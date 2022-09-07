@@ -48,90 +48,98 @@ fn main() {
 
     // Finding the location of C headers for the Postgres server:
     // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/pg_install`
-    // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/v14/include/postgresql/server`
-    let mut pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR")
-    {
+    // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/{PG_MAJORVERSION}/include/postgresql/server`
+    let pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
         postgres_install_dir.into()
     } else {
         PathBuf::from("pg_install")
     };
-    // Currently, we only expect to find PostgreSQL v14 sources, in "pg_install/v14". In the
-    // future, we will run this for all supported PostgreSQL versions.
-    pg_install_dir.push("v14");
 
-    if pg_install_dir.is_relative() {
-        let cwd = env::current_dir().unwrap();
-        pg_install_dir = cwd.join("..").join("..").join(pg_install_dir);
-    }
-
-    let pg_config_bin = pg_install_dir.join("bin").join("pg_config");
-    let inc_server_path: String = if pg_config_bin.exists() {
-        let output = Command::new(pg_config_bin)
-            .arg("--includedir-server")
-            .output()
-            .expect("failed to execute `pg_config --includedir-server`");
-
-        if !output.status.success() {
-            panic!("`pg_config --includedir-server` failed")
+    for pg_version in &["v14", "v15"] {
+        let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
+        if pg_install_dir_versioned.is_relative() {
+            let cwd = env::current_dir().unwrap();
+            pg_install_dir_versioned = cwd.join("..").join("..").join(pg_install_dir_versioned);
         }
 
-        String::from_utf8(output.stdout).unwrap().trim_end().into()
-    } else {
-        pg_install_dir
-            .join("include")
-            .join("postgresql")
-            .join("server")
-            .into_os_string()
-            .into_string()
-            .unwrap()
-    };
+        let pg_config_bin = pg_install_dir_versioned
+            .join(pg_version)
+            .join("bin")
+            .join("pg_config");
+        let inc_server_path: String = if pg_config_bin.exists() {
+            let output = Command::new(pg_config_bin)
+                .arg("--includedir-server")
+                .output()
+                .expect("failed to execute `pg_config --includedir-server`");
 
-    // The bindgen::Builder is the main entry point
-    // to bindgen, and lets you build up options for
-    // the resulting bindings.
-    let bindings = bindgen::Builder::default()
-        //
-        // All the needed PostgreSQL headers are included from 'bindgen_deps.h'
-        //
-        .header("bindgen_deps.h")
-        //
-        // Tell cargo to invalidate the built crate whenever any of the
-        // included header files changed.
-        //
-        .parse_callbacks(Box::new(PostgresFfiCallbacks))
-        //
-        // These are the types and constants that we want to generate bindings for
-        //
-        .allowlist_type("BlockNumber")
-        .allowlist_type("OffsetNumber")
-        .allowlist_type("MultiXactId")
-        .allowlist_type("MultiXactOffset")
-        .allowlist_type("MultiXactStatus")
-        .allowlist_type("ControlFileData")
-        .allowlist_type("CheckPoint")
-        .allowlist_type("FullTransactionId")
-        .allowlist_type("XLogRecord")
-        .allowlist_type("XLogPageHeaderData")
-        .allowlist_type("XLogLongPageHeaderData")
-        .allowlist_var("XLOG_PAGE_MAGIC")
-        .allowlist_var("PG_CONTROL_FILE_SIZE")
-        .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
-        .allowlist_type("PageHeaderData")
-        .allowlist_type("DBState")
-        // Because structs are used for serialization, tell bindgen to emit
-        // explicit padding fields.
-        .explicit_padding(true)
-        //
-        .clang_arg(format!("-I{inc_server_path}"))
-        //
-        // Finish the builder and generate the bindings.
-        //
-        .generate()
-        .expect("Unable to generate bindings");
+            if !output.status.success() {
+                panic!("`pg_config --includedir-server` failed")
+            }
 
-    // Write the bindings to the $OUT_DIR/bindings.rs file.
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings
-        .write_to_file(out_path.join("bindings.rs"))
-        .expect("Couldn't write bindings!");
+            String::from_utf8(output.stdout).unwrap().trim_end().into()
+        } else {
+            pg_install_dir_versioned
+                .join("include")
+                .join("postgresql")
+                .join("server")
+                .into_os_string()
+                .into_string()
+                .unwrap()
+        };
+
+        // The bindgen::Builder is the main entry point
+        // to bindgen, and lets you build up options for
+        // the resulting bindings.
+        let bindings = bindgen::Builder::default()
+            //
+            // All the needed PostgreSQL headers are included from 'bindgen_deps.h'
+            //
+            .header("bindgen_deps.h")
+            //
+            // Tell cargo to invalidate the built crate whenever any of the
+            // included header files changed.
+            //
+            .parse_callbacks(Box::new(PostgresFfiCallbacks))
+            //
+            // These are the types and constants that we want to generate bindings for
+            //
+            .allowlist_type("BlockNumber")
+            .allowlist_type("OffsetNumber")
+            .allowlist_type("XLogRecPtr")
+            .allowlist_type("XLogSegNo")
+            .allowlist_type("TimeLineID")
+            .allowlist_type("TimestampTz")
+            .allowlist_type("MultiXactId")
+            .allowlist_type("MultiXactOffset")
+            .allowlist_type("MultiXactStatus")
+            .allowlist_type("ControlFileData")
+            .allowlist_type("CheckPoint")
+            .allowlist_type("FullTransactionId")
+            .allowlist_type("XLogRecord")
+            .allowlist_type("XLogPageHeaderData")
+            .allowlist_type("XLogLongPageHeaderData")
+            .allowlist_var("XLOG_PAGE_MAGIC")
+            .allowlist_var("PG_CONTROL_FILE_SIZE")
+            .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
+            .allowlist_type("PageHeaderData")
+            .allowlist_type("DBState")
+            // Because structs are used for serialization, tell bindgen to emit
+            // explicit padding fields.
+            .explicit_padding(true)
+            //
+            .clang_arg(format!("-I{inc_server_path}"))
+            //
+            // Finish the builder and generate the bindings.
+            //
+            .generate()
+            .expect("Unable to generate bindings");
+
+        // Write the bindings to the $OUT_DIR/bindings_$pg_version.rs file.
+        let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let filename = format!("bindings_{pg_version}.rs");
+
+        bindings
+            .write_to_file(out_path.join(filename))
+            .expect("Couldn't write bindings!");
+    }
 }

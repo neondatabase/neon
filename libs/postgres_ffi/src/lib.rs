@@ -13,13 +13,17 @@ macro_rules! postgres_ffi {
     ($version:ident) => {
         #[path = "."]
         pub mod $version {
-            // fixme: does this have to be 'pub'?
             pub mod bindings {
                 // bindgen generates bindings for a lot of stuff we don't need
                 #![allow(dead_code)]
 
                 use serde::{Deserialize, Serialize};
-                include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+                include!(concat!(
+                    env!("OUT_DIR"),
+                    "/bindings_",
+                    stringify!($version),
+                    ".rs"
+                ));
             }
             pub mod controlfile_utils;
             pub mod nonrelfile_utils;
@@ -27,6 +31,8 @@ macro_rules! postgres_ffi {
             pub mod relfile_utils;
             pub mod waldecoder;
             pub mod xlog_utils;
+
+            pub const PG_MAJORVERSION: &str = stringify!($version);
 
             // Re-export some symbols from bindings
             pub use bindings::DBState_DB_SHUTDOWNED;
@@ -36,20 +42,26 @@ macro_rules! postgres_ffi {
 }
 
 postgres_ffi!(v14);
+postgres_ffi!(v15);
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
 pub use v14::bindings::{uint32, uint64, Oid};
 pub use v14::bindings::{BlockNumber, OffsetNumber};
 pub use v14::bindings::{MultiXactId, TransactionId};
+pub use v14::bindings::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
 
 // Likewise for these, although the assumption that these don't change is a little more iffy.
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
+pub use v14::xlog_utils::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
 
 // from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
 // --with-segsize=SEGSIZE, but assume the defaults for now.
 pub const BLCKSZ: u16 = 8192;
 pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 pub const XLOG_BLCKSZ: usize = 8192;
+pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
+
+pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 // PG timeline is always 1, changing it doesn't have any useful meaning in Neon.
 //

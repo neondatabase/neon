@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use etcd_broker::subscription_value::SkTimelineInfo;
 
 use once_cell::sync::Lazy;
-use postgres_ffi::v14::xlog_utils::XLogSegNo;
+use postgres_ffi::XLogSegNo;
 
 use serde::Serialize;
 use tokio::sync::watch;

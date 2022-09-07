@@ -77,9 +77,14 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Set pg revision for caching
+      - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v14)
+        shell: bash -euxo pipefail {0}
+
+      - name: Set pg 15 revision for caching
+        id: pg_v15_rev
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v15)
         shell: bash -euxo pipefail {0}
 
       # Set some environment variables used by all the steps.
@@ -125,15 +130,27 @@ jobs:
             v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
 
       - name: Cache postgres v14 build
-        id: cache_pg
+        id: cache_pg_14
         uses: actions/cache@v3
         with:
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
-      - name: Build postgres
-        if: steps.cache_pg.outputs.cache-hit != 'true'
-        run: mold -run make postgres -j$(nproc)
+      - name: Cache postgres v15 build
+        id: cache_pg_15
+        uses: actions/cache@v3
+        with:
+          path: pg_install/v15
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Build postgres v14
+        if: steps.cache_pg_14.outputs.cache-hit != 'true'
+        run: mold -run make postgres-v14 -j$(nproc)
+        shell: bash -euxo pipefail {0}
+
+      - name: Build postgres v15
+        if: steps.cache_pg_15.outputs.cache-hit != 'true'
+        run: mold -run make postgres-v15 -j$(nproc)
         shell: bash -euxo pipefail {0}
 
       - name: Build neon extensions

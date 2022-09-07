@@ -30,7 +30,7 @@ use postgres_ffi::v14::xlog_utils::{generate_wal_segment, normalize_lsn, XLogFil
 use postgres_ffi::v14::{CheckPoint, ControlFileData};
 use postgres_ffi::TransactionId;
 use postgres_ffi::PG_TLI;
-use postgres_ffi::{BLCKSZ, RELSEG_SIZE};
+use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
 /// This is short-living object only for the time of tarball creation,
@@ -268,8 +268,11 @@ where
             None
         };
 
+        // TODO pass this as a parameter
+        let pg_version = "14";
+
         if spcnode == pg_constants::GLOBALTABLESPACE_OID {
-            let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
+            let version_bytes = pg_version.as_bytes();
             let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
             self.ar.append(&header, version_bytes)?;
 
@@ -312,7 +315,7 @@ where
 
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
-                let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
+                let version_bytes = pg_version.as_bytes();
                 let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
                 self.ar.append(&header, version_bytes)?;
 
@@ -358,7 +361,7 @@ where
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
 
         // Generate new pg_control needed for bootstrap
-        checkpoint.redo = normalize_lsn(self.lsn, pg_constants::WAL_SEGMENT_SIZE).0;
+        checkpoint.redo = normalize_lsn(self.lsn, WAL_SEGMENT_SIZE).0;
 
         //reset some fields we don't want to preserve
         //TODO Check this.
@@ -392,13 +395,13 @@ where
         self.ar.append(&header, &pg_control_bytes[..])?;
 
         //send wal segment
-        let segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-        let wal_file_name = XLogFileName(PG_TLI, segno, pg_constants::WAL_SEGMENT_SIZE);
+        let segno = self.lsn.segment_number(WAL_SEGMENT_SIZE);
+        let wal_file_name = XLogFileName(PG_TLI, segno, WAL_SEGMENT_SIZE);
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
-        let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
+        let header = new_tar_header(&wal_file_path, WAL_SEGMENT_SIZE as u64)?;
         let wal_seg = generate_wal_segment(segno, pg_control.system_identifier)
             .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
-        ensure!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
+        ensure!(wal_seg.len() == WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())
     }

@@ -5,7 +5,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use etcd_broker::subscription_value::SkTimelineInfo;
-use postgres_ffi::v14::xlog_utils::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
+use postgres_ffi::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;

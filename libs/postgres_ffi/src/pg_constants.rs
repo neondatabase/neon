@@ -7,7 +7,7 @@
 //! comments on them.
 //!
 
-use super::bindings::PageHeaderData;
+use super::bindings::{PageHeaderData, XLogRecord};
 use crate::BLCKSZ;
 
 //
@@ -176,7 +176,7 @@ pub const XLOG_DBASE_DROP: u8 = 0x10;
 pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
 pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
-pub const SIZEOF_XLOGRECORD: u32 = 24;
+pub const SIZEOF_XLOGRECORD: u32 = std::mem::size_of::<XLogRecord>() as u32;
 
 //
 // from xlogrecord.h
@@ -206,14 +206,9 @@ pub const INVALID_TRANSACTION_ID: u32 = 0;
 pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
 pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
 
-/* FIXME: pageserver should request wal_seg_size from compute node */
-pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
-
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
-
-pub const PG_MAJORVERSION: &str = "14";
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c
