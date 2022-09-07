@@ -34,13 +34,13 @@ use utils::{
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
-use crate::layered_repository::Timeline;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::Timeline;
 use crate::tenant_mgr;
 use crate::CheckpointConfig;
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
@@ -477,8 +477,8 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let timeline = repo.create_empty_timeline(timeline_id, base_lsn)?;
+        let timeline = tenant_mgr::get_tenant(tenant_id, true)?
+            .create_empty_timeline(timeline_id, base_lsn)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -539,10 +539,7 @@ impl PageServerHandler {
     ) -> anyhow::Result<()> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let timeline = repo
-            .get_timeline(timeline_id)
-            .with_context(|| format!("Timeline {timeline_id} was not found"))?;
+        let timeline = get_local_timeline(tenant_id, timeline_id)?;
         ensure!(timeline.get_last_record_lsn() == start_lsn);
 
         // TODO leave clean state on error. For now you can use detach to clean
@@ -770,7 +767,7 @@ impl PageServerHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenantid: Option<ZTenantId>) -> Result<()> {
+    fn check_permission(&self, tenant_id: Option<ZTenantId>) -> Result<()> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -782,7 +779,7 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        auth::check_permission(claims, tenantid)
+        auth::check_permission(claims, tenant_id)
     }
 }
 
@@ -809,7 +806,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
         }
 
         info!(
-            "jwt auth succeeded for scope: {:#?} by tenantid: {:?}",
+            "jwt auth succeeded for scope: {:#?} by tenant id: {:?}",
             data.claims.scope, data.claims.tenant_id,
         );
 
@@ -1013,8 +1010,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(params.len() == 1, "invalid param number for config command");
-            let tenantid = ZTenantId::from_str(params[0])?;
-            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+            let tenant_id = ZTenantId::from_str(params[0])?;
+            let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
@@ -1027,25 +1024,27 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"pitr_interval"),
             ]))?
             .write_message(&BeMessage::DataRow(&[
-                Some(repo.get_checkpoint_distance().to_string().as_bytes()),
+                Some(tenant.get_checkpoint_distance().to_string().as_bytes()),
                 Some(
-                    repo.get_checkpoint_timeout()
+                    tenant
+                        .get_checkpoint_timeout()
                         .as_secs()
                         .to_string()
                         .as_bytes(),
                 ),
-                Some(repo.get_compaction_target_size().to_string().as_bytes()),
+                Some(tenant.get_compaction_target_size().to_string().as_bytes()),
                 Some(
-                    repo.get_compaction_period()
+                    tenant
+                        .get_compaction_period()
                         .as_secs()
                         .to_string()
                         .as_bytes(),
                 ),
-                Some(repo.get_compaction_threshold().to_string().as_bytes()),
-                Some(repo.get_gc_horizon().to_string().as_bytes()),
-                Some(repo.get_gc_period().as_secs().to_string().as_bytes()),
-                Some(repo.get_image_creation_threshold().to_string().as_bytes()),
-                Some(repo.get_pitr_interval().as_secs().to_string().as_bytes()),
+                Some(tenant.get_compaction_threshold().to_string().as_bytes()),
+                Some(tenant.get_gc_horizon().to_string().as_bytes()),
+                Some(tenant.get_gc_period().as_secs().to_string().as_bytes()),
+                Some(tenant.get_image_creation_threshold().to_string().as_bytes()),
+                Some(tenant.get_pitr_interval().as_secs().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
@@ -1066,16 +1065,16 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
-            let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+            let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
             let gc_horizon: u64 = caps
                 .get(4)
                 .map(|h| h.as_str().parse())
-                .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
+                .unwrap_or_else(|| Ok(tenant.get_gc_horizon()))?;
 
             // Use tenant's pitr setting
-            let pitr = repo.get_pitr_interval();
-            let result = repo.gc_iteration(Some(timeline_id), gc_horizon, pitr, true)?;
+            let pitr = tenant.get_pitr_interval();
+            let result = tenant.gc_iteration(Some(timeline_id), gc_horizon, pitr, true)?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layers_total"),
                 RowDescriptor::int8_col(b"layers_needed_by_cutoff"),
@@ -1169,12 +1168,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 }
 
 fn get_local_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
-    tenant_mgr::get_repository_for_tenant(tenant_id)
-        .and_then(|repo| {
-            repo.get_timeline(timeline_id)
-                .context("No timeline in tenant's repository")
-        })
-        .with_context(|| format!("Could not get timeline {timeline_id} in tenant {tenant_id}"))
+    tenant_mgr::get_tenant(tenant_id, true).and_then(|tenant| tenant.get_timeline(timeline_id))
 }
 
 ///

@@ -1,4 +1,4 @@
-//! Every image of a certain timeline from [`crate::layered_repository::Repository`]
+//! Every image of a certain timeline from [`crate::tenant::Tenant`]
 //! has a metadata that needs to be stored persistently.
 //!
 //! Later, the file gets is used in [`crate::remote_storage::storage_sync`] as a part of
@@ -216,7 +216,7 @@ pub fn save_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::repo_harness::TIMELINE_ID;
+    use crate::tenant::harness::TIMELINE_ID;
 
     #[test]
     fn metadata_serializes_correctly() {

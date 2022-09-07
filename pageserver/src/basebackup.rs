@@ -22,8 +22,8 @@ use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 use tracing::*;
 
-use crate::layered_repository::Timeline;
 use crate::reltag::{RelTag, SlruKind};
+use crate::tenant::Timeline;
 
 use postgres_ffi::v14::pg_constants;
 use postgres_ffi::v14::xlog_utils::{generate_wal_segment, normalize_lsn, XLogFileName};

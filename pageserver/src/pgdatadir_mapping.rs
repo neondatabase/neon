@@ -7,9 +7,9 @@
 //! Clarify that)
 //!
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::layered_repository::Timeline;
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
+use crate::tenant::Timeline;
 use crate::walrecord::ZenithWalRecord;
 use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
@@ -1398,16 +1398,12 @@ fn is_slru_block_key(key: Key) -> bool {
         && key.field6 != 0xffffffff // and not SlruSegSize
 }
 
-//
-//-- Tests that should work the same with any Repository/Timeline implementation.
-//
-
 #[cfg(test)]
 pub fn create_test_timeline(
-    repo: &crate::layered_repository::Repository,
+    tenant: &crate::tenant::Tenant,
     timeline_id: utils::zid::ZTimelineId,
 ) -> Result<std::sync::Arc<Timeline>> {
-    let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
+    let tline = tenant.create_empty_timeline(timeline_id, Lsn(8))?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;

@@ -15,9 +15,7 @@ use super::{
     LayersUpload, SyncData, SyncQueue,
 };
 use crate::metrics::NO_LAYERS_UPLOAD;
-use crate::{
-    config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
-};
+use crate::{config::PageServerConf, storage_sync::SyncTask, tenant::metadata::metadata_path};
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part(
@@ -202,18 +200,18 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
-        layered_repository::repo_harness::{RepoHarness, TIMELINE_ID},
         storage_sync::{
             index::RelativePath,
             test_utils::{create_local_timeline, dummy_metadata},
         },
+        tenant::harness::{TenantHarness, TIMELINE_ID},
     };
 
     use super::{upload_index_part, *};
 
     #[tokio::test]
     async fn regular_layer_upload() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("regular_layer_upload")?;
+        let harness = TenantHarness::create("regular_layer_upload")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
@@ -301,7 +299,7 @@ mod tests {
     // Currently, GC can run between upload retries, removing local layers scheduled for upload. Test this scenario.
     #[tokio::test]
     async fn layer_upload_after_local_fs_update() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("layer_upload_after_local_fs_update")?;
+        let harness = TenantHarness::create("layer_upload_after_local_fs_update")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
@@ -396,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_index_part() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("test_upload_index_part")?;
+        let harness = TenantHarness::create("test_upload_index_part")?;
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let storage = GenericRemoteStorage::new(LocalFs::new(

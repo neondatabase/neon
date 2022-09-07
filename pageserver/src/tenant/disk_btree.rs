@@ -25,7 +25,7 @@ use std::{cmp::Ordering, io, result};
 use thiserror::Error;
 use tracing::error;
 
-use crate::layered_repository::block_io::{BlockReader, BlockWriter};
+use crate::tenant::block_io::{BlockReader, BlockWriter};
 
 // The maximum size of a value stored in the B-tree. 5 bytes is enough currently.
 pub const VALUE_SZ: usize = 5;

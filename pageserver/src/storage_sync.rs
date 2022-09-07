@@ -46,10 +46,10 @@
 //! Some time later, during pageserver checkpoints, in-memory data is flushed onto disk along with its metadata.
 //! If the storage sync loop was successfully started before, pageserver schedules the layer files and the updated metadata file for upload, every time a layer is flushed to disk.
 //! The uploads are disabled, if no remote storage configuration is provided (no sync loop is started this way either).
-//! See [`crate::layered_repository`] for the upload calls and the adjacent logic.
+//! See [`crate::tenant`] for the upload calls and the adjacent logic.
 //!
-//! Synchronization logic is able to communicate back with updated timeline sync states, [`crate::repository::TimelineSyncStatusUpdate`],
-//! submitted via [`crate::tenant_mgr::apply_timeline_sync_status_updates`] function. Tenant manager applies corresponding timeline updates in pageserver's in-memory state.
+//! Synchronization logic is able to communicate back with updated timeline sync states, submitted via [`crate::tenant_mgr::attach_local_tenants`] function.
+//! Tenant manager applies corresponding timeline updates in pageserver's in-memory state.
 //! Such submissions happen in two cases:
 //! * once after the sync loop startup, to signal pageserver which timelines will be synchronized in the near future
 //! * after every loop step, in case a timeline needs to be reloaded or evicted from pageserver's memory
@@ -171,11 +171,11 @@ use self::{
 use crate::{
     config::PageServerConf,
     exponential_backoff,
-    layered_repository::metadata::{metadata_path, TimelineMetadata},
     storage_sync::index::RemoteIndex,
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
+    tenant::metadata::{metadata_path, TimelineMetadata},
     tenant_mgr::attach_local_tenants,
 };
 use crate::{
@@ -714,17 +714,17 @@ async fn storage_sync_loop(
                         };
 
                         if tenant_entry.has_in_progress_downloads() {
-                            info!("Tenant {tenant_id} has pending timeline downloads, skipping repository registration");
+                            info!("Tenant {tenant_id} has pending timeline downloads, skipping tenant registration");
                             continue;
                         } else {
                             info!(
-                                "Tenant {tenant_id} download completed. Picking to register in repository"
+                                "Tenant {tenant_id} download completed. Picking to register in tenant"
                             );
                             // Here we assume that if tenant has no in-progress downloads that
                             // means that it is the last completed timeline download that triggered
                             // sync status update. So we look at the index for available timelines
-                            // and register them all at once in a repository for download
-                            // to be submitted in a single operation to repository
+                            // and register them all at once in a tenant for download
+                            // to be submitted in a single operation to tenant
                             // so it can apply them at once to internal timeline map.
                             timelines_to_attach.0.insert(
                                 tenant_id,
@@ -737,9 +737,7 @@ async fn storage_sync_loop(
                     }
                     drop(index_accessor);
                     // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
-                    if let Err(e) = attach_local_tenants(conf, &index, timelines_to_attach) {
-                        error!("Failed to attach new timelines: {e:?}");
-                    };
+                    attach_local_tenants(conf, &index, timelines_to_attach);
                 }
             }
             ControlFlow::Break(()) => {
@@ -1038,13 +1036,7 @@ async fn update_local_metadata(
             timeline_id,
         } = sync_id;
         tokio::task::spawn_blocking(move || {
-            crate::layered_repository::save_metadata(
-                conf,
-                timeline_id,
-                tenant_id,
-                &cloned_metadata,
-                true,
-            )
+            crate::tenant::save_metadata(conf, timeline_id, tenant_id, &cloned_metadata, true)
         })
         .await
         .with_context(|| {
@@ -1411,12 +1403,12 @@ fn register_sync_status(
 mod test_utils {
     use utils::lsn::Lsn;
 
-    use crate::layered_repository::repo_harness::RepoHarness;
+    use crate::tenant::harness::TenantHarness;
 
     use super::*;
 
     pub(super) async fn create_local_timeline(
-        harness: &RepoHarness<'_>,
+        harness: &TenantHarness<'_>,
         timeline_id: ZTimelineId,
         filenames: &[&str],
         metadata: TimelineMetadata,
@@ -1456,7 +1448,7 @@ mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::test_utils::dummy_metadata;
-    use crate::layered_repository::repo_harness::TIMELINE_ID;
+    use crate::tenant::harness::TIMELINE_ID;
     use hex_literal::hex;
     use utils::lsn::Lsn;
 

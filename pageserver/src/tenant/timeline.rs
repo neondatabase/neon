@@ -17,7 +17,7 @@ use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering}
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::layered_repository::{
+use crate::tenant::{
     delta_layer::{DeltaLayer, DeltaLayerWriter},
     ephemeral_file::is_ephemeral_file,
     filename::{DeltaFileName, ImageFileName},
@@ -118,7 +118,7 @@ pub struct Timeline {
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
-    /// and [`Repository::delete_timeline`].
+    /// and [`Tenant::delete_timeline`].
     layer_removal_cs: Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected

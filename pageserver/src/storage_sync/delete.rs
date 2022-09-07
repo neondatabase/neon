@@ -112,8 +112,8 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
-        layered_repository::repo_harness::{RepoHarness, TIMELINE_ID},
         storage_sync::test_utils::{create_local_timeline, dummy_metadata},
+        tenant::harness::{TenantHarness, TIMELINE_ID},
     };
     use remote_storage::{LocalFs, RemoteStorage};
 
@@ -121,7 +121,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_timeline_negative() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("delete_timeline_negative")?;
+        let harness = TenantHarness::create("delete_timeline_negative")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let storage = GenericRemoteStorage::new(LocalFs::new(
@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_timeline() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("delete_timeline")?;
+        let harness = TenantHarness::create("delete_timeline")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
 
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);

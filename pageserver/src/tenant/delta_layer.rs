@@ -24,15 +24,13 @@
 //! "values" part.
 //!
 use crate::config::PageServerConf;
-use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
-use crate::layered_repository::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
-use crate::layered_repository::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
-use crate::layered_repository::storage_layer::{
-    Layer, ValueReconstructResult, ValueReconstructState,
-};
 use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
+use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
+use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
+use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
+use crate::tenant::filename::{DeltaFileName, PathOrConf};
+use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};

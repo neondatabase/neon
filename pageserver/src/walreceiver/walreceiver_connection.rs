@@ -21,10 +21,10 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use super::TaskEvent;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::{
-    layered_repository::{Timeline, WalReceiverInfo},
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
+    tenant::{Timeline, WalReceiverInfo},
     tenant_mgr,
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
@@ -141,8 +141,7 @@ pub async fn handle_walreceiver_connection(
 
     let tenant_id = timeline.tenant_id;
     let timeline_id = timeline.timeline_id;
-    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
-        .with_context(|| format!("no repository found for tenant {tenant_id}"))?;
+    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -283,7 +282,7 @@ pub async fn handle_walreceiver_connection(
         })?;
 
         if let Some(last_lsn) = status_update {
-            let remote_index = repo.get_remote_index();
+            let remote_index = tenant.get_remote_index();
             let timeline_remote_consistent_lsn = remote_index
                 .read()
                 .await

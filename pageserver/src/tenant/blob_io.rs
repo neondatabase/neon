@@ -11,8 +11,8 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
-use crate::layered_repository::block_io::{BlockCursor, BlockReader};
 use crate::page_cache::PAGE_SZ;
+use crate::tenant::block_io::{BlockCursor, BlockReader};
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 

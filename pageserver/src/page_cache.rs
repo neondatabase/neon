@@ -53,8 +53,8 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::layered_repository::writeback_ephemeral_file;
 use crate::repository::Key;
+use crate::tenant::writeback_ephemeral_file;
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;

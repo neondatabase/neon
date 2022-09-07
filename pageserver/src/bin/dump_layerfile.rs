@@ -3,8 +3,8 @@
 //! A handy tool for debugging, that's all.
 use anyhow::Result;
 use clap::{App, Arg};
-use pageserver::layered_repository::dump_layerfile_from_path;
 use pageserver::page_cache;
+use pageserver::tenant::dump_layerfile_from_path;
 use pageserver::virtual_file;
 use std::path::PathBuf;
 use utils::project_git_version;

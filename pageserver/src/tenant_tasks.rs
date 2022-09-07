@@ -1,12 +1,14 @@
 //! This module contains functions to serve per-tenant background processes,
 //! such as compaction and GC
 
+use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::{Tenant, TenantState};
 use crate::tenant_mgr;
-use crate::tenant_mgr::TenantState;
 use tracing::*;
 use utils::zid::ZTenantId;
 
@@ -18,7 +20,10 @@ pub fn start_background_loops(tenant_id: ZTenantId) {
         None,
         &format!("compactor for tenant {tenant_id}"),
         false,
-        compaction_loop(tenant_id),
+        async move {
+            compaction_loop(tenant_id).await;
+            Ok(())
+        },
     );
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
@@ -27,43 +32,50 @@ pub fn start_background_loops(tenant_id: ZTenantId) {
         None,
         &format!("garbage collector for tenant {tenant_id}"),
         false,
-        gc_loop(tenant_id),
+        async move {
+            gc_loop(tenant_id).await;
+            Ok(())
+        },
     );
 }
 
 ///
 /// Compaction task's main loop
 ///
-async fn compaction_loop(tenant_id: ZTenantId) -> anyhow::Result<()> {
+async fn compaction_loop(tenant_id: ZTenantId) {
+    let wait_duration = Duration::from_secs(2);
+
     info!("starting compaction loop for {tenant_id}");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
-    let result = async {
+    async {
         loop {
             trace!("waking up");
 
+            let tenant = tokio::select! {
+                _ = task_mgr::shutdown_watcher() => {
+                    info!("received compaction cancellation request");
+                    return;
+                },
+                tenant_wait_result = wait_for_active_tenant(tenant_id, wait_duration) => match tenant_wait_result {
+                    ControlFlow::Break(()) => return,
+                    ControlFlow::Continue(tenant) => tenant,
+                },
+            };
+
             // Run blocking part of the task
 
-            // Break if tenant is not active
-            if tenant_mgr::get_tenant_state(tenant_id) != Some(TenantState::Active) {
-                break Ok(());
-            }
-            // This should not fail. If someone started us, it means that the tenant exists.
-            // And before you remove a tenant, you have to wait until all the associated tasks
-            // exit.
-            let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-
             // Run compaction
-            let mut sleep_duration = repo.get_compaction_period();
-            if let Err(e) = repo.compaction_iteration() {
-                error!("Compaction failed, retrying: {}", e);
-                sleep_duration = Duration::from_secs(2)
+            let mut sleep_duration = tenant.get_compaction_period();
+            if let Err(e) = tenant.compaction_iteration() {
+                error!("Compaction failed, retrying: {e:#}");
+                sleep_duration = wait_duration;
             }
 
             // Sleep
             tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
-                    trace!("received cancellation request");
-                    break Ok(());
+                    info!("received compaction cancellation request during idling");
+                    break ;
                 },
                 _ = tokio::time::sleep(sleep_duration) => {},
             }
@@ -72,49 +84,49 @@ async fn compaction_loop(tenant_id: ZTenantId) -> anyhow::Result<()> {
     .await;
     TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
 
-    info!(
-        "compaction loop stopped. State is {:?}",
-        tenant_mgr::get_tenant_state(tenant_id)
-    );
-    result
+    trace!("compaction loop stopped.");
 }
 
 ///
 /// GC task's main loop
 ///
-async fn gc_loop(tenant_id: ZTenantId) -> anyhow::Result<()> {
+async fn gc_loop(tenant_id: ZTenantId) {
+    let wait_duration = Duration::from_secs(2);
+
     info!("starting gc loop for {tenant_id}");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
-    let result = async {
+    async {
         loop {
             trace!("waking up");
 
-            // Break if tenant is not active
-            if tenant_mgr::get_tenant_state(tenant_id) != Some(TenantState::Active) {
-                break Ok(());
-            }
-            // This should not fail. If someone started us, it means that the tenant exists.
-            // And before you remove a tenant, you have to wait until all the associated tasks
-            // exit.
-            let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+            let tenant = tokio::select! {
+                _ = task_mgr::shutdown_watcher() => {
+                    info!("received GC cancellation request");
+                    return;
+                },
+                tenant_wait_result = wait_for_active_tenant(tenant_id, wait_duration) => match tenant_wait_result {
+                    ControlFlow::Break(()) => return,
+                    ControlFlow::Continue(tenant) => tenant,
+                },
+            };
 
             // Run gc
-            let gc_period = repo.get_gc_period();
-            let gc_horizon = repo.get_gc_horizon();
+            let gc_period = tenant.get_gc_period();
+            let gc_horizon = tenant.get_gc_horizon();
             let mut sleep_duration = gc_period;
             if gc_horizon > 0 {
-                if let Err(e) = repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)
+                if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false)
                 {
-                    error!("Gc failed, retrying: {}", e);
-                    sleep_duration = Duration::from_secs(2)
+                    error!("Gc failed, retrying: {e:#}");
+                    sleep_duration = wait_duration;
                 }
             }
 
             // Sleep
             tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
-                    trace!("received cancellation request");
-                    break Ok(());
+                    info!("received GC cancellation request during idling");
+                    break;
                 },
                 _ = tokio::time::sleep(sleep_duration) => {},
             }
@@ -122,9 +134,50 @@ async fn gc_loop(tenant_id: ZTenantId) -> anyhow::Result<()> {
     }
     .await;
     TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
-    info!(
-        "GC loop stopped. State is {:?}",
-        tenant_mgr::get_tenant_state(tenant_id)
-    );
-    result
+    trace!("GC loop stopped.");
+}
+
+async fn wait_for_active_tenant(
+    tenant_id: ZTenantId,
+    wait: Duration,
+) -> ControlFlow<(), Arc<Tenant>> {
+    let tenant = loop {
+        match tenant_mgr::get_tenant(tenant_id, false) {
+            Ok(tenant) => break tenant,
+            Err(e) => {
+                error!("Failed to get a tenant {tenant_id}: {e:#}");
+                tokio::time::sleep(wait).await;
+            }
+        }
+    };
+
+    // if the tenant has a proper status already, no need to wait for anything
+    if tenant.should_run_tasks() {
+        ControlFlow::Continue(tenant)
+    } else {
+        let mut tenant_state_updates = tenant.subscribe_for_state_updates();
+        loop {
+            match tenant_state_updates.changed().await {
+                Ok(()) => {
+                    let new_state = *tenant_state_updates.borrow();
+                    match new_state {
+                        TenantState::Active {
+                            background_jobs_running: true,
+                        } => {
+                            debug!("Tenant state changed to active with background jobs enabled, continuing the task loop");
+                            return ControlFlow::Continue(tenant);
+                        }
+                        state => {
+                            debug!("Not running the task loop, tenant is not active with background jobs enabled: {state:?}");
+                            tokio::time::sleep(wait).await;
+                        }
+                    }
+                }
+                Err(_sender_dropped_error) => {
+                    info!("Tenant dropped the state updates sender, quitting waiting for tenant and the task loop");
+                    return ControlFlow::Break(());
+                }
+            }
+        }
+    }
 }
