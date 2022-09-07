@@ -55,7 +55,6 @@ jobs:
         include:
           - runs-on: dev
             container-image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-            container-options: --init
             install_rust_toolchain: false   # Use the toolchain from the container
             upload: true   # Upload the Neon artifact
 
@@ -66,9 +65,7 @@ jobs:
             upload: false
 
     runs-on: ${{ matrix.runs-on }}
-    container:
-      image: ${{ matrix.container-image }}
-      options: ${{ matrix.container-options }}
+    container: ${{ matrix.container-image }}
 
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
