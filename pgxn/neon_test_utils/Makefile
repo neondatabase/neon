@@ -6,6 +6,8 @@ OBJS = \
 	$(WIN32RES) \
 	neontest.o
 
+PG_CPPFLAGS = -Werror
+
 EXTENSION = neon_test_utils
 DATA = neon_test_utils--1.0.sql
 PGFILEDESC = "neon_test_utils - helpers for neon testing and debugging"
