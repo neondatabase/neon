@@ -13,8 +13,7 @@ macro_rules! postgres_ffi {
     ($version:ident) => {
         #[path = "."]
         pub mod $version {
-            // fixme: does this have to be 'pub'?
-            pub mod bindings {
+            mod bindings {
                 // bindgen generates bindings for a lot of stuff we don't need
                 #![allow(dead_code)]
 
@@ -53,6 +52,7 @@ pub use v14::bindings::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
 
 // Likewise for these, although the assumption that these don't change is a little more iffy.
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
+pub use v14::xlog_utils::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
 
 // from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
 // --with-segsize=SEGSIZE, but assume the defaults for now.

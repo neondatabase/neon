@@ -5,9 +5,6 @@
 ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
 ARG IMAGE=rust
 ARG TAG=pinned
-# ARGs don't get replaced in RUN commands in Kaniko
-# so use hardcoded value below
-# ARG PG_VERSION=v14
 
 # Build Postgres
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
@@ -40,7 +37,6 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_ACCESS_KEY_ID
 #ARG AWS_SECRET_ACCESS_KEY
 
-ARG PG_VERSION=v14
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
 COPY . .
@@ -72,7 +68,6 @@ COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/safekeeper 
 COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/proxy      /usr/local/bin
 
 # v14 is default for now
-ARG PG_VERSION=v14
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 

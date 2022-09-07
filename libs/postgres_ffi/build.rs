@@ -48,7 +48,7 @@ fn main() {
 
     // Finding the location of C headers for the Postgres server:
     // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/pg_install`
-    // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/v14/include/postgresql/server`
+    // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/{PG_MAJORVERSION}/include/postgresql/server`
     let pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
         postgres_install_dir.into()
     } else {
