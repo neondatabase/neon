@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import sys
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS perf_test_results (
 
 def err(msg):
     print(f"error: {msg}")
-    exit(1)
+    sys.exit(1)
 
 
 @contextmanager
@@ -43,8 +44,8 @@ def create_table(cur):
     cur.execute(CREATE_TABLE)
 
 
-def ingest_perf_test_result(cursor, data_dile: Path, recorded_at_timestamp: int) -> int:
-    run_data = json.loads(data_dile.read_text())
+def ingest_perf_test_result(cursor, data_file: Path, recorded_at_timestamp: int) -> int:
+    run_data = json.loads(data_file.read_text())
     revision = run_data["revision"]
     platform = run_data["platform"]
 
