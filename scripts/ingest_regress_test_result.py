@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -40,11 +41,17 @@ def create_table(cur):
 def ingest_regress_test_result(
     cursor, reference: str, revision: str, build_type: str, data_file: Path
 ):
+    data = data_file.read_text()
+    # In the JSON report we can have lines related to LazyFixture with escaped double-quote
+    # It's hard to insert them into jsonb field as is, so replace \" with ' to make it easier for us
+    #
+    # "<LazyFixture \"vanilla_compare\">" -> "<LazyFixture 'vanilla_compare'>"
+    data = re.sub(r'("<LazyFixture )\\"([^\\]+)\\"(>")', r"\g<1>'\g<2>'\g<3>", data)
     values = (
         reference,
         revision,
         build_type,
-        data_file.read_text(),
+        data,
     )
     cursor.execute(
         """
