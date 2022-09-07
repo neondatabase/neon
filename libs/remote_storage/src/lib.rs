@@ -344,6 +344,8 @@ impl Debug for S3Config {
     }
 }
 
+/// Adds a suffix to the file(directory) name, either appending the suffux to the end of its extension,
+/// or if there's no extension, creates one and puts a suffix there.
 pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str) -> PathBuf {
     let new_extension = match original_path
         .as_ref()
@@ -467,6 +469,11 @@ mod tests {
         assert_eq!(
             &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
             "/foo/bar.baz..temp"
+        );
+        let p = PathBuf::from("/foo/bar/dir/");
+        assert_eq!(
+            &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
+            "/foo/bar/dir..temp"
         );
     }
 

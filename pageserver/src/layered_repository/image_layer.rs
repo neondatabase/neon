@@ -30,7 +30,7 @@ use crate::layered_repository::storage_layer::{
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
-use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION};
+use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
@@ -255,7 +255,7 @@ impl ImageLayer {
             .collect();
 
         conf.timeline_path(&timelineid, &tenantid)
-            .join(format!("{}.{}.temp", fname, rand_string))
+            .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
     }
 
     ///

@@ -30,7 +30,7 @@ use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use self::metadata::{metadata_path, TimelineMetadata};
+use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
 use crate::metrics::remove_tenant_metrics;
 use crate::storage_sync::index::RemoteIndex;
@@ -299,6 +299,14 @@ impl Repository {
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
+        let _guard = match self.file_lock.try_read() {
+            Ok(g) => g,
+            Err(_) => {
+                info!("File lock write acquired, shutting down GC");
+                return Ok(GcResult::default());
+            }
+        };
+
         let timeline_str = target_timeline_id
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
@@ -315,6 +323,14 @@ impl Repository {
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
     pub fn compaction_iteration(&self) -> Result<()> {
+        let _guard = match self.file_lock.try_read() {
+            Ok(g) => g,
+            Err(_) => {
+                info!("File lock write acquired, shutting down compaction");
+                return Ok(());
+            }
+        };
+
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
@@ -401,10 +417,10 @@ impl Repository {
 
     pub fn init_attach_timelines(
         &self,
-        timelines: Vec<(ZTimelineId, TimelineMetadata)>,
+        timelines: HashMap<ZTimelineId, TimelineMetadata>,
     ) -> anyhow::Result<()> {
         let sorted_timelines = if timelines.len() == 1 {
-            timelines
+            timelines.into_iter().collect()
         } else if !timelines.is_empty() {
             tree_sort_timelines(timelines)?
         } else {
@@ -442,7 +458,7 @@ impl Repository {
 /// perform a topological sort, so that the parent of each timeline comes
 /// before the children.
 fn tree_sort_timelines(
-    timelines: Vec<(ZTimelineId, TimelineMetadata)>,
+    timelines: HashMap<ZTimelineId, TimelineMetadata>,
 ) -> Result<Vec<(ZTimelineId, TimelineMetadata)>> {
     let mut result = Vec::with_capacity(timelines.len());
 
@@ -567,13 +583,8 @@ impl Repository {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag)
     }
 
-    pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) -> Result<()> {
-        let mut tenant_conf = self.tenant_conf.write().unwrap();
-
-        tenant_conf.update(&new_tenant_conf);
-
-        Repository::persist_tenant_config(self.conf, self.tenant_id, *tenant_conf)?;
-        Ok(())
+    pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
+        self.tenant_conf.write().unwrap().update(&new_tenant_conf);
     }
 
     fn initialize_new_timeline(
@@ -648,32 +659,37 @@ impl Repository {
         tenant_id: ZTenantId,
     ) -> anyhow::Result<TenantConfOpt> {
         let target_config_path = TenantConf::path(conf, tenant_id);
+        let target_config_display = target_config_path.display();
 
-        info!("load tenantconf from {}", target_config_path.display());
+        info!("loading tenantconf from {target_config_display}");
 
         // FIXME If the config file is not found, assume that we're attaching
         // a detached tenant and config is passed via attach command.
         // https://github.com/neondatabase/neon/issues/1555
         if !target_config_path.exists() {
-            info!(
-                "tenant config not found in {}",
-                target_config_path.display()
-            );
-            return Ok(Default::default());
+            info!("tenant config not found in {target_config_display}");
+            return Ok(TenantConfOpt::default());
         }
 
         // load and parse file
-        let config = fs::read_to_string(target_config_path)?;
+        let config = fs::read_to_string(&target_config_path).with_context(|| {
+            format!("Failed to load config from path '{target_config_display}'")
+        })?;
 
-        let toml = config.parse::<toml_edit::Document>()?;
+        let toml = config.parse::<toml_edit::Document>().with_context(|| {
+            format!("Failed to parse config from file '{target_config_display}' as toml file")
+        })?;
 
-        let mut tenant_conf: TenantConfOpt = Default::default();
+        let mut tenant_conf = TenantConfOpt::default();
         for (key, item) in toml.iter() {
             match key {
                 "tenant_config" => {
-                    tenant_conf = PageServerConf::parse_toml_tenant_conf(item)?;
+                    tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
+                        format!("Failed to parse config from file '{target_config_display}' as pageserver config")
+                    })?;
                 }
-                _ => bail!("unrecognized pageserver option '{}'", key),
+                _ => bail!("config file {target_config_display} has unrecognized pageserver option '{key}'"),
+
             }
         }
 
@@ -888,26 +904,6 @@ pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn load_metadata(
-    conf: &'static PageServerConf,
-    timeline_id: ZTimelineId,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<TimelineMetadata> {
-    let metadata_path = metadata_path(conf, timeline_id, tenant_id);
-    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
-        format!(
-            "Failed to read metadata bytes from path {}",
-            metadata_path.display()
-        )
-    })?;
-    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
-        format!(
-            "Failed to parse metadata bytes from path {}",
-            metadata_path.display()
-        )
-    })
-}
-
 #[cfg(test)]
 pub mod repo_harness {
     use bytes::{Bytes, BytesMut};
@@ -925,6 +921,7 @@ pub mod repo_harness {
         walredo::{WalRedoError, WalRedoManager},
     };
 
+    use super::metadata::metadata_path;
     use super::*;
     use crate::tenant_config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
@@ -1030,7 +1027,7 @@ pub mod repo_harness {
                 false,
             );
             // populate repo with locally available timelines
-            let mut timelines_to_load = Vec::new();
+            let mut timelines_to_load = HashMap::new();
             for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
                 .expect("should be able to read timelines dir")
             {
@@ -1042,7 +1039,7 @@ pub mod repo_harness {
                     .to_string_lossy()
                     .parse()?;
                 let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
-                timelines_to_load.push((timeline_id, timeline_metadata));
+                timelines_to_load.insert(timeline_id, timeline_metadata);
             }
             repo.init_attach_timelines(timelines_to_load)?;
 
@@ -1052,6 +1049,26 @@ pub mod repo_harness {
         pub fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
             self.conf.timeline_path(timeline_id, &self.tenant_id)
         }
+    }
+
+    fn load_metadata(
+        conf: &'static PageServerConf,
+        timeline_id: ZTimelineId,
+        tenant_id: ZTenantId,
+    ) -> anyhow::Result<TimelineMetadata> {
+        let metadata_path = metadata_path(conf, timeline_id, tenant_id);
+        let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
+            format!(
+                "Failed to read metadata bytes from path {}",
+                metadata_path.display()
+            )
+        })?;
+        TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
+            format!(
+                "Failed to parse metadata bytes from path {}",
+                metadata_path.display()
+            )
+        })
     }
 
     // Mock WAL redo manager that doesn't do much

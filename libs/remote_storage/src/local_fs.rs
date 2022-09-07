@@ -21,6 +21,8 @@ use crate::{path_with_suffix_extension, Download, DownloadError, RemoteObjectId}
 
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
 
+const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
+
 /// Convert a Path in the remote storage into a RemoteObjectId
 fn remote_object_id_from_path(path: &Path) -> anyhow::Result<RemoteObjectId> {
     Ok(RemoteObjectId(
@@ -143,7 +145,8 @@ impl RemoteStorage for LocalFs {
         // We need this dance with sort of durable rename (without fsyncs)
         // to prevent partial uploads. This was really hit when pageserver shutdown
         // cancelled the upload and partial file was left on the fs
-        let temp_file_path = path_with_suffix_extension(&target_file_path, "temp");
+        let temp_file_path =
+            path_with_suffix_extension(&target_file_path, LOCAL_FS_TEMP_FILE_SUFFIX);
         let mut destination = io::BufWriter::new(
             fs::OpenOptions::new()
                 .write(true)

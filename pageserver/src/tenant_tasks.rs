@@ -34,11 +34,6 @@ async fn compaction_loop(tenantid: ZTenantId, mut cancel: watch::Receiver<()>) {
 
             // Break if we're not allowed to write to disk
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            // TODO do this inside repo.compaction_iteration instead.
-            let _guard = match repo.file_lock.try_read() {
-                Ok(g) => g,
-                Err(_) => return Ok(ControlFlow::Break(())),
-            };
 
             // Run compaction
             let compaction_period = repo.get_compaction_period();
@@ -233,11 +228,6 @@ async fn gc_loop(tenantid: ZTenantId, mut cancel: watch::Receiver<()>) {
 
             // Break if we're not allowed to write to disk
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            // TODO do this inside repo.gc_iteration instead.
-            let _guard = match repo.file_lock.try_read() {
-                Ok(g) => g,
-                Err(_) => return Ok(ControlFlow::Break(())),
-            };
 
             // Run gc
             let gc_period = repo.get_gc_period();
