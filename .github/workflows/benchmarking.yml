@@ -62,19 +62,12 @@ jobs:
         echo Pgbench
         $POSTGRES_DISTRIB_DIR/bin/pgbench --version
 
-    # FIXME cluster setup is skipped due to various changes in console API
-    # for now pre created cluster is used. When API gain some stability
-    # after massive changes dynamic cluster setup will be revived.
-    # So use pre created cluster. It needs to be started manually, but stop is automatic after 5 minutes of inactivity
-    - name: Setup cluster
-      env:
-        BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
-      run: |
-        set -e
-
-        echo "Starting cluster"
-        # wake up the cluster
-        $POSTGRES_DISTRIB_DIR/bin/psql $BENCHMARK_CONNSTR -c "SELECT 1"
+    - name: Create Neon Project
+      id: create-neon-project
+      uses: ./.github/actions/neon-project-create
+      with:
+        environment: staging
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Run benchmark
       # pgbench is installed system wide from official repo
@@ -97,7 +90,7 @@ jobs:
         TEST_PG_BENCH_DURATIONS_MATRIX: "300"
         TEST_PG_BENCH_SCALES_MATRIX: "10,100"
         PLATFORM: "neon-staging"
-        BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
+        BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
       run: |
         # just to be sure that no data was cached on self hosted runner
@@ -114,6 +107,14 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
       run: |
         REPORT_FROM=$(realpath perf-report-staging) REPORT_TO=staging scripts/generate_and_push_perf_report.sh
+
+    - name: Delete Neon Project
+      if: ${{ always() }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        environment: staging
+        project_id: ${{ steps.create-neon-project.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
