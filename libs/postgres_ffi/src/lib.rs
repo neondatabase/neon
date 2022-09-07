@@ -13,7 +13,7 @@ macro_rules! postgres_ffi {
     ($version:ident) => {
         #[path = "."]
         pub mod $version {
-            mod bindings {
+            pub mod bindings {
                 // bindgen generates bindings for a lot of stuff we don't need
                 #![allow(dead_code)]
 
