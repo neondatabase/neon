@@ -412,7 +412,7 @@ jobs:
   trigger-e2e-tests:
     runs-on: dev
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
     needs: [ build-neon ]
     steps:
