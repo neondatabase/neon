@@ -12,7 +12,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     ffi::OsStr,
-    fmt::Debug,
+    fmt::{Debug, Display},
     num::{NonZeroU32, NonZeroUsize},
     ops::Deref,
     path::{Path, PathBuf},
@@ -46,12 +46,6 @@ const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 #[derive(Clone, PartialEq, Eq)]
 pub struct RemoteObjectId(String);
 
-impl From<RemoteObjectId> for String {
-    fn from(id: RemoteObjectId) -> Self {
-        id.0
-    }
-}
-
 ///
 /// A key that refers to an object in remote storage. It works much like a Path,
 /// but it's a separate datatype so that you don't accidentally mix local paths
@@ -80,7 +74,13 @@ impl RemoteObjectId {
 
 impl Debug for RemoteObjectId {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        self.0.fmt(fmt)
+        Debug::fmt(&self.0, fmt)
+    }
+}
+
+impl Display for RemoteObjectId {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, fmt)
     }
 }
 
