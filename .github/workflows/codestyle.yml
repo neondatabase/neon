@@ -17,6 +17,7 @@ concurrency:
 
 env:
   RUST_BACKTRACE: 1
+  COPT: '-Werror'
 
 jobs:
   check-codestyle-rust:

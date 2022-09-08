@@ -1347,7 +1347,7 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 /*
  *	zenith_db_size() -- Get the size of the database in bytes.
  */
-const int64
+int64
 zenith_dbsize(Oid dbNode)
 {
 	ZenithResponse *resp;

@@ -182,7 +182,7 @@ extern void zenith_write(SMgrRelation reln, ForkNumber forknum,
 extern void zenith_writeback(SMgrRelation reln, ForkNumber forknum,
 							 BlockNumber blocknum, BlockNumber nblocks);
 extern BlockNumber zenith_nblocks(SMgrRelation reln, ForkNumber forknum);
-extern const int64 zenith_dbsize(Oid dbNode);
+extern int64 zenith_dbsize(Oid dbNode);
 extern void zenith_truncate(SMgrRelation reln, ForkNumber forknum,
 							BlockNumber nblocks);
 extern void zenith_immedsync(SMgrRelation reln, ForkNumber forknum);
