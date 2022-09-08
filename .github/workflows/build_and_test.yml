@@ -104,15 +104,13 @@ jobs:
           brew install flex bison openssl
           echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
+          echo 'mold_run=' >> $GITHUB_ENV
 
       - name: Set platform-specific env
         if: matrix.runs-on != 'macos-latest'
         run: |
           echo 'MAKEFLAGS=-j'`nproc` >> $GITHUB_ENV
-          echo 'PG_EXTRA_CONFIGURE_OPTS=LD=mold' >> $GITHUB_ENV
-
-          echo '[target.x86_64-unknown-linux-gnu]' >> .cargo/config.toml
-          echo 'rustflags = ["-C", "link-arg=-fuse-ld='`which mold`'"]' >> .cargo/config.toml
+          echo 'mold_run=mold -run' >> $GITHUB_ENV
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
@@ -182,16 +180,16 @@ jobs:
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
-        run: make postgres-v14
+        run: ${mold_run} make postgres-v14
         shell: bash -euxo pipefail {0}
 
       - name: Build postgres v15
         if: steps.cache_pg_15.outputs.cache-hit != 'true'
-        run: make postgres-v15
+        run: ${mold_run} make postgres-v15
         shell: bash -euxo pipefail {0}
 
       - name: Build neon extensions
-        run: make neon-pg-ext
+        run: ${mold_run} make neon-pg-ext
         shell: bash -euxo pipefail {0}
 
       - name: Check formatting of Rust code
@@ -200,7 +198,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          ${cov_prefix} cargo build $CARGO_FLAGS --features failpoints --bins --tests
+          ${cov_prefix} ${mold_run} cargo build $CARGO_FLAGS --features failpoints --bins --tests
         shell: bash -euxo pipefail {0}
 
       - name: Run cargo test

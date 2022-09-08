@@ -26,6 +26,7 @@ ifeq ($(UNAME_S),Linux)
 	PG_CONFIGURE_OPTS += --with-libseccomp
 endif
 
+
 # macOS with brew-installed openssl requires explicit paths
 # It can be configured with OPENSSL_PREFIX variable
 UNAME_S := $(shell uname -s)
@@ -33,8 +34,6 @@ ifeq ($(UNAME_S),Darwin)
     OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
     PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
 endif
-
-PG_CONFIGURE_OPTS += $(PG_EXTRA_CONFIGURE_OPTS)
 
 # Choose whether we should be silent or verbose
 CARGO_BUILD_FLAGS += --$(if $(filter s,$(MAKEFLAGS)),quiet,verbose)
