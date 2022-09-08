@@ -10,12 +10,12 @@ POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 BUILD_TYPE ?= debug
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
-	PG_CFLAGS = -O2 -g3 -Werror $(CFLAGS)
+	PG_CFLAGS = -O2 -g3 $(CFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
-	PG_CFLAGS = -O0 -g3 -Werror $(CFLAGS)
+	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -25,7 +25,6 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	PG_CONFIGURE_OPTS += --with-libseccomp
 endif
-
 
 # macOS with brew-installed openssl requires explicit paths
 # It can be configured with OPENSSL_PREFIX variable
@@ -144,24 +143,24 @@ neon-pg-ext-v14: postgres-v14
 	+@echo "Compiling neon v14"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-v14
 	(cd $(POSTGRES_INSTALL_DIR)/build/neon-v14 && \
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v14/bin/pg_config CFLAGS='$(PG_CFLAGS)' \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v14/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install)
 	+@echo "Compiling neon_test_utils" v14
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v14
 	(cd $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v14 && \
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v14/bin/pg_config CFLAGS='$(PG_CFLAGS)' \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v14/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install)
 
 neon-pg-ext-v15: postgres-v15
 	+@echo "Compiling neon v15"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-v15
 	(cd $(POSTGRES_INSTALL_DIR)/build/neon-v15 && \
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config CFLAGS='$(PG_CFLAGS)' \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install)
 	+@echo "Compiling neon_test_utils" v15
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v15
 	(cd $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v15 && \
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config CFLAGS='$(PG_CFLAGS)' \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install)
 
 .PHONY: neon-pg-ext-clean
