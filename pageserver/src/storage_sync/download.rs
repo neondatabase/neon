@@ -625,7 +625,7 @@ mod tests {
             metadata_path(harness.conf, sync_id.timeline_id, sync_id.tenant_id)
                 .with_file_name(IndexPart::FILE_NAME);
         let index_part_remote_id = local_storage.remote_object_id(&local_index_part_path)?;
-        let index_part_local_path = PathBuf::from(String::from(index_part_remote_id));
+        let index_part_local_path = PathBuf::from(index_part_remote_id.to_string());
         fs::create_dir_all(index_part_local_path.parent().unwrap()).await?;
         fs::write(&index_part_local_path, serde_json::to_vec(&index_part)?).await?;
 
