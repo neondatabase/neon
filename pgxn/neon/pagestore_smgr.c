@@ -964,10 +964,11 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	 * it will not be set when page is wal-logged and written to the disk.
 	 * So use current LSN to associate with relation metadata.
 	 */
-	#if 0
 	if (lsn == InvalidXLogRecPtr)
+	{
 		lsn = GetXLogInsertRecPtr();
-	#endif
+		SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forkNum, blkno);
+	}
 	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forkNum);
 }
 
