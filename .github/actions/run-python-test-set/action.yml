@@ -5,9 +5,6 @@ inputs:
   build_type:
     description: 'Type of Rust (neon) and C (postgres) builds. Must be "release" or "debug", or "remote" for the remote cluster'
     required: true
-  rust_toolchain:
-    description: 'Rust toolchain version to fetch the caches'
-    required: false
   test_selection:
     description: 'A python test suite to run'
     required: true
@@ -55,7 +52,7 @@ runs:
       if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
-        name: neon-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
+        name: neon-${{ runner.os }}-${{ inputs.build_type }}-artifact
         path: /tmp/neon
 
     - name: Checkout
