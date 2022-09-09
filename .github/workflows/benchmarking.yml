@@ -14,6 +14,13 @@ on:
     - cron:  '36 4 * * *' # run once a day, timezone is utc
 
   workflow_dispatch: # adds ability to run this manually
+    inputs:
+      environment:
+        description: 'Environment to run remote tests on (dev or staging)'
+        required: false
+      region_id:
+        description: 'Use a particular region. If empty the default one will be used'
+        false: true
 
 defaults:
   run:
@@ -66,8 +73,8 @@ jobs:
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        environment: staging
-        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        environment: ${{ github.event.inputs.environment || 'staging' }}
+        api_key: ${{ ( github.event.inputs.environment || 'staging' ) == 'staging' && secrets.NEON_STAGING_API_KEY  || secrets.NEON_CAPTEST_API_KEY }}
 
     - name: Run benchmark
       # pgbench is installed system wide from official repo
@@ -159,8 +166,8 @@ jobs:
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        environment: dev
-        api_key: ${{ secrets.NEON_CAPTEST_API_KEY }}
+        environment: ${{ github.event.inputs.environment || 'dev' }}
+        api_key: ${{ ( github.event.inputs.environment || 'dev' ) == 'staging' && secrets.NEON_STAGING_API_KEY  || secrets.NEON_CAPTEST_API_KEY }}
 
     - name: Set up Connection String
       id: set-up-connstr
