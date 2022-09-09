@@ -530,9 +530,6 @@ where
                 state.timeline_id
             );
         }
-        if state.server.wal_seg_size == 0 {
-            bail!("Calling SafeKeeper::new with empty wal_seg_size");
-        }
 
         Ok(SafeKeeper {
             global_commit_lsn: state.commit_lsn,
@@ -788,6 +785,11 @@ where
         Ok(())
     }
 
+    /// Persist control file to disk, called only after timeline creation (bootstrap).
+    pub fn persist(&mut self) -> Result<()> {
+        self.persist_control_file(self.state.clone())
+    }
+
     /// Persist in-memory state to the disk, taking other data from state.
     fn persist_control_file(&mut self, mut state: SafeKeeperState) -> Result<()> {
         state.commit_lsn = self.inmem.commit_lsn;
@@ -938,7 +940,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use postgres_ffi::v14::pg_constants;
+    use postgres_ffi::WAL_SEGMENT_SIZE;
 
     use super::*;
     use crate::wal_storage::Storage;
@@ -966,7 +968,7 @@ mod tests {
 
     fn test_sk_state() -> SafeKeeperState {
         let mut state = SafeKeeperState::empty();
-        state.server.wal_seg_size = pg_constants::WAL_SEGMENT_SIZE as u32;
+        state.server.wal_seg_size = WAL_SEGMENT_SIZE as u32;
         state.tenant_id = ZTenantId::from([1u8; 16]);
         state.timeline_id = ZTimelineId::from([1u8; 16]);
         state

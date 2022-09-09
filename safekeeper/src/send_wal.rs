@@ -4,6 +4,7 @@
 use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::{ReplicaState, Timeline};
 use crate::wal_storage::WalReader;
+use crate::GlobalTimelines;
 use anyhow::{bail, Context, Result};
 
 use bytes::Bytes;
@@ -78,13 +79,7 @@ struct ReplicationConnGuard {
 
 impl Drop for ReplicationConnGuard {
     fn drop(&mut self) {
-        let res = self.timeline.remove_replica(self.replica);
-        if let Err(e) = res {
-            warn!(
-                "Failed to remove replica {} from timeline {}: {}",
-                self.replica, self.timeline.zttid, e
-            );
-        }
+        self.timeline.remove_replica(self.replica);
     }
 }
 
@@ -118,7 +113,7 @@ impl ReplicationConn {
                             // Note: deserializing is on m[1..] because we skip the tag byte.
                             state.hs_feedback = HotStandbyFeedback::des(&m[1..])
                                 .context("failed to deserialize HotStandbyFeedback")?;
-                            timeline.update_replica_state(replica_id, state)?;
+                            timeline.update_replica_state(replica_id, state);
                         }
                         Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
                             let _reply = StandbyReply::des(&m[1..])
@@ -140,7 +135,7 @@ impl ReplicationConn {
                             // This replica is the source of information to resend to compute.
                             state.pageserver_feedback = Some(reply);
 
-                            timeline.update_replica_state(replica_id, state)?;
+                            timeline.update_replica_state(replica_id, state);
                         }
                         _ => warn!("unexpected message {:?}", msg),
                     }
@@ -173,7 +168,7 @@ impl ReplicationConn {
     ) -> Result<()> {
         let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap()).entered();
 
-        let tli = Arc::clone(spg.timeline.as_ref().unwrap());
+        let tli = GlobalTimelines::get(spg.zttid)?;
 
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(&tli);
@@ -182,7 +177,7 @@ impl ReplicationConn {
 
         let state = ReplicaState::new();
         // This replica_id is used below to check if it's time to stop replication.
-        let replica_id = bg_timeline.add_replica(state)?;
+        let replica_id = bg_timeline.add_replica(state);
 
         // Use a guard object to remove our entry from the timeline, when the background
         // thread and us have both finished using it.
@@ -209,7 +204,7 @@ impl ReplicationConn {
             .build()?;
 
         runtime.block_on(async move {
-            let (inmem_state, persisted_state) = tli.get_state()?;
+            let (inmem_state, persisted_state) = tli.get_state();
             // add persisted_state.timeline_start_lsn == Lsn(0) check
 
             // Walproposer gets special handling: safekeeper must give proposer all
@@ -222,7 +217,7 @@ impl ReplicationConn {
             // on this safekeeper itself. That's ok as (old) proposer will never be
             // able to commit such WAL.
             let stop_pos: Option<Lsn> = if spg.is_walproposer_recovery() {
-                let wal_end = tli.get_flush_lsn()?;
+                let wal_end = tli.get_flush_lsn();
                 Some(wal_end)
             } else {
                 None
@@ -263,7 +258,7 @@ impl ReplicationConn {
                     } else {
                         // TODO: also check once in a while whether we are walsender
                         // to right pageserver.
-                        if tli.should_walsender_stop(replica_id)? {
+                        if tli.should_walsender_stop(replica_id) {
                             // Shut down, timeline is suspended.
                             // TODO create proper error type for this
                             bail!("end streaming to {:?}", spg.appname);

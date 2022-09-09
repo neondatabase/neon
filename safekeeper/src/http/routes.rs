@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
-use crate::timeline;
-use crate::timeline::TimelineDeleteForceResult;
+
+use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 use etcd_broker::subscription_value::SkTimelineInfo;
@@ -99,9 +99,9 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(zttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(zttid);
-    let (inmem, state) = tli.get_state()?;
-    let flush_lsn = tli.get_flush_lsn()?;
+    let tli = GlobalTimelines::get(zttid)?;
+    let (inmem, state) = tli.get_state();
+    let flush_lsn = tli.get_flush_lsn();
 
     let acc_state = AcceptorStateStatus {
         term: state.acceptor_state.term,
@@ -138,12 +138,6 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 }
 
 /// Deactivates the timeline and removes its data directory.
-///
-/// It does not try to stop any processing of the timeline; there is no such code at the time of writing.
-/// However, it tries to check whether the timeline was active and report it to caller just in case.
-/// Note that this information is inaccurate:
-/// 1. There is a race condition between checking the timeline for activity and actual directory deletion.
-/// 2. At the time of writing Safekeeper rarely marks a timeline inactive. E.g. disconnecting the compute node does nothing.
 async fn timeline_delete_force_handler(
     mut request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
@@ -153,12 +147,8 @@ async fn timeline_delete_force_handler(
     );
     check_permission(&request, Some(zttid.tenant_id))?;
     ensure_no_body(&mut request).await?;
-    json_response(
-        StatusCode::OK,
-        timeline::delete_force(get_conf(&request), &zttid)
-            .await
-            .map_err(ApiError::from_err)?,
-    )
+    let resp = GlobalTimelines::delete_force(&zttid).map_err(ApiError::from_err)?;
+    json_response(StatusCode::OK, resp)
 }
 
 /// Deactivates all timelines for the tenant and removes its data directory.
@@ -171,8 +161,7 @@ async fn tenant_delete_force_handler(
     ensure_no_body(&mut request).await?;
     json_response(
         StatusCode::OK,
-        timeline::delete_force_all_for_tenant(get_conf(&request), &tenant_id)
-            .await
+        GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
             .map_err(ApiError::from_err)?
             .iter()
             .map(|(zttid, resp)| (format!("{}", zttid.timeline_id), *resp))
@@ -189,7 +178,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
     check_permission(&request, Some(zttid.tenant_id))?;
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
-    let tli = GlobalTimelines::get(zttid);
+    let tli = GlobalTimelines::get(zttid)?;
     tli.record_safekeeper_info(&safekeeper_info, NodeId(1))
         .await?;
 

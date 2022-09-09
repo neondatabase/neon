@@ -235,21 +235,15 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
         // Push data concurrently to not suffer from latency, with many timelines it can be slow.
         let handles = active_tlis
             .iter()
-            .filter_map(|tli| {
-                let sk_info = tli.get_public_info(&conf).ok()?;
+            .map(|tli| {
+                let sk_info = tli.get_public_info(&conf);
                 let key = timeline_safekeeper_path(
                     conf.broker_etcd_prefix.clone(),
                     tli.zttid,
                     conf.my_id,
                 );
                 let lease = leases.remove(&tli.zttid).unwrap();
-                Some(tokio::spawn(push_sk_info(
-                    tli.zttid,
-                    client.clone(),
-                    key,
-                    sk_info,
-                    lease,
-                )))
+                tokio::spawn(push_sk_info(tli.zttid, client.clone(), key, sk_info, lease))
             })
             .collect::<Vec<_>>();
         for h in handles {
@@ -290,10 +284,10 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
         match subscription.value_updates.recv().await {
             Some(new_info) => {
                 // note: there are blocking operations below, but it's considered fine for now
-                let tli = GlobalTimelines::get(new_info.key.id);
-                let _ = tli
-                    .record_safekeeper_info(&new_info.value, new_info.key.node_id)
-                    .await;
+                if let Ok(tli) = GlobalTimelines::get(new_info.key.id) {
+                    tli.record_safekeeper_info(&new_info.value, new_info.key.node_id)
+                        .await?
+                }
             }
             None => {
                 // XXX it means we lost connection with etcd, error is consumed inside sub object

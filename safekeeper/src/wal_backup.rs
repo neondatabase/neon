@@ -54,7 +54,9 @@ pub fn wal_backup_launcher_thread_main(
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
 fn is_wal_backup_required(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
-    Some(GlobalTimelines::get(zttid)).filter(|tli| tli.wal_backup_attend())
+    GlobalTimelines::get(zttid)
+        .ok()
+        .filter(|tli| tli.wal_backup_attend())
 }
 
 struct WalBackupTaskHandle {
@@ -200,15 +202,15 @@ async fn backup_task_main(
     election: Election,
 ) {
     info!("started");
-    let tli = GlobalTimelines::get(zttid);
-    let res = tli.get_wal_seg_size();
+    let res = GlobalTimelines::get(zttid);
     if let Err(e) = res {
         info!("backup error for timeline {}: {}", zttid, e);
         return;
     }
+    let tli = res.unwrap();
 
     let mut wb = WalBackupTask {
-        wal_seg_size: res.unwrap(),
+        wal_seg_size: tli.get_wal_seg_size(),
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
         timeline: tli,
         timeline_dir,
@@ -279,12 +281,7 @@ impl WalBackupTask {
                     continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
                 }
                 // Perhaps peers advanced the position, check shmem value.
-                let res = self.timeline.get_wal_backup_lsn();
-                if let Err(e) = res {
-                    error!("backup error: {}", e);
-                    return;
-                }
-                backup_lsn = res.unwrap();
+                backup_lsn = self.timeline.get_wal_backup_lsn();
                 if backup_lsn.segment_number(self.wal_seg_size)
                     >= commit_lsn.segment_number(self.wal_seg_size)
                 {

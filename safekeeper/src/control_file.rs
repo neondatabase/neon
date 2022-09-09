@@ -69,6 +69,7 @@ impl FileStorage {
         })
     }
 
+    /// Create file storage for a new timeline, but don't persist it yet.
     pub fn create_new(
         zttid: &ZTenantTimelineId,
         conf: &SafeKeeperConf,
@@ -78,19 +79,18 @@ impl FileStorage {
         let tenant_id = zttid.tenant_id.to_string();
         let timeline_id = zttid.timeline_id.to_string();
 
-        let mut store = FileStorage {
+        let store = FileStorage {
             timeline_dir,
             conf: conf.clone(),
             persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
                 .with_label_values(&[&tenant_id, &timeline_id]),
-            state: state.clone(),
+            state,
         };
 
-        store.persist(&state)?;
         Ok(store)
     }
 
-    // Check the magic/version in the on-disk data and deserialize it, if possible.
+    /// Check the magic/version in the on-disk data and deserialize it, if possible.
     fn deser_sk_state(buf: &mut &[u8]) -> Result<SafeKeeperState> {
         // Read the version independent part
         let magic = buf.read_u32::<LittleEndian>()?;
@@ -110,7 +110,7 @@ impl FileStorage {
         upgrade_control_file(buf, version)
     }
 
-    // Load control file for given zttid at path specified by conf.
+    /// Load control file for given zttid at path specified by conf.
     pub fn load_control_file_conf(
         conf: &SafeKeeperConf,
         zttid: &ZTenantTimelineId,
@@ -171,8 +171,8 @@ impl Deref for FileStorage {
 }
 
 impl Storage for FileStorage {
-    // persists state durably to underlying storage
-    // for description see https://lwn.net/Articles/457667/
+    /// persists state durably to underlying storage
+    /// for description see https://lwn.net/Articles/457667/
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
         let _timer = &self.persist_control_file_seconds.start_timer();
 

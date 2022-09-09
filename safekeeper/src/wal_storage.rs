@@ -156,16 +156,14 @@ pub struct PhysicalStorage {
 }
 
 impl PhysicalStorage {
+    /// Create new storage. If commit_lsn is not zero, flush_lsn is tried to be restored from
+    /// the disk. Otherwise, all LSNs are set to zero.
     pub fn new(
         zttid: &ZTenantTimelineId,
         conf: &SafeKeeperConf,
         state: &SafeKeeperState,
     ) -> Result<PhysicalStorage> {
         let timeline_dir = conf.timeline_dir(zttid);
-
-        if state.server.wal_seg_size == 0 {
-            bail!("wal_seg_size must be initialized before creating PhysicalStorage");
-        }
         let wal_seg_size = state.server.wal_seg_size as usize;
 
         // Find out where stored WAL ends, starting at commit_lsn which is a
@@ -399,7 +397,7 @@ impl Storage for PhysicalStorage {
     /// end_pos must point to the end of the WAL record.
     fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
         // Streaming must not create a hole, so truncate cannot be called on non-written lsn
-        if self.write_lsn != Lsn(0) && end_pos >= self.write_lsn {
+        if self.write_lsn != Lsn(0) && end_pos > self.write_lsn {
             bail!(
                 "truncate_wal called on non-written WAL, write_lsn={}, end_pos={}",
                 self.write_lsn,
