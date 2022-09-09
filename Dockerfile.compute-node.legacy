@@ -24,7 +24,7 @@ FROM $REPOSITORY/$IMAGE:$TAG AS compute-deps
 #
 FROM debian:buster-slim AS build-deps
 
-RUN apt-get update && apt-get -yq install automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
+RUN ldd --version && apt-get update && apt-get -yq install automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
                                           libcurl4-openssl-dev libossp-uuid-dev
 
 #
@@ -51,7 +51,7 @@ RUN mkdir /pg/compute_build && cd /pg/compute_build && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install
 
 # Install neon contrib
-RUN make MAKELEVEL=0 PG_CONFIG=/pg/compute_build/postgres_bin/bin/pg_config -j $(getconf _NPROCESSORS_ONLN) -C /pg/neon install
+RUN ldd --version && make MAKELEVEL=0 PG_CONFIG=/pg/compute_build/postgres_bin/bin/pg_config -j $(getconf _NPROCESSORS_ONLN) -C /pg/neon install
 
 USER postgres
 WORKDIR /pg
@@ -81,7 +81,7 @@ COPY --from=compute-deps /usr/local/bin/compute_ctl /usr/local/bin/compute_ctl
 RUN ln -s /usr/local/bin/compute_ctl /usr/local/bin/zenith_ctl
 
 # Add postgres shared objects to the search path
-RUN echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
+RUN ldd --version && echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
 USER postgres
 

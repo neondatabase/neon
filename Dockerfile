@@ -16,7 +16,7 @@ COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 
 ENV BUILD_TYPE release
-RUN set -e \
+RUN ldd --version && set -e \
     && mold -run make -j $(nproc) -s neon-pg-ext \
     && rm -rf pg_install/v14/build \
     && rm -rf pg_install/v15/build \
@@ -43,7 +43,7 @@ COPY . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
-RUN set -e \
+RUN ldd --version && set -e \
 && mold -run cargo build --locked --release \
     && cachepot -s
 
@@ -73,7 +73,7 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
-RUN mkdir -p /data/.neon/ && chown -R zenith:zenith /data/.neon/ \
+RUN ldd --version && mkdir -p /data/.neon/ && chown -R zenith:zenith /data/.neon/ \
     && /usr/local/bin/pageserver -D /data/.neon/ --init \
        -c "id=1234" \
        -c "broker_endpoints=['http://etcd:2379']" \

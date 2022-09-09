@@ -19,7 +19,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 COPY . .
 
-RUN set -e \
+RUN ldd --version && set -e \
     && mold -run cargo build -p compute_tools --locked --release \
     && cachepot -s
 
