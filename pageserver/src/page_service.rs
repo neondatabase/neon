@@ -472,6 +472,7 @@ impl PageServerHandler {
                         let tenant_id = tenant_id.to_string();
                         let timeline_id = timeline_id.to_string();
 
+                        // TODO(now) append to trace if tenant is configured for read tracing
                         let response = match zenith_fe_msg {
                             PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_rel_exists", &tenant_id, &timeline_id])
@@ -854,6 +855,8 @@ impl postgres_backend::Handler for PageServerHandler {
 
             self.check_permission(Some(tenantid))?;
 
+            // TODO(now) make trace logger if tenant is configured for read tracing.
+            //           Also flush trace logger on drop.
             self.handle_pagerequests(pgb, timelineid, tenantid)?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());

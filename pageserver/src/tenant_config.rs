@@ -87,6 +87,7 @@ pub struct TenantConf {
     /// A lagging safekeeper will be changed after `lagging_wal_timeout` time elapses since the last WAL update,
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
+    // TODO(now) add setting to enable read request tracing
 }
 
 /// Same as TenantConf, but this struct preserves the information about
