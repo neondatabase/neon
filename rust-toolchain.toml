@@ -5,7 +5,7 @@
 # 'testing' or even 'unstable', which is a bit more cutting-edge than we'd like. Hopefully the 1.60 packages reach
 # 'testing' soon (and similarly for the other distributions).
 # See https://tracker.debian.org/pkg/rustc for more details on Debian rustc package.
-channel = "1.60" # do update CI matrix values when updating this
+channel = "1.60" # do update GitHub CI cache values for rust builds, when changing this value
 profile = "default"
 # The default profile includes rustc, rust-std, cargo, rust-docs, rustfmt and clippy.
 # https://rust-lang.github.io/rustup/concepts/profiles.html
