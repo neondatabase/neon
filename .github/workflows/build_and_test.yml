@@ -41,34 +41,14 @@ jobs:
 
   # Build in debug mode, and run regression test. This gathers code coverage data, too.
   build-debug:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-
-    steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-
-      - name: "Build (debug)"
-        uses: ./.github/actions/build
-        with:
-          build_type: debug
-          rust_toolchain: 1.58
-          install_rust_toolchain: false
-          upload: true
+    uses: ./.github/workflows/build.yml
+    with:
+       runs-on: dev
+       container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+       build_type: debug
+       rust_toolchain: 1.58
+       install_rust_toolchain: false
+       upload: true
 
   regress-test-debug:
     needs: [ build-debug ]
@@ -109,33 +89,14 @@ jobs:
 
   # Build in release mode, and run regression and performance tests.
   build-release:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-
-      - name: Build (release)
-        uses: ./.github/actions/build
-        with:
-          build_type: release
-          rust_toolchain: 1.58
-          install_rust_toolchain: false
-          upload: true
+    uses: ./.github/workflows/build.yml
+    with:
+       runs-on: dev
+       container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+       build_type: release
+       rust_toolchain: 1.58
+       install_rust_toolchain: false
+       upload: true
 
   regress-test-release:
     needs: [ build-release ]
@@ -196,30 +157,13 @@ jobs:
 
   # Minimal build on macOS, just to check that it compiles. Don't run the regression tests.
   build-macos:
-    runs-on: macos-latest
-    steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-
-      - name: Build (macOS)
-        uses: ./.github/actions/build
-        with:
-          build_type: debug
-          rust_toolchain: 1.58
-          install_rust_toolchain: true
-          upload: false
+    uses: ./.github/workflows/build.yml
+    with:
+       runs-on: macos-latest
+       build_type: debug
+       rust_toolchain: 1.58
+       install_rust_toolchain: true
+       upload: false
 
   merge-allure-report:
     runs-on: ${{ inputs.runs-on }}
