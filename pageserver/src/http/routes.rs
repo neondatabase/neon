@@ -559,6 +559,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
         tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
     }
+    if let Some(trace_read_requests) = request_data.trace_read_requests {
+        tenant_conf.trace_read_requests = Some(trace_read_requests);
+    }
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
