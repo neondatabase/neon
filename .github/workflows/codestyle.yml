@@ -24,8 +24,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO read from `rust-toolchain.toml` and do the same in the build and test workflow too.
-        rust_toolchain: ['1.60']
+        # XXX: both OSes have rustup
+        #   * https://github.com/actions/runner-images/blob/main/images/macos/macos-12-Readme.md#rust-tools
+        #   * https://github.com/actions/runner-images/blob/main/images/linux/Ubuntu2204-Readme.md#rust-tools
+        # this is all we need to install our toolchain later via rust-toolchain.toml
+        # so don't install any toolchain explicitly.
         os: [ubuntu-latest, macos-latest]
         # To support several Postgres versions, add them here.
         postgres_version: [v14, v15]
@@ -39,14 +42,6 @@ jobs:
         with:
           submodules: true
           fetch-depth: 2
-
-      - name: Install rust toolchain ${{ matrix.rust_toolchain }}
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust_toolchain }}
-          components: rustfmt, clippy
-          override: true
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -106,7 +101,7 @@ jobs:
             !~/.cargo/registry/src
             ~/.cargo/git
             target
-          key: v3-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust-${{ matrix.rust_toolchain }}
+          key: v4-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust
 
       - name: Run cargo clippy
         run: ./run_clippy.sh
