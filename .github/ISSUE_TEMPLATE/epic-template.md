@@ -1,6 +1,6 @@
 ---
 name: Epic Template
-about: A set of related tasks contributing towards specific outcome, comprizing of
+about: A set of related tasks contributing towards specific outcome, comprising of
   more than 1 week of work.
 title: 'Epic: '
 labels: t/Epic
