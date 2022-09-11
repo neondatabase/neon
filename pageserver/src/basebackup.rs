@@ -81,9 +81,8 @@ where
         // an old LSN and it doesn't have any WAL of its own yet. We will set
         // prev_lsn to Lsn(0) if we cannot provide the correct value.
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
-            // Backup was requested at a particular LSN. Wait for it to arrive.
-            info!("waiting for {}", req_lsn);
-            timeline.wait_lsn(req_lsn)?;
+            // Backup was requested at a particular LSN. The caller should've
+            // already checked that it's a valid LSN.
 
             // If the requested point is the end of the timeline, we can
             // provide prev_lsn. (get_last_record_rlsn() might return it as

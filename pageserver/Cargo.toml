@@ -12,6 +12,8 @@ profiling = ["pprof"]
 failpoints = ["fail/failpoints"]
 
 [dependencies]
+async-stream = "0.3"
+async-trait = "0.1"
 chrono = "0.4.19"
 rand = "0.8.3"
 regex = "1.4.5"
@@ -24,6 +26,7 @@ itertools = "0.10.3"
 clap = "3.0"
 daemonize = "0.4.1"
 tokio = { version = "1.17", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }
+tokio-util = { version = "0.7.3", features = ["io", "io-util"] }
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
@@ -43,7 +46,7 @@ pprof = { git = "https://github.com/neondatabase/pprof-rs.git", branch = "wallcl
 toml_edit = { version = "0.13", features = ["easy"] }
 scopeguard = "1.1.0"
 const_format = "0.2.21"
-tracing = "0.1.27"
+tracing = "0.1.36"
 signal-hook = "0.3.10"
 url = "2"
 nix = "0.23"

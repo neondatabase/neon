@@ -1,3 +1,4 @@
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_until
 from fixtures.types import ZTenantId, ZTimelineId
 
@@ -39,9 +40,6 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         for t in timelines:
             client.timeline_delete(tenant, t)
 
-    def assert_idle(tenant):
-        assert get_state(tenant) == "Idle"
-
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline(name, tenant_id=tenant)
@@ -51,18 +49,21 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     # Stop compute
     pg.stop()
 
-    # Detach all tenants and wait for them to go idle
-    # TODO they should be already idle since there are no active computes
+    # Delete all timelines on all tenants
     for tenant_info in client.tenant_list():
         tenant_id = ZTenantId(tenant_info["id"])
         delete_all_timelines(tenant_id)
-        wait_until(10, 0.2, lambda: assert_idle(tenant_id))
 
-    # Assert that all tasks finish quickly after tenants go idle
+    # Assert that all tasks finish quickly after tenant is detached
+    assert get_metric_value('pageserver_tenant_task_events{event="start"}') > 0
+    client.tenant_detach(tenant)
+    client.tenant_detach(env.initial_tenant)
+
     def assert_tasks_finish():
         tasks_started = get_metric_value('pageserver_tenant_task_events{event="start"}')
         tasks_ended = get_metric_value('pageserver_tenant_task_events{event="stop"}')
         tasks_panicked = get_metric_value('pageserver_tenant_task_events{event="panic"}')
+        log.info(f"started {tasks_started}, ended {tasks_ended}, panicked {tasks_panicked}")
         assert tasks_started == tasks_ended
         assert tasks_panicked == 0
 

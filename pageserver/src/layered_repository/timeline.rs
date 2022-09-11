@@ -5,16 +5,17 @@ use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use tokio::task::spawn_blocking;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard, RwLock, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
-use std::{fs, thread};
 
 use crate::layered_repository::{
     delta_layer::{DeltaLayer, DeltaLayerWriter},
@@ -46,8 +47,9 @@ use utils::{
 
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
-use crate::thread_mgr;
-use crate::walreceiver::IS_WAL_RECEIVER;
+use crate::task_mgr;
+use crate::task_mgr::TaskKind;
+use crate::walreceiver::{is_etcd_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{page_cache, storage_sync};
@@ -56,7 +58,7 @@ pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    tenant_id: ZTenantId,
+    pub tenant_id: ZTenantId,
     pub timeline_id: ZTimelineId,
 
     pub layers: RwLock<LayerMap>,
@@ -110,11 +112,11 @@ pub struct Timeline {
     /// to avoid deadlock.
     write_lock: Mutex<()>,
 
-    /// Used to ensure that there is only one thread
+    /// Used to ensure that there is only task performing flushing at a time
     layer_flush_lock: Mutex<()>,
 
     /// Layer removal lock.
-    /// A lock to ensure that no layer of the timeline is removed concurrently by other threads.
+    /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
     /// and [`Repository::delete_timeline`].
     layer_removal_cs: Mutex<()>,
@@ -142,10 +144,7 @@ pub struct Timeline {
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
-    // TODO task management should be done outside timeline, managed along with other tasks.
-    #[allow(clippy::type_complexity)]
-    initial_size_computation_task:
-        Mutex<Option<(thread::JoinHandle<anyhow::Result<()>>, mpsc::Receiver<()>)>>,
+    initial_size_computation_started: AtomicBool,
 
     /// Information about the last processed message by the WAL receiver,
     /// or None if WAL receiver has not received anything for this timeline
@@ -413,23 +412,23 @@ impl Timeline {
     /// You should call this before any of the other get_* or list_* functions. Calling
     /// those functions with an LSN that has been processed yet is an error.
     ///
-    pub fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
-        // This should never be called from the WAL receiver thread, because that could lead
+    pub async fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
+        // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
         ensure!(
-            !IS_WAL_RECEIVER.with(|c| c.get()),
-            "wait_lsn called by WAL receiver thread"
+            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnection),
+            "wait_lsn cannot be called in WAL receiver"
         );
 
-        self.metrics.wait_lsn_time_histo.observe_closure_duration(
-            || self.last_record_lsn
-                .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
-                .with_context(|| {
-                    format!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
-                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
-                    )
-                }))?;
+        let _timer = self.metrics.wait_lsn_time_histo.start_timer();
+
+        self.last_record_lsn.wait_for_timeout(lsn, self.conf.wait_lsn_timeout).await
+            .with_context(||
+                format!(
+                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
+                    lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
+                )
+            )?;
 
         Ok(())
     }
@@ -587,7 +586,7 @@ impl Timeline {
                 // initial logical size is 0.
                 LogicalSize::empty_initial()
             },
-            initial_size_computation_task: Mutex::new(None),
+            initial_size_computation_started: AtomicBool::new(false),
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             repartition_threshold: 0,
 
@@ -596,6 +595,43 @@ impl Timeline {
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
         result
+    }
+
+    pub fn launch_wal_receiver(self: &Arc<Self>) -> anyhow::Result<()> {
+        if !is_etcd_client_initialized() {
+            if cfg!(test) {
+                info!("not launching WAL receiver because etcd client hasn't been initialized");
+                return Ok(());
+            } else {
+                panic!("etcd client not initialized");
+            }
+        }
+
+        info!(
+            "launching WAL receiver for timeline {} of tenant {}",
+            self.timeline_id, self.tenant_id
+        );
+        let tenant_conf_guard = self.tenant_conf.read().unwrap();
+        let lagging_wal_timeout = tenant_conf_guard
+            .lagging_wal_timeout
+            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
+        let walreceiver_connect_timeout = tenant_conf_guard
+            .walreceiver_connect_timeout
+            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
+        let max_lsn_wal_lag = tenant_conf_guard
+            .max_lsn_wal_lag
+            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
+        drop(tenant_conf_guard);
+        let self_clone = Arc::clone(self);
+        let _ = spawn_connection_manager_task(
+            self.conf.broker_etcd_prefix.clone(),
+            self_clone,
+            walreceiver_connect_timeout,
+            lagging_wal_timeout,
+            max_lsn_wal_lag,
+        )?;
+
+        Ok(())
     }
 
     ///
@@ -715,61 +751,34 @@ impl Timeline {
     fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn) {
         let timeline_id = self.timeline_id;
 
-        let mut task_guard = match self.initial_size_computation_task.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                debug!("Skipping timeline logical size init: task lock is taken already");
-                return;
-            }
-        };
-
-        if let Some((old_task, task_finish_signal)) = task_guard.take() {
-            // TODO rust 1.61 would allow to remove `task_finish_signal` entirely and call `old_task.is_finished()` instead
-            match task_finish_signal.try_recv() {
-                // task has either signaled successfully that it finished or panicked and dropped the sender part without signalling
-                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
-                    match old_task.join() {
-                        // we're here due to OnceCell::get not returning the value
-                        Ok(Ok(())) => {
-                            error!("Timeline {timeline_id} size init task finished, yet the size was not updated, rescheduling the computation")
-                        }
-                        Ok(Err(task_error)) => {
-                            error!("Error during timeline {timeline_id} size init: {task_error:?}")
-                        }
-                        Err(e) => error!("Timeline {timeline_id} size init task panicked: {e:?}"),
-                    }
-                }
-                // task had not yet finished: no signal was sent and the sender channel is not dropped
-                Err(mpsc::TryRecvError::Empty) => {
-                    // let the task finish
-                    *task_guard = Some((old_task, task_finish_signal));
-                    return;
-                }
-            }
-        }
-
-        if task_guard.is_none() {
-            let thread_timeline = Arc::clone(self);
-            let (finish_sender, finish_receiver) = mpsc::channel();
-
-            match thread::Builder::new()
-                .name(format!(
-                    "Timeline {timeline_id} initial logical size calculation"
-                ))
-                .spawn(move || {
-                    let _enter = info_span!("initial_logical_size_calculation", timeline = %timeline_id).entered();
-                    let calculated_size = thread_timeline.calculate_logical_size(init_lsn)?;
-                    match thread_timeline.current_logical_size.initial_logical_size.set(calculated_size) {
+        // Atomically check if the timeline size calculation had already started.
+        // If the flag was not already set, this sets it.
+        if !self
+            .initial_size_computation_started
+            .swap(true, AtomicOrdering::SeqCst)
+        {
+            // We need to start the computation task.
+            let self_clone = Arc::clone(self);
+            task_mgr::spawn(
+                task_mgr::BACKGROUND_RUNTIME.handle(),
+                task_mgr::TaskKind::InitialLogicalSizeCalculation,
+                Some(self.tenant_id),
+                Some(self.timeline_id),
+                "initial size calculation",
+                false,
+                async move {
+                    let calculated_size = self_clone.calculate_logical_size(init_lsn)?;
+                    let result = spawn_blocking(move || {
+                        self_clone.current_logical_size.initial_logical_size.set(calculated_size)
+                    }).await?;
+                    match result {
                         Ok(()) => info!("Successfully calculated initial logical size"),
                         Err(existing_size) => error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing"),
                     }
-
-                    finish_sender.send(()).ok();
                     Ok(())
-                }) {
-                Ok(guard) => *task_guard = Some((guard, finish_receiver)),
-                Err(e) => error!("Failed to spawn timeline {timeline_id} size init task: {e}"),
-            }
+                }
+                .instrument(info_span!("initial_logical_size_calculation", timeline = %timeline_id))
+            );
         }
     }
 
@@ -1099,22 +1108,23 @@ impl Timeline {
                 self.last_freeze_at.store(last_lsn);
                 *(self.last_freeze_ts.write().unwrap()) = Instant::now();
 
-                // Launch a thread to flush the frozen layer to disk, unless
-                // a thread was already running. (If the thread was running
+                // Launch a task to flush the frozen layer to disk, unless
+                // a task was already running. (If the task was running
                 // at the time that we froze the layer, it must've seen the
                 // the layer we just froze before it exited; see comments
                 // in flush_frozen_layers())
                 if let Ok(guard) = self.layer_flush_lock.try_lock() {
                     drop(guard);
                     let self_clone = Arc::clone(self);
-                    thread_mgr::spawn(
-                        thread_mgr::ThreadKind::LayerFlushThread,
+                    task_mgr::spawn(
+                        task_mgr::BACKGROUND_RUNTIME.handle(),
+                        task_mgr::TaskKind::LayerFlushTask,
                         Some(self.tenant_id),
                         Some(self.timeline_id),
-                        "layer flush thread",
+                        "layer flush task",
                         false,
-                        move || self_clone.flush_frozen_layers(false),
-                    )?;
+                        async move { self_clone.flush_frozen_layers(false) },
+                    );
                 }
             }
         }
@@ -1123,8 +1133,8 @@ impl Timeline {
 
     /// Flush all frozen layers to disk.
     ///
-    /// Only one thread at a time can be doing layer-flushing for a
-    /// given timeline. If 'wait' is true, and another thread is
+    /// Only one task at a time can be doing layer-flushing for a
+    /// given timeline. If 'wait' is true, and another task is
     /// currently doing the flushing, this function will wait for it
     /// to finish. If 'wait' is false, this function will return
     /// immediately instead.

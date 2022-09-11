@@ -13,7 +13,6 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use tracing::*;
-use utils::zid::ZTenantTimelineId;
 
 use std::cmp::min;
 use std::collections::hash_map;
@@ -38,8 +37,7 @@ use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 use crate::metrics::STORAGE_TIME;
 use crate::repository::GcResult;
-use crate::tenant_mgr::LocalTimelineUpdate;
-use crate::thread_mgr;
+use crate::task_mgr;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 
@@ -87,18 +85,6 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 pub struct Repository {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
-
-    // Allows us to gracefully cancel operations that edit the directory
-    // that backs this layered repository. Usage:
-    //
-    // Use `let _guard = file_lock.try_read()` while writing any files.
-    // Use `let _guard = file_lock.write().unwrap()` to wait for all writes to finish.
-    //
-    // TODO try_read this lock during checkpoint as well to prevent race
-    //      between checkpoint and detach/delete.
-    // TODO try_read this lock for all gc/compaction operations, not just
-    //      ones scheduled by the tenant task manager.
-    pub file_lock: RwLock<()>,
 
     // Overridden tenant-specific config parameters.
     // We keep TenantConfOpt sturct here to preserve the information
@@ -284,7 +270,7 @@ impl Repository {
     }
 
     /// perform one garbage collection iteration, removing old data files from disk.
-    /// this function is periodically called by gc thread.
+    /// this function is periodically called by gc task.
     /// also it can be explicitly requested through page server api 'do_gc' command.
     ///
     /// 'timelineid' specifies the timeline to GC, or None for all.
@@ -299,14 +285,6 @@ impl Repository {
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
-        let _guard = match self.file_lock.try_read() {
-            Ok(g) => g,
-            Err(_) => {
-                info!("File lock write acquired, shutting down GC");
-                return Ok(GcResult::default());
-            }
-        };
-
         let timeline_str = target_timeline_id
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
@@ -319,18 +297,10 @@ impl Repository {
     }
 
     /// Perform one compaction iteration.
-    /// This function is periodically called by compactor thread.
+    /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
     pub fn compaction_iteration(&self) -> Result<()> {
-        let _guard = match self.file_lock.try_read() {
-            Ok(g) => g,
-            Err(_) => {
-                info!("File lock write acquired, shutting down compaction");
-                return Ok(());
-            }
-        };
-
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
@@ -624,10 +594,7 @@ impl Repository {
             .load_layer_map(new_disk_consistent_lsn)
             .context("failed to load layermap")?;
 
-        crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
-            id: ZTenantTimelineId::new(self.tenant_id(), new_timeline_id),
-            timeline: Arc::clone(&new_timeline),
-        });
+        new_timeline.launch_wal_receiver()?;
 
         Ok(new_timeline)
     }
@@ -642,7 +609,6 @@ impl Repository {
     ) -> Repository {
         Repository {
             tenant_id,
-            file_lock: RwLock::new(()),
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
@@ -846,7 +812,7 @@ impl Repository {
         // See comments in [`Repository::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
-            if thread_mgr::is_shutdown_requested() {
+            if task_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
                 break;

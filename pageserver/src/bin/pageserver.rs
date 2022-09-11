@@ -4,7 +4,7 @@ use remote_storage::GenericRemoteStorage;
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 use tracing::*;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use clap::{App, Arg};
 use daemonize::Daemonize;
@@ -12,13 +12,15 @@ use daemonize::Daemonize;
 use fail::FailScenario;
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, profiling, tenant_mgr, thread_mgr,
-    thread_mgr::ThreadKind,
-    virtual_file, LOG_FILE_NAME,
+    http, page_cache, page_service, profiling, task_mgr,
+    task_mgr::TaskKind,
+    task_mgr::{
+        BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
+    },
+    tenant_mgr, virtual_file, LOG_FILE_NAME,
 };
 use utils::{
     auth::JwtAuth,
-    http::endpoint,
     logging,
     postgres_backend::AuthType,
     project_git_version,
@@ -286,7 +288,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // start profiler (if enabled)
     let profiler_guard = profiling::init_profiler(conf);
 
-    pageserver::tenant_tasks::init_tenant_task_pool()?;
+    WALRECEIVER_RUNTIME.block_on(pageserver::walreceiver::init_etcd_client(conf))?;
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
@@ -307,35 +309,54 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         })
         .transpose()
         .context("Failed to init generic remote storage")?;
+    let remote_index = {
+        let _rt_guard = BACKGROUND_RUNTIME.enter();
+        tenant_mgr::init_tenant_mgr(conf, remote_storage.clone())?
+    };
 
-    let remote_index = tenant_mgr::init_tenant_mgr(conf, remote_storage.clone())?;
-
-    // Spawn a new thread for the http endpoint
+    // Spawn all HTTP related tasks in the MGMT_REQUEST_RUNTIME.
     // bind before launching separate thread so the error reported before startup exits
-    let auth_cloned = auth.clone();
-    thread_mgr::spawn(
-        ThreadKind::HttpEndpointListener,
-        None,
-        None,
-        "http_endpoint_thread",
-        true,
-        move || {
-            let router = http::make_router(conf, auth_cloned, remote_index, remote_storage)?;
-            endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
-        },
-    )?;
 
-    // Spawn a thread to listen for libpq connections. It will spawn further threads
+    // Create a Service from the router above to handle incoming requests.
+    {
+        let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
+
+        let router = http::make_router(conf, auth.clone(), remote_index, remote_storage)?;
+        let service =
+            utils::http::RouterService::new(router.build().map_err(|err| anyhow!(err))?).unwrap();
+        let server = hyper::Server::from_tcp(http_listener)?
+            .serve(service)
+            .with_graceful_shutdown(task_mgr::shutdown_watcher());
+
+        task_mgr::spawn(
+            MGMT_REQUEST_RUNTIME.handle(),
+            TaskKind::HttpEndpointListener,
+            None,
+            None,
+            "http endpoint listener",
+            true,
+            async {
+                server.await?;
+                Ok(())
+            },
+        );
+    }
+
+    // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection.
-    thread_mgr::spawn(
-        ThreadKind::LibpqEndpointListener,
+    task_mgr::spawn(
+        COMPUTE_REQUEST_RUNTIME.handle(),
+        TaskKind::LibpqEndpointListener,
         None,
         None,
-        "libpq endpoint thread",
+        "libpq endpoint listener",
         true,
-        move || page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type),
-    )?;
+        async move {
+            page_service::libpq_listener_main(conf, auth, pageserver_listener, conf.auth_type).await
+        },
+    );
 
+    // All started up! Now just sit and wait for shutdown signal.
     signals.handle(|signal| match signal {
         Signal::Quit => {
             info!(
@@ -352,7 +373,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 signal.name()
             );
             profiling::exit_profiler(conf, &profiler_guard);
-            pageserver::shutdown_pageserver(0);
+            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
             unreachable!()
         }
     })

@@ -2,7 +2,7 @@
 //! Timeline management code
 //
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use remote_storage::path_with_suffix_extension;
 
 use std::{
@@ -14,59 +14,20 @@ use std::{
 use tracing::*;
 
 use utils::{
-    crashsafe_dir,
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
 };
 
+use crate::config::PageServerConf;
+use crate::layered_repository::{Repository, Timeline};
 use crate::tenant_mgr;
 use crate::CheckpointConfig;
-use crate::{
-    config::PageServerConf, storage_sync::index::RemoteIndex, tenant_config::TenantConfOpt,
-};
 use crate::{import_datadir, TEMP_FILE_SUFFIX};
-use crate::{
-    layered_repository::{Repository, Timeline},
-    walredo::WalRedoManager,
-};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
     pub timeline_id: ZTimelineId,
     pub lsn: Lsn,
-}
-
-pub fn create_repo(
-    conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
-    tenant_id: ZTenantId,
-    wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-    remote_index: RemoteIndex,
-) -> Result<Arc<Repository>> {
-    let repo_dir = conf.tenant_path(&tenant_id);
-    ensure!(
-        !repo_dir.exists(),
-        "cannot create new tenant repo: '{}' directory already exists",
-        tenant_id
-    );
-
-    // top-level dir may exist if we are creating it through CLI
-    crashsafe_dir::create_dir_all(&repo_dir)
-        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
-    crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
-    info!("created directory structure in {}", repo_dir.display());
-
-    // Save tenant's config
-    Repository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
-
-    Ok(Arc::new(Repository::new(
-        conf,
-        tenant_conf,
-        wal_redo_manager,
-        tenant_id,
-        remote_index,
-        conf.remote_storage_config.is_some(),
-    )))
 }
 
 // Create the cluster temporarily in 'initdbpath' directory inside the repository
@@ -158,7 +119,7 @@ fn bootstrap_timeline(
 /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
 /// a new unique ID is generated.
 ///
-pub(crate) fn create_timeline(
+pub(crate) async fn create_timeline(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     new_timeline_id: Option<ZTimelineId>,
@@ -187,7 +148,7 @@ pub(crate) fn create_timeline(
                 // sizes etc. and that would get confused if the previous page versions
                 // are not in the repository yet.
                 *lsn = lsn.align();
-                ancestor_timeline.wait_lsn(*lsn)?;
+                ancestor_timeline.wait_lsn(*lsn).await?;
 
                 let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                 if ancestor_ancestor_lsn > *lsn {
