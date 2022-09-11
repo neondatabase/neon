@@ -5,14 +5,14 @@ use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
 use crate::layered_repository::ephemeral_file::is_ephemeral_file;
 use crate::layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME};
-use crate::layered_repository::{Repository, Timeline};
+use crate::layered_repository::Repository;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
+use crate::task_mgr::{self, TaskKind};
 use crate::tenant_config::TenantConfOpt;
-use crate::thread_mgr::ThreadKind;
-use crate::walredo::PostgresRedoManager;
-use crate::{thread_mgr, timelines, walreceiver, TenantTimelineValues, TEMP_FILE_SUFFIX};
-use anyhow::Context;
+use crate::walredo::{PostgresRedoManager, WalRedoManager};
+use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
+use anyhow::{ensure, Context};
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::{self, Entry};
@@ -21,33 +21,23 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::*;
 
-pub use tenants_state::try_send_timeline_update;
-use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+use utils::crashsafe_dir;
+use utils::zid::{ZTenantId, ZTimelineId};
 
 mod tenants_state {
-    use anyhow::ensure;
     use once_cell::sync::Lazy;
     use std::{
         collections::HashMap,
         sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     };
-    use tokio::sync::mpsc;
-    use tracing::{debug, error};
     use utils::zid::ZTenantId;
 
-    use crate::tenant_mgr::{LocalTimelineUpdate, Tenant};
+    use crate::tenant_mgr::Tenant;
 
     static TENANTS: Lazy<RwLock<HashMap<ZTenantId, Tenant>>> =
         Lazy::new(|| RwLock::new(HashMap::new()));
-
-    /// Sends updates to the local timelines (creation and deletion) to the WAL receiver,
-    /// so that it can enable/disable corresponding processes.
-    static TIMELINE_UPDATE_SENDER: Lazy<
-        RwLock<Option<mpsc::UnboundedSender<LocalTimelineUpdate>>>,
-    > = Lazy::new(|| RwLock::new(None));
 
     pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Tenant>> {
         TENANTS
@@ -60,39 +50,6 @@ mod tenants_state {
             .write()
             .expect("Failed to write() tenants lock, it got poisoned")
     }
-
-    pub(super) fn set_timeline_update_sender(
-        timeline_updates_sender: mpsc::UnboundedSender<LocalTimelineUpdate>,
-    ) -> anyhow::Result<()> {
-        let mut sender_guard = TIMELINE_UPDATE_SENDER
-            .write()
-            .expect("Failed to write() timeline_update_sender lock, it got poisoned");
-        ensure!(sender_guard.is_none(), "Timeline update sender already set");
-        *sender_guard = Some(timeline_updates_sender);
-        Ok(())
-    }
-
-    pub fn try_send_timeline_update(update: LocalTimelineUpdate) {
-        match TIMELINE_UPDATE_SENDER
-            .read()
-            .expect("Failed to read() timeline_update_sender lock, it got poisoned")
-            .as_ref()
-        {
-            Some(sender) => {
-                if let Err(e) = sender.send(update) {
-                    error!("Failed to send timeline update: {}", e);
-                }
-            }
-            None => debug!("Timeline update sender is not enabled, cannot send update {update:?}"),
-        }
-    }
-
-    pub(super) fn stop_timeline_update_sender() {
-        TIMELINE_UPDATE_SENDER
-            .write()
-            .expect("Failed to write() timeline_update_sender lock, it got poisoned")
-            .take();
-    }
 }
 
 struct Tenant {
@@ -103,9 +60,6 @@ struct Tenant {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum TenantState {
-    // All data for this tenant is complete on local disk, but we haven't loaded the Repository,
-    // Timeline and Layer structs into memory yet, so it cannot be accessed yet.
-    //Ready,
     // This tenant exists on local disk, and the layer map has been loaded into memory.
     // The local disk might have some newer files that don't exist in cloud storage yet.
     Active,
@@ -139,10 +93,6 @@ pub fn init_tenant_mgr(
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<RemoteIndex> {
     let _entered = info_span!("init_tenant_mgr").entered();
-    let (timeline_updates_sender, timeline_updates_receiver) =
-        mpsc::unbounded_channel::<LocalTimelineUpdate>();
-    tenants_state::set_timeline_update_sender(timeline_updates_sender)?;
-    walreceiver::init_wal_receiver_main_thread(conf, timeline_updates_receiver)?;
 
     let local_tenant_files = local_tenant_timeline_files(conf)
         .context("Failed to collect local tenant timeline files")?;
@@ -156,7 +106,7 @@ pub fn init_tenant_mgr(
         let SyncStartupData {
             remote_index,
             local_timeline_init_statuses,
-        } = storage_sync::spawn_storage_sync_thread(
+        } = storage_sync::spawn_storage_sync_task(
             conf,
             local_tenant_files,
             storage,
@@ -183,27 +133,6 @@ pub fn init_tenant_mgr(
     attach_local_tenants(conf, &remote_index, tenants_to_attach)?;
 
     Ok(remote_index)
-}
-
-pub enum LocalTimelineUpdate {
-    Detach {
-        id: ZTenantTimelineId,
-        // used to signal to the detach caller that walreceiver successfully terminated for specified id
-        join_confirmation_sender: std::sync::mpsc::Sender<()>,
-    },
-    Attach {
-        id: ZTenantTimelineId,
-        timeline: Arc<Timeline>,
-    },
-}
-
-impl std::fmt::Debug for LocalTimelineUpdate {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Detach { id, .. } => f.debug_tuple("Detach").field(id).finish(),
-            Self::Attach { id, .. } => f.debug_tuple("Attach").field(id).finish(),
-        }
-    }
 }
 
 /// Reads local files to load tenants and their timelines given into pageserver's memory.
@@ -274,24 +203,26 @@ fn load_local_repo(
 ///
 /// Shut down all tenants. This runs as part of pageserver shutdown.
 ///
-pub fn shutdown_all_tenants() {
-    tenants_state::stop_timeline_update_sender();
-    let mut m = tenants_state::write_tenants();
-    let mut tenantids = Vec::new();
-    for (tenantid, tenant) in m.iter_mut() {
-        match tenant.state {
-            TenantState::Active | TenantState::Idle | TenantState::Stopping => {
-                tenant.state = TenantState::Stopping;
-                tenantids.push(*tenantid)
+pub async fn shutdown_all_tenants() {
+    let tenantids = {
+        let mut m = tenants_state::write_tenants();
+        let mut tenantids = Vec::new();
+        for (tenantid, tenant) in m.iter_mut() {
+            match tenant.state {
+                TenantState::Active | TenantState::Idle | TenantState::Stopping => {
+                    tenant.state = TenantState::Stopping;
+                    tenantids.push(*tenantid)
+                }
+                TenantState::Broken => {}
             }
-            TenantState::Broken => {}
         }
-    }
-    drop(m);
+        drop(m);
+        tenantids
+    };
 
-    thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiverManager), None, None);
+    task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
 
-    // Ok, no background threads running anymore. Flush any remaining data in
+    // Ok, no background tasks running anymore. Flush any remaining data in
     // memory to disk.
     //
     // We assume that any incoming connections that might request pages from
@@ -314,7 +245,40 @@ pub fn shutdown_all_tenants() {
     }
 }
 
-pub fn create_tenant_repository(
+fn create_repo(
+    conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
+    tenant_id: ZTenantId,
+    wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
+    remote_index: RemoteIndex,
+) -> anyhow::Result<Arc<Repository>> {
+    let repo_dir = conf.tenant_path(&tenant_id);
+    ensure!(
+        !repo_dir.exists(),
+        "cannot create new tenant repo: '{}' directory already exists",
+        tenant_id
+    );
+
+    // top-level dir may exist if we are creating it through CLI
+    crashsafe_dir::create_dir_all(&repo_dir)
+        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
+    crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
+    info!("created directory structure in {}", repo_dir.display());
+
+    // Save tenant's config
+    Repository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
+
+    Ok(Arc::new(Repository::new(
+        conf,
+        tenant_conf,
+        wal_redo_manager,
+        tenant_id,
+        remote_index,
+        conf.remote_storage_config.is_some(),
+    )))
+}
+
+pub fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: ZTenantId,
@@ -327,17 +291,12 @@ pub fn create_tenant_repository(
         }
         Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-            let repo = timelines::create_repo(
-                conf,
-                tenant_conf,
-                tenant_id,
-                wal_redo_manager,
-                remote_index,
-            )?;
+            let repo = create_repo(conf, tenant_conf, tenant_id, wal_redo_manager, remote_index)?;
             v.insert(Tenant {
-                state: TenantState::Idle,
+                state: TenantState::Active,
                 repo,
             });
+            crate::tenant_tasks::start_background_loops(tenant_id);
             Ok(Some(tenant_id))
         }
     }
@@ -360,13 +319,15 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
 }
 
 pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow::Result<()> {
-    let mut m = tenants_state::write_tenants();
-    let tenant = m
-        .get_mut(&tenant_id)
-        .with_context(|| format!("Tenant not found for id {tenant_id}"))?;
-    let old_state = tenant.state;
-    tenant.state = new_state;
-    drop(m);
+    let old_state = {
+        let mut m = tenants_state::write_tenants();
+        let tenant = m
+            .get_mut(&tenant_id)
+            .with_context(|| format!("Tenant not found for id {tenant_id}"))?;
+        let old_state = tenant.state;
+        tenant.state = new_state;
+        old_state
+    };
 
     match (old_state, new_state) {
         (TenantState::Broken, TenantState::Broken)
@@ -389,24 +350,15 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
-            // TODO maybe use tokio::sync::watch instead?
-            crate::tenant_tasks::start_compaction_loop(tenant_id)?;
-            crate::tenant_tasks::start_gc_loop(tenant_id)?;
+            crate::tenant_tasks::start_background_loops(tenant_id);
         }
         (TenantState::Idle, TenantState::Stopping) => {
             info!("stopping idle tenant {tenant_id}");
         }
         (TenantState::Active, TenantState::Stopping | TenantState::Idle) => {
-            info!("stopping tenant {tenant_id} threads due to new state {new_state}");
-            thread_mgr::shutdown_threads(
-                Some(ThreadKind::WalReceiverManager),
-                Some(tenant_id),
-                None,
-            );
+            info!("stopping tenant {tenant_id} tasks due to new state {new_state}");
 
-            // Wait until all gc/compaction tasks finish
-            let repo = get_repository_for_tenant(tenant_id)?;
-            let _guard = repo.file_lock.write().unwrap();
+            // Note: The caller is responsible for waiting for any tasks to finish.
         }
     }
 
@@ -422,28 +374,28 @@ pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Rep
     Ok(Arc::clone(&tenant.repo))
 }
 
-pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+pub async fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
     // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
     // It is important that we do not take locks here, and do not check whether the timeline exists
-    // because if we hold tenants_state::write_tenants() while awaiting for the threads to join
+    // because if we hold tenants_state::write_tenants() while awaiting for the tasks to join
     // we cannot create new timelines and tenants, and that can take quite some time,
     // it can even become stuck due to a bug making whole pageserver unavailable for some operations
     // so this is the way how we deal with concurrent delete requests: shutdown everythig, wait for confirmation
     // and then try to actually remove timeline from inmemory state and this is the point when concurrent requests
     // will synchronize and either fail with the not found error or succeed
 
-    let (sender, receiver) = std::sync::mpsc::channel::<()>();
-    tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach {
-        id: ZTenantTimelineId::new(tenant_id, timeline_id),
-        join_confirmation_sender: sender,
-    });
-
     debug!("waiting for wal receiver to shutdown");
-    let _ = receiver.recv();
+    task_mgr::shutdown_tasks(
+        Some(TaskKind::WalReceiverManager),
+        Some(tenant_id),
+        Some(timeline_id),
+    )
+    .await;
     debug!("wal receiver shutdown confirmed");
-    debug!("waiting for threads to shutdown");
-    thread_mgr::shutdown_threads(None, None, Some(timeline_id));
-    debug!("thread shutdown completed");
+
+    info!("waiting for timeline tasks to shutdown");
+    task_mgr::shutdown_tasks(None, Some(tenant_id), Some(timeline_id)).await;
+    info!("timeline task shutdown completed");
     match tenants_state::read_tenants().get(&tenant_id) {
         Some(tenant) => tenant.repo.delete_timeline(timeline_id)?,
         None => anyhow::bail!("Tenant {tenant_id} not found in local tenant state"),
@@ -452,36 +404,17 @@ pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow
     Ok(())
 }
 
-pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> anyhow::Result<()> {
+pub async fn detach_tenant(
+    conf: &'static PageServerConf,
+    tenant_id: ZTenantId,
+) -> anyhow::Result<()> {
     set_tenant_state(tenant_id, TenantState::Stopping)?;
-    // shutdown the tenant and timeline threads: gc, compaction, page service threads)
-    thread_mgr::shutdown_threads(None, Some(tenant_id), None);
+    // shutdown all tenant and timeline tasks: gc, compaction, page service)
+    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
 
-    let mut walreceiver_join_handles = Vec::new();
-    let removed_tenant = {
+    {
         let mut tenants_accessor = tenants_state::write_tenants();
-        tenants_accessor.remove(&tenant_id)
-    };
-    if let Some(tenant) = removed_tenant {
-        for (timeline_id, _) in tenant.repo.list_timelines() {
-            let (sender, receiver) = std::sync::mpsc::channel::<()>();
-            tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach {
-                id: ZTenantTimelineId::new(tenant_id, timeline_id),
-                join_confirmation_sender: sender,
-            });
-            walreceiver_join_handles.push((timeline_id, receiver));
-        }
-    }
-
-    // wait for wal receivers to stop without holding the lock, because walreceiver
-    // will attempt to change tenant state which is protected by the same global tenants lock.
-    // TODO do we need a timeout here? how to handle it?
-    // recv_timeout is broken: https://github.com/rust-lang/rust/issues/94518#issuecomment-1057440631
-    // need to use crossbeam-channel
-    for (timeline_id, join_handle) in walreceiver_join_handles {
-        info!("waiting for wal receiver to shutdown timeline_id {timeline_id}");
-        join_handle.recv().ok();
-        info!("wal receiver shutdown confirmed timeline_id {timeline_id}");
+        tenants_accessor.remove(&tenant_id);
     }
 
     // If removal fails there will be no way to successfully retry detach,

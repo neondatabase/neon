@@ -153,7 +153,7 @@ pub(super) async fn upload_timeline_layers<'a>(
                         // We have run the upload sync task, but the file we wanted to upload is gone.
                         // This is "fine" due the asynchronous nature of the sync loop: it only reacts to events and might need to
                         // retry the upload tasks, if S3 or network is down: but during this time, pageserver might still operate and
-                        // run compaction/gc threads, removing redundant files from disk.
+                        // run compaction/gc tasks, removing redundant files from disk.
                         // It's not good to pause GC/compaction because of those and we would rather skip such uploads.
                         //
                         // Yet absence of such files might also mean that the timeline metadata file was updated (GC moves the Lsn forward, for instance).

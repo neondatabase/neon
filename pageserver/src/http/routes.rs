@@ -161,16 +161,14 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
-    let new_timeline_info = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
-
+    let new_timeline_info = async {
         match timelines::create_timeline(
             get_config(&request),
             tenant_id,
             request_data.new_timeline_id.map(ZTimelineId::from),
             request_data.ancestor_timeline_id.map(ZTimelineId::from),
             request_data.ancestor_start_lsn,
-        ) {
+        ).await {
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
                 let local_info = local_timeline_info_from_timeline(&new_timeline, false, false)?;
@@ -184,9 +182,10 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             Ok(None) => Ok(None), // timeline already exists
             Err(err) => Err(err),
         }
-    })
-    .await
-        .map_err(ApiError::from_err)??;
+    }
+    .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn))
+        .await
+            .map_err(ApiError::from_err)?;
 
     Ok(match new_timeline_info {
         Some(info) => json_response(StatusCode::CREATED, info)?,
@@ -426,12 +425,10 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     let state = get_state(&request);
-    tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("timeline_delete", tenant = %tenant_id).entered();
-        tenant_mgr::delete_timeline(tenant_id, timeline_id)
-    })
-    .await
-    .map_err(ApiError::from_err)??;
+    tenant_mgr::delete_timeline(tenant_id, timeline_id)
+        .instrument(info_span!("timeline_delete", tenant = %tenant_id))
+        .await
+        .map_err(ApiError::from_err)?;
 
     let mut remote_index = state.remote_index.write().await;
     remote_index.remove_timeline_entry(ZTenantTimelineId {
@@ -448,12 +445,10 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
 
     let state = get_state(&request);
     let conf = state.conf;
-    tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_detach", tenant = %tenant_id).entered();
-        tenant_mgr::detach_tenant(conf, tenant_id)
-    })
-    .await
-    .map_err(ApiError::from_err)??;
+    tenant_mgr::detach_tenant(conf, tenant_id)
+        .instrument(info_span!("tenant_detach", tenant = %tenant_id))
+        .await
+        .map_err(ApiError::from_err)?;
 
     let mut remote_index = state.remote_index.write().await;
     remote_index.remove_tenant_entry(&tenant_id);
@@ -583,7 +578,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
         let conf = get_config(&request);
 
-        tenant_mgr::create_tenant_repository(conf, tenant_conf, target_tenant_id, remote_index)
+        tenant_mgr::create_tenant(conf, tenant_conf, target_tenant_id, remote_index)
     })
     .await
     .map_err(ApiError::from_err)??;

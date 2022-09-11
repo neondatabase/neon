@@ -37,7 +37,7 @@
 //!                                                            | access to this storage |
 //!                                                            +------------------------+
 //!
-//! First, during startup, the pageserver inits the storage sync thread with the async loop, or leaves the loop uninitialised, if configured so.
+//! First, during startup, the pageserver inits the storage sync task with the async loop, or leaves the loop uninitialised, if configured so.
 //! The loop inits the storage connection and checks the remote files stored.
 //! This is done once at startup only, relying on the fact that pageserver uses the storage alone (ergo, nobody else uploads the files to the storage but this server).
 //! Based on the remote storage data, the sync logic immediately schedules sync tasks for local timelines and reports about remote only timelines to pageserver, so it can
@@ -158,7 +158,6 @@ use once_cell::sync::OnceCell;
 use remote_storage::GenericRemoteStorage;
 use tokio::{
     fs,
-    runtime::Runtime,
     time::{Duration, Instant},
 };
 use tracing::*;
@@ -174,9 +173,10 @@ use crate::{
     exponential_backoff,
     layered_repository::metadata::{metadata_path, TimelineMetadata},
     storage_sync::index::RemoteIndex,
+    task_mgr,
+    task_mgr::TaskKind,
+    task_mgr::BACKGROUND_RUNTIME,
     tenant_mgr::attach_local_tenants,
-    thread_mgr,
-    thread_mgr::ThreadKind,
 };
 use crate::{
     metrics::{IMAGE_SYNC_TIME, REMAINING_SYNC_ITEMS, REMOTE_INDEX_UPLOAD},
@@ -264,7 +264,7 @@ impl SyncQueue {
                 .unwrap()
                 .0;
 
-            if thread_mgr::is_shutdown_requested() {
+            if task_mgr::is_shutdown_requested() {
                 return (HashMap::new(), q.len());
             }
         }
@@ -574,7 +574,7 @@ pub fn schedule_layer_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
 
 /// Launch a thread to perform remote storage sync tasks.
 /// See module docs for loop step description.
-pub fn spawn_storage_sync_thread(
+pub fn spawn_storage_sync_task(
     conf: &'static PageServerConf,
     local_timeline_files: TenantTimelineValues<(TimelineMetadata, HashSet<PathBuf>)>,
     storage: GenericRemoteStorage,
@@ -589,11 +589,6 @@ pub fn spawn_storage_sync_thread(
         Some(queue) => queue,
         None => bail!("Could not get sync queue during the sync loop step, aborting"),
     };
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to create storage sync runtime")?;
 
     // TODO we are able to "attach" empty tenants, but not doing it now since it might require big wait time:
     // * we need to list every timeline for tenant on S3, that might be a costly operation
@@ -616,7 +611,7 @@ pub fn spawn_storage_sync_thread(
         }
     }
 
-    let applicable_index_parts = runtime.block_on(download_index_parts(
+    let applicable_index_parts = BACKGROUND_RUNTIME.block_on(download_index_parts(
         conf,
         &storage,
         keys_for_index_part_downloads,
@@ -625,7 +620,7 @@ pub fn spawn_storage_sync_thread(
     let remote_index = RemoteIndex::from_parts(conf, applicable_index_parts)?;
 
     let mut local_timeline_init_statuses = schedule_first_sync_tasks(
-        &mut runtime.block_on(remote_index.write()),
+        &mut BACKGROUND_RUNTIME.block_on(remote_index.write()),
         sync_queue,
         timelines_to_sync,
     );
@@ -634,31 +629,30 @@ pub fn spawn_storage_sync_thread(
         .extend(empty_tenants.0.into_iter());
 
     let remote_index_clone = remote_index.clone();
-    thread_mgr::spawn(
-        ThreadKind::StorageSync,
+    task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
+        TaskKind::StorageSync,
         None,
         None,
-        "Remote storage sync thread",
+        "Remote storage sync task",
         false,
-        move || {
+        async move {
             storage_sync_loop(
-                runtime,
                 conf,
                 (storage, remote_index_clone, sync_queue),
                 max_sync_errors,
-            );
+            )
+            .await;
             Ok(())
         },
-    )
-    .context("Failed to spawn remote storage sync thread")?;
+    );
     Ok(SyncStartupData {
         remote_index,
         local_timeline_init_statuses,
     })
 }
 
-fn storage_sync_loop(
-    runtime: Runtime,
+async fn storage_sync_loop(
     conf: &'static PageServerConf,
     (storage, index, sync_queue): (GenericRemoteStorage, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
@@ -669,7 +663,7 @@ fn storage_sync_loop(
 
         let (batched_tasks, remaining_queue_length) = sync_queue.next_task_batch();
 
-        if thread_mgr::is_shutdown_requested() {
+        if task_mgr::is_shutdown_requested() {
             info!("Shutdown requested, stopping");
             break;
         }
@@ -683,20 +677,19 @@ fn storage_sync_loop(
         }
 
         // Concurrently perform all the tasks in the batch
-        let loop_step = runtime.block_on(async {
-            tokio::select! {
-                step = process_batches(
-                    conf,
-                    max_sync_errors,
-                    loop_storage,
-                    &index,
-                    batched_tasks,
-                    sync_queue,
-                )
-                    .instrument(info_span!("storage_sync_loop_step")) => ControlFlow::Continue(step),
-                _ = thread_mgr::shutdown_watcher() => ControlFlow::Break(()),
-            }
-        });
+        let loop_step = tokio::select! {
+            step = process_batches(
+                conf,
+                max_sync_errors,
+                loop_storage,
+                &index,
+                batched_tasks,
+                sync_queue,
+            )
+                .instrument(info_span!("storage_sync_loop_step")) => ControlFlow::Continue(step)
+                ,
+            _ = task_mgr::shutdown_watcher() => ControlFlow::Break(()),
+        };
 
         match loop_step {
             ControlFlow::Continue(updated_tenants) => {
@@ -708,7 +701,7 @@ fn storage_sync_loop(
                         updated_tenants.len()
                     );
                     let mut timelines_to_attach = TenantTimelineValues::new();
-                    let index_accessor = runtime.block_on(index.read());
+                    let index_accessor = index.read().await;
                     for tenant_id in updated_tenants {
                         let tenant_entry = match index_accessor.tenant_entry(&tenant_id) {
                             Some(tenant_entry) => tenant_entry,

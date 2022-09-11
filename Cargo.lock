@@ -1831,6 +1831,8 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
+ "async-trait",
  "byteorder",
  "bytes",
  "chrono",
@@ -1871,6 +1873,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-postgres",
+ "tokio-util",
  "toml_edit",
  "tracing",
  "url",
@@ -3481,9 +3484,9 @@ checksum = "b6bc1c9ce2b5135ac7f93c72918fc37feb872bdc6a5533a8b85eb4b86bfdae52"
 
 [[package]]
 name = "tracing"
-version = "0.1.34"
+version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d0ecdcb44a79f0fe9844f0c4f33a342cbcbb5117de8001e6ba0dc2351327d09"
+checksum = "2fce9567bd60a67d08a16488756721ba392f24f29006402881e43b19aac64307"
 dependencies = [
  "cfg-if",
  "log",
@@ -3505,11 +3508,11 @@ dependencies = [
 
 [[package]]
 name = "tracing-core"
-version = "0.1.26"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f54c8ca710e81886d498c2fd3331b56c93aa248d49de2222ad2742247c60072f"
+checksum = "5aeea4303076558a00714b823f9ad67d58a3bbda1df83d8827d21193156e22f7"
 dependencies = [
- "lazy_static",
+ "once_cell",
  "valuable",
 ]
 
@@ -3626,6 +3629,7 @@ name = "utils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bincode",
  "byteorder",
  "bytes",
@@ -3653,6 +3657,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
  "workspace_hack",

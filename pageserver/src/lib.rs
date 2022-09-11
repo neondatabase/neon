@@ -12,10 +12,10 @@ pub mod profiling;
 pub mod reltag;
 pub mod repository;
 pub mod storage_sync;
+pub mod task_mgr;
 pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_tasks;
-pub mod thread_mgr;
 pub mod timelines;
 pub mod virtual_file;
 pub mod walingest;
@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use tracing::info;
 use utils::zid::{ZTenantId, ZTimelineId};
 
-use crate::thread_mgr::ThreadKind;
+use crate::task_mgr::TaskKind;
 
 /// Current storage format version
 ///
@@ -52,30 +52,31 @@ pub enum CheckpointConfig {
     Forced,
 }
 
-pub fn shutdown_pageserver(exit_code: i32) {
-    // Shut down the libpq endpoint thread. This prevents new connections from
+pub async fn shutdown_pageserver(exit_code: i32) {
+    // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
-    thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
+    task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None).await;
 
-    // Shut down any page service threads.
-    thread_mgr::shutdown_threads(Some(ThreadKind::PageRequestHandler), None, None);
+    // Shut down any page service tasks.
+    task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None).await;
 
     // Shut down all the tenants. This flushes everything to disk and kills
-    // the checkpoint and GC threads.
-    tenant_mgr::shutdown_all_tenants();
+    // the checkpoint and GC tasks.
+    tenant_mgr::shutdown_all_tenants().await;
 
     // Stop syncing with remote storage.
     //
-    // FIXME: Does this wait for the sync thread to finish syncing what's queued up?
+    // FIXME: Does this wait for the sync tasks to finish syncing what's queued up?
     // Should it?
-    thread_mgr::shutdown_threads(Some(ThreadKind::StorageSync), None, None);
+    task_mgr::shutdown_tasks(Some(TaskKind::StorageSync), None, None).await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
-    thread_mgr::shutdown_threads(Some(ThreadKind::HttpEndpointListener), None, None);
+    // FIXME: We should probably stop accepting commands like attach/detach earlier.
+    task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None).await;
 
     // There should be nothing left, but let's be sure
-    thread_mgr::shutdown_threads(None, None, None);
+    task_mgr::shutdown_tasks(None, None, None).await;
 
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
