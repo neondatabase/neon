@@ -251,21 +251,34 @@ impl GlobalTimelines {
 
     /// Cancels timeline, then deletes the corresponding data directory.
     pub fn delete_force(zttid: &ZTenantTimelineId) -> Result<TimelineDeleteForceResult> {
-        let timeline = TIMELINES_STATE.lock().unwrap().get(zttid)?;
+        let tli_res = TIMELINES_STATE.lock().unwrap().get(zttid);
+        match tli_res {
+            Ok(timeline) => {
+                // Take a lock and finish the deletion holding this mutex.
+                let mut shared_state = timeline.write_shared_state();
 
-        // Take a lock and finish the deletion holding this mutex.
-        let mut shared_state = timeline.write_shared_state();
+                info!("deleting timeline {}", zttid);
+                let (dir_existed, was_active) = timeline.delete_from_disk(&mut shared_state)?;
 
-        info!("deleting timeline {}", zttid);
-        let (dir_existed, was_active) = timeline.delete_from_disk(&mut shared_state)?;
+                // Remove timeline from the map.
+                TIMELINES_STATE.lock().unwrap().timelines.remove(zttid);
 
-        // Remove timeline from the map.
-        TIMELINES_STATE.lock().unwrap().timelines.remove(zttid);
+                Ok(TimelineDeleteForceResult {
+                    dir_existed,
+                    was_active,
+                })
+            }
+            Err(_) => {
+                // Timeline is not memory, but it may still exist on disk in broken state.
+                let dir_path = TIMELINES_STATE.lock().unwrap().conf.timeline_dir(zttid);
+                let dir_existed = delete_dir(dir_path)?;
 
-        Ok(TimelineDeleteForceResult {
-            dir_existed,
-            was_active,
-        })
+                Ok(TimelineDeleteForceResult {
+                    dir_existed,
+                    was_active: false,
+                })
+            }
+        }
     }
 
     /// Deactivates and deletes all timelines for the tenant. Returns map of all timelines which

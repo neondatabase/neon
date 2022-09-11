@@ -433,9 +433,9 @@ impl PostgresBackend {
                     // We also don't want to log full stacktrace when the error is primitive,
                     // such as usual connection closed.
                     let short_error = format!("{:#}", e);
-                    if e.root_cause()
-                        .to_string()
-                        .contains("connection closed unexpectedly")
+                    let root_cause = e.root_cause().to_string();
+                    if root_cause.contains("connection closed unexpectedly")
+                        || root_cause.contains("Broken pipe (os error 32)")
                     {
                         error!(
                             "query handler for '{}' failed: {}",
