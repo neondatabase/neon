@@ -12,11 +12,12 @@ use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tracing::*;
+use utils::zid::ZTenantTimelineId;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
+use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
 use crate::safekeeper::{
-    AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected, ProposerGreeting,
+    AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected,
 };
 use crate::safekeeper::{SafeKeeperState, Term, TermHistory, TermSwitchEntry};
 use crate::timeline::Timeline;
@@ -65,10 +66,9 @@ pub fn handle_json_ctrl(
     append_request: &AppendLogicalMessage,
 ) -> Result<()> {
     info!("JSON_CTRL request: {:?}", append_request);
-    let tli = GlobalTimelines::get(spg.zttid)?;
 
     // need to init safekeeper state before AppendRequest
-    prepare_safekeeper(&tli)?;
+    let tli = prepare_safekeeper(spg.zttid)?;
 
     // if send_proposer_elected is true, we need to update local history
     if append_request.send_proposer_elected {
@@ -95,23 +95,15 @@ pub fn handle_json_ctrl(
 
 /// Prepare safekeeper to process append requests without crashes,
 /// by sending ProposerGreeting with default server.wal_seg_size.
-fn prepare_safekeeper(tli: &Arc<Timeline>) -> Result<()> {
-    let greeting_request = ProposerAcceptorMessage::Greeting(ProposerGreeting {
-        protocol_version: 2, // current protocol
-        pg_version: 0,       // unknown
-        proposer_id: [0u8; 16],
-        system_id: 0,
-        ztli: tli.zttid.timeline_id,
-        tenant_id: tli.zttid.tenant_id,
-        tli: 0,
-        wal_seg_size: WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
-    });
-
-    let response = tli.process_msg(&greeting_request)?;
-    match response {
-        Some(AcceptorProposerMessage::Greeting(_)) => Ok(()),
-        _ => anyhow::bail!("not GreetingResponse"),
-    }
+fn prepare_safekeeper(zttid: ZTenantTimelineId) -> Result<Arc<Timeline>> {
+    GlobalTimelines::create(
+        zttid,
+        ServerInfo {
+            pg_version: 0, // unknown
+            wal_seg_size: WAL_SEGMENT_SIZE as u32,
+            system_id: 0,
+        },
+    )
 }
 
 fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> Result<()> {

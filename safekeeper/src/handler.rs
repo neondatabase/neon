@@ -103,16 +103,14 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         self.zttid = ZTenantTimelineId::new(tenantid, timelineid);
 
         match cmd {
-            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb)
-                .run(self)
-                .context("failed to run ReceiveWalConn"),
-            SafekeeperPostgresCommand::StartReplication { start_lsn } => ReplicationConn::new(pgb)
-                .run(self, pgb, start_lsn)
-                .context("failed to run ReplicationConn"),
+            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb).run(self),
+            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
+                ReplicationConn::new(pgb).run(self, pgb, start_lsn)
+            }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
         }
-        .context(format!("timeline {timelineid}"))?;
+        .context(format!("Failed to process query for timeline {timelineid}"))?;
 
         Ok(())
     }
