@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use std::{
-    fs::File,
+    fs::{create_dir_all, File},
     io::{BufWriter, Write},
     path::PathBuf,
 };
@@ -17,6 +17,9 @@ impl Drop for Tracer {
 
 impl Tracer {
     pub fn new(path: PathBuf) -> Self {
+        let parent = path.parent().expect("failed to parse parent path");
+        create_dir_all(parent).expect("failed to create trace dir");
+
         let file = File::create(path).expect("failed to create trace file");
         Tracer {
             writer: BufWriter::new(file),

@@ -10,3 +10,10 @@ def test_trace_replay(neon_env_builder: NeonEnvBuilder):
             "trace_read_requests": "true",
         }
     )
+    timeline = env.neon_cli.create_timeline("test_trace_replay", tenant_id=tenant)
+    pg = env.postgres.create_start("test_trace_replay", "main", tenant)
+
+    pg.safe_psql("select 1;")
+
+    trace_path = env.repo_dir / "traces" / str(tenant) / str(timeline) / str(timeline)
+    assert trace_path.exists()
