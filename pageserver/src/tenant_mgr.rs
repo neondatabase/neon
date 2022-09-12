@@ -282,10 +282,8 @@ fn create_repo(
         )
     })?;
     // first, create a config in the top-level temp directory, fsync the file
-    Repository::persist_tenant_config(&temporary_tenant_config_path, tenant_conf)?;
-    fs::File::open(temporary_tenant_config_path)?.sync_all()?;
-    // then, create a subdirectory in the top-level temp directory, it will fsync the top-level directory,
-    // taking care of the config file parent fsync
+    Repository::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true)?;
+    // then, create a subdirectory in the top-level temp directory, fsynced
     crashsafe_dir::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
             "could not create temporary tenant timelines directory {}",
@@ -371,7 +369,7 @@ pub fn update_tenant_config(
     info!("configuring tenant {tenant_id}");
     get_repository_for_tenant(tenant_id)?.update_tenant_config(tenant_conf);
 
-    Repository::persist_tenant_config(&TenantConf::path(conf, tenant_id), tenant_conf)?;
+    Repository::persist_tenant_config(&TenantConf::path(conf, tenant_id), tenant_conf, false)?;
     Ok(())
 }
 
