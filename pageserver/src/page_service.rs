@@ -452,7 +452,7 @@ impl PageServerHandler {
         // Make request tracer if needed
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let trace_read_requests = repo.get_trace_read_requests();
-        let tracer = if trace_read_requests {
+        let mut tracer = if trace_read_requests {
             Some(Tracer::new())
         } else {
             None
@@ -483,7 +483,7 @@ impl PageServerHandler {
                         let timeline_id = timeline_id.to_string();
 
                         // Trace request if needed
-                        if let Some(t) = tracer {
+                        if let Some(t) = tracer.as_mut() {
                             t.trace() // TODO(now) pass zenith_fe_msg
                         }
 
