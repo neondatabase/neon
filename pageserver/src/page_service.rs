@@ -64,21 +64,21 @@ pub enum PagestreamBeMessage {
 }
 
 #[derive(Debug)]
-struct PagestreamExistsRequest {
+pub struct PagestreamExistsRequest {
     latest: bool,
     lsn: Lsn,
     rel: RelTag,
 }
 
 #[derive(Debug)]
-struct PagestreamNblocksRequest {
+pub struct PagestreamNblocksRequest {
     latest: bool,
     lsn: Lsn,
     rel: RelTag,
 }
 
 #[derive(Debug)]
-struct PagestreamGetPageRequest {
+pub struct PagestreamGetPageRequest {
     latest: bool,
     lsn: Lsn,
     rel: RelTag,
@@ -86,34 +86,34 @@ struct PagestreamGetPageRequest {
 }
 
 #[derive(Debug)]
-struct PagestreamDbSizeRequest {
+pub struct PagestreamDbSizeRequest {
     latest: bool,
     lsn: Lsn,
     dbnode: u32,
 }
 
 #[derive(Debug)]
-struct PagestreamExistsResponse {
+pub struct PagestreamExistsResponse {
     exists: bool,
 }
 
 #[derive(Debug)]
-struct PagestreamNblocksResponse {
+pub struct PagestreamNblocksResponse {
     n_blocks: u32,
 }
 
 #[derive(Debug)]
-struct PagestreamGetPageResponse {
+pub struct PagestreamGetPageResponse {
     page: Bytes,
 }
 
 #[derive(Debug)]
-struct PagestreamErrorResponse {
+pub struct PagestreamErrorResponse {
     message: String,
 }
 
 #[derive(Debug)]
-struct PagestreamDbSizeResponse {
+pub struct PagestreamDbSizeResponse {
     db_size: i64,
 }
 
@@ -452,9 +452,9 @@ impl PageServerHandler {
 
         // Make request tracer if needed
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let trace_read_requests = repo.get_trace_read_requests();
-        let mut tracer = if trace_read_requests {
-            Some(Tracer::new())
+        let mut tracer = if repo.get_trace_read_requests() {
+            let path = repo.conf.trace_path(&tenant_id, &timeline_id, &timeline_id);
+            Some(Tracer::new(path))
         } else {
             None
         };
