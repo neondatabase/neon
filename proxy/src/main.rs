@@ -23,7 +23,7 @@ use anyhow::{bail, Context};
 use clap::{self, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
-use std::{future::Future, net::SocketAddr};
+use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use utils::project_git_version;
 
@@ -34,23 +34,6 @@ async fn flatten_err(
     f: impl Future<Output = Result<anyhow::Result<()>, JoinError>>,
 ) -> anyhow::Result<()> {
     f.map(|r| r.context("join error").and_then(|x| x)).await
-}
-
-/// A proper parser for auth backend parameter.
-impl clap::ValueEnum for auth::BackendType<()> {
-    fn value_variants<'a>() -> &'a [Self] {
-        use auth::BackendType::*;
-        &[Console(()), Postgres(()), Link]
-    }
-
-    fn to_possible_value<'a>(&self) -> Option<clap::PossibleValue<'a>> {
-        use auth::BackendType::*;
-        Some(clap::PossibleValue::new(match self {
-            Console(_) => "console",
-            Postgres(_) => "postgres",
-            Link => "link",
-        }))
-    }
 }
 
 #[tokio::main]
@@ -69,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
             Arg::new("auth-backend")
                 .long("auth-backend")
                 .takes_value(true)
-                .value_parser(clap::builder::EnumValueParser::<auth::BackendType<()>>::new())
+                .possible_values(["console", "postgres", "link"])
                 .default_value("link"),
         )
         .arg(
@@ -135,23 +118,30 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
 
-    let auth_backend = *arg_matches
-        .try_get_one::<auth::BackendType<()>>("auth-backend")?
-        .unwrap();
-
-    let auth_urls = config::AuthUrls {
-        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
-        auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
+    let auth_backend = match arg_matches.value_of("auth-backend").unwrap() {
+        "console" => {
+            let url = arg_matches.value_of("auth-endpoint").unwrap().parse()?;
+            let endpoint = http::Endpoint::new(url, reqwest::Client::new());
+            auth::BackendType::Console(Cow::Owned(endpoint), ())
+        }
+        "postgres" => {
+            let url = arg_matches.value_of("auth-endpoint").unwrap().parse()?;
+            auth::BackendType::Postgres(Cow::Owned(url), ())
+        }
+        "link" => {
+            let url = arg_matches.value_of("uri").unwrap().parse()?;
+            auth::BackendType::Link(Cow::Owned(url))
+        }
+        other => bail!("unsupported auth backend: {other}"),
     };
 
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
-        auth_urls,
     }));
 
     println!("Version: {GIT_VERSION}");
-    println!("Authentication backend: {:?}", config.auth_backend);
+    println!("Authentication backend: {}", config.auth_backend);
 
     // Check that we can bind to address before further initialization
     println!("Starting http on {}", http_address);
@@ -164,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
     let tasks = [
-        tokio::spawn(http::thread_main(http_listener)),
+        tokio::spawn(http::server::thread_main(http_listener)),
         tokio::spawn(proxy::thread_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
     ]

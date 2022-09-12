@@ -1,16 +1,10 @@
-use crate::{auth, url::ApiUrl};
+use crate::auth;
 use anyhow::{ensure, Context};
 use std::sync::Arc;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
-    pub auth_backend: auth::BackendType<()>,
-    pub auth_urls: AuthUrls,
-}
-
-pub struct AuthUrls {
-    pub auth_endpoint: ApiUrl,
-    pub auth_link_uri: ApiUrl,
+    pub auth_backend: auth::BackendType<'static, ()>,
 }
 
 pub struct TlsConfig {

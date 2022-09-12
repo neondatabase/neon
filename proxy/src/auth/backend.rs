@@ -8,13 +8,12 @@ pub use console::{GetAuthInfoError, WakeComputeError};
 
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
-    compute, config, mgmt,
-    stream::PqStream,
+    compute, http, mgmt, stream, url,
     waiters::{self, Waiter, Waiters},
 };
-
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 static CPLANE_WAITERS: Lazy<Waiters<mgmt::ComputeReady>> = Lazy::new(Default::default);
@@ -75,6 +74,14 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
     }
 }
 
+/// Extra query params we'd like to pass to the console.
+pub struct ConsoleReqExtra<'a> {
+    /// A unique identifier for a connection.
+    pub session_id: uuid::Uuid,
+    /// Name of client application, if set.
+    pub application_name: Option<&'a str>,
+}
+
 /// This type serves two purposes:
 ///
 /// * When `T` is `()`, it's just a regular auth backend selector
@@ -83,53 +90,83 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
 /// * However, when we substitute `T` with [`ClientCredentials`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendType<T> {
+#[derive(Debug)]
+pub enum BackendType<'a, T> {
     /// Current Cloud API (V2).
-    Console(T),
+    Console(Cow<'a, http::Endpoint>, T),
     /// Local mock of Cloud API (V2).
-    Postgres(T),
+    Postgres(Cow<'a, url::ApiUrl>, T),
     /// Authentication via a web browser.
-    Link,
+    Link(Cow<'a, url::ApiUrl>),
 }
 
-impl<T> BackendType<T> {
+impl std::fmt::Display for BackendType<'_, ()> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use BackendType::*;
+        match self {
+            Console(endpoint, _) => fmt
+                .debug_tuple("Console")
+                .field(&endpoint.url().as_str())
+                .finish(),
+            Postgres(endpoint, _) => fmt
+                .debug_tuple("Postgres")
+                .field(&endpoint.as_str())
+                .finish(),
+            Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+        }
+    }
+}
+
+impl<T> BackendType<'_, T> {
+    /// Very similar to [`std::option::Option::as_ref`].
+    /// This helps us pass structured config to async tasks.
+    pub fn as_ref(&self) -> BackendType<'_, &T> {
+        use BackendType::*;
+        match self {
+            Console(c, x) => Console(Cow::Borrowed(c), x),
+            Postgres(c, x) => Postgres(Cow::Borrowed(c), x),
+            Link(c) => Link(Cow::Borrowed(c)),
+        }
+    }
+}
+
+impl<'a, T> BackendType<'a, T> {
     /// Very similar to [`std::option::Option::map`].
     /// Maps [`BackendType<T>`] to [`BackendType<R>`] by applying
     /// a function to a contained value.
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<R> {
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<'a, R> {
         use BackendType::*;
         match self {
-            Console(x) => Console(f(x)),
-            Postgres(x) => Postgres(f(x)),
-            Link => Link,
+            Console(c, x) => Console(c, f(x)),
+            Postgres(c, x) => Postgres(c, f(x)),
+            Link(c) => Link(c),
         }
     }
 }
 
-impl<T, E> BackendType<Result<T, E>> {
+impl<'a, T, E> BackendType<'a, Result<T, E>> {
     /// Very similar to [`std::option::Option::transpose`].
     /// This is most useful for error handling.
-    pub fn transpose(self) -> Result<BackendType<T>, E> {
+    pub fn transpose(self) -> Result<BackendType<'a, T>, E> {
         use BackendType::*;
         match self {
-            Console(x) => x.map(Console),
-            Postgres(x) => x.map(Postgres),
-            Link => Ok(Link),
+            Console(c, x) => x.map(|x| Console(c, x)),
+            Postgres(c, x) => x.map(|x| Postgres(c, x)),
+            Link(c) => Ok(Link(c)),
         }
     }
 }
 
-impl BackendType<ClientCredentials<'_>> {
+impl BackendType<'_, ClientCredentials<'_>> {
     /// Authenticate the client via the requested backend, possibly using credentials.
     pub async fn authenticate(
         mut self,
-        urls: &config::AuthUrls,
-        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+        extra: &ConsoleReqExtra<'_>,
+        client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
     ) -> super::Result<compute::NodeInfo> {
         use BackendType::*;
 
-        if let Console(creds) | Postgres(creds) = &mut self {
+        if let Console(_, creds) | Postgres(_, creds) = &mut self {
             // If there's no project so far, that entails that client doesn't
             // support SNI or other means of passing the project name.
             // We now expect to see a very specific payload in the place of password.
@@ -145,15 +182,13 @@ impl BackendType<ClientCredentials<'_>> {
                 creds.project = Some(payload.project.into());
 
                 let mut config = match &self {
-                    Console(creds) => {
-                        console::Api::new(&urls.auth_endpoint, creds)
+                    Console(endpoint, creds) => {
+                        console::Api::new(endpoint, extra, creds)
                             .wake_compute()
                             .await?
                     }
-                    Postgres(creds) => {
-                        postgres::Api::new(&urls.auth_endpoint, creds)
-                            .wake_compute()
-                            .await?
+                    Postgres(endpoint, creds) => {
+                        postgres::Api::new(endpoint, creds).wake_compute().await?
                     }
                     _ => unreachable!("see the patterns above"),
                 };
@@ -169,49 +204,18 @@ impl BackendType<ClientCredentials<'_>> {
         }
 
         match self {
-            Console(creds) => {
-                console::Api::new(&urls.auth_endpoint, &creds)
+            Console(endpoint, creds) => {
+                console::Api::new(&endpoint, extra, &creds)
                     .handle_user(client)
                     .await
             }
-            Postgres(creds) => {
-                postgres::Api::new(&urls.auth_endpoint, &creds)
+            Postgres(endpoint, creds) => {
+                postgres::Api::new(&endpoint, &creds)
                     .handle_user(client)
                     .await
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Link => link::handle_user(&urls.auth_link_uri, client).await,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_backend_type_map() {
-        let values = [
-            BackendType::Console(0),
-            BackendType::Postgres(0),
-            BackendType::Link,
-        ];
-
-        for value in values {
-            assert_eq!(value.map(|x| x), value);
-        }
-    }
-
-    #[test]
-    fn test_backend_type_transpose() {
-        let values = [
-            BackendType::Console(Ok::<_, ()>(0)),
-            BackendType::Postgres(Ok(0)),
-            BackendType::Link,
-        ];
-
-        for value in values {
-            assert_eq!(value.map(Result::unwrap), value.transpose().unwrap());
+            Link(url) => link::handle_user(&url, client).await,
         }
     }
 }

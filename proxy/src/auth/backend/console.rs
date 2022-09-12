@@ -1,12 +1,12 @@
 //! Cloud API V2.
 
+use super::ConsoleReqExtra;
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute::{self, ComputeConnCfg},
     error::{io_error, UserFacingError},
-    scram,
+    http, scram,
     stream::PqStream,
-    url::ApiUrl,
 };
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -120,14 +120,23 @@ pub enum AuthInfo {
 
 #[must_use]
 pub(super) struct Api<'a> {
-    endpoint: &'a ApiUrl,
+    endpoint: &'a http::Endpoint,
+    extra: &'a ConsoleReqExtra<'a>,
     creds: &'a ClientCredentials<'a>,
 }
 
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
-    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
-        Self { endpoint, creds }
+    pub(super) fn new(
+        endpoint: &'a http::Endpoint,
+        extra: &'a ConsoleReqExtra<'a>,
+        creds: &'a ClientCredentials,
+    ) -> Self {
+        Self {
+            endpoint,
+            extra,
+            creds,
+        }
     }
 
     /// Authenticate the existing user or throw an error.
@@ -139,16 +148,22 @@ impl<'a> Api<'a> {
     }
 
     async fn get_auth_info(&self) -> Result<AuthInfo, GetAuthInfoError> {
-        let mut url = self.endpoint.clone();
-        url.path_segments_mut().push("proxy_get_role_secret");
-        url.query_pairs_mut()
-            .append_pair("project", self.creds.project().expect("impossible"))
-            .append_pair("role", self.creds.user);
+        let req = self
+            .endpoint
+            .get("proxy_get_role_secret")
+            .header("X-Request-ID", uuid::Uuid::new_v4().to_string())
+            .query(&[("session_id", self.extra.session_id)])
+            .query(&[
+                ("application_name", self.extra.application_name),
+                ("project", Some(self.creds.project().expect("impossible"))),
+                ("role", Some(self.creds.user)),
+            ])
+            .build()?;
 
         // TODO: use a proper logger
-        println!("cplane request: {url}");
+        println!("cplane request: {}", req.url());
 
-        let resp = reqwest::get(url.into_inner()).await?;
+        let resp = self.endpoint.execute(req).await?;
         if !resp.status().is_success() {
             return Err(TransportError::HttpStatus(resp.status()).into());
         }
@@ -162,15 +177,21 @@ impl<'a> Api<'a> {
 
     /// Wake up the compute node and return the corresponding connection info.
     pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg, WakeComputeError> {
-        let mut url = self.endpoint.clone();
-        url.path_segments_mut().push("proxy_wake_compute");
-        url.query_pairs_mut()
-            .append_pair("project", self.creds.project().expect("impossible"));
+        let req = self
+            .endpoint
+            .get("proxy_wake_compute")
+            .header("X-Request-ID", uuid::Uuid::new_v4().to_string())
+            .query(&[("session_id", self.extra.session_id)])
+            .query(&[
+                ("application_name", self.extra.application_name),
+                ("project", Some(self.creds.project().expect("impossible"))),
+            ])
+            .build()?;
 
         // TODO: use a proper logger
-        println!("cplane request: {url}");
+        println!("cplane request: {}", req.url());
 
-        let resp = reqwest::get(url.into_inner()).await?;
+        let resp = self.endpoint.execute(req).await?;
         if !resp.status().is_success() {
             return Err(TransportError::HttpStatus(resp.status()).into());
         }

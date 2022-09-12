@@ -43,6 +43,7 @@ tokio = { version = "1", features = ["bytes", "fs", "io-std", "io-util", "libc",
 tokio-util = { version = "0.7", features = ["codec", "io", "io-util", "tracing"] }
 tracing = { version = "0.1", features = ["attributes", "log", "std", "tracing-attributes"] }
 tracing-core = { version = "0.1", features = ["once_cell", "std"] }
+uuid = { version = "0.8", features = ["getrandom", "serde", "std", "v4"] }
 
 [build-dependencies]
 ahash = { version = "0.7", features = ["std"] }
