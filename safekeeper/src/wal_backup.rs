@@ -204,7 +204,7 @@ async fn backup_task_main(
     info!("started");
     let res = GlobalTimelines::get(zttid);
     if let Err(e) = res {
-        info!("backup error for timeline {}: {}", zttid, e);
+        error!("backup error for timeline {}: {}", zttid, e);
         return;
     }
     let tli = res.unwrap();
@@ -255,7 +255,7 @@ impl WalBackupTask {
                 if retry_attempt == 0 {
                     // wait for new WAL to arrive
                     if let Err(e) = self.commit_lsn_watch_rx.changed().await {
-                        // can happen if timeline is deleted
+                        // should never happen, as we hold Arc to timeline.
                         error!("commit_lsn watch shut down: {:?}", e);
                         return;
                     }

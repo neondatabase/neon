@@ -213,16 +213,16 @@ impl GlobalTimelines {
     /// or was corrupted and couldn't be loaded on startup. Returned timeline is always valid,
     /// i.e. loaded in memory and not cancelled.
     pub fn get(zttid: ZTenantTimelineId) -> Result<Arc<Timeline>> {
-        let global_lock = TIMELINES_STATE.lock().unwrap();
+        let res = TIMELINES_STATE.lock().unwrap().get(&zttid);
 
-        match global_lock.timelines.get(&zttid) {
-            Some(result) => {
-                if result.is_cancelled() {
+        match res {
+            Ok(tli) => {
+                if tli.is_cancelled() {
                     anyhow::bail!(TimelineError::Cancelled(zttid));
                 }
-                Ok(Arc::clone(result))
+                Ok(tli)
             }
-            None => anyhow::bail!(TimelineError::NotFound(zttid)),
+            Err(e) => Err(e),
         }
     }
 

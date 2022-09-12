@@ -53,6 +53,7 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
+    /// Initialize storage by loading state from disk.
     pub fn restore_new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
         let timeline_dir = conf.timeline_dir(zttid);
         let tenant_id = zttid.tenant_id.to_string();

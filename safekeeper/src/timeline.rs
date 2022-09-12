@@ -1,7 +1,7 @@
 //! This module implements Timeline lifecycle management and has all neccessary code
 //! to glue together SafeKeeper and all other background services.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 
 use etcd_broker::subscription_value::SkTimelineInfo;
 
@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use std::cmp::{max, min};
 
 use parking_lot::{Mutex, MutexGuard};
-use std::io;
+
 use std::path::PathBuf;
 
 use tokio::sync::mpsc::Sender;
@@ -121,15 +121,7 @@ impl SharedState {
 
     /// Restore SharedState from control file. If file doesn't exist, bails out.
     fn restore(conf: &SafeKeeperConf, zttid: &ZTenantTimelineId) -> Result<Self> {
-        let control_store = control_file::FileStorage::restore_new(zttid, conf).map_err(|e| {
-            if let Some(e) = e.downcast_ref::<io::Error>() {
-                if e.kind() == io::ErrorKind::NotFound {
-                    return anyhow!(TimelineError::NotFound(*zttid));
-                }
-            }
-            e
-        })?;
-
+        let control_store = control_file::FileStorage::restore_new(zttid, conf)?;
         if control_store.server.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(*zttid));
         }
@@ -548,8 +540,7 @@ impl Timeline {
         }
     }
 
-    /// Returns commit_lsn watch channel. Channel should be obtained only after
-    /// the timeline is loaded. Otherwise, the channel will have invalid LSN value.
+    /// Returns commit_lsn watch channel.
     pub fn get_commit_lsn_watch_rx(&self) -> watch::Receiver<Lsn> {
         self.commit_lsn_watch_rx.clone()
     }
