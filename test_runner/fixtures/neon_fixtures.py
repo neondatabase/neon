@@ -1636,6 +1636,27 @@ def pg_bin(test_output_dir: Path) -> PgBin:
     return PgBin(test_output_dir)
 
 
+@dataclass
+class ReplayBin:
+    """A helper class for replaying pageserver wal and read traces."""
+
+    traces_dir: str
+
+    def replay_all(self) -> str:
+        replay_binpath = os.path.join(str(neon_binpath), "replay")
+        args = [
+            replay_binpath,
+            self.traces_dir,
+        ]
+        return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
+
+
+@pytest.fixture(scope="function")
+def replay_bin(test_output_dir):
+    traces_dir = os.path.join(test_output_dir, "repo", "traces")
+    return ReplayBin(traces_dir)
+
+
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: Path, pg_bin: PgBin, port: int, init=True):
         super().__init__(host="localhost", port=port, dbname="postgres")

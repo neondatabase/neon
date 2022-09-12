@@ -1,7 +1,7 @@
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, ReplayBin
 
 
-def test_trace_replay(neon_env_builder: NeonEnvBuilder):
+def test_trace_replay(neon_env_builder: NeonEnvBuilder, replay_bin: ReplayBin):
     neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
 
@@ -17,3 +17,6 @@ def test_trace_replay(neon_env_builder: NeonEnvBuilder):
 
     trace_path = env.repo_dir / "traces" / str(tenant) / str(timeline) / str(timeline)
     assert trace_path.exists()
+
+    output = replay_bin.replay_all()
+    print(output)
