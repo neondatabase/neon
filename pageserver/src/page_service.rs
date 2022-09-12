@@ -38,6 +38,7 @@ use crate::reltag::RelTag;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
+use crate::trace::Tracer;
 use crate::CheckpointConfig;
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 
@@ -448,6 +449,15 @@ impl PageServerHandler {
         //       so there is no need to reset the association
         thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
+        // Make request tracer if needed
+        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+        let trace_read_requests = repo.get_trace_read_requests();
+        let tracer = if trace_read_requests {
+            Some(Tracer::new())
+        } else {
+            None
+        };
+
         // Check that the timeline exists
         let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
@@ -472,7 +482,11 @@ impl PageServerHandler {
                         let tenant_id = tenant_id.to_string();
                         let timeline_id = timeline_id.to_string();
 
-                        // TODO(now) append to trace if tenant is configured for read tracing
+                        // Trace request if needed
+                        if let Some(t) = tracer {
+                            t.trace() // TODO(now) pass zenith_fe_msg
+                        }
+
                         let response = match zenith_fe_msg {
                             PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_rel_exists", &tenant_id, &timeline_id])
@@ -855,8 +869,6 @@ impl postgres_backend::Handler for PageServerHandler {
 
             self.check_permission(Some(tenantid))?;
 
-            // TODO(now) make trace logger if tenant is configured for read tracing.
-            //           Also flush trace logger on drop.
             self.handle_pagerequests(pgb, timelineid, tenantid)?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
