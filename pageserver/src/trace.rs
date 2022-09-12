@@ -1,8 +1,12 @@
-use crate::page_service::PagestreamFeMessage;
-use std::{fs::File, io::Write, path::PathBuf};
+use bytes::Bytes;
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+    path::PathBuf,
+};
 
 pub struct Tracer {
-    output: File,
+    writer: BufWriter<File>,
 }
 
 impl Drop for Tracer {
@@ -13,16 +17,17 @@ impl Drop for Tracer {
 
 impl Tracer {
     pub fn new(path: PathBuf) -> Self {
+        let file = File::create(path).expect("failed to create trace file");
         Tracer {
-            output: File::create(path).expect("failed to create trace file"),
+            writer: BufWriter::new(file),
         }
     }
 
-    pub fn trace(&mut self, _msg: &PagestreamFeMessage) {
-        // TODO(now) implement
+    pub fn trace(&mut self, msg: &Bytes) {
+        self.writer.write(msg).expect("failed to write trace");
     }
 
     pub fn flush(&mut self) {
-        self.output.flush().expect("failed to flush trace file");
+        self.writer.flush().expect("failed to flush trace file");
     }
 }

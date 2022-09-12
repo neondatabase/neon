@@ -118,6 +118,50 @@ pub struct PagestreamDbSizeResponse {
 }
 
 impl PagestreamFeMessage {
+    pub fn serialize(&self) -> Bytes {
+        let mut bytes = BytesMut::new();
+
+        match self {
+            Self::Exists(req) => {
+                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.rel.spcnode);
+                bytes.put_u32(req.rel.dbnode);
+                bytes.put_u32(req.rel.relnode);
+                bytes.put_u8(req.rel.forknum);
+            }
+
+            Self::Nblocks(req) => {
+                bytes.put_u8(1);
+                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.rel.spcnode);
+                bytes.put_u32(req.rel.dbnode);
+                bytes.put_u32(req.rel.relnode);
+                bytes.put_u8(req.rel.forknum);
+            }
+
+            Self::GetPage(req) => {
+                bytes.put_u8(2);
+                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.rel.spcnode);
+                bytes.put_u32(req.rel.dbnode);
+                bytes.put_u32(req.rel.relnode);
+                bytes.put_u8(req.rel.forknum);
+            }
+
+            Self::DbSize(req) => {
+                bytes.put_u8(3);
+                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.dbnode);
+            }
+        }
+
+        bytes.into()
+    }
+
     fn parse(mut body: Bytes) -> anyhow::Result<PagestreamFeMessage> {
         // TODO these gets can fail
 
@@ -479,14 +523,14 @@ impl PageServerHandler {
                             _ => continue,
                         };
 
+                        // Trace request if needed
+                        if let Some(t) = tracer.as_mut() {
+                            t.trace(&copy_data_bytes)
+                        }
+
                         let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
                         let tenant_id = tenant_id.to_string();
                         let timeline_id = timeline_id.to_string();
-
-                        // Trace request if needed
-                        if let Some(t) = tracer.as_mut() {
-                            t.trace(&zenith_fe_msg)
-                        }
 
                         let response = match zenith_fe_msg {
                             PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
