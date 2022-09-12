@@ -9,16 +9,14 @@ use crate::layered_repository::Repository;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::task_mgr::{self, TaskKind};
-use crate::tenant_config::TenantConfOpt;
+use crate::tenant_config::{TenantConf, TenantConfOpt};
 use crate::walredo::{PostgresRedoManager, WalRedoManager};
 use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
-use anyhow::{ensure, Context};
-use remote_storage::GenericRemoteStorage;
-use serde::{Deserialize, Serialize};
-use std::collections::hash_map::{self, Entry};
-use std::collections::{HashMap, HashSet};
+use anyhow::Context;
+use remote_storage::{path_with_suffix_extension, GenericRemoteStorage};
+use std::collections::{hash_map, HashMap, HashSet};
 use std::ffi::OsStr;
-use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::*;
@@ -58,7 +56,7 @@ struct Tenant {
     repo: Arc<Repository>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TenantState {
     // This tenant exists on local disk, and the layer map has been loaded into memory.
     // The local disk might have some newer files that don't exist in cloud storage yet.
@@ -74,8 +72,8 @@ pub enum TenantState {
     Broken,
 }
 
-impl fmt::Display for TenantState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for TenantState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Active => f.write_str("Active"),
             Self::Idle => f.write_str("Idle"),
@@ -252,21 +250,71 @@ fn create_repo(
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
     remote_index: RemoteIndex,
 ) -> anyhow::Result<Arc<Repository>> {
-    let repo_dir = conf.tenant_path(&tenant_id);
-    ensure!(
-        !repo_dir.exists(),
-        "cannot create new tenant repo: '{}' directory already exists",
-        tenant_id
+    let target_tenant_directory = conf.tenant_path(&tenant_id);
+    anyhow::ensure!(
+        !target_tenant_directory.exists(),
+        "cannot create new tenant repo: '{tenant_id}' directory already exists",
     );
 
-    // top-level dir may exist if we are creating it through CLI
-    crashsafe_dir::create_dir_all(&repo_dir)
-        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
-    crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
-    info!("created directory structure in {}", repo_dir.display());
+    let temporary_tenant_dir =
+        path_with_suffix_extension(&target_tenant_directory, TEMP_FILE_SUFFIX);
+    debug!(
+        "Creating temporary directory structure in {}",
+        temporary_tenant_dir.display()
+    );
 
-    // Save tenant's config
-    Repository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
+    let temporary_tenant_timelines_dir = rebase_directory(
+        &conf.timelines_path(&tenant_id),
+        &target_tenant_directory,
+        &temporary_tenant_dir,
+    )?;
+    let temporary_tenant_config_path = rebase_directory(
+        &TenantConf::path(conf, tenant_id),
+        &target_tenant_directory,
+        &temporary_tenant_dir,
+    )?;
+
+    // top-level dir may exist if we are creating it through CLI
+    crashsafe_dir::create_dir_all(&temporary_tenant_dir).with_context(|| {
+        format!(
+            "could not create temporary tenant directory {}",
+            temporary_tenant_dir.display()
+        )
+    })?;
+    // first, create a config in the top-level temp directory, fsync the file
+    Repository::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true)?;
+    // then, create a subdirectory in the top-level temp directory, fsynced
+    crashsafe_dir::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
+        format!(
+            "could not create temporary tenant timelines directory {}",
+            temporary_tenant_timelines_dir.display()
+        )
+    })?;
+
+    fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
+        anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
+    });
+
+    // move-rename tmp directory with all files synced into a permanent directory, fsync its parent
+    fs::rename(&temporary_tenant_dir, &target_tenant_directory).with_context(|| {
+        format!(
+            "failed to move temporary tenant directory {} into the permanent one {}",
+            temporary_tenant_dir.display(),
+            target_tenant_directory.display()
+        )
+    })?;
+    let target_dir_parent = target_tenant_directory.parent().with_context(|| {
+        format!(
+            "Failed to get tenant dir parent for {}",
+            target_tenant_directory.display()
+        )
+    })?;
+    fs::File::open(target_dir_parent)?.sync_all()?;
+
+    info!(
+        "created directory structure in {}",
+        target_tenant_directory.display()
+    );
 
     Ok(Arc::new(Repository::new(
         conf,
@@ -278,6 +326,17 @@ fn create_repo(
     )))
 }
 
+fn rebase_directory(original_path: &Path, base: &Path, new_base: &Path) -> anyhow::Result<PathBuf> {
+    let relative_path = original_path.strip_prefix(base).with_context(|| {
+        format!(
+            "Failed to strip base prefix '{}' off path '{}'",
+            base.display(),
+            original_path.display()
+        )
+    })?;
+    Ok(new_base.join(relative_path))
+}
+
 pub fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
@@ -285,11 +344,11 @@ pub fn create_tenant(
     remote_index: RemoteIndex,
 ) -> anyhow::Result<Option<ZTenantId>> {
     match tenants_state::write_tenants().entry(tenant_id) {
-        Entry::Occupied(_) => {
+        hash_map::Entry::Occupied(_) => {
             debug!("tenant {tenant_id} already exists");
             Ok(None)
         }
-        Entry::Vacant(v) => {
+        hash_map::Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
             let repo = create_repo(conf, tenant_conf, tenant_id, wal_redo_manager, remote_index)?;
             v.insert(Tenant {
@@ -310,7 +369,7 @@ pub fn update_tenant_config(
     info!("configuring tenant {tenant_id}");
     get_repository_for_tenant(tenant_id)?.update_tenant_config(tenant_conf);
 
-    Repository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
+    Repository::persist_tenant_config(&TenantConf::path(conf, tenant_id), tenant_conf, false)?;
     Ok(())
 }
 
@@ -424,7 +483,7 @@ pub async fn detach_tenant(
     // we will attempt to remove files which no longer exist. This can be fixed by having shutdown
     // mechanism for repository that will clean temporary data to avoid any references to ephemeral files
     let local_tenant_directory = conf.tenant_path(&tenant_id);
-    std::fs::remove_dir_all(&local_tenant_directory).with_context(|| {
+    fs::remove_dir_all(&local_tenant_directory).with_context(|| {
         format!(
             "Failed to remove local tenant directory '{}'",
             local_tenant_directory.display()
@@ -472,7 +531,7 @@ fn local_tenant_timeline_files(
 
     let mut local_tenant_timeline_files = TenantTimelineValues::new();
     let tenants_dir = config.tenants_path();
-    for tenants_dir_entry in std::fs::read_dir(&tenants_dir)
+    for tenants_dir_entry in fs::read_dir(&tenants_dir)
         .with_context(|| format!("Failed to list tenants dir {}", tenants_dir.display()))?
     {
         match &tenants_dir_entry {
@@ -483,7 +542,7 @@ fn local_tenant_timeline_files(
                         "Found temporary tenant directory, removing: {}",
                         tenant_dir_path.display()
                     );
-                    if let Err(e) = std::fs::remove_dir_all(&tenant_dir_path) {
+                    if let Err(e) = fs::remove_dir_all(&tenant_dir_path) {
                         error!(
                             "Failed to remove temporary directory '{}': {:?}",
                             tenant_dir_path.display(),
@@ -545,7 +604,7 @@ fn remove_if_empty(tenant_dir_path: &Path) -> anyhow::Result<bool> {
         .is_none();
 
     if directory_is_empty {
-        std::fs::remove_dir_all(&tenant_dir_path).with_context(|| {
+        fs::remove_dir_all(&tenant_dir_path).with_context(|| {
             format!(
                 "Failed to remove empty directory '{}'",
                 tenant_dir_path.display(),
@@ -582,7 +641,7 @@ fn collect_timelines_for_tenant(
     let timelines_dir = config.timelines_path(&tenant_id);
 
     let mut tenant_timelines = HashMap::new();
-    for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
+    for timelines_dir_entry in fs::read_dir(&timelines_dir)
         .with_context(|| format!("Failed to list timelines dir entry for tenant {tenant_id}"))?
     {
         match timelines_dir_entry {
@@ -593,7 +652,7 @@ fn collect_timelines_for_tenant(
                         "Found temporary timeline directory, removing: {}",
                         timeline_dir.display()
                     );
-                    if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
+                    if let Err(e) = fs::remove_dir_all(&timeline_dir) {
                         error!(
                             "Failed to remove temporary directory '{}': {:?}",
                             timeline_dir.display(),
@@ -660,7 +719,7 @@ fn collect_timeline_files(
         .parse::<ZTimelineId>()
         .context("Could not parse timeline id out of the timeline dir name")?;
     let timeline_dir_entries =
-        std::fs::read_dir(&timeline_dir).context("Failed to list timeline dir contents")?;
+        fs::read_dir(&timeline_dir).context("Failed to list timeline dir contents")?;
     for entry in timeline_dir_entries {
         let entry_path = entry.context("Failed to list timeline dir entry")?.path();
         if entry_path.is_file() {
@@ -671,7 +730,7 @@ fn collect_timeline_files(
                 continue;
             } else if is_temporary(&entry_path) {
                 info!("removing temp timeline file at {}", entry_path.display());
-                std::fs::remove_file(&entry_path).with_context(|| {
+                fs::remove_file(&entry_path).with_context(|| {
                     format!(
                         "failed to remove temp download file at {}",
                         entry_path.display()
@@ -695,7 +754,7 @@ fn collect_timeline_files(
         None => anyhow::bail!("No metadata file found in the timeline directory"),
     };
     let metadata = TimelineMetadata::from_bytes(
-        &std::fs::read(&timeline_metadata_path).context("Failed to read timeline metadata file")?,
+        &fs::read(&timeline_metadata_path).context("Failed to read timeline metadata file")?,
     )
     .context("Failed to parse timeline metadata file bytes")?;
 

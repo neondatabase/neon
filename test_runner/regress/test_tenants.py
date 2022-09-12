@@ -1,14 +1,53 @@
 import os
 from contextlib import closing
 from datetime import datetime
+from pathlib import Path
 from typing import List
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import PAGESERVER_PER_TENANT_METRICS, parse_metrics
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.types import Lsn, ZTenantId
 from prometheus_client.samples import Sample
+
+
+def test_tenant_creation_fails(neon_simple_env: NeonEnv):
+    tenants_dir = Path(neon_simple_env.repo_dir) / "tenants"
+    initial_tenants = sorted(
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+    )
+    initial_tenant_dirs = set([d for d in tenants_dir.iterdir()])
+
+    neon_simple_env.pageserver.safe_psql("failpoints tenant-creation-before-tmp-rename=return")
+    with pytest.raises(Exception, match="tenant-creation-before-tmp-rename"):
+        _ = neon_simple_env.neon_cli.create_tenant()
+
+    new_tenants = sorted(
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+    )
+    assert initial_tenants == new_tenants, "should not create new tenants"
+
+    new_tenant_dirs = list(set([d for d in tenants_dir.iterdir()]) - initial_tenant_dirs)
+    assert len(new_tenant_dirs) == 1, "should have new tenant directory created"
+    tmp_tenant_dir = new_tenant_dirs[0]
+    assert str(tmp_tenant_dir).endswith(
+        ".___temp"
+    ), "new tenant directory created should be a temporary one"
+
+    neon_simple_env.pageserver.stop()
+    neon_simple_env.pageserver.start()
+
+    tenants_after_restart = sorted(
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+    )
+    dirs_after_restart = set([d for d in tenants_dir.iterdir()])
+    assert (
+        tenants_after_restart == initial_tenants
+    ), "should load all non-corrupt tenants after restart"
+    assert (
+        dirs_after_restart == initial_tenant_dirs
+    ), "pageserver should clean its temp tenant dirs on restart"
 
 
 @pytest.mark.parametrize("with_safekeepers", [False, True])
