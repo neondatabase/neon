@@ -1,3 +1,5 @@
+use crate::page_service::PagestreamFeMessage;
+
 pub struct Tracer {}
 
 impl Drop for Tracer {
@@ -11,7 +13,7 @@ impl Tracer {
         Tracer {}
     }
 
-    pub fn trace(&mut self) {
+    pub fn trace(&mut self, _msg: &PagestreamFeMessage) {
         // TODO(now) implement
     }
 

@@ -46,7 +46,8 @@ use postgres_ffi::v14::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
 // Wrapped in libpq CopyData
-enum PagestreamFeMessage {
+// TODO these should be in a library outside the pageserver
+pub enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
@@ -54,7 +55,7 @@ enum PagestreamFeMessage {
 }
 
 // Wrapped in libpq CopyData
-enum PagestreamBeMessage {
+pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
     GetPage(PagestreamGetPageResponse),
@@ -484,7 +485,7 @@ impl PageServerHandler {
 
                         // Trace request if needed
                         if let Some(t) = tracer.as_mut() {
-                            t.trace() // TODO(now) pass zenith_fe_msg
+                            t.trace(&zenith_fe_msg)
                         }
 
                         let response = match zenith_fe_msg {
