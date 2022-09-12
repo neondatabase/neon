@@ -663,14 +663,13 @@ impl Repository {
     }
 
     pub fn persist_tenant_config(
-        conf: &'static PageServerConf,
-        tenant_id: ZTenantId,
+        target_config_path: &Path,
         tenant_conf: TenantConfOpt,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
-        let target_config_path = TenantConf::path(conf, tenant_id);
-        info!("save tenantconf to {}", target_config_path.display());
+        info!("persisting tenantconf to {}", target_config_path.display());
 
+        // TODO this will prepend comments endlessly
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
 
