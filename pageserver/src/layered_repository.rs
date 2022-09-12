@@ -154,8 +154,16 @@ impl Repository {
         // Create the timeline directory, and write initial metadata to file.
         crashsafe_dir::create_dir_all(timeline_path)?;
 
-        let new_metadata =
-            TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
+        let disk_consistent_lsn = Lsn(initdb_lsn.0.saturating_sub(1));
+
+        let new_metadata = TimelineMetadata::new(
+            disk_consistent_lsn,
+            None,
+            None,
+            Lsn(0),
+            initdb_lsn,
+            initdb_lsn,
+        );
         save_metadata(
             self.conf,
             new_timeline_id,
