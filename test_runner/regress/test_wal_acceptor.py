@@ -59,9 +59,7 @@ def wait_lsn_force_checkpoint(
     )
 
     # force checkpoint to advance remote_consistent_lsn
-    with closing(ps.connect(**pageserver_conn_options)) as psconn:
-        with psconn.cursor() as pscur:
-            pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+    ps.http_client(auth_token).timeline_checkpoint(tenant_id, timeline_id)
 
     # ensure that remote_consistent_lsn is advanced
     wait_for_upload(

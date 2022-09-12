@@ -57,6 +57,7 @@ def test_remote_storage_backup_and_restore(
 
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
 
     client = env.pageserver.http_client()
@@ -80,7 +81,7 @@ def test_remote_storage_backup_and_restore(
         wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
         # run checkpoint manually to be sure that data landed in remote storage
-        env.pageserver.safe_psql(f"checkpoint {tenant_id} {timeline_id}")
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
         log.info(f"waiting for checkpoint {checkpoint_number} upload")
         # wait until pageserver successfully uploaded a checkpoint to remote storage
@@ -99,7 +100,7 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # Introduce failpoint in download
-    env.pageserver.safe_psql("failpoints remote-storage-download-pre-rename=return")
+    pageserver_http.configure_failpoints(("remote-storage-download-pre-rename", "return"))
 
     client.tenant_attach(tenant_id)
 

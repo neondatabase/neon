@@ -1,4 +1,3 @@
-import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
@@ -96,7 +95,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     assert pg.safe_psql("SELECT 1")[0][0] == 1
 
     # branch at pre-initdb lsn
-    with pytest.raises(Exception, match="invalid branch start lsn"):
+    with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         env.neon_cli.create_branch("test_branch_preinitdb", ancestor_start_lsn=Lsn("0/42"))
 
     # branch at pre-ancestor lsn
@@ -106,13 +105,11 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
         )
 
     # check that we cannot create branch based on garbage collected data
-    with env.pageserver.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-        # call gc to advace latest_gc_cutoff_lsn
-        pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
-        row = pscur.fetchone()
-        print_gc_result(row)
+    with env.pageserver.http_client() as pageserver_http:
+        gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+        print_gc_result(gc_result)
 
-    with pytest.raises(Exception, match="invalid branch start lsn"):
+    with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
         env.neon_cli.create_branch(
             "test_branch_create_fail", "test_branch_behind", ancestor_start_lsn=gced_lsn

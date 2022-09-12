@@ -19,7 +19,8 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     )
     initial_tenant_dirs = set([d for d in tenants_dir.iterdir()])
 
-    neon_simple_env.pageserver.safe_psql("failpoints tenant-creation-before-tmp-rename=return")
+    pageserver_http = neon_simple_env.pageserver.http_client()
+    pageserver_http.configure_failpoints(("tenant-creation-before-tmp-rename", "return"))
     with pytest.raises(Exception, match="tenant-creation-before-tmp-rename"):
         _ = neon_simple_env.neon_cli.create_tenant()
 

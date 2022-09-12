@@ -9,6 +9,7 @@ from fixtures.utils import query_scalar
 #
 def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
 
     # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
     # Extend compaction_period and gc_period to disable background compaction and gc.
@@ -23,7 +24,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
         }
     )
 
-    env.pageserver.safe_psql("failpoints flush-frozen-before-sync=sleep(10000)")
+    pageserver_http.configure_failpoints(("flush-frozen-before-sync", "sleep(10000)"))
 
     pg_branch0 = env.postgres.create_start("main", tenant_id=tenant)
     branch0_cur = pg_branch0.connect().cursor()
@@ -92,9 +93,9 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     log.info(f"LSN after 300k rows: {lsn_300}")
 
     # Run compaction on branch1.
-    compact = f"compact {tenant} {branch1_timeline} {lsn_200}"
+    compact = f"compact {tenant} {branch1_timeline}"
     log.info(compact)
-    env.pageserver.safe_psql(compact)
+    pageserver_http.timeline_compact(tenant, branch1_timeline)
 
     assert query_scalar(branch0_cur, "SELECT count(*) FROM foo") == 100000
 

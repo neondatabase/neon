@@ -1,16 +1,21 @@
 from threading import Thread
 
-import psycopg2
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    NeonPageserverApiException,
+    NeonPageserverHttpClient,
+)
 from fixtures.types import TenantId, TimelineId
 
 
-def do_gc_target(env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId):
+def do_gc_target(
+    pageserver_http: NeonPageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
+):
     """Hack to unblock main, see https://github.com/neondatabase/neon/issues/2211"""
     try:
-        env.pageserver.safe_psql(f"do_gc {tenant_id} {timeline_id} 0")
+        pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
     except Exception as e:
         log.error("do_gc failed: %s", e)
 
@@ -44,13 +49,13 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     # gc should not try to even start
     with pytest.raises(
-        expected_exception=psycopg2.DatabaseError, match="gc target timeline does not exist"
+        expected_exception=NeonPageserverApiException, match="gc target timeline does not exist"
     ):
         bogus_timeline_id = TimelineId.generate()
-        env.pageserver.safe_psql(f"do_gc {tenant_id} {bogus_timeline_id} 0")
+        pageserver_http.timeline_gc(tenant_id, bogus_timeline_id, 0)
 
     # try to concurrently run gc and detach
-    gc_thread = Thread(target=lambda: do_gc_target(env, tenant_id, timeline_id))
+    gc_thread = Thread(target=lambda: do_gc_target(pageserver_http, tenant_id, timeline_id))
     gc_thread.start()
 
     last_error = None
@@ -73,6 +78,6 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
     with pytest.raises(
-        expected_exception=psycopg2.DatabaseError, match=f"Tenant {tenant_id} not found"
+        expected_exception=NeonPageserverApiException, match=f"Tenant {tenant_id} not found"
     ):
-        env.pageserver.safe_psql(f"do_gc {tenant_id} {timeline_id} 0")
+        pageserver_http.timeline_gc(tenant_id, timeline_id, 0)

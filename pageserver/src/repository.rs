@@ -176,7 +176,7 @@ impl Value {
 ///
 /// Result of performing GC
 ///
-#[derive(Default)]
+#[derive(Default, Serialize)]
 pub struct GcResult {
     pub layers_total: u64,
     pub layers_needed_by_cutoff: u64,
@@ -185,7 +185,16 @@ pub struct GcResult {
     pub layers_not_updated: u64,
     pub layers_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
 
+    #[serde(serialize_with = "serialize_duration_as_millis")]
     pub elapsed: Duration,
+}
+
+// helper function for `GcResult`, serializing a `Duration` as an integer number of milliseconds
+fn serialize_duration_as_millis<S>(d: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    d.as_millis().serialize(serializer)
 }
 
 impl AddAssign for GcResult {

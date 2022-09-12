@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import random
 
 from fixtures.log_helper import log
@@ -30,10 +31,15 @@ async def update_table(pg: Postgres):
 
 # Perform aggressive GC with 0 horizon
 async def gc(env: NeonEnv, timeline: TimelineId):
-    psconn = await env.pageserver.connect_async()
+    pageserver_http = env.pageserver.http_client()
 
-    while updates_performed < updates_to_perform:
-        await psconn.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+    loop = asyncio.get_running_loop()
+
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        while updates_performed < updates_to_perform:
+            await loop.run_in_executor(
+                pool, lambda: pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+            )
 
 
 # At the same time, run UPDATEs and GC
