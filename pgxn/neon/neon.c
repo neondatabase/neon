@@ -29,7 +29,8 @@ PG_MODULE_MAGIC;
 void		_PG_init(void);
 
 
-void		_PG_init(void)
+void
+_PG_init(void)
 {
 	pg_init_libpagestore();
 	pg_init_libpqwalproposer();
@@ -59,9 +60,9 @@ pg_cluster_size(PG_FUNCTION_ARGS)
 Datum
 backpressure_lsns(PG_FUNCTION_ARGS)
 {
-	XLogRecPtr writePtr;
-	XLogRecPtr flushPtr;
-	XLogRecPtr applyPtr;
+	XLogRecPtr	writePtr;
+	XLogRecPtr	flushPtr;
+	XLogRecPtr	applyPtr;
 	Datum		values[3];
 	bool		nulls[3];
 	TupleDesc	tupdesc;

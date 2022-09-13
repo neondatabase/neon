@@ -94,7 +94,9 @@ const int	SmgrTrace = DEBUG5;
 page_server_api *page_server;
 
 /* GUCs */
-char	   *page_server_connstring; // with substituted password
+char	   *page_server_connstring;
+
+//with substituted password
 char	   *zenith_timeline;
 char	   *zenith_tenant;
 bool		wal_redo = false;
@@ -107,7 +109,7 @@ typedef enum
 	UNLOGGED_BUILD_PHASE_1,
 	UNLOGGED_BUILD_PHASE_2,
 	UNLOGGED_BUILD_NOT_PERMANENT
-} UnloggedBuildPhase;
+}			UnloggedBuildPhase;
 
 static SMgrRelation unlogged_build_rel = NULL;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
@@ -127,31 +129,33 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
 #define MAX_PREFETCH_REQUESTS 128
 
-BufferTag prefetch_requests[MAX_PREFETCH_REQUESTS];
-BufferTag prefetch_responses[MAX_PREFETCH_REQUESTS];
-int n_prefetch_requests;
-int n_prefetch_responses;
-int n_prefetched_buffers;
-int n_prefetch_hits;
-int n_prefetch_misses;
-XLogRecPtr prefetch_lsn;
+BufferTag	prefetch_requests[MAX_PREFETCH_REQUESTS];
+BufferTag	prefetch_responses[MAX_PREFETCH_REQUESTS];
+int			n_prefetch_requests;
+int			n_prefetch_responses;
+int			n_prefetched_buffers;
+int			n_prefetch_hits;
+int			n_prefetch_misses;
+XLogRecPtr	prefetch_lsn;
 
 static void
 consume_prefetch_responses(void)
 {
-	for (int i = n_prefetched_buffers; i < n_prefetch_responses; i++) {
-		ZenithResponse*	resp = page_server->receive();
+	for (int i = n_prefetched_buffers; i < n_prefetch_responses; i++)
+	{
+		ZenithResponse *resp = page_server->receive();
+
 		pfree(resp);
 	}
 	n_prefetched_buffers = 0;
 	n_prefetch_responses = 0;
 }
 
-static ZenithResponse*
-page_server_request(void const* req)
+static ZenithResponse *
+page_server_request(void const *req)
 {
 	consume_prefetch_responses();
-	return page_server->request((ZenithRequest*)req);
+	return page_server->request((ZenithRequest *) req);
 }
 
 
@@ -196,11 +200,11 @@ zm_pack_request(ZenithRequest *msg)
 			{
 				ZenithDbSizeRequest *msg_req = (ZenithDbSizeRequest *) msg;
 
-					pq_sendbyte(&s, msg_req->req.latest);
-					pq_sendint64(&s, msg_req->req.lsn);
-					pq_sendint32(&s, msg_req->dbNode);
+				pq_sendbyte(&s, msg_req->req.latest);
+				pq_sendint64(&s, msg_req->req.lsn);
+				pq_sendint32(&s, msg_req->dbNode);
 
-					break;
+				break;
 			}
 		case T_ZenithGetPageRequest:
 			{
@@ -546,21 +550,22 @@ zenith_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, 
 	else if (lsn == InvalidXLogRecPtr)
 	{
 		/*
-		 * When PostgreSQL extends a relation, it calls smgrextend() with an all-zeros pages,
-		 * and we can just ignore that in Zenith. We do need to remember the new size,
-		 * though, so that smgrnblocks() returns the right answer after the rel has
-		 * been extended. We rely on the relsize cache for that.
+		 * When PostgreSQL extends a relation, it calls smgrextend() with an
+		 * all-zeros pages, and we can just ignore that in Zenith. We do need
+		 * to remember the new size, though, so that smgrnblocks() returns the
+		 * right answer after the rel has been extended. We rely on the
+		 * relsize cache for that.
 		 *
-		 * A completely empty heap page doesn't need to be WAL-logged, either. The
-		 * heapam can leave such a page behind, if e.g. an insert errors out after
-		 * initializing the page, but before it has inserted the tuple and WAL-logged
-		 * the change. When we read the page from the page server, it will come back
-		 * as all-zeros. That's OK, the heapam will initialize an all-zeros page on
-		 * first use.
+		 * A completely empty heap page doesn't need to be WAL-logged, either.
+		 * The heapam can leave such a page behind, if e.g. an insert errors
+		 * out after initializing the page, but before it has inserted the
+		 * tuple and WAL-logged the change. When we read the page from the
+		 * page server, it will come back as all-zeros. That's OK, the heapam
+		 * will initialize an all-zeros page on first use.
 		 *
-		 * In other scenarios, evicting a dirty page with no LSN is a bad sign: it implies
-		 * that the page was not WAL-logged, and its contents will be lost when it's
-		 * evicted.
+		 * In other scenarios, evicting a dirty page with no LSN is a bad
+		 * sign: it implies that the page was not WAL-logged, and its contents
+		 * will be lost when it's evicted.
 		 */
 		if (PageIsNew(buffer))
 		{
@@ -691,9 +696,9 @@ zenith_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, Bloc
 		 * Is it possible that the last-written LSN is ahead of last flush
 		 * LSN? Generally not, we shouldn't evict a page from the buffer cache
 		 * before all its modifications have been safely flushed. That's the
-		 * "WAL before data" rule. However, such case does exist at index building,
-		 * _bt_blwritepage logs the full page without flushing WAL before
-		 * smgrextend (files are fsynced before build ends).
+		 * "WAL before data" rule. However, such case does exist at index
+		 * building, _bt_blwritepage logs the full page without flushing WAL
+		 * before smgrextend (files are fsynced before build ends).
 		 */
 #if PG_VERSION_NUM >= 150000
 		flushlsn = GetFlushRecPtr(NULL);
@@ -728,10 +733,12 @@ zenith_exists(SMgrRelation reln, ForkNumber forkNum)
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
+
 			/*
-			 * We don't know if it's an unlogged rel stored locally, or permanent
-			 * rel stored in the page server. First check if it exists locally.
-			 * If it does, great. Otherwise check if it exists in the page server.
+			 * We don't know if it's an unlogged rel stored locally, or
+			 * permanent rel stored in the page server. First check if it
+			 * exists locally. If it does, great. Otherwise check if it exists
+			 * in the page server.
 			 */
 			if (mdexists(reln, forkNum))
 				return true;
@@ -755,11 +762,11 @@ zenith_exists(SMgrRelation reln, ForkNumber forkNum)
 
 	/*
 	 * \d+ on a view calls smgrexists with 0/0/0 relfilenode. The page server
-	 * will error out if you check that, because the whole dbdir for tablespace
-	 * 0, db 0 doesn't exists. We possibly should change the page server to
-	 * accept that and return 'false', to be consistent with mdexists(). But
-	 * we probably also should fix pg_table_size() to not call smgrexists()
-	 * with bogus relfilenode.
+	 * will error out if you check that, because the whole dbdir for
+	 * tablespace 0, db 0 doesn't exists. We possibly should change the page
+	 * server to accept that and return 'false', to be consistent with
+	 * mdexists(). But we probably also should fix pg_table_size() to not call
+	 * smgrexists() with bogus relfilenode.
 	 *
 	 * For now, handle that special case here.
 	 */
@@ -880,13 +887,13 @@ void
 zenith_unlink(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 {
 	/*
-	 * Might or might not exist locally, depending on whether it's
-	 * an unlogged or permanent relation (or if DEBUG_COMPARE_LOCAL is
-	 * set). Try to unlink, it won't do any harm if the file doesn't
-	 * exist.
+	 * Might or might not exist locally, depending on whether it's an unlogged
+	 * or permanent relation (or if DEBUG_COMPARE_LOCAL is set). Try to
+	 * unlink, it won't do any harm if the file doesn't exist.
 	 */
 	mdunlink(rnode, forkNum, isRedo);
-	if (!RelFileNodeBackendIsTemp(rnode)) {
+	if (!RelFileNodeBackendIsTemp(rnode))
+	{
 		forget_cached_relsize(rnode.node, forkNum);
 	}
 }
@@ -926,8 +933,9 @@ zenith_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	/*
 	 * Check that the cluster size limit has not been exceeded.
 	 *
-	 * Temporary and unlogged relations are not included in the cluster size measured
-	 * by the page server, so ignore those. Autovacuum processes are also exempt.
+	 * Temporary and unlogged relations are not included in the cluster size
+	 * measured by the page server, so ignore those. Autovacuum processes are
+	 * also exempt.
 	 */
 	if (max_cluster_size > 0 &&
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
@@ -937,10 +945,10 @@ zenith_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,
-				(errcode(ERRCODE_DISK_FULL),
-					errmsg("could not extend file because cluster size limit (%d MB) has been exceeded",
-						   max_cluster_size),
-					errhint("This limit is defined by neon.max_cluster_size GUC")));
+					(errcode(ERRCODE_DISK_FULL),
+					 errmsg("could not extend file because cluster size limit (%d MB) has been exceeded",
+							max_cluster_size),
+					 errhint("This limit is defined by neon.max_cluster_size GUC")));
 	}
 
 	zenith_wallog_page(reln, forkNum, blkno, buffer);
@@ -987,8 +995,8 @@ void
 zenith_close(SMgrRelation reln, ForkNumber forknum)
 {
 	/*
-	 * Let md.c close it, if it had it open. Doesn't hurt to do this
-	 * even for permanent relations that have no local storage.
+	 * Let md.c close it, if it had it open. Doesn't hurt to do this even for
+	 * permanent relations that have no local storage.
 	 */
 	mdclose(reln, forknum);
 }
@@ -1079,17 +1087,18 @@ zenith_writeback(SMgrRelation reln, ForkNumber forknum,
  * While function is defined in the zenith extension it's used within neon_test_utils directly.
  * To avoid breaking tests in the runtime please keep function signature in sync.
  */
-void zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
-			XLogRecPtr request_lsn, bool request_latest, char *buffer)
+void
+zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+				   XLogRecPtr request_lsn, bool request_latest, char *buffer)
 {
 	ZenithResponse *resp;
-	int			    i;
+	int			i;
 
 	/*
-	 * Try to find prefetched page.
-	 * It is assumed that pages will be requested in the same order as them are prefetched,
-	 * but some other backend may load page in shared buffers, so some prefetch responses should
-	 * be skipped.
+	 * Try to find prefetched page. It is assumed that pages will be requested
+	 * in the same order as them are prefetched, but some other backend may
+	 * load page in shared buffers, so some prefetch responses should be
+	 * skipped.
 	 */
 	for (i = n_prefetched_buffers; i < n_prefetch_responses; i++)
 	{
@@ -1099,19 +1108,20 @@ void zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno
 			prefetch_responses[i].forkNum == forkNum &&
 			prefetch_responses[i].blockNum == blkno)
 		{
-			char* page = ((ZenithGetPageResponse *) resp)->page;
+			char	   *page = ((ZenithGetPageResponse *) resp)->page;
+
 			/*
-			 * Check if prefetched page is still relevant.
-			 * If it is updated by some other backend, then it should not
-			 * be requested from smgr unless it is evicted from shared buffers.
-			 * In the last case last_evicted_lsn should be updated and
-			 * request_lsn should be greater than prefetch_lsn.
-			 * Maximum with page LSN is used because page returned by page server
-			 * may have LSN either greater either smaller than requested.
+			 * Check if prefetched page is still relevant. If it is updated by
+			 * some other backend, then it should not be requested from smgr
+			 * unless it is evicted from shared buffers. In the last case
+			 * last_evicted_lsn should be updated and request_lsn should be
+			 * greater than prefetch_lsn. Maximum with page LSN is used
+			 * because page returned by page server may have LSN either
+			 * greater either smaller than requested.
 			 */
 			if (Max(prefetch_lsn, PageGetLSN(page)) >= request_lsn)
 			{
-				n_prefetched_buffers = i+1;
+				n_prefetched_buffers = i + 1;
 				n_prefetch_hits += 1;
 				n_prefetch_requests = 0;
 				memcpy(buffer, page, BLCKSZ);
@@ -1133,6 +1143,7 @@ void zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno
 			.forknum = forkNum,
 			.blkno = blkno
 		};
+
 		if (n_prefetch_requests > 0)
 		{
 			/* Combine all prefetch requests with primary request */
@@ -1471,8 +1482,8 @@ int64
 zenith_dbsize(Oid dbNode)
 {
 	ZenithResponse *resp;
-	int64 db_size;
-	XLogRecPtr request_lsn;
+	int64		db_size;
+	XLogRecPtr	request_lsn;
 	bool		latest;
 	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
 
@@ -1564,10 +1575,12 @@ zenith_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	XLogFlush(lsn);
 
 	/*
-	 * Truncate may affect several chunks of relations. So we should either update last written LSN for all of them,
-	 * or update LSN for "dummy" metadata block. Second approach seems more efficient. If the relation is extended
-	 * again later, the extension will update the last-written LSN for the extended pages, so there's no harm in
-	 * leaving behind obsolete entries for the truncated chunks.
+	 * Truncate may affect several chunks of relations. So we should either
+	 * update last written LSN for all of them, or update LSN for "dummy"
+	 * metadata block. Second approach seems more efficient. If the relation
+	 * is extended again later, the extension will update the last-written LSN
+	 * for the extended pages, so there's no harm in leaving behind obsolete
+	 * entries for the truncated chunks.
 	 */
 	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forknum);
 

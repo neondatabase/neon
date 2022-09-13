@@ -153,11 +153,11 @@ static void
 pageserver_disconnect(void)
 {
 	/*
-	 * If anything goes wrong while we were sending a request, it's not
-	 * clear what state the connection is in. For example, if we sent the
-	 * request but didn't receive a response yet, we might receive the
-	 * response some time later after we have already sent a new unrelated
-	 * request. Close the connection to avoid getting confused.
+	 * If anything goes wrong while we were sending a request, it's not clear
+	 * what state the connection is in. For example, if we sent the request
+	 * but didn't receive a response yet, we might receive the response some
+	 * time later after we have already sent a new unrelated request. Close
+	 * the connection to avoid getting confused.
 	 */
 	if (connected)
 	{
@@ -191,12 +191,13 @@ pageserver_send(ZenithRequest *request)
 	 *
 	 * In principle, this could block if the output buffer is full, and we
 	 * should use async mode and check for interrupts while waiting. In
-	 * practice, our requests are small enough to always fit in the output
-	 * and TCP buffer.
+	 * practice, our requests are small enough to always fit in the output and
+	 * TCP buffer.
 	 */
 	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
-		char* msg = PQerrorMessage(pageserver_conn);
+		char	   *msg = PQerrorMessage(pageserver_conn);
+
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to send page request: %s", msg);
 	}
@@ -205,6 +206,7 @@ pageserver_send(ZenithRequest *request)
 	if (message_level_is_interesting(PageStoreTrace))
 	{
 		char	   *msg = zm_to_string((ZenithMessage *) request);
+
 		neon_log(PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
 	}
@@ -255,15 +257,16 @@ static void
 pageserver_flush(void)
 {
 	if (PQflush(pageserver_conn))
- 	{
-		char* msg = PQerrorMessage(pageserver_conn);
+	{
+		char	   *msg = PQerrorMessage(pageserver_conn);
+
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to flush page requests: %s", msg);
 	}
 }
 
 static ZenithResponse *
-pageserver_call(ZenithRequest* request)
+pageserver_call(ZenithRequest *request)
 {
 	pageserver_send(request);
 	pageserver_flush();

@@ -188,10 +188,10 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	{
 		/*
 		 * We assume the buffer cache is large enough to hold all the buffers
-		 * needed for most operations. Overflowing to this "in-mem smgr" in rare
-		 * cases is OK. But if we find that we're using more than WARN_PAGES,
-		 * print a warning so that we get alerted and get to investigate why
-		 * we're accessing so many buffers.
+		 * needed for most operations. Overflowing to this "in-mem smgr" in
+		 * rare cases is OK. But if we find that we're using more than
+		 * WARN_PAGES, print a warning so that we get alerted and get to
+		 * investigate why we're accessing so many buffers.
 		 */
 		elog(used_pages >= WARN_PAGES ? WARNING : DEBUG1,
 			 "inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
@@ -207,7 +207,9 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		pg = used_pages;
 		used_pages++;
 		INIT_BUFFERTAG(page_tag[pg], reln->smgr_rnode.node, forknum, blocknum);
-	}  else {
+	}
+	else
+	{
 		elog(DEBUG1, "inmem_write() called for %u/%u/%u.%u blk %u: found at %u",
 			 reln->smgr_rnode.node.spcNode,
 			 reln->smgr_rnode.node.dbNode,
@@ -226,14 +228,14 @@ BlockNumber
 inmem_nblocks(SMgrRelation reln, ForkNumber forknum)
 {
 	/*
-	 * It's not clear why a WAL redo function would call smgrnblocks().
-	 * During recovery, at least before reaching consistency, the size of a
-	 * relation could be arbitrarily small, if it was truncated after the
-	 * record being replayed, or arbitrarily large if it was extended
-	 * afterwards. But one place where it's called is in
-	 * XLogReadBufferExtended(): it extends the relation, if it's smaller than
-	 * the requested page. That's a waste of time in the WAL redo
-	 * process. Pretend that all relations are maximally sized to avoid it.
+	 * It's not clear why a WAL redo function would call smgrnblocks(). During
+	 * recovery, at least before reaching consistency, the size of a relation
+	 * could be arbitrarily small, if it was truncated after the record being
+	 * replayed, or arbitrarily large if it was extended afterwards. But one
+	 * place where it's called is in XLogReadBufferExtended(): it extends the
+	 * relation, if it's smaller than the requested page. That's a waste of
+	 * time in the WAL redo process. Pretend that all relations are maximally
+	 * sized to avoid it.
 	 */
 	return MaxBlockNumber;
 }

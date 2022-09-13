@@ -39,8 +39,8 @@ PG_FUNCTION_INFO_V1(neon_xlogflush);
  * Linkage to functions in zenith module.
  * The signature here would need to be updated whenever function parameters change in pagestore_smgr.c
  */
-typedef void (*zenith_read_at_lsn_type)(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
-			XLogRecPtr request_lsn, bool request_latest, char *buffer);
+typedef void (*zenith_read_at_lsn_type) (RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+										 XLogRecPtr request_lsn, bool request_latest, char *buffer);
 
 static zenith_read_at_lsn_type zenith_read_at_lsn_ptr;
 
@@ -136,8 +136,8 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 
 			/*
 			 * Pin the buffer, and release it again. Because we have
-			 * zenith_test_evict==true, this will evict the page from
-			 * the buffer cache if no one else is holding a pin on it.
+			 * zenith_test_evict==true, this will evict the page from the
+			 * buffer cache if no one else is holding a pin on it.
 			 */
 			if (isvalid)
 			{
@@ -177,8 +177,8 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	text	   *forkname;
 	uint32		blkno;
 
-	bool request_latest = PG_ARGISNULL(3);
-	uint64 read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(3);
+	bool		request_latest = PG_ARGISNULL(3);
+	uint64		read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(3);
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
@@ -262,7 +262,7 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				errmsg("must be superuser to use raw page functions")));
+				 errmsg("must be superuser to use raw page functions")));
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
 		PG_ARGISNULL(3) || PG_ARGISNULL(4))
@@ -271,19 +271,20 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 	{
 		RelFileNode rnode = {
 			.spcNode = PG_GETARG_OID(0),
-			.dbNode  = PG_GETARG_OID(1),
+			.dbNode = PG_GETARG_OID(1),
 			.relNode = PG_GETARG_OID(2)
 		};
 
-		ForkNumber forknum = PG_GETARG_UINT32(3);
+		ForkNumber	forknum = PG_GETARG_UINT32(3);
 
-		uint32 blkno = PG_GETARG_UINT32(4);
-		bool request_latest = PG_ARGISNULL(5);
-		uint64 read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(5);
+		uint32		blkno = PG_GETARG_UINT32(4);
+		bool		request_latest = PG_ARGISNULL(5);
+		uint64		read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(5);
 
 
 		/* Initialize buffer to copy to */
-		bytea *raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
+		bytea	   *raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
+
 		SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 		raw_page_data = VARDATA(raw_page);
 
@@ -298,7 +299,8 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 Datum
 neon_xlogflush(PG_FUNCTION_ARGS)
 {
-	XLogRecPtr lsn = PG_GETARG_LSN(0);
+	XLogRecPtr	lsn = PG_GETARG_LSN(0);
+
 	XLogFlush(lsn);
 	PG_RETURN_VOID();
 }
