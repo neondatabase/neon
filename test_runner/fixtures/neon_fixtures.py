@@ -125,7 +125,8 @@ def pytest_configure(config):
     if env_neon_bin:
         neon_binpath = env_neon_bin
     else:
-        neon_binpath = os.path.join(base_dir, "target/debug")
+        build_type = os.environ.get("BUILD_TYPE", "debug")
+        neon_binpath = os.path.join(base_dir, "target", build_type)
     log.info(f"neon_binpath is {neon_binpath}")
     if not os.path.exists(os.path.join(neon_binpath, "pageserver")):
         raise Exception('neon binaries not found at "{}"'.format(neon_binpath))
