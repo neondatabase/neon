@@ -68,11 +68,14 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(options) = params.options_raw() {
                 for opt in options {
+                    // FIXME `ztenantid` and `ztimelineid` left for compatibility during deploy,
+                    // remove these after the PR gets deployed:
+                    // https://github.com/neondatabase/neon/pull/2433#discussion_r970005064
                     match opt.split_once('=') {
-                        Some(("tenant_id", value)) => {
+                        Some(("ztenantid", value)) | Some(("tenant_id", value)) => {
                             self.tenant_id = Some(value.parse()?);
                         }
-                        Some(("timeline_id", value)) => {
+                        Some(("ztimelineid", value)) | Some(("timeline_id", value)) => {
                             self.timeline_id = Some(value.parse()?);
                         }
                         _ => continue,
