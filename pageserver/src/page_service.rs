@@ -499,7 +499,9 @@ impl PageServerHandler {
         // Make request tracer if needed
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let mut tracer = if repo.get_trace_read_requests() {
-            let path = repo.conf.trace_path(&tenant_id, &timeline_id, &timeline_id);
+            let path = repo
+                .conf
+                .trace_path(&tenant_id, &timeline_id, &ZTimelineId::generate());
             Some(Tracer::new(path))
         } else {
             None
