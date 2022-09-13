@@ -10,7 +10,7 @@ use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::tenant::Timeline;
-use crate::walrecord::ZenithWalRecord;
+use crate::walrecord::NeonWalRecord;
 use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
 use postgres_ffi::v14::pg_constants;
@@ -570,7 +570,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         rel: RelTag,
         blknum: BlockNumber,
-        rec: ZenithWalRecord,
+        rec: NeonWalRecord,
     ) -> Result<()> {
         ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
@@ -583,7 +583,7 @@ impl<'a> DatadirModification<'a> {
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
-        rec: ZenithWalRecord,
+        rec: NeonWalRecord,
     ) -> Result<()> {
         self.put(
             slru_block_to_key(kind, segno, blknum),
@@ -1401,7 +1401,7 @@ fn is_slru_block_key(key: Key) -> bool {
 #[cfg(test)]
 pub fn create_test_timeline(
     tenant: &crate::tenant::Tenant,
-    timeline_id: utils::zid::ZTimelineId,
+    timeline_id: utils::id::TimelineId,
 ) -> Result<std::sync::Arc<Timeline>> {
     let tline = tenant.create_empty_timeline(timeline_id, Lsn(8))?;
     let mut m = tline.begin_modification(Lsn(8));

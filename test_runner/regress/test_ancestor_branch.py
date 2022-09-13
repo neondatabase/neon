@@ -1,6 +1,6 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import ZTimelineId
+from fixtures.types import TimelineId
 from fixtures.utils import query_scalar
 
 
@@ -27,7 +27,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
 
     pg_branch0 = env.postgres.create_start("main", tenant_id=tenant)
     branch0_cur = pg_branch0.connect().cursor()
-    branch0_timeline = ZTimelineId(query_scalar(branch0_cur, "SHOW neon.timeline_id"))
+    branch0_timeline = TimelineId(query_scalar(branch0_cur, "SHOW neon.timeline_id"))
     log.info(f"b0 timeline {branch0_timeline}")
 
     # Create table, and insert 100k rows.
@@ -51,7 +51,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     log.info("postgres is running on 'branch1' branch")
 
     branch1_cur = pg_branch1.connect().cursor()
-    branch1_timeline = ZTimelineId(query_scalar(branch1_cur, "SHOW neon.timeline_id"))
+    branch1_timeline = TimelineId(query_scalar(branch1_cur, "SHOW neon.timeline_id"))
     log.info(f"b1 timeline {branch1_timeline}")
 
     branch1_lsn = query_scalar(branch1_cur, "SELECT pg_current_wal_insert_lsn()")
@@ -74,7 +74,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     log.info("postgres is running on 'branch2' branch")
     branch2_cur = pg_branch2.connect().cursor()
 
-    branch2_timeline = ZTimelineId(query_scalar(branch2_cur, "SHOW neon.timeline_id"))
+    branch2_timeline = TimelineId(query_scalar(branch2_cur, "SHOW neon.timeline_id"))
     log.info(f"b2 timeline {branch2_timeline}")
 
     branch2_lsn = query_scalar(branch2_cur, "SELECT pg_current_wal_insert_lsn()")

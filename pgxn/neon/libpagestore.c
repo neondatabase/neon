@@ -30,13 +30,12 @@
 #include "walproposer.h"
 #include "walproposer_utils.h"
 
-
 #define PageStoreTrace DEBUG5
 
 #define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag, \
-		(errmsg(NEON_TAG fmt, ## __VA_ARGS__), \
-		 errhidestmt(true), errhidecontext(true)))
+#define neon_log(tag, fmt, ...) ereport(tag,                                  \
+										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
+										 errhidestmt(true), errhidecontext(true)))
 
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
@@ -65,7 +64,7 @@ pageserver_connect()
 				 errdetail_internal("%s", msg)));
 	}
 
-	query = psprintf("pagestream %s %s", zenith_tenant, zenith_timeline);
+	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
 	ret = PQsendQuery(pageserver_conn, query);
 	if (ret != 1)
 	{
@@ -169,7 +168,7 @@ pageserver_disconnect(void)
 }
 
 static void
-pageserver_send(ZenithRequest *request)
+pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
 
@@ -205,18 +204,18 @@ pageserver_send(ZenithRequest *request)
 
 	if (message_level_is_interesting(PageStoreTrace))
 	{
-		char	   *msg = zm_to_string((ZenithMessage *) request);
+		char	   *msg = zm_to_string((NeonMessage *) request);
 
 		neon_log(PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
 	}
 }
 
-static ZenithResponse *
+static NeonResponse *
 pageserver_receive(void)
 {
 	StringInfoData resp_buff;
-	ZenithResponse *resp;
+	NeonResponse *resp;
 
 	PG_TRY();
 	{
@@ -236,7 +235,7 @@ pageserver_receive(void)
 
 		if (message_level_is_interesting(PageStoreTrace))
 		{
-			char	   *msg = zm_to_string((ZenithMessage *) resp);
+			char	   *msg = zm_to_string((NeonMessage *) resp);
 
 			neon_log(PageStoreTrace, "got response: %s", msg);
 			pfree(msg);
@@ -249,7 +248,7 @@ pageserver_receive(void)
 	}
 	PG_END_TRY();
 
-	return (ZenithResponse *) resp;
+	return (NeonResponse *) resp;
 }
 
 
@@ -265,8 +264,8 @@ pageserver_flush(void)
 	}
 }
 
-static ZenithResponse *
-pageserver_call(ZenithRequest *request)
+static NeonResponse *
+pageserver_call(NeonRequest * request)
 {
 	pageserver_send(request);
 	pageserver_flush();
@@ -281,7 +280,7 @@ page_server_api api = {
 };
 
 static bool
-check_zenith_id(char **newval, void **extra, GucSource source)
+check_neon_id(char **newval, void **extra, GucSource source)
 {
 	uint8		zid[16];
 
@@ -403,22 +402,22 @@ pg_init_libpagestore(void)
 							   NULL, NULL, NULL);
 
 	DefineCustomStringVariable("neon.timeline_id",
-							   "Zenith timelineid the server is running on",
+							   "Neon timeline_id the server is running on",
 							   NULL,
-							   &zenith_timeline,
+							   &neon_timeline,
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
-							   check_zenith_id, NULL, NULL);
+							   check_neon_id, NULL, NULL);
 
 	DefineCustomStringVariable("neon.tenant_id",
-							   "Neon tenantid the server is running on",
+							   "Neon tenant_id the server is running on",
 							   NULL,
-							   &zenith_tenant,
+							   &neon_tenant,
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
-							   check_zenith_id, NULL, NULL);
+							   check_neon_id, NULL, NULL);
 
 	DefineCustomBoolVariable("neon.wal_redo",
 							 "start in wal-redo mode",
@@ -450,8 +449,8 @@ pg_init_libpagestore(void)
 	page_server_connstring = substitute_pageserver_password(page_server_connstring_raw);
 
 	/* Is there more correct way to pass CustomGUC to postgres code? */
-	zenith_timeline_walproposer = zenith_timeline;
-	zenith_tenant_walproposer = zenith_tenant;
+	neon_timeline_walproposer = neon_timeline;
+	neon_tenant_walproposer = neon_tenant;
 
 	if (wal_redo)
 	{
@@ -462,8 +461,8 @@ pg_init_libpagestore(void)
 	else if (page_server_connstring && page_server_connstring[0])
 	{
 		neon_log(PageStoreTrace, "set neon_smgr hook");
-		smgr_hook = smgr_zenith;
-		smgr_init_hook = smgr_init_zenith;
-		dbsize_hook = zenith_dbsize;
+		smgr_hook = smgr_neon;
+		smgr_init_hook = smgr_init_neon;
+		dbsize_hook = neon_dbsize;
 	}
 }

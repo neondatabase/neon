@@ -21,9 +21,9 @@ use thiserror::Error;
 use utils::{
     connstring::connection_address,
     http::error::HttpErrorBody,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::local_env::LocalEnv;
@@ -83,7 +83,7 @@ pub struct PageServerNode {
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let password = if env.pageserver.auth_type == AuthType::ZenithJWT {
+        let password = if env.pageserver.auth_type == AuthType::NeonJWT {
             &env.pageserver.auth_token
         } else {
             ""
@@ -109,10 +109,10 @@ impl PageServerNode {
 
     pub fn initialize(
         &self,
-        create_tenant: Option<ZTenantId>,
-        initial_timeline_id: Option<ZTimelineId>,
+        create_tenant: Option<TenantId>,
+        initial_timeline_id: Option<TimelineId>,
         config_overrides: &[&str],
-    ) -> anyhow::Result<ZTimelineId> {
+    ) -> anyhow::Result<TimelineId> {
         let id = format!("id={}", self.env.pageserver.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param =
@@ -173,9 +173,9 @@ impl PageServerNode {
 
     fn try_init_timeline(
         &self,
-        new_tenant_id: Option<ZTenantId>,
-        new_timeline_id: Option<ZTimelineId>,
-    ) -> anyhow::Result<ZTimelineId> {
+        new_tenant_id: Option<TenantId>,
+        new_timeline_id: Option<TimelineId>,
+    ) -> anyhow::Result<TimelineId> {
         let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())?;
         let initial_timeline_info =
             self.timeline_create(initial_tenant_id, new_timeline_id, None, None)?;
@@ -345,7 +345,7 @@ impl PageServerNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
         let mut builder = self.http_client.request(method, url);
-        if self.env.pageserver.auth_type == AuthType::ZenithJWT {
+        if self.env.pageserver.auth_type == AuthType::NeonJWT {
             builder = builder.bearer_auth(&self.env.pageserver.auth_token)
         }
         builder
@@ -368,9 +368,9 @@ impl PageServerNode {
 
     pub fn tenant_create(
         &self,
-        new_tenant_id: Option<ZTenantId>,
+        new_tenant_id: Option<TenantId>,
         settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<ZTenantId> {
+    ) -> anyhow::Result<TenantId> {
         self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))
             .json(&TenantCreateRequest {
                 new_tenant_id,
@@ -422,7 +422,7 @@ impl PageServerNode {
             })
     }
 
-    pub fn tenant_config(&self, tenant_id: ZTenantId, settings: HashMap<&str, &str>) -> Result<()> {
+    pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
         self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))
             .json(&TenantConfigRequest {
                 tenant_id,
@@ -471,7 +471,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {
+    pub fn timeline_list(&self, tenant_id: &TenantId) -> anyhow::Result<Vec<TimelineInfo>> {
         let timeline_infos: Vec<TimelineInfo> = self
             .http_request(
                 Method::GET,
@@ -486,10 +486,10 @@ impl PageServerNode {
 
     pub fn timeline_create(
         &self,
-        tenant_id: ZTenantId,
-        new_timeline_id: Option<ZTimelineId>,
+        tenant_id: TenantId,
+        new_timeline_id: Option<TimelineId>,
         ancestor_start_lsn: Option<Lsn>,
-        ancestor_timeline_id: Option<ZTimelineId>,
+        ancestor_timeline_id: Option<TimelineId>,
     ) -> anyhow::Result<TimelineInfo> {
         self.http_request(
             Method::POST,
@@ -524,8 +524,8 @@ impl PageServerNode {
     /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
     pub fn timeline_import(
         &self,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         base: (Lsn, PathBuf),
         pg_wal: Option<(Lsn, PathBuf)>,
     ) -> anyhow::Result<()> {

@@ -23,7 +23,7 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::*;
 
-use utils::{lsn::Lsn, zid::ZTenantTimelineId};
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::broker::{Election, ElectionLeader};
 use crate::timeline::{GlobalTimelines, Timeline};
@@ -38,7 +38,7 @@ const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
 
 pub fn wal_backup_launcher_thread_main(
     conf: SafeKeeperConf,
-    wal_backup_launcher_rx: Receiver<ZTenantTimelineId>,
+    wal_backup_launcher_rx: Receiver<TenantTimelineId>,
 ) {
     let rt = Builder::new_multi_thread()
         .worker_threads(conf.backup_runtime_threads)
@@ -53,7 +53,7 @@ pub fn wal_backup_launcher_thread_main(
 
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
-fn is_wal_backup_required(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
+fn is_wal_backup_required(zttid: TenantTimelineId) -> Option<Arc<Timeline>> {
     GlobalTimelines::get_loaded(zttid).filter(|t| t.wal_backup_attend())
 }
 
@@ -70,7 +70,7 @@ struct WalBackupTimelineEntry {
 /// Start per timeline task, if it makes sense for this safekeeper to offload.
 fn consider_start_task(
     conf: &SafeKeeperConf,
-    zttid: ZTenantTimelineId,
+    zttid: TenantTimelineId,
     task: &mut WalBackupTimelineEntry,
 ) {
     if !task.timeline.can_wal_backup() {
@@ -117,7 +117,7 @@ const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 /// panics and separate elections from offloading itself.
 async fn wal_backup_launcher_main_loop(
     conf: SafeKeeperConf,
-    mut wal_backup_launcher_rx: Receiver<ZTenantTimelineId>,
+    mut wal_backup_launcher_rx: Receiver<TenantTimelineId>,
 ) {
     info!(
         "WAL backup launcher started, remote config {:?}",
@@ -135,7 +135,7 @@ async fn wal_backup_launcher_main_loop(
     // Presense in this map means launcher is aware s3 offloading is needed for
     // the timeline, but task is started only if it makes sense for to offload
     // from this safekeeper.
-    let mut tasks: HashMap<ZTenantTimelineId, WalBackupTimelineEntry> = HashMap::new();
+    let mut tasks: HashMap<TenantTimelineId, WalBackupTimelineEntry> = HashMap::new();
 
     let mut ticker = tokio::time::interval(Duration::from_millis(CHECK_TASKS_INTERVAL_MSEC));
     loop {
@@ -193,7 +193,7 @@ struct WalBackupTask {
 
 /// Offload single timeline.
 async fn backup_task_main(
-    zttid: ZTenantTimelineId,
+    zttid: TenantTimelineId,
     timeline_dir: PathBuf,
     mut shutdown_rx: Receiver<()>,
     election: Election,

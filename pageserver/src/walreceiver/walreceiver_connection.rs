@@ -30,7 +30,7 @@ use crate::{
     walrecord::DecodedWALRecord,
 };
 use postgres_ffi::v14::waldecoder::WalStreamDecoder;
-use utils::zid::ZTenantTimelineId;
+use utils::id::TenantTimelineId;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
 
 /// Status of the connection.
@@ -288,7 +288,7 @@ pub async fn handle_walreceiver_connection(
                 .await
                 // here we either do not have this timeline in remote index
                 // or there were no checkpoints for it yet
-                .timeline_entry(&ZTenantTimelineId {
+                .timeline_entry(&TenantTimelineId {
                     tenant_id,
                     timeline_id,
                 })
@@ -316,7 +316,7 @@ pub async fn handle_walreceiver_connection(
             };
             *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
 
-            // Send zenith feedback message.
+            // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
             let status_update = ReplicationFeedback {
                 current_timeline_size: timeline
@@ -328,7 +328,7 @@ pub async fn handle_walreceiver_connection(
                 ps_replytime: ts,
             };
 
-            debug!("zenith_status_update {status_update:?}");
+            debug!("neon_status_update {status_update:?}");
 
             let mut data = BytesMut::new();
             status_update.serialize(&mut data)?;

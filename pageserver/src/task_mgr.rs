@@ -51,7 +51,7 @@ use tracing::{debug, error, info, warn};
 
 use once_cell::sync::Lazy;
 
-use utils::zid::{ZTenantId, ZTimelineId};
+use utils::id::{TenantId, TimelineId};
 
 use crate::shutdown_pageserver;
 
@@ -210,8 +210,8 @@ pub enum TaskKind {
 #[derive(Default)]
 struct MutableTaskState {
     /// Tenant and timeline that this task is associated with.
-    tenant_id: Option<ZTenantId>,
-    timeline_id: Option<ZTimelineId>,
+    tenant_id: Option<TenantId>,
+    timeline_id: Option<TimelineId>,
 
     /// Handle for waiting for the task to exit. It can be None, if the
     /// the task has already exited.
@@ -238,8 +238,8 @@ struct PageServerTask {
 pub fn spawn<F>(
     runtime: &tokio::runtime::Handle,
     kind: TaskKind,
-    tenant_id: Option<ZTenantId>,
-    timeline_id: Option<ZTimelineId>,
+    tenant_id: Option<TenantId>,
+    timeline_id: Option<TimelineId>,
     name: &str,
     shutdown_process_on_error: bool,
     future: F,
@@ -371,7 +371,7 @@ async fn task_finish(
 }
 
 // expected to be called from the task of the given id.
-pub fn associate_with(tenant_id: Option<ZTenantId>, timeline_id: Option<ZTimelineId>) {
+pub fn associate_with(tenant_id: Option<TenantId>, timeline_id: Option<TimelineId>) {
     CURRENT_TASK.with(|ct| {
         let mut task_mut = ct.mutable.lock().unwrap();
         task_mut.tenant_id = tenant_id;
@@ -391,12 +391,12 @@ pub fn associate_with(tenant_id: Option<ZTenantId>, timeline_id: Option<ZTimelin
 ///
 /// Or to shut down all tasks for given timeline:
 ///
-///   shutdown_tasks(None, Some(tenantid), Some(timelineid))
+///   shutdown_tasks(None, Some(tenant_id), Some(timeline_id))
 ///
 pub async fn shutdown_tasks(
     kind: Option<TaskKind>,
-    tenant_id: Option<ZTenantId>,
-    timeline_id: Option<ZTimelineId>,
+    tenant_id: Option<TenantId>,
+    timeline_id: Option<TimelineId>,
 ) {
     let mut victim_tasks = Vec::new();
 

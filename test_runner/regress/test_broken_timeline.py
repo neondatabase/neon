@@ -5,7 +5,7 @@ from typing import List, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
-from fixtures.types import ZTenantId, ZTimelineId
+from fixtures.types import TenantId, TimelineId
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -15,7 +15,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    tenant_timelines: List[Tuple[ZTenantId, ZTimelineId, Postgres]] = []
+    tenant_timelines: List[Tuple[TenantId, TimelineId, Postgres]] = []
 
     for n in range(4):
         tenant_id, timeline_id = env.neon_cli.create_tenant()

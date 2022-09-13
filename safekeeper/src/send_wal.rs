@@ -30,7 +30,7 @@ use utils::{
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
 const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
-// zenith extension of replication protocol
+// neon extension of replication protocol
 const NEON_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 
 type FullTransactionId = u64;
@@ -105,7 +105,7 @@ impl ReplicationConn {
             match &msg {
                 FeMessage::CopyData(m) => {
                     // There's three possible data messages that the client is supposed to send here:
-                    // `HotStandbyFeedback` and `StandbyStatusUpdate` and `ZenithStandbyFeedback`.
+                    // `HotStandbyFeedback` and `StandbyStatusUpdate` and `NeonStandbyFeedback`.
 
                     match m.first().cloned() {
                         Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
@@ -165,12 +165,12 @@ impl ReplicationConn {
         pgb: &mut PostgresBackend,
         mut start_pos: Lsn,
     ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap()).entered();
+        let _enter = info_span!("WAL sender", timeline = %spg.timeline_id.unwrap()).entered();
 
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(spg.timeline.get());
         let bg_stream_in = self.stream_in.take().unwrap();
-        let bg_timeline_id = spg.ztimelineid.unwrap();
+        let bg_timeline_id = spg.timeline_id.unwrap();
 
         let state = ReplicaState::new();
         // This replica_id is used below to check if it's time to stop replication.

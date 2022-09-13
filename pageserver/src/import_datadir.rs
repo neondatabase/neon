@@ -1,6 +1,6 @@
 //!
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
-//! a zenith Timeline.
+//! a neon Timeline.
 //!
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

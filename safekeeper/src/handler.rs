@@ -14,10 +14,10 @@ use regex::Regex;
 use std::sync::Arc;
 use tracing::info;
 use utils::{
+    id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
     postgres_backend::{self, PostgresBackend},
     pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID},
-    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 /// Safekeeper handler of postgres commands
@@ -25,8 +25,8 @@ pub struct SafekeeperPostgresHandler {
     pub conf: SafeKeeperConf,
     /// assigned application name
     pub appname: Option<String>,
-    pub ztenantid: Option<ZTenantId>,
-    pub ztimelineid: Option<ZTimelineId>,
+    pub tenant_id: Option<TenantId>,
+    pub timeline_id: Option<TimelineId>,
     pub timeline: Option<Arc<Timeline>>,
 }
 
@@ -63,17 +63,17 @@ fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
 }
 
 impl postgres_backend::Handler for SafekeeperPostgresHandler {
-    // ztenant id and ztimeline id are passed in connection string params
+    // tenant_id and timeline_id are passed in connection string params
     fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupPacket) -> Result<()> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(options) = params.options_raw() {
                 for opt in options {
                     match opt.split_once('=') {
-                        Some(("ztenantid", value)) => {
-                            self.ztenantid = Some(value.parse()?);
+                        Some(("tenant_id", value)) => {
+                            self.tenant_id = Some(value.parse()?);
                         }
-                        Some(("ztimelineid", value)) => {
-                            self.ztimelineid = Some(value.parse()?);
+                        Some(("timeline_id", value)) => {
+                            self.timeline_id = Some(value.parse()?);
                         }
                         _ => continue,
                     }
@@ -95,18 +95,18 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
         info!(
             "got query {:?} in timeline {:?}",
-            query_string, self.ztimelineid
+            query_string, self.timeline_id
         );
 
         let create = !(matches!(cmd, SafekeeperPostgresCommand::StartReplication { .. })
             || matches!(cmd, SafekeeperPostgresCommand::IdentifySystem));
 
-        let tenantid = self.ztenantid.context("tenantid is required")?;
-        let timelineid = self.ztimelineid.context("timelineid is required")?;
+        let tenant_id = self.tenant_id.context("tenant_id is required")?;
+        let timeline_id = self.timeline_id.context("timeline_id is required")?;
         if self.timeline.is_none() {
             self.timeline.set(
                 &self.conf,
-                ZTenantTimelineId::new(tenantid, timelineid),
+                TenantTimelineId::new(tenant_id, timeline_id),
                 create,
             )?;
         }
@@ -121,7 +121,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
         }
-        .context(format!("timeline {timelineid}"))?;
+        .context(format!("timeline {timeline_id}"))?;
 
         Ok(())
     }
@@ -132,8 +132,8 @@ impl SafekeeperPostgresHandler {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
-            ztenantid: None,
-            ztimelineid: None,
+            tenant_id: None,
+            timeline_id: None,
             timeline: None,
         }
     }

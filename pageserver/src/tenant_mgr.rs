@@ -27,7 +27,7 @@ use crate::walredo::PostgresRedoManager;
 use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe_dir;
-use utils::zid::{ZTenantId, ZTimelineId};
+use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
     use once_cell::sync::Lazy;
@@ -35,20 +35,20 @@ mod tenants_state {
         collections::HashMap,
         sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     };
-    use utils::zid::ZTenantId;
+    use utils::id::TenantId;
 
     use crate::tenant::Tenant;
 
-    static TENANTS: Lazy<RwLock<HashMap<ZTenantId, Arc<Tenant>>>> =
+    static TENANTS: Lazy<RwLock<HashMap<TenantId, Arc<Tenant>>>> =
         Lazy::new(|| RwLock::new(HashMap::new()));
 
-    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Arc<Tenant>>> {
+    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<TenantId, Arc<Tenant>>> {
         TENANTS
             .read()
             .expect("Failed to read() tenants lock, it got poisoned")
     }
 
-    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Arc<Tenant>>> {
+    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<TenantId, Arc<Tenant>>> {
         TENANTS
             .write()
             .expect("Failed to write() tenants lock, it got poisoned")
@@ -159,7 +159,7 @@ pub fn attach_local_tenants(
 
 fn load_local_tenant(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     remote_index: &RemoteIndex,
 ) -> Arc<Tenant> {
     let tenant = Arc::new(Tenant::new(
@@ -225,7 +225,7 @@ pub async fn shutdown_all_tenants() {
 fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
 ) -> anyhow::Result<()> {
     let target_tenant_directory = conf.tenant_path(&tenant_id);
     anyhow::ensure!(
@@ -310,9 +310,9 @@ fn rebase_directory(original_path: &Path, base: &Path, new_base: &Path) -> anyho
 pub fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     remote_index: RemoteIndex,
-) -> anyhow::Result<Option<ZTenantId>> {
+) -> anyhow::Result<Option<TenantId>> {
     match tenants_state::write_tenants().entry(tenant_id) {
         hash_map::Entry::Occupied(_) => {
             debug!("tenant {tenant_id} already exists");
@@ -339,7 +339,7 @@ pub fn create_tenant(
 pub fn update_tenant_config(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
     get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);
@@ -349,7 +349,7 @@ pub fn update_tenant_config(
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-pub fn get_tenant(tenant_id: ZTenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
+pub fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
     let m = tenants_state::read_tenants();
     let tenant = m
         .get(&tenant_id)
@@ -361,7 +361,7 @@ pub fn get_tenant(tenant_id: ZTenantId, active_only: bool) -> anyhow::Result<Arc
     }
 }
 
-pub async fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<()> {
     // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
     // It is important that we do not take locks here, and do not check whether the timeline exists
     // because if we hold tenants_state::write_tenants() while awaiting for the tasks to join
@@ -398,7 +398,7 @@ pub async fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> 
 
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
 ) -> anyhow::Result<()> {
     let tenant = match {
         let mut tenants_accessor = tenants_state::write_tenants();
@@ -565,14 +565,14 @@ fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
 ) -> anyhow::Result<(
-    ZTenantId,
-    HashMap<ZTimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
+    TenantId,
+    HashMap<TimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
 )> {
     let tenant_id = tenant_path
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or_default()
-        .parse::<ZTenantId>()
+        .parse::<TenantId>()
         .context("Could not parse tenant id out of the tenant dir name")?;
     let timelines_dir = config.timelines_path(&tenant_id);
 
@@ -644,7 +644,7 @@ fn collect_timelines_for_tenant(
 //  NOTE: ephemeral files are excluded from the list
 fn collect_timeline_files(
     timeline_dir: &Path,
-) -> anyhow::Result<(ZTimelineId, TimelineMetadata, HashSet<PathBuf>)> {
+) -> anyhow::Result<(TimelineId, TimelineMetadata, HashSet<PathBuf>)> {
     let mut timeline_files = HashSet::new();
     let mut timeline_metadata_path = None;
 
@@ -652,7 +652,7 @@ fn collect_timeline_files(
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or_default()
-        .parse::<ZTimelineId>()
+        .parse::<TimelineId>()
         .context("Could not parse timeline id out of the timeline dir name")?;
     let timeline_dir_entries =
         fs::read_dir(&timeline_dir).context("Failed to list timeline dir contents")?;

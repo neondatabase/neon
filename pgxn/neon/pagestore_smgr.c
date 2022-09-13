@@ -96,9 +96,9 @@ page_server_api *page_server;
 /* GUCs */
 char	   *page_server_connstring;
 
-//with substituted password
-char	   *zenith_timeline;
-char	   *zenith_tenant;
+/*with substituted password*/
+char	   *neon_timeline;
+char	   *neon_tenant;
 bool		wal_redo = false;
 int32		max_cluster_size;
 
@@ -143,7 +143,7 @@ consume_prefetch_responses(void)
 {
 	for (int i = n_prefetched_buffers; i < n_prefetch_responses; i++)
 	{
-		ZenithResponse *resp = page_server->receive();
+		NeonResponse *resp = page_server->receive();
 
 		pfree(resp);
 	}
@@ -151,16 +151,16 @@ consume_prefetch_responses(void)
 	n_prefetch_responses = 0;
 }
 
-static ZenithResponse *
+static NeonResponse *
 page_server_request(void const *req)
 {
 	consume_prefetch_responses();
-	return page_server->request((ZenithRequest *) req);
+	return page_server->request((NeonRequest *) req);
 }
 
 
 StringInfoData
-zm_pack_request(ZenithRequest *msg)
+zm_pack_request(NeonRequest * msg)
 {
 	StringInfoData s;
 
@@ -170,9 +170,9 @@ zm_pack_request(ZenithRequest *msg)
 	switch (messageTag(msg))
 	{
 			/* pagestore_client -> pagestore */
-		case T_ZenithExistsRequest:
+		case T_NeonExistsRequest:
 			{
-				ZenithExistsRequest *msg_req = (ZenithExistsRequest *) msg;
+				NeonExistsRequest *msg_req = (NeonExistsRequest *) msg;
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
@@ -183,9 +183,9 @@ zm_pack_request(ZenithRequest *msg)
 
 				break;
 			}
-		case T_ZenithNblocksRequest:
+		case T_NeonNblocksRequest:
 			{
-				ZenithNblocksRequest *msg_req = (ZenithNblocksRequest *) msg;
+				NeonNblocksRequest *msg_req = (NeonNblocksRequest *) msg;
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
@@ -196,9 +196,9 @@ zm_pack_request(ZenithRequest *msg)
 
 				break;
 			}
-		case T_ZenithDbSizeRequest:
+		case T_NeonDbSizeRequest:
 			{
-				ZenithDbSizeRequest *msg_req = (ZenithDbSizeRequest *) msg;
+				NeonDbSizeRequest *msg_req = (NeonDbSizeRequest *) msg;
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
@@ -206,9 +206,9 @@ zm_pack_request(ZenithRequest *msg)
 
 				break;
 			}
-		case T_ZenithGetPageRequest:
+		case T_NeonGetPageRequest:
 			{
-				ZenithGetPageRequest *msg_req = (ZenithGetPageRequest *) msg;
+				NeonGetPageRequest *msg_req = (NeonGetPageRequest *) msg;
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
@@ -222,91 +222,91 @@ zm_pack_request(ZenithRequest *msg)
 			}
 
 			/* pagestore -> pagestore_client. We never need to create these. */
-		case T_ZenithExistsResponse:
-		case T_ZenithNblocksResponse:
-		case T_ZenithGetPageResponse:
-		case T_ZenithErrorResponse:
-		case T_ZenithDbSizeResponse:
+		case T_NeonExistsResponse:
+		case T_NeonNblocksResponse:
+		case T_NeonGetPageResponse:
+		case T_NeonErrorResponse:
+		case T_NeonDbSizeResponse:
 		default:
-			elog(ERROR, "unexpected zenith message tag 0x%02x", msg->tag);
+			elog(ERROR, "unexpected neon message tag 0x%02x", msg->tag);
 			break;
 	}
 	return s;
 }
 
-ZenithResponse *
+NeonResponse *
 zm_unpack_response(StringInfo s)
 {
-	ZenithMessageTag tag = pq_getmsgbyte(s);
-	ZenithResponse *resp = NULL;
+	NeonMessageTag tag = pq_getmsgbyte(s);
+	NeonResponse *resp = NULL;
 
 	switch (tag)
 	{
 			/* pagestore -> pagestore_client */
-		case T_ZenithExistsResponse:
+		case T_NeonExistsResponse:
 			{
-				ZenithExistsResponse *msg_resp = palloc0(sizeof(ZenithExistsResponse));
+				NeonExistsResponse *msg_resp = palloc0(sizeof(NeonExistsResponse));
 
 				msg_resp->tag = tag;
 				msg_resp->exists = pq_getmsgbyte(s);
 				pq_getmsgend(s);
 
-				resp = (ZenithResponse *) msg_resp;
+				resp = (NeonResponse *) msg_resp;
 				break;
 			}
 
-		case T_ZenithNblocksResponse:
+		case T_NeonNblocksResponse:
 			{
-				ZenithNblocksResponse *msg_resp = palloc0(sizeof(ZenithNblocksResponse));
+				NeonNblocksResponse *msg_resp = palloc0(sizeof(NeonNblocksResponse));
 
 				msg_resp->tag = tag;
 				msg_resp->n_blocks = pq_getmsgint(s, 4);
 				pq_getmsgend(s);
 
-				resp = (ZenithResponse *) msg_resp;
+				resp = (NeonResponse *) msg_resp;
 				break;
 			}
 
-		case T_ZenithGetPageResponse:
+		case T_NeonGetPageResponse:
 			{
-				ZenithGetPageResponse *msg_resp = palloc0(offsetof(ZenithGetPageResponse, page) + BLCKSZ);
+				NeonGetPageResponse *msg_resp = palloc0(offsetof(NeonGetPageResponse, page) + BLCKSZ);
 
 				msg_resp->tag = tag;
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
 
-				resp = (ZenithResponse *) msg_resp;
+				resp = (NeonResponse *) msg_resp;
 				break;
 			}
 
-		case T_ZenithDbSizeResponse:
+		case T_NeonDbSizeResponse:
 			{
-				ZenithDbSizeResponse *msg_resp = palloc0(sizeof(ZenithDbSizeResponse));
+				NeonDbSizeResponse *msg_resp = palloc0(sizeof(NeonDbSizeResponse));
 
 				msg_resp->tag = tag;
 				msg_resp->db_size = pq_getmsgint64(s);
 				pq_getmsgend(s);
 
-				resp = (ZenithResponse *) msg_resp;
+				resp = (NeonResponse *) msg_resp;
 				break;
 			}
 
-		case T_ZenithErrorResponse:
+		case T_NeonErrorResponse:
 			{
-				ZenithErrorResponse *msg_resp;
+				NeonErrorResponse *msg_resp;
 				size_t		msglen;
 				const char *msgtext;
 
 				msgtext = pq_getmsgrawstring(s);
 				msglen = strlen(msgtext);
 
-				msg_resp = palloc0(sizeof(ZenithErrorResponse) + msglen + 1);
+				msg_resp = palloc0(sizeof(NeonErrorResponse) + msglen + 1);
 				msg_resp->tag = tag;
 				memcpy(msg_resp->message, msgtext, msglen + 1);
 				pq_getmsgend(s);
 
-				resp = (ZenithResponse *) msg_resp;
+				resp = (NeonResponse *) msg_resp;
 				break;
 			}
 
@@ -315,12 +315,12 @@ zm_unpack_response(StringInfo s)
 			 *
 			 * We create these ourselves, and don't need to decode them.
 			 */
-		case T_ZenithExistsRequest:
-		case T_ZenithNblocksRequest:
-		case T_ZenithGetPageRequest:
-		case T_ZenithDbSizeRequest:
+		case T_NeonExistsRequest:
+		case T_NeonNblocksRequest:
+		case T_NeonGetPageRequest:
+		case T_NeonDbSizeRequest:
 		default:
-			elog(ERROR, "unexpected zenith message tag 0x%02x", tag);
+			elog(ERROR, "unexpected neon message tag 0x%02x", tag);
 			break;
 	}
 
@@ -329,7 +329,7 @@ zm_unpack_response(StringInfo s)
 
 /* dump to json for debugging / error reporting purposes */
 char *
-zm_to_string(ZenithMessage *msg)
+zm_to_string(NeonMessage * msg)
 {
 	StringInfoData s;
 
@@ -338,11 +338,11 @@ zm_to_string(ZenithMessage *msg)
 	switch (messageTag(msg))
 	{
 			/* pagestore_client -> pagestore */
-		case T_ZenithExistsRequest:
+		case T_NeonExistsRequest:
 			{
-				ZenithExistsRequest *msg_req = (ZenithExistsRequest *) msg;
+				NeonExistsRequest *msg_req = (NeonExistsRequest *) msg;
 
-				appendStringInfoString(&s, "{\"type\": \"ZenithExistsRequest\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonExistsRequest\"");
 				appendStringInfo(&s, ", \"rnode\": \"%u/%u/%u\"",
 								 msg_req->rnode.spcNode,
 								 msg_req->rnode.dbNode,
@@ -354,11 +354,11 @@ zm_to_string(ZenithMessage *msg)
 				break;
 			}
 
-		case T_ZenithNblocksRequest:
+		case T_NeonNblocksRequest:
 			{
-				ZenithNblocksRequest *msg_req = (ZenithNblocksRequest *) msg;
+				NeonNblocksRequest *msg_req = (NeonNblocksRequest *) msg;
 
-				appendStringInfoString(&s, "{\"type\": \"ZenithNblocksRequest\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonNblocksRequest\"");
 				appendStringInfo(&s, ", \"rnode\": \"%u/%u/%u\"",
 								 msg_req->rnode.spcNode,
 								 msg_req->rnode.dbNode,
@@ -370,11 +370,11 @@ zm_to_string(ZenithMessage *msg)
 				break;
 			}
 
-		case T_ZenithGetPageRequest:
+		case T_NeonGetPageRequest:
 			{
-				ZenithGetPageRequest *msg_req = (ZenithGetPageRequest *) msg;
+				NeonGetPageRequest *msg_req = (NeonGetPageRequest *) msg;
 
-				appendStringInfoString(&s, "{\"type\": \"ZenithGetPageRequest\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonGetPageRequest\"");
 				appendStringInfo(&s, ", \"rnode\": \"%u/%u/%u\"",
 								 msg_req->rnode.spcNode,
 								 msg_req->rnode.dbNode,
@@ -386,11 +386,11 @@ zm_to_string(ZenithMessage *msg)
 				appendStringInfoChar(&s, '}');
 				break;
 			}
-		case T_ZenithDbSizeRequest:
+		case T_NeonDbSizeRequest:
 			{
-				ZenithDbSizeRequest *msg_req = (ZenithDbSizeRequest *) msg;
+				NeonDbSizeRequest *msg_req = (NeonDbSizeRequest *) msg;
 
-				appendStringInfoString(&s, "{\"type\": \"ZenithDbSizeRequest\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeRequest\"");
 				appendStringInfo(&s, ", \"dbnode\": \"%u\"", msg_req->dbNode);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
 				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
@@ -398,61 +398,57 @@ zm_to_string(ZenithMessage *msg)
 				break;
 			}
 
-
 			/* pagestore -> pagestore_client */
-		case T_ZenithExistsResponse:
+		case T_NeonExistsResponse:
 			{
-				ZenithExistsResponse *msg_resp = (ZenithExistsResponse *) msg;
+				NeonExistsResponse *msg_resp = (NeonExistsResponse *) msg;
 
-				appendStringInfoString(&s, "{\"type\": \"ZenithExistsResponse\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonExistsResponse\"");
 				appendStringInfo(&s, ", \"exists\": %d}",
-								 msg_resp->exists
-					);
+								 msg_resp->exists);
 				appendStringInfoChar(&s, '}');
 
 				break;
 			}
-		case T_ZenithNblocksResponse:
+		case T_NeonNblocksResponse:
 			{
-				ZenithNblocksResponse *msg_resp = (ZenithNblocksResponse *) msg;
+				NeonNblocksResponse *msg_resp = (NeonNblocksResponse *) msg;
 
-				appendStringInfoString(&s, "{\"type\": \"ZenithNblocksResponse\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonNblocksResponse\"");
 				appendStringInfo(&s, ", \"n_blocks\": %u}",
-								 msg_resp->n_blocks
-					);
+								 msg_resp->n_blocks);
 				appendStringInfoChar(&s, '}');
 
 				break;
 			}
-		case T_ZenithGetPageResponse:
+		case T_NeonGetPageResponse:
 			{
 #if 0
-				ZenithGetPageResponse *msg_resp = (ZenithGetPageResponse *) msg;
+				NeonGetPageResponse *msg_resp = (NeonGetPageResponse *) msg;
 #endif
 
-				appendStringInfoString(&s, "{\"type\": \"ZenithGetPageResponse\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonGetPageResponse\"");
 				appendStringInfo(&s, ", \"page\": \"XXX\"}");
 				appendStringInfoChar(&s, '}');
 				break;
 			}
-		case T_ZenithErrorResponse:
+		case T_NeonErrorResponse:
 			{
-				ZenithErrorResponse *msg_resp = (ZenithErrorResponse *) msg;
+				NeonErrorResponse *msg_resp = (NeonErrorResponse *) msg;
 
 				/* FIXME: escape double-quotes in the message */
-				appendStringInfoString(&s, "{\"type\": \"ZenithErrorResponse\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonErrorResponse\"");
 				appendStringInfo(&s, ", \"message\": \"%s\"}", msg_resp->message);
 				appendStringInfoChar(&s, '}');
 				break;
 			}
-		case T_ZenithDbSizeResponse:
+		case T_NeonDbSizeResponse:
 			{
-				ZenithDbSizeResponse *msg_resp = (ZenithDbSizeResponse *) msg;
+				NeonDbSizeResponse *msg_resp = (NeonDbSizeResponse *) msg;
 
-				appendStringInfoString(&s, "{\"type\": \"ZenithDbSizeResponse\"");
+				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeResponse\"");
 				appendStringInfo(&s, ", \"db_size\": %ld}",
-								 msg_resp->db_size
-					);
+								 msg_resp->db_size);
 				appendStringInfoChar(&s, '}');
 
 				break;
@@ -494,7 +490,7 @@ PageIsEmptyHeapPage(char *buffer)
 }
 
 static void
-zenith_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer)
+neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer)
 {
 	XLogRecPtr	lsn = PageGetLSN(buffer);
 
@@ -551,8 +547,8 @@ zenith_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, 
 	{
 		/*
 		 * When PostgreSQL extends a relation, it calls smgrextend() with an
-		 * all-zeros pages, and we can just ignore that in Zenith. We do need
-		 * to remember the new size, though, so that smgrnblocks() returns the
+		 * all-zeros pages, and we can just ignore that in Neon. We do need to
+		 * remember the new size, though, so that smgrnblocks() returns the
 		 * right answer after the rel has been extended. We rely on the
 		 * relsize cache for that.
 		 *
@@ -616,12 +612,11 @@ zenith_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, 
 	SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forknum, blocknum);
 }
 
-
 /*
- *	zenith_init() -- Initialize private state
+ *	neon_init() -- Initialize private state
  */
 void
-zenith_init(void)
+neon_init(void)
 {
 	/* noop */
 #ifdef DEBUG_COMPARE_LOCAL
@@ -658,7 +653,7 @@ zm_adjust_lsn(XLogRecPtr lsn)
  * Return LSN for requesting pages and number of blocks from page server
  */
 static XLogRecPtr
-zenith_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockNumber blkno)
+neon_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockNumber blkno)
 {
 	XLogRecPtr	lsn;
 
@@ -666,14 +661,14 @@ zenith_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, Bloc
 	{
 		*latest = false;
 		lsn = GetXLogReplayRecPtr(NULL);
-		elog(DEBUG1, "zenith_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
+		elog(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 	}
 	else if (am_walsender)
 	{
 		*latest = true;
 		lsn = InvalidXLogRecPtr;
-		elog(DEBUG1, "am walsender zenith_get_request_lsn lsn 0 ");
+		elog(DEBUG1, "am walsender neon_get_request_lsn lsn 0 ");
 	}
 	else
 	{
@@ -687,7 +682,7 @@ zenith_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, Bloc
 		*latest = true;
 		lsn = GetLastWrittenLSN(rnode, forknum, blkno);
 		Assert(lsn != InvalidXLogRecPtr);
-		elog(DEBUG1, "zenith_get_request_lsn GetLastWrittenLSN lsn %X/%X ",
+		elog(DEBUG1, "neon_get_request_lsn GetLastWrittenLSN lsn %X/%X ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 
 		lsn = zm_adjust_lsn(lsn);
@@ -717,15 +712,14 @@ zenith_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, Bloc
 	return lsn;
 }
 
-
 /*
- *	zenith_exists() -- Does the physical file exist?
+ *	neon_exists() -- Does the physical file exist?
  */
 bool
-zenith_exists(SMgrRelation reln, ForkNumber forkNum)
+neon_exists(SMgrRelation reln, ForkNumber forkNum)
 {
 	bool		exists;
-	ZenithResponse *resp;
+	NeonResponse *resp;
 	BlockNumber n_blocks;
 	bool		latest;
 	XLogRecPtr	request_lsn;
@@ -777,26 +771,25 @@ zenith_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, REL_METADATA_PSEUDO_BLOCKNO);
 	{
-		ZenithExistsRequest request = {
-			.req.tag = T_ZenithExistsRequest,
+		NeonExistsRequest request = {
+			.req.tag = T_NeonExistsRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
 			.rnode = reln->smgr_rnode.node,
-			.forknum = forkNum
-		};
+		.forknum = forkNum};
 
 		resp = page_server_request(&request);
 	}
 
 	switch (resp->tag)
 	{
-		case T_ZenithExistsResponse:
-			exists = ((ZenithExistsResponse *) resp)->exists;
+		case T_NeonExistsResponse:
+			exists = ((NeonExistsResponse *) resp)->exists;
 			break;
 
-		case T_ZenithErrorResponse:
+		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
@@ -806,7 +799,7 @@ zenith_exists(SMgrRelation reln, ForkNumber forkNum)
 							forkNum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
-							   ((ZenithErrorResponse *) resp)->message)));
+							   ((NeonErrorResponse *) resp)->message)));
 			break;
 
 		default:
@@ -817,12 +810,12 @@ zenith_exists(SMgrRelation reln, ForkNumber forkNum)
 }
 
 /*
- *	zenith_create() -- Create a new relation on zenithd storage
+ *	neon_create() -- Create a new relation on neond storage
  *
  * If isRedo is true, it's okay for the relation to exist already.
  */
 void
-zenith_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
+neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 {
 	switch (reln->smgr_relpersistence)
 	{
@@ -866,7 +859,7 @@ zenith_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 }
 
 /*
- *	zenith_unlink() -- Unlink a relation.
+ *	neon_unlink() -- Unlink a relation.
  *
  * Note that we're passed a RelFileNodeBackend --- by the time this is called,
  * there won't be an SMgrRelation hashtable entry anymore.
@@ -884,7 +877,7 @@ zenith_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
  * we are usually not in a transaction anymore when this is called.
  */
 void
-zenith_unlink(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
+neon_unlink(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 {
 	/*
 	 * Might or might not exist locally, depending on whether it's an unlogged
@@ -899,7 +892,7 @@ zenith_unlink(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 }
 
 /*
- *	zenith_extend() -- Add a block to the specified relation.
+ *	neon_extend() -- Add a block to the specified relation.
  *
  *		The semantics are nearly the same as mdwrite(): write at the
  *		specified position.  However, this is to be used for the case of
@@ -908,8 +901,8 @@ zenith_unlink(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
  *		causes intervening file space to become filled with zeroes.
  */
 void
-zenith_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
-			  char *buffer, bool skipFsync)
+neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
+			char *buffer, bool skipFsync)
 {
 	XLogRecPtr	lsn;
 
@@ -951,7 +944,7 @@ zenith_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 					 errhint("This limit is defined by neon.max_cluster_size GUC")));
 	}
 
-	zenith_wallog_page(reln, forkNum, blkno, buffer);
+	neon_wallog_page(reln, forkNum, blkno, buffer);
 	set_cached_relsize(reln->smgr_rnode.node, forkNum, blkno + 1);
 
 	lsn = PageGetLSN(buffer);
@@ -971,10 +964,10 @@ zenith_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 }
 
 /*
- *  zenith_open() -- Initialize newly-opened relation.
+ *  neon_open() -- Initialize newly-opened relation.
  */
 void
-zenith_open(SMgrRelation reln)
+neon_open(SMgrRelation reln)
 {
 	/*
 	 * We don't have anything special to do here. Call mdopen() to let md.c
@@ -985,14 +978,14 @@ zenith_open(SMgrRelation reln)
 	mdopen(reln);
 
 	/* no work */
-	elog(SmgrTrace, "[ZENITH_SMGR] open noop");
+	elog(SmgrTrace, "[NEON_SMGR] open noop");
 }
 
 /*
- *	zenith_close() -- Close the specified relation, if it isn't closed already.
+ *	neon_close() -- Close the specified relation, if it isn't closed already.
  */
 void
-zenith_close(SMgrRelation reln, ForkNumber forknum)
+neon_close(SMgrRelation reln, ForkNumber forknum)
 {
 	/*
 	 * Let md.c close it, if it had it open. Doesn't hurt to do this even for
@@ -1003,19 +996,19 @@ zenith_close(SMgrRelation reln, ForkNumber forknum)
 
 
 /*
- *	zenith_reset_prefetch() -- reoe all previously rgistered prefeth requests
+ *	neon_reset_prefetch() -- reoe all previously rgistered prefeth requests
  */
 void
-zenith_reset_prefetch(SMgrRelation reln)
+neon_reset_prefetch(SMgrRelation reln)
 {
 	n_prefetch_requests = 0;
 }
 
 /*
- *	zenith_prefetch() -- Initiate asynchronous read of the specified block of a relation
+ *	neon_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
 bool
-zenith_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
 	switch (reln->smgr_relpersistence)
 	{
@@ -1046,14 +1039,14 @@ zenith_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 }
 
 /*
- * zenith_writeback() -- Tell the kernel to write pages back to storage.
+ * neon_writeback() -- Tell the kernel to write pages back to storage.
  *
  * This accepts a range of blocks because flushing several pages at once is
  * considerably more efficient than doing so individually.
  */
 void
-zenith_writeback(SMgrRelation reln, ForkNumber forknum,
-				 BlockNumber blocknum, BlockNumber nblocks)
+neon_writeback(SMgrRelation reln, ForkNumber forknum,
+			   BlockNumber blocknum, BlockNumber nblocks)
 {
 	switch (reln->smgr_relpersistence)
 	{
@@ -1075,7 +1068,7 @@ zenith_writeback(SMgrRelation reln, ForkNumber forknum,
 	}
 
 	/* not implemented */
-	elog(SmgrTrace, "[ZENITH_SMGR] writeback noop");
+	elog(SmgrTrace, "[NEON_SMGR] writeback noop");
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1084,14 +1077,14 @@ zenith_writeback(SMgrRelation reln, ForkNumber forknum,
 }
 
 /*
- * While function is defined in the zenith extension it's used within neon_test_utils directly.
+ * While function is defined in the neon extension it's used within neon_test_utils directly.
  * To avoid breaking tests in the runtime please keep function signature in sync.
  */
 void
-zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
-				   XLogRecPtr request_lsn, bool request_latest, char *buffer)
+neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+				 XLogRecPtr request_lsn, bool request_latest, char *buffer)
 {
-	ZenithResponse *resp;
+	NeonResponse *resp;
 	int			i;
 
 	/*
@@ -1103,12 +1096,12 @@ zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	for (i = n_prefetched_buffers; i < n_prefetch_responses; i++)
 	{
 		resp = page_server->receive();
-		if (resp->tag == T_ZenithGetPageResponse &&
+		if (resp->tag == T_NeonGetPageResponse &&
 			RelFileNodeEquals(prefetch_responses[i].rnode, rnode) &&
 			prefetch_responses[i].forkNum == forkNum &&
 			prefetch_responses[i].blockNum == blkno)
 		{
-			char	   *page = ((ZenithGetPageResponse *) resp)->page;
+			char	   *page = ((NeonGetPageResponse *) resp)->page;
 
 			/*
 			 * Check if prefetched page is still relevant. If it is updated by
@@ -1135,8 +1128,8 @@ zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	n_prefetch_responses = 0;
 	n_prefetch_misses += 1;
 	{
-		ZenithGetPageRequest request = {
-			.req.tag = T_ZenithGetPageRequest,
+		NeonGetPageRequest request = {
+			.req.tag = T_NeonGetPageRequest,
 			.req.latest = request_latest,
 			.req.lsn = request_lsn,
 			.rnode = rnode,
@@ -1147,14 +1140,14 @@ zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (n_prefetch_requests > 0)
 		{
 			/* Combine all prefetch requests with primary request */
-			page_server->send((ZenithRequest *) &request);
+			page_server->send((NeonRequest *) & request);
 			for (i = 0; i < n_prefetch_requests; i++)
 			{
 				request.rnode = prefetch_requests[i].rnode;
 				request.forknum = prefetch_requests[i].forkNum;
 				request.blkno = prefetch_requests[i].blockNum;
 				prefetch_responses[i] = prefetch_requests[i];
-				page_server->send((ZenithRequest *) &request);
+				page_server->send((NeonRequest *) & request);
 			}
 			page_server->flush();
 			n_prefetch_responses = n_prefetch_requests;
@@ -1164,16 +1157,16 @@ zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		}
 		else
 		{
-			resp = page_server->request((ZenithRequest *) &request);
+			resp = page_server->request((NeonRequest *) & request);
 		}
 	}
 	switch (resp->tag)
 	{
-		case T_ZenithGetPageResponse:
-			memcpy(buffer, ((ZenithGetPageResponse *) resp)->page, BLCKSZ);
+		case T_NeonGetPageResponse:
+			memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
 			break;
 
-		case T_ZenithErrorResponse:
+		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
@@ -1184,7 +1177,7 @@ zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 							forkNum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
-							   ((ZenithErrorResponse *) resp)->message)));
+							   ((NeonErrorResponse *) resp)->message)));
 			break;
 
 		default:
@@ -1195,11 +1188,11 @@ zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 }
 
 /*
- *	zenith_read() -- Read the specified block from a relation.
+ *	neon_read() -- Read the specified block from a relation.
  */
 void
-zenith_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
-			char *buffer)
+neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
+		  char *buffer)
 {
 	bool		latest;
 	XLogRecPtr	request_lsn;
@@ -1221,8 +1214,8 @@ zenith_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno);
-	zenith_read_at_lsn(reln->smgr_rnode.node, forkNum, blkno, request_lsn, latest, buffer);
+	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno);
+	neon_read_at_lsn(reln->smgr_rnode.node, forkNum, blkno, request_lsn, latest, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -1328,15 +1321,15 @@ hexdump_page(char *page)
 #endif
 
 /*
- *	zenith_write() -- Write the supplied block at the appropriate location.
+ *	neon_write() -- Write the supplied block at the appropriate location.
  *
  *		This is to be used only for updating already-existing blocks of a
  *		relation (ie, those before the current EOF).  To extend a relation,
  *		use mdextend().
  */
 void
-zenith_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			 char *buffer, bool skipFsync)
+neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+		   char *buffer, bool skipFsync)
 {
 	XLogRecPtr	lsn;
 
@@ -1372,7 +1365,7 @@ zenith_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	zenith_wallog_page(reln, forknum, blocknum, buffer);
+	neon_wallog_page(reln, forknum, blocknum, buffer);
 
 	lsn = PageGetLSN(buffer);
 	elog(SmgrTrace, "smgrwrite called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
@@ -1389,12 +1382,12 @@ zenith_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 }
 
 /*
- *	zenith_nblocks() -- Get the number of blocks stored in a relation.
+ *	neon_nblocks() -- Get the number of blocks stored in a relation.
  */
 BlockNumber
-zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
+neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 {
-	ZenithResponse *resp;
+	NeonResponse *resp;
 	BlockNumber n_blocks;
 	bool		latest;
 	XLogRecPtr	request_lsn;
@@ -1426,10 +1419,10 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 		return n_blocks;
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node, forknum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forknum, REL_METADATA_PSEUDO_BLOCKNO);
 	{
-		ZenithNblocksRequest request = {
-			.req.tag = T_ZenithNblocksRequest,
+		NeonNblocksRequest request = {
+			.req.tag = T_NeonNblocksRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
 			.rnode = reln->smgr_rnode.node,
@@ -1441,11 +1434,11 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 
 	switch (resp->tag)
 	{
-		case T_ZenithNblocksResponse:
-			n_blocks = ((ZenithNblocksResponse *) resp)->n_blocks;
+		case T_NeonNblocksResponse:
+			n_blocks = ((NeonNblocksResponse *) resp)->n_blocks;
 			break;
 
-		case T_ZenithErrorResponse:
+		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
@@ -1455,7 +1448,7 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 							forknum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
-							   ((ZenithErrorResponse *) resp)->message)));
+							   ((NeonErrorResponse *) resp)->message)));
 			break;
 
 		default:
@@ -1463,7 +1456,7 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 	}
 	update_cached_relsize(reln->smgr_rnode.node, forknum, n_blocks);
 
-	elog(SmgrTrace, "zenith_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
+	elog(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
 		 reln->smgr_rnode.node.spcNode,
 		 reln->smgr_rnode.node.dbNode,
 		 reln->smgr_rnode.node.relNode,
@@ -1476,21 +1469,21 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 }
 
 /*
- *	zenith_db_size() -- Get the size of the database in bytes.
+ *	neon_db_size() -- Get the size of the database in bytes.
  */
 int64
-zenith_dbsize(Oid dbNode)
+neon_dbsize(Oid dbNode)
 {
-	ZenithResponse *resp;
+	NeonResponse *resp;
 	int64		db_size;
 	XLogRecPtr	request_lsn;
 	bool		latest;
 	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
 
-	request_lsn = zenith_get_request_lsn(&latest, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
 	{
-		ZenithDbSizeRequest request = {
-			.req.tag = T_ZenithDbSizeRequest,
+		NeonDbSizeRequest request = {
+			.req.tag = T_NeonDbSizeRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
 			.dbNode = dbNode,
@@ -1501,25 +1494,25 @@ zenith_dbsize(Oid dbNode)
 
 	switch (resp->tag)
 	{
-		case T_ZenithDbSizeResponse:
-			db_size = ((ZenithDbSizeResponse *) resp)->db_size;
+		case T_NeonDbSizeResponse:
+			db_size = ((NeonDbSizeResponse *) resp)->db_size;
 			break;
 
-		case T_ZenithErrorResponse:
+		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read db size of db %u from page server at lsn %X/%08X",
 							dbNode,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
-							   ((ZenithErrorResponse *) resp)->message)));
+							   ((NeonErrorResponse *) resp)->message)));
 			break;
 
 		default:
 			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
 
-	elog(SmgrTrace, "zenith_dbsize: db %u (request LSN %X/%08X): %ld bytes",
+	elog(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
 		 dbNode,
 		 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 		 db_size);
@@ -1529,10 +1522,10 @@ zenith_dbsize(Oid dbNode)
 }
 
 /*
- *	zenith_truncate() -- Truncate relation to specified number of blocks.
+ *	neon_truncate() -- Truncate relation to specified number of blocks.
  */
 void
-zenith_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
+neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 {
 	XLogRecPtr	lsn;
 
@@ -1591,7 +1584,7 @@ zenith_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 }
 
 /*
- *	zenith_immedsync() -- Immediately sync a relation to stable storage.
+ *	neon_immedsync() -- Immediately sync a relation to stable storage.
  *
  * Note that only writes already issued are synced; this routine knows
  * nothing of dirty buffers that may exist inside the buffer manager.  We
@@ -1602,7 +1595,7 @@ zenith_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
  * segment may survive recovery, reintroducing unwanted data into the table.
  */
 void
-zenith_immedsync(SMgrRelation reln, ForkNumber forknum)
+neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 {
 	switch (reln->smgr_relpersistence)
 	{
@@ -1622,7 +1615,7 @@ zenith_immedsync(SMgrRelation reln, ForkNumber forknum)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	elog(SmgrTrace, "[ZENITH_SMGR] immedsync noop");
+	elog(SmgrTrace, "[NEON_SMGR] immedsync noop");
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1631,16 +1624,16 @@ zenith_immedsync(SMgrRelation reln, ForkNumber forknum)
 }
 
 /*
- * zenith_start_unlogged_build() -- Starting build operation on a rel.
+ * neon_start_unlogged_build() -- Starting build operation on a rel.
  *
  * Some indexes are built in two phases, by first populating the table with
  * regular inserts, using the shared buffer cache but skipping WAL-logging,
- * and WAL-logging the whole relation after it's done. Zenith relies on the
+ * and WAL-logging the whole relation after it's done. Neon relies on the
  * WAL to reconstruct pages, so we cannot use the page server in the
  * first phase when the changes are not logged.
  */
 static void
-zenith_start_unlogged_build(SMgrRelation reln)
+neon_start_unlogged_build(SMgrRelation reln)
 {
 	/*
 	 * Currently, there can be only one unlogged relation build operation in
@@ -1692,13 +1685,13 @@ zenith_start_unlogged_build(SMgrRelation reln)
 }
 
 /*
- * zenith_finish_unlogged_build_phase_1()
+ * neon_finish_unlogged_build_phase_1()
  *
  * Call this after you have finished populating a relation in unlogged mode,
  * before you start WAL-logging it.
  */
 static void
-zenith_finish_unlogged_build_phase_1(SMgrRelation reln)
+neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 {
 	Assert(unlogged_build_rel == reln);
 
@@ -1718,7 +1711,7 @@ zenith_finish_unlogged_build_phase_1(SMgrRelation reln)
 }
 
 /*
- * zenith_end_unlogged_build() -- Finish an unlogged rel build.
+ * neon_end_unlogged_build() -- Finish an unlogged rel build.
  *
  * Call this after you have finished WAL-logging an relation that was
  * first populated without WAL-logging.
@@ -1727,7 +1720,7 @@ zenith_finish_unlogged_build_phase_1(SMgrRelation reln)
  * WAL-logged and is present in the page server.
  */
 static void
-zenith_end_unlogged_build(SMgrRelation reln)
+neon_end_unlogged_build(SMgrRelation reln)
 {
 	Assert(unlogged_build_rel == reln);
 
@@ -1769,7 +1762,7 @@ zenith_end_unlogged_build(SMgrRelation reln)
 }
 
 static void
-AtEOXact_zenith(XactEvent event, void *arg)
+AtEOXact_neon(XactEvent event, void *arg)
 {
 	switch (event)
 	{
@@ -1802,47 +1795,46 @@ AtEOXact_zenith(XactEvent event, void *arg)
 	}
 }
 
-static const struct f_smgr zenith_smgr =
+static const struct f_smgr neon_smgr =
 {
-	.smgr_init = zenith_init,
+	.smgr_init = neon_init,
 	.smgr_shutdown = NULL,
-	.smgr_open = zenith_open,
-	.smgr_close = zenith_close,
-	.smgr_create = zenith_create,
-	.smgr_exists = zenith_exists,
-	.smgr_unlink = zenith_unlink,
-	.smgr_extend = zenith_extend,
-	.smgr_prefetch = zenith_prefetch,
-	.smgr_reset_prefetch = zenith_reset_prefetch,
-	.smgr_read = zenith_read,
-	.smgr_write = zenith_write,
-	.smgr_writeback = zenith_writeback,
-	.smgr_nblocks = zenith_nblocks,
-	.smgr_truncate = zenith_truncate,
-	.smgr_immedsync = zenith_immedsync,
+	.smgr_open = neon_open,
+	.smgr_close = neon_close,
+	.smgr_create = neon_create,
+	.smgr_exists = neon_exists,
+	.smgr_unlink = neon_unlink,
+	.smgr_extend = neon_extend,
+	.smgr_prefetch = neon_prefetch,
+	.smgr_reset_prefetch = neon_reset_prefetch,
+	.smgr_read = neon_read,
+	.smgr_write = neon_write,
+	.smgr_writeback = neon_writeback,
+	.smgr_nblocks = neon_nblocks,
+	.smgr_truncate = neon_truncate,
+	.smgr_immedsync = neon_immedsync,
 
-	.smgr_start_unlogged_build = zenith_start_unlogged_build,
-	.smgr_finish_unlogged_build_phase_1 = zenith_finish_unlogged_build_phase_1,
-	.smgr_end_unlogged_build = zenith_end_unlogged_build,
+	.smgr_start_unlogged_build = neon_start_unlogged_build,
+	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
+	.smgr_end_unlogged_build = neon_end_unlogged_build,
 };
 
-
 const f_smgr *
-smgr_zenith(BackendId backend, RelFileNode rnode)
+smgr_neon(BackendId backend, RelFileNode rnode)
 {
 
 	/* Don't use page server for temp relations */
 	if (backend != InvalidBackendId)
 		return smgr_standard(backend, rnode);
 	else
-		return &zenith_smgr;
+		return &neon_smgr;
 }
 
 void
-smgr_init_zenith(void)
+smgr_init_neon(void)
 {
-	RegisterXactCallback(AtEOXact_zenith, NULL);
+	RegisterXactCallback(AtEOXact_neon, NULL);
 
 	smgr_init_standard();
-	zenith_init();
+	neon_init();
 }

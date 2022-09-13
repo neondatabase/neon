@@ -3,7 +3,7 @@ from contextlib import closing
 import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import ZTimelineId
+from fixtures.types import TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -25,7 +25,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
-    timeline = ZTimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
+    timeline = TimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
 
     # Create table
     main_cur.execute("CREATE TABLE foo (t text)")

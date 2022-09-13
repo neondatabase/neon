@@ -39,10 +39,10 @@ use crate::tenant_config::TenantConfOpt;
 
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 use utils::{
+    id::{TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
     simple_rcu::{Rcu, RcuReadGuard},
-    zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::repository::GcResult;
@@ -58,8 +58,8 @@ pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    pub tenant_id: ZTenantId,
-    pub timeline_id: ZTimelineId,
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
 
     pub layers: RwLock<LayerMap>,
 
@@ -312,7 +312,7 @@ impl Timeline {
     }
 
     /// Get the ancestor's timeline id
-    pub fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId> {
+    pub fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
         self.ancestor_timeline
             .as_ref()
             .map(|ancestor| ancestor.timeline_id)
@@ -531,8 +531,8 @@ impl Timeline {
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        timeline_id: ZTimelineId,
-        tenant_id: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_layers: bool,
     ) -> Timeline {
@@ -1250,7 +1250,7 @@ impl Timeline {
                 None
             };
 
-            let ancestor_timelineid = self
+            let ancestor_timeline_id = self
                 .ancestor_timeline
                 .as_ref()
                 .map(|ancestor| ancestor.timeline_id);
@@ -1258,7 +1258,7 @@ impl Timeline {
             let metadata = TimelineMetadata::new(
                 disk_consistent_lsn,
                 ondisk_prev_record_lsn,
-                ancestor_timelineid,
+                ancestor_timeline_id,
                 self.ancestor_lsn,
                 *self.latest_gc_cutoff_lsn.read(),
                 self.initdb_lsn,

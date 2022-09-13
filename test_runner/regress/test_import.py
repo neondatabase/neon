@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
     wait_for_last_record_lsn,
     wait_for_upload,
 )
-from fixtures.types import Lsn, ZTenantId, ZTimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 
 
@@ -69,8 +69,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         end_lsn = manifest["WAL-Ranges"][0]["End-LSN"]
 
     node_name = "import_from_vanilla"
-    tenant = ZTenantId.generate()
-    timeline = ZTimelineId.generate()
+    tenant = TenantId.generate()
+    timeline = TimelineId.generate()
 
     # Set up pageserver for import
     neon_env_builder.enable_local_fs_remote_storage()
@@ -195,7 +195,7 @@ def _generate_data(num_rows: int, pg: Postgres) -> Lsn:
 
 
 def _import(
-    expected_num_rows: int, lsn: Lsn, env: NeonEnv, pg_bin: PgBin, timeline: ZTimelineId
+    expected_num_rows: int, lsn: Lsn, env: NeonEnv, pg_bin: PgBin, timeline: TimelineId
 ) -> str:
     """Test importing backup data to the pageserver.
 
@@ -228,9 +228,9 @@ def _import(
     # start the pageserver again
     env.pageserver.start()
 
-    # Import using another tenantid, because we use the same pageserver.
+    # Import using another tenant_id, because we use the same pageserver.
     # TODO Create another pageserver to make test more realistic.
-    tenant = ZTenantId.generate()
+    tenant = TenantId.generate()
 
     # Import to pageserver
     node_name = "import_from_pageserver"

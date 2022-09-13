@@ -14,7 +14,7 @@ use tracing::*;
 use crate::control_file_upgrade::upgrade_control_file;
 use crate::safekeeper::{SafeKeeperState, SK_FORMAT_VERSION, SK_MAGIC};
 use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
-use utils::{bin_ser::LeSer, zid::ZTenantTimelineId};
+use utils::{bin_ser::LeSer, id::TenantTimelineId};
 
 use crate::SafeKeeperConf;
 
@@ -55,7 +55,7 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
-    pub fn restore_new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
+    pub fn restore_new(zttid: &TenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
         let timeline_dir = conf.timeline_dir(zttid);
         let tenant_id = zttid.tenant_id.to_string();
         let timeline_id = zttid.timeline_id.to_string();
@@ -72,7 +72,7 @@ impl FileStorage {
     }
 
     pub fn create_new(
-        zttid: &ZTenantTimelineId,
+        zttid: &TenantTimelineId,
         conf: &SafeKeeperConf,
         state: SafeKeeperState,
     ) -> Result<FileStorage> {
@@ -115,7 +115,7 @@ impl FileStorage {
     // Load control file for given zttid at path specified by conf.
     pub fn load_control_file_conf(
         conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
+        zttid: &TenantTimelineId,
     ) -> Result<SafeKeeperState> {
         let path = conf.timeline_dir(zttid).join(CONTROL_FILE_NAME);
         Self::load_control_file(path)
@@ -252,7 +252,7 @@ mod test {
     use crate::{safekeeper::SafeKeeperState, SafeKeeperConf};
     use anyhow::Result;
     use std::fs;
-    use utils::{lsn::Lsn, zid::ZTenantTimelineId};
+    use utils::{id::TenantTimelineId, lsn::Lsn};
 
     fn stub_conf() -> SafeKeeperConf {
         let workdir = tempfile::tempdir().unwrap().into_path();
@@ -264,7 +264,7 @@ mod test {
 
     fn load_from_control_file(
         conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
+        zttid: &TenantTimelineId,
     ) -> Result<(FileStorage, SafeKeeperState)> {
         fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
         Ok((
@@ -275,7 +275,7 @@ mod test {
 
     fn create(
         conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
+        zttid: &TenantTimelineId,
     ) -> Result<(FileStorage, SafeKeeperState)> {
         fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
         let state = SafeKeeperState::empty();
@@ -286,7 +286,7 @@ mod test {
     #[test]
     fn test_read_write_safekeeper_state() {
         let conf = stub_conf();
-        let zttid = ZTenantTimelineId::generate();
+        let zttid = TenantTimelineId::generate();
         {
             let (mut storage, mut state) = create(&conf, &zttid).expect("failed to create state");
             // change something
@@ -301,7 +301,7 @@ mod test {
     #[test]
     fn test_safekeeper_state_checksum_mismatch() {
         let conf = stub_conf();
-        let zttid = ZTenantTimelineId::generate();
+        let zttid = TenantTimelineId::generate();
         {
             let (mut storage, mut state) = create(&conf, &zttid).expect("failed to read state");
 

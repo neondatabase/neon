@@ -21,9 +21,9 @@ use tokio::sync::mpsc::Sender;
 use tracing::*;
 
 use utils::{
+    id::{NodeId, TenantId, TenantTimelineId},
     lsn::Lsn,
     pq_proto::ReplicationFeedback,
-    zid::{NodeId, ZTenantId, ZTenantTimelineId},
 };
 
 use crate::control_file;
@@ -98,7 +98,7 @@ impl SharedState {
     /// Initialize timeline state, creating control file
     fn create(
         conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
+        zttid: &TenantTimelineId,
         peer_ids: Vec<NodeId>,
     ) -> Result<Self> {
         let state = SafeKeeperState::new(zttid, peer_ids);
@@ -119,7 +119,7 @@ impl SharedState {
 
     /// Restore SharedState from control file.
     /// If file doesn't exist, bails out.
-    fn restore(conf: &SafeKeeperConf, zttid: &ZTenantTimelineId) -> Result<Self> {
+    fn restore(conf: &SafeKeeperConf, zttid: &TenantTimelineId) -> Result<Self> {
         let control_store = control_file::FileStorage::restore_new(zttid, conf)?;
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
 
@@ -143,7 +143,7 @@ impl SharedState {
 
     /// Mark timeline active/inactive and return whether s3 offloading requires
     /// start/stop action.
-    fn update_status(&mut self, ttid: ZTenantTimelineId) -> bool {
+    fn update_status(&mut self, ttid: TenantTimelineId) -> bool {
         let is_active = self.is_active();
         if self.active != is_active {
             info!("timeline {} active={} now", ttid, is_active);
@@ -213,7 +213,7 @@ impl SharedState {
             //
             // To choose what feedback to use and resend to compute node,
             // we need to know which pageserver compute node considers to be main.
-            // See https://github.com/zenithdb/zenith/issues/1171
+            // See https://github.com/neondatabase/neon/issues/1171
             //
             if let Some(pageserver_feedback) = state.pageserver_feedback {
                 if let Some(acc_feedback) = acc.pageserver_feedback {
@@ -227,7 +227,7 @@ impl SharedState {
 
                 // last lsn received by pageserver
                 // FIXME if multiple pageservers are streaming WAL, last_received_lsn must be tracked per pageserver.
-                // See https://github.com/zenithdb/zenith/issues/1171
+                // See https://github.com/neondatabase/neon/issues/1171
                 acc.last_received_lsn = Lsn::from(pageserver_feedback.ps_writelsn);
 
                 // When at least one pageserver has preserved data up to remote_consistent_lsn,
@@ -256,11 +256,11 @@ impl SharedState {
 
 /// Database instance (tenant)
 pub struct Timeline {
-    pub zttid: ZTenantTimelineId,
+    pub zttid: TenantTimelineId,
     /// Sending here asks for wal backup launcher attention (start/stop
     /// offloading). Sending zttid instead of concrete command allows to do
     /// sending without timeline lock.
-    wal_backup_launcher_tx: Sender<ZTenantTimelineId>,
+    wal_backup_launcher_tx: Sender<TenantTimelineId>,
     commit_lsn_watch_tx: watch::Sender<Lsn>,
     /// For breeding receivers.
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
@@ -269,8 +269,8 @@ pub struct Timeline {
 
 impl Timeline {
     fn new(
-        zttid: ZTenantTimelineId,
-        wal_backup_launcher_tx: Sender<ZTenantTimelineId>,
+        zttid: TenantTimelineId,
+        wal_backup_launcher_tx: Sender<TenantTimelineId>,
         shared_state: SharedState,
     ) -> Timeline {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
@@ -539,13 +539,13 @@ impl Timeline {
 
 // Utilities needed by various Connection-like objects
 pub trait TimelineTools {
-    fn set(&mut self, conf: &SafeKeeperConf, zttid: ZTenantTimelineId, create: bool) -> Result<()>;
+    fn set(&mut self, conf: &SafeKeeperConf, zttid: TenantTimelineId, create: bool) -> Result<()>;
 
     fn get(&self) -> &Arc<Timeline>;
 }
 
 impl TimelineTools for Option<Arc<Timeline>> {
-    fn set(&mut self, conf: &SafeKeeperConf, zttid: ZTenantTimelineId, create: bool) -> Result<()> {
+    fn set(&mut self, conf: &SafeKeeperConf, zttid: TenantTimelineId, create: bool) -> Result<()> {
         *self = Some(GlobalTimelines::get(conf, zttid, create)?);
         Ok(())
     }
@@ -556,8 +556,8 @@ impl TimelineTools for Option<Arc<Timeline>> {
 }
 
 struct GlobalTimelinesState {
-    timelines: HashMap<ZTenantTimelineId, Arc<Timeline>>,
-    wal_backup_launcher_tx: Option<Sender<ZTenantTimelineId>>,
+    timelines: HashMap<TenantTimelineId, Arc<Timeline>>,
+    wal_backup_launcher_tx: Option<Sender<TenantTimelineId>>,
 }
 
 static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
@@ -577,7 +577,7 @@ pub struct TimelineDeleteForceResult {
 pub struct GlobalTimelines;
 
 impl GlobalTimelines {
-    pub fn init(wal_backup_launcher_tx: Sender<ZTenantTimelineId>) {
+    pub fn init(wal_backup_launcher_tx: Sender<TenantTimelineId>) {
         let mut state = TIMELINES_STATE.lock().unwrap();
         assert!(state.wal_backup_launcher_tx.is_none());
         state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
@@ -586,7 +586,7 @@ impl GlobalTimelines {
     fn create_internal(
         mut state: MutexGuard<GlobalTimelinesState>,
         conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
+        zttid: TenantTimelineId,
         peer_ids: Vec<NodeId>,
     ) -> Result<Arc<Timeline>> {
         match state.timelines.get(&zttid) {
@@ -612,7 +612,7 @@ impl GlobalTimelines {
 
     pub fn create(
         conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
+        zttid: TenantTimelineId,
         peer_ids: Vec<NodeId>,
     ) -> Result<Arc<Timeline>> {
         let state = TIMELINES_STATE.lock().unwrap();
@@ -623,7 +623,7 @@ impl GlobalTimelines {
     /// If control file doesn't exist and create=false, bails out.
     pub fn get(
         conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
+        zttid: TenantTimelineId,
         create: bool,
     ) -> Result<Arc<Timeline>> {
         let _enter = info_span!("", timeline = %zttid.timeline_id).entered();
@@ -664,13 +664,12 @@ impl GlobalTimelines {
     }
 
     /// Get loaded timeline, if it exists.
-    pub fn get_loaded(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
+    pub fn get_loaded(zttid: TenantTimelineId) -> Option<Arc<Timeline>> {
         let state = TIMELINES_STATE.lock().unwrap();
         state.timelines.get(&zttid).map(Arc::clone)
     }
 
-    /// Get ZTenantTimelineIDs of all active timelines.
-    pub fn get_active_timelines() -> HashSet<ZTenantTimelineId> {
+    pub fn get_active_timelines() -> HashSet<TenantTimelineId> {
         let state = TIMELINES_STATE.lock().unwrap();
         state
             .timelines
@@ -692,7 +691,7 @@ impl GlobalTimelines {
 
     fn delete_force_internal(
         conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
+        zttid: &TenantTimelineId,
         was_active: bool,
     ) -> Result<TimelineDeleteForceResult> {
         match std::fs::remove_dir_all(conf.timeline_dir(zttid)) {
@@ -721,7 +720,7 @@ impl GlobalTimelines {
     /// TODO: ensure all of the above never happens.
     pub async fn delete_force(
         conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
+        zttid: &TenantTimelineId,
     ) -> Result<TimelineDeleteForceResult> {
         info!("deleting timeline {}", zttid);
         let timeline = TIMELINES_STATE.lock().unwrap().timelines.remove(zttid);
@@ -737,8 +736,8 @@ impl GlobalTimelines {
     /// There may be a race if new timelines are created simultaneously.
     pub async fn delete_force_all_for_tenant(
         conf: &SafeKeeperConf,
-        tenant_id: &ZTenantId,
-    ) -> Result<HashMap<ZTenantTimelineId, TimelineDeleteForceResult>> {
+        tenant_id: &TenantId,
+    ) -> Result<HashMap<TenantTimelineId, TimelineDeleteForceResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
         let mut to_delete = HashMap::new();
         {

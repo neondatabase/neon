@@ -1,7 +1,7 @@
 import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import ZTimelineId
+from fixtures.types import TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -27,7 +27,7 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     cur = pg_conn.cursor()
 
     # Get the timeline ID of our branch. We need it for the 'do_gc' command
-    timeline = ZTimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
+    timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
     psconn = env.pageserver.connect()
     pscur = psconn.cursor(cursor_factory=psycopg2.extras.DictCursor)

@@ -10,12 +10,12 @@ clap = "3.0"
 env_logger = "0.9"
 hyper = { version = "0.14", features = ["full"] }
 log = { version = "0.4", features = ["std", "serde"] }
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 tar = "0.4"
 tokio = { version = "1.17", features = ["macros", "rt", "rt-multi-thread"] }
-tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 url = "2.2.2"
 workspace_hack = { version = "0.1", path = "../workspace_hack" }

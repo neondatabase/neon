@@ -7,7 +7,7 @@
 //! must be page images or WAL records with the 'will_init' flag set, so that
 //! they can be replayed without referring to an older page version.
 //!
-//! The delta files are stored in timelines/<timelineid> directory.  Currently,
+//! The delta files are stored in timelines/<timeline_id> directory.  Currently,
 //! there are no subdirectories, and each delta file is named like this:
 //!
 //!    <key start>-<key end>__<start LSN>-<end LSN
@@ -48,8 +48,8 @@ use tracing::*;
 
 use utils::{
     bin_ser::BeSer,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 ///
@@ -60,12 +60,12 @@ use utils::{
 ///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
-    /// Magic value to identify this as a zenith delta file. Always DELTA_FILE_MAGIC.
+    /// Magic value to identify this as a neon delta file. Always DELTA_FILE_MAGIC.
     magic: u16,
     format_version: u16,
 
-    tenantid: ZTenantId,
-    timelineid: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     key_range: Range<Key>,
     lsn_range: Range<Lsn>,
 
@@ -81,8 +81,8 @@ impl From<&DeltaLayer> for Summary {
             magic: DELTA_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
 
-            tenantid: layer.tenantid,
-            timelineid: layer.timelineid,
+            tenant_id: layer.tenant_id,
+            timeline_id: layer.timeline_id,
             key_range: layer.key_range.clone(),
             lsn_range: layer.lsn_range.clone(),
 
@@ -173,8 +173,8 @@ impl DeltaKey {
 pub struct DeltaLayer {
     path_or_conf: PathOrConf,
 
-    pub tenantid: ZTenantId,
-    pub timelineid: ZTimelineId,
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
     pub key_range: Range<Key>,
     pub lsn_range: Range<Lsn>,
 
@@ -194,12 +194,12 @@ pub struct DeltaLayerInner {
 }
 
 impl Layer for DeltaLayer {
-    fn get_tenant_id(&self) -> ZTenantId {
-        self.tenantid
+    fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
     }
 
-    fn get_timeline_id(&self) -> ZTimelineId {
-        self.timelineid
+    fn get_timeline_id(&self) -> TimelineId {
+        self.timeline_id
     }
 
     fn get_key_range(&self) -> Range<Key> {
@@ -344,8 +344,8 @@ impl Layer for DeltaLayer {
     fn dump(&self, verbose: bool) -> Result<()> {
         println!(
             "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
-            self.tenantid,
-            self.timelineid,
+            self.tenant_id,
+            self.timeline_id,
             self.key_range.start,
             self.key_range.end,
             self.lsn_range.start,
@@ -419,22 +419,22 @@ impl Layer for DeltaLayer {
 impl DeltaLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         fname: &DeltaFileName,
     ) -> PathBuf {
         match path_or_conf {
             PathOrConf::Path(path) => path.clone(),
             PathOrConf::Conf(conf) => conf
-                .timeline_path(&timelineid, &tenantid)
+                .timeline_path(&timeline_id, &tenant_id)
                 .join(fname.to_string()),
         }
     }
 
     fn temp_path_for(
         conf: &PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> PathBuf {
@@ -444,7 +444,7 @@ impl DeltaLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&timelineid, &tenantid).join(format!(
+        conf.timeline_path(&timeline_id, &tenant_id).join(format!(
             "{}-XXX__{:016X}-{:016X}.{}.{}",
             key_start,
             u64::from(lsn_range.start),
@@ -535,14 +535,14 @@ impl DeltaLayer {
     /// Create a DeltaLayer struct representing an existing file on disk.
     pub fn new(
         conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         filename: &DeltaFileName,
     ) -> DeltaLayer {
         DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
-            timelineid,
-            tenantid,
+            timeline_id,
+            tenant_id,
             key_range: filename.key_range.clone(),
             lsn_range: filename.lsn_range.clone(),
             inner: RwLock::new(DeltaLayerInner {
@@ -568,8 +568,8 @@ impl DeltaLayer {
 
         Ok(DeltaLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
-            timelineid: summary.timelineid,
-            tenantid: summary.tenantid,
+            timeline_id: summary.timeline_id,
+            tenant_id: summary.tenant_id,
             key_range: summary.key_range,
             lsn_range: summary.lsn_range,
             inner: RwLock::new(DeltaLayerInner {
@@ -592,8 +592,8 @@ impl DeltaLayer {
     pub fn path(&self) -> PathBuf {
         Self::path_for(
             &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
+            self.timeline_id,
+            self.tenant_id,
             &self.layer_name(),
         )
     }
@@ -613,8 +613,8 @@ impl DeltaLayer {
 pub struct DeltaLayerWriter {
     conf: &'static PageServerConf,
     path: PathBuf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
+    timeline_id: TimelineId,
+    tenant_id: TenantId,
 
     key_start: Key,
     lsn_range: Range<Lsn>,
@@ -630,8 +630,8 @@ impl DeltaLayerWriter {
     ///
     pub fn new(
         conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         key_start: Key,
         lsn_range: Range<Lsn>,
     ) -> Result<DeltaLayerWriter> {
@@ -641,7 +641,7 @@ impl DeltaLayerWriter {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path = DeltaLayer::temp_path_for(conf, timelineid, tenantid, key_start, &lsn_range);
+        let path = DeltaLayer::temp_path_for(conf, timeline_id, tenant_id, key_start, &lsn_range);
 
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
@@ -656,8 +656,8 @@ impl DeltaLayerWriter {
         Ok(DeltaLayerWriter {
             conf,
             path,
-            timelineid,
-            tenantid,
+            timeline_id,
+            tenant_id,
             key_start,
             lsn_range,
             tree: tree_builder,
@@ -718,8 +718,8 @@ impl DeltaLayerWriter {
         let summary = Summary {
             magic: DELTA_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenantid: self.tenantid,
-            timelineid: self.timelineid,
+            tenant_id: self.tenant_id,
+            timeline_id: self.timeline_id,
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
             index_start_blk,
@@ -733,8 +733,8 @@ impl DeltaLayerWriter {
         // set inner.file here. The first read will have to re-open it.
         let layer = DeltaLayer {
             path_or_conf: PathOrConf::Conf(self.conf),
-            tenantid: self.tenantid,
-            timelineid: self.timelineid,
+            tenant_id: self.tenant_id,
+            timeline_id: self.timeline_id,
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
             inner: RwLock::new(DeltaLayerInner {
@@ -753,8 +753,8 @@ impl DeltaLayerWriter {
         // FIXME: throw an error instead?
         let final_path = DeltaLayer::path_for(
             &PathOrConf::Conf(self.conf),
-            self.timelineid,
-            self.tenantid,
+            self.timeline_id,
+            self.tenant_id,
             &DeltaFileName {
                 key_range: self.key_start..key_end,
                 lsn_range: self.lsn_range,

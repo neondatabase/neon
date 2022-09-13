@@ -19,7 +19,7 @@ from fixtures.neon_fixtures import (
     wait_for_last_record_lsn,
     wait_for_upload,
 )
-from fixtures.types import Lsn, ZTenantId, ZTimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 
 
 async def tenant_workload(env: NeonEnv, pg: Postgres):
@@ -58,7 +58,7 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
 
     env = neon_env_builder.init_start()
 
-    tenants_pgs: List[Tuple[ZTenantId, Postgres]] = []
+    tenants_pgs: List[Tuple[TenantId, Postgres]] = []
 
     for _ in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly
@@ -83,8 +83,8 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
         res = pg.safe_psql_many(
             ["SHOW neon.tenant_id", "SHOW neon.timeline_id", "SELECT pg_current_wal_flush_lsn()"]
         )
-        tenant_id = ZTenantId(res[0][0][0])
-        timeline_id = ZTimelineId(res[1][0][0])
+        tenant_id = TenantId(res[0][0][0])
+        timeline_id = TimelineId(res[1][0][0])
         current_lsn = Lsn(res[2][0][0])
 
         # wait until pageserver receives all the data

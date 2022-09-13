@@ -8,7 +8,7 @@ use metrics::{
     Gauge, IntGaugeVec,
 };
 use postgres_ffi::XLogSegNo;
-use utils::{lsn::Lsn, zid::ZTenantTimelineId};
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     safekeeper::{SafeKeeperState, SafekeeperMemState},
@@ -16,7 +16,7 @@ use crate::{
 };
 
 pub struct FullTimelineInfo {
-    pub zttid: ZTenantTimelineId,
+    pub zttid: TenantTimelineId,
     pub replicas: Vec<ReplicaState>,
     pub wal_backup_active: bool,
     pub timeline_is_active: bool,

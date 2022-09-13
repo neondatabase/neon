@@ -2,7 +2,7 @@ from contextlib import closing
 
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserverApiException
-from fixtures.types import ZTenantId
+from fixtures.types import TenantId
 
 
 def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
@@ -13,7 +13,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
 
     tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant)
     tenant_http_client = env.pageserver.http_client(tenant_token)
-    invalid_tenant_token = env.auth_keys.generate_tenant_token(ZTenantId.generate())
+    invalid_tenant_token = env.auth_keys.generate_tenant_token(TenantId.generate())
     invalid_tenant_http_client = env.pageserver.http_client(invalid_tenant_token)
 
     management_token = env.auth_keys.generate_management_token()

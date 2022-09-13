@@ -4,7 +4,7 @@
 //! The functions here are responsible for locating the correct layer for the
 //! get/put call, walking back the timeline branching history as needed.
 //!
-//! The files are stored in the .neon/tenants/<tenantid>/timelines/<timelineid>
+//! The files are stored in the .neon/tenants/<tenant_id>/timelines/<timeline_id>
 //! directory. See docs/pageserver-storage.md for how the files are managed.
 //! In addition to the layer files, there is a metadata file in the same
 //! directory that contains information about the timeline, in particular its
@@ -48,8 +48,8 @@ use crate::CheckpointConfig;
 use toml_edit;
 use utils::{
     crashsafe_dir,
+    id::{TenantId, TimelineId},
     lsn::{Lsn, RecordLsn},
-    zid::{ZTenantId, ZTimelineId},
 };
 
 mod blob_io;
@@ -80,7 +80,7 @@ pub use crate::tenant::metadata::save_metadata;
 // re-export for use in walreceiver
 pub use crate::tenant::timeline::WalReceiverInfo;
 
-/// Parts of the `.neon/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
+/// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
 ///
@@ -98,8 +98,8 @@ pub struct Tenant {
     // This is necessary to allow global config updates.
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    tenant_id: ZTenantId,
-    timelines: Mutex<HashMap<ZTimelineId, Arc<Timeline>>>,
+    tenant_id: TenantId,
+    timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
@@ -134,7 +134,7 @@ pub enum TenantState {
 impl Tenant {
     /// Get Timeline handle for given zenith timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
-    pub fn get_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<Arc<Timeline>> {
+    pub fn get_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<Arc<Timeline>> {
         self.timelines
             .lock()
             .unwrap()
@@ -151,7 +151,7 @@ impl Tenant {
 
     /// Lists timelines the tenant contains.
     /// Up to tenant's implementation to omit certain timelines that ar not considered ready for use.
-    pub fn list_timelines(&self) -> Vec<(ZTimelineId, Arc<Timeline>)> {
+    pub fn list_timelines(&self) -> Vec<(TimelineId, Arc<Timeline>)> {
         self.timelines
             .lock()
             .unwrap()
@@ -164,7 +164,7 @@ impl Tenant {
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
     pub fn create_empty_timeline(
         &self,
-        new_timeline_id: ZTimelineId,
+        new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
         // XXX: keep the lock to avoid races during timeline creation
@@ -207,8 +207,8 @@ impl Tenant {
     /// Branch a timeline
     pub fn branch_timeline(
         &self,
-        src: ZTimelineId,
-        dst: ZTimelineId,
+        src: TimelineId,
+        dst: TimelineId,
         start_lsn: Option<Lsn>,
     ) -> Result<Arc<Timeline>> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
@@ -302,14 +302,14 @@ impl Tenant {
     /// this function is periodically called by gc task.
     /// also it can be explicitly requested through page server api 'do_gc' command.
     ///
-    /// 'timelineid' specifies the timeline to GC, or None for all.
+    /// 'target_timeline_id' specifies the timeline to GC, or None for all.
     /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
     /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
     /// to make tests more deterministic.
     /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
     pub fn gc_iteration(
         &self,
-        target_timeline_id: Option<ZTimelineId>,
+        target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
@@ -337,13 +337,13 @@ impl Tenant {
         let timelines = self.timelines.lock().unwrap();
         let timelines_to_compact = timelines
             .iter()
-            .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
+            .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
             .collect::<Vec<_>>();
         drop(timelines);
 
-        for (timelineid, timeline) in &timelines_to_compact {
+        for (timeline_id, timeline) in &timelines_to_compact {
             let _entered =
-                info_span!("compact", timeline = %timelineid, tenant = %self.tenant_id).entered();
+                info_span!("compact", timeline = %timeline_id, tenant = %self.tenant_id).entered();
             timeline.compact()?;
         }
 
@@ -362,13 +362,13 @@ impl Tenant {
         let timelines = self.timelines.lock().unwrap();
         let timelines_to_compact = timelines
             .iter()
-            .map(|(timelineid, timeline)| (*timelineid, Arc::clone(timeline)))
+            .map(|(timeline_id, timeline)| (*timeline_id, Arc::clone(timeline)))
             .collect::<Vec<_>>();
         drop(timelines);
 
-        for (timelineid, timeline) in &timelines_to_compact {
+        for (timeline_id, timeline) in &timelines_to_compact {
             let _entered =
-                info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenant_id)
+                info_span!("checkpoint", timeline = %timeline_id, tenant = %self.tenant_id)
                     .entered();
             timeline.checkpoint(CheckpointConfig::Flush)?;
         }
@@ -377,7 +377,7 @@ impl Tenant {
     }
 
     /// Removes timeline-related in-memory data
-    pub fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    pub fn delete_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<()> {
         // in order to be retriable detach needs to be idempotent
         // (or at least to a point that each time the detach is called it can make progress)
         let mut timelines = self.timelines.lock().unwrap();
@@ -416,7 +416,7 @@ impl Tenant {
 
     pub fn init_attach_timelines(
         &self,
-        timelines: HashMap<ZTimelineId, TimelineMetadata>,
+        timelines: HashMap<TimelineId, TimelineMetadata>,
     ) -> anyhow::Result<()> {
         let sorted_timelines = if timelines.len() == 1 {
             timelines.into_iter().collect()
@@ -505,13 +505,13 @@ impl Tenant {
 /// perform a topological sort, so that the parent of each timeline comes
 /// before the children.
 fn tree_sort_timelines(
-    timelines: HashMap<ZTimelineId, TimelineMetadata>,
-) -> Result<Vec<(ZTimelineId, TimelineMetadata)>> {
+    timelines: HashMap<TimelineId, TimelineMetadata>,
+) -> Result<Vec<(TimelineId, TimelineMetadata)>> {
     let mut result = Vec::with_capacity(timelines.len());
 
     let mut now = Vec::with_capacity(timelines.len());
     // (ancestor, children)
-    let mut later: HashMap<ZTimelineId, Vec<(ZTimelineId, TimelineMetadata)>> =
+    let mut later: HashMap<TimelineId, Vec<(TimelineId, TimelineMetadata)>> =
         HashMap::with_capacity(timelines.len());
 
     for (timeline_id, metadata) in timelines {
@@ -636,9 +636,9 @@ impl Tenant {
 
     fn initialize_new_timeline(
         &self,
-        new_timeline_id: ZTimelineId,
+        new_timeline_id: TimelineId,
         new_metadata: TimelineMetadata,
-        timelines: &mut MutexGuard<HashMap<ZTimelineId, Arc<Timeline>>>,
+        timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let ancestor = match new_metadata.ancestor_timeline() {
             Some(ancestor_timeline_id) => Some(
@@ -680,7 +680,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_conf: TenantConfOpt,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         remote_index: RemoteIndex,
         upload_layers: bool,
     ) -> Tenant {
@@ -701,7 +701,7 @@ impl Tenant {
     /// Locate and load config
     pub fn load_tenant_config(
         conf: &'static PageServerConf,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
         let target_config_path = TenantConf::path(conf, tenant_id);
         let target_config_display = target_config_path.display();
@@ -830,7 +830,7 @@ impl Tenant {
     //   we do.
     fn gc_iteration_internal(
         &self,
-        target_timeline_id: Option<ZTimelineId>,
+        target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
@@ -848,7 +848,7 @@ impl Tenant {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
+        let mut all_branchpoints: BTreeSet<(TimelineId, Lsn)> = BTreeSet::new();
         let timeline_ids = {
             if let Some(target_timeline_id) = target_timeline_id.as_ref() {
                 if timelines.get(target_timeline_id).is_none() {
@@ -861,11 +861,11 @@ impl Tenant {
                 .map(|(timeline_id, timeline_entry)| {
                     // This is unresolved question for now, how to do gc in presence of remote timelines
                     // especially when this is combined with branching.
-                    // Somewhat related: https://github.com/zenithdb/zenith/issues/999
+                    // Somewhat related: https://github.com/neondatabase/neon/issues/999
                     if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
                         // If target_timeline is specified, we only need to know branchpoints of its children
-                        if let Some(timelineid) = target_timeline_id {
-                            if ancestor_timeline_id == &timelineid {
+                        if let Some(timeline_id) = target_timeline_id {
+                            if ancestor_timeline_id == &timeline_id {
                                 all_branchpoints.insert((
                                     *ancestor_timeline_id,
                                     timeline_entry.get_ancestor_lsn(),
@@ -895,8 +895,8 @@ impl Tenant {
                 .with_context(|| format!("Timeline {timeline_id} was not found"))?;
 
             // If target_timeline is specified, ignore all other timelines
-            if let Some(target_timelineid) = target_timeline_id {
-                if timeline_id != target_timelineid {
+            if let Some(target_timeline_id) = target_timeline_id {
+                if timeline_id != target_timeline_id {
                     continue;
                 }
             }
@@ -952,7 +952,7 @@ impl Tenant {
         Ok(totals)
     }
 
-    pub fn tenant_id(&self) -> ZTenantId {
+    pub fn tenant_id(&self) -> TenantId {
         self.tenant_id
     }
 }
@@ -998,7 +998,7 @@ pub mod harness {
         config::PageServerConf,
         repository::Key,
         tenant::Tenant,
-        walrecord::ZenithWalRecord,
+        walrecord::NeonWalRecord,
         walredo::{WalRedoError, WalRedoManager},
     };
 
@@ -1006,12 +1006,12 @@ pub mod harness {
     use super::*;
     use crate::tenant_config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
-    use utils::zid::{ZTenantId, ZTimelineId};
+    use utils::id::{TenantId, TimelineId};
 
-    pub const TIMELINE_ID: ZTimelineId =
-        ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
-    pub const NEW_TIMELINE_ID: ZTimelineId =
-        ZTimelineId::from_array(hex!("AA223344556677881122334455667788"));
+    pub const TIMELINE_ID: TimelineId =
+        TimelineId::from_array(hex!("11223344556677881122334455667788"));
+    pub const NEW_TIMELINE_ID: TimelineId =
+        TimelineId::from_array(hex!("AA223344556677881122334455667788"));
 
     /// Convenience function to create a page image with given string as the only content
     #[allow(non_snake_case)]
@@ -1047,7 +1047,7 @@ pub mod harness {
     pub struct TenantHarness<'a> {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
-        pub tenant_id: ZTenantId,
+        pub tenant_id: TenantId,
 
         pub lock_guard: (
             Option<RwLockReadGuard<'a, ()>>,
@@ -1080,7 +1080,7 @@ pub mod harness {
 
             let tenant_conf = TenantConf::dummy_conf();
 
-            let tenant_id = ZTenantId::generate();
+            let tenant_id = TenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
@@ -1113,7 +1113,7 @@ pub mod harness {
                 .expect("should be able to read timelines dir")
             {
                 let timeline_dir_entry = timeline_dir_entry?;
-                let timeline_id: ZTimelineId = timeline_dir_entry
+                let timeline_id: TimelineId = timeline_dir_entry
                     .path()
                     .file_name()
                     .unwrap()
@@ -1128,15 +1128,15 @@ pub mod harness {
             Ok(tenant)
         }
 
-        pub fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
+        pub fn timeline_path(&self, timeline_id: &TimelineId) -> PathBuf {
             self.conf.timeline_path(timeline_id, &self.tenant_id)
         }
     }
 
     fn load_metadata(
         conf: &'static PageServerConf,
-        timeline_id: ZTimelineId,
-        tenant_id: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
     ) -> anyhow::Result<TimelineMetadata> {
         let metadata_path = metadata_path(conf, timeline_id, tenant_id);
         let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
@@ -1162,7 +1162,7 @@ pub mod harness {
             key: Key,
             lsn: Lsn,
             base_img: Option<Bytes>,
-            records: Vec<(Lsn, ZenithWalRecord)>,
+            records: Vec<(Lsn, NeonWalRecord)>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
                 "redo for {} to get to {}, with {} and {} records",
@@ -1747,7 +1747,7 @@ mod tests {
 
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
-            let new_tline_id = ZTimelineId::generate();
+            let new_tline_id = TimelineId::generate();
             tenant.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
             tline = tenant
                 .get_timeline(new_tline_id)
@@ -1808,7 +1808,7 @@ mod tests {
 
         #[allow(clippy::needless_range_loop)]
         for idx in 0..NUM_TLINES {
-            let new_tline_id = ZTimelineId::generate();
+            let new_tline_id = TimelineId::generate();
             tenant.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
             tline = tenant
                 .get_timeline(new_tline_id)

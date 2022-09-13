@@ -24,7 +24,7 @@ from fixtures.neon_fixtures import (
     wait_for_upload,
     wait_until,
 )
-from fixtures.types import Lsn, ZTenantId, ZTimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, subprocess_capture
 
 
@@ -113,15 +113,15 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
 
 def populate_branch(
     pg: Postgres,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     ps_http: NeonPageserverHttpClient,
     create_table: bool,
     expected_sum: Optional[int],
-) -> Tuple[ZTimelineId, Lsn]:
+) -> Tuple[TimelineId, Lsn]:
     # insert some data
     with pg_cur(pg) as cur:
         cur.execute("SHOW neon.timeline_id")
-        timeline_id = ZTimelineId(cur.fetchone()[0])
+        timeline_id = TimelineId(cur.fetchone()[0])
         log.info("timeline to relocate %s", timeline_id)
 
         log.info(
@@ -149,8 +149,8 @@ def populate_branch(
 def ensure_checkpoint(
     pageserver_cur,
     pageserver_http: NeonPageserverHttpClient,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     current_lsn: Lsn,
 ):
     # run checkpoint manually to be sure that data landed in remote storage
@@ -162,8 +162,8 @@ def ensure_checkpoint(
 
 def check_timeline_attached(
     new_pageserver_http_client: NeonPageserverHttpClient,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     old_timeline_detail: Dict[str, Any],
     old_current_lsn: Lsn,
 ):
@@ -187,8 +187,8 @@ def switch_pg_to_new_pageserver(
     env: NeonEnv,
     pg: Postgres,
     new_pageserver_port: int,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
 ) -> pathlib.Path:
     pg.stop()
 
@@ -265,7 +265,7 @@ def test_tenant_relocation(
     pageserver_http = env.pageserver.http_client()
 
     tenant_id, initial_timeline_id = env.neon_cli.create_tenant(
-        ZTenantId("74ee8b079a0e437eb0afea7d26a07209")
+        TenantId("74ee8b079a0e437eb0afea7d26a07209")
     )
     log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, initial_timeline_id)
 

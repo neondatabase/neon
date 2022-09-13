@@ -25,8 +25,8 @@ use utils::{
         request::parse_request_param,
         RequestExt, RouterBuilder,
     },
+    id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 struct State {
@@ -128,10 +128,10 @@ fn local_timeline_info_from_timeline(
 }
 
 fn list_local_timelines(
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
-) -> Result<Vec<(ZTimelineId, LocalTimelineInfo)>> {
+) -> Result<Vec<(TimelineId, LocalTimelineInfo)>> {
     let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
     let timelines = tenant.list_timelines();
 
@@ -156,7 +156,7 @@ async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiErr
 }
 
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -164,8 +164,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         match timelines::create_timeline(
             get_config(&request),
             tenant_id,
-            request_data.new_timeline_id.map(ZTimelineId::from),
-            request_data.ancestor_timeline_id.map(ZTimelineId::from),
+            request_data.new_timeline_id.map(TimelineId::from),
+            request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
         ).await {
             Ok(Some(new_timeline)) => {
@@ -193,7 +193,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 }
 
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
     let include_non_incremental_physical_size =
@@ -229,7 +229,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
                 .remote_index
                 .read()
                 .await
-                .timeline_entry(&ZTenantTimelineId {
+                .timeline_entry(&TenantTimelineId {
                     tenant_id,
                     timeline_id,
                 })
@@ -257,8 +257,8 @@ fn query_param_present(request: &Request<Body>, param: &str) -> bool {
 }
 
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
     let include_non_incremental_physical_size =
@@ -289,7 +289,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         let remote_timeline_info = {
             let remote_index_read = get_state(&request).remote_index.read().await;
             remote_index_read
-                .timeline_entry(&ZTenantTimelineId {
+                .timeline_entry(&TenantTimelineId {
                     tenant_id,
                     timeline_id,
                 })
@@ -322,7 +322,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 
 // TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
 async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     info!("Handling tenant attach {tenant_id}");
@@ -402,8 +402,8 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
 /// for details see comment to `storage_sync::gather_tenant_timelines_index_parts`
 async fn gather_tenant_timelines_index_parts(
     state: &State,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<Option<Vec<(ZTimelineId, RemoteTimeline)>>> {
+    tenant_id: TenantId,
+) -> anyhow::Result<Option<Vec<(TimelineId, RemoteTimeline)>>> {
     let index_parts = match state.remote_storage.as_ref() {
         Some(storage) => {
             storage_sync::gather_tenant_timelines_index_parts(state.conf, storage, tenant_id).await
@@ -425,8 +425,8 @@ async fn gather_tenant_timelines_index_parts(
 }
 
 async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let state = get_state(&request);
@@ -436,7 +436,7 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
         .map_err(ApiError::from_err)?;
 
     let mut remote_index = state.remote_index.write().await;
-    remote_index.remove_timeline_entry(ZTenantTimelineId {
+    remote_index.remove_timeline_entry(TenantTimelineId {
         tenant_id,
         timeline_id,
     });
@@ -445,7 +445,7 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
 }
 
 async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let state = get_state(&request);
@@ -479,7 +479,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
 }
 
 async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     // if tenant is in progress of downloading it can be absent in global tenant map
@@ -588,8 +588,8 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let target_tenant_id = request_data
         .new_tenant_id
-        .map(ZTenantId::from)
-        .unwrap_or_else(ZTenantId::generate);
+        .map(TenantId::from)
+        .unwrap_or_else(TenantId::generate);
 
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();

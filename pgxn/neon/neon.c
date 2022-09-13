@@ -28,7 +28,6 @@
 PG_MODULE_MAGIC;
 void		_PG_init(void);
 
-
 void
 _PG_init(void)
 {
@@ -55,7 +54,6 @@ pg_cluster_size(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT64(size);
 }
-
 
 Datum
 backpressure_lsns(PG_FUNCTION_ARGS)

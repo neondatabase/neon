@@ -10,7 +10,7 @@ Intended to be used in integration tests and in CLI tools for local installation
 
 `/docs`:
 
-Documentation of the Zenith features and concepts.
+Documentation of the Neon features and concepts.
 Now it is mostly dev documentation.
 
 `/monitoring`:
@@ -19,7 +19,7 @@ TODO
 
 `/pageserver`:
 
-Zenith storage service.
+Neon storage service.
 The pageserver has a few different duties:
 
 - Store and manage the data.
@@ -54,7 +54,7 @@ PostgreSQL extension that contains functions needed for testing and debugging.
 
 `/safekeeper`:
 
-The zenith WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
+The neon WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
 It acts as a holding area and redistribution center for recently generated WAL.
 
 For more detailed info, see [walservice.md](./walservice.md)
@@ -63,11 +63,6 @@ For more detailed info, see [walservice.md](./walservice.md)
 The workspace_hack crate exists only to pin down some dependencies.
 
 We use [cargo-hakari](https://crates.io/crates/cargo-hakari) for automation.
-
-`/zenith`
-
-Main entry point for the 'zenith' CLI utility.
-TODO: Doesn't it belong to control_plane?
 
 `/libs`:
 Unites granular neon helper crates under the hood.

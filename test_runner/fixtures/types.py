@@ -46,11 +46,11 @@ class Lsn:
 
 
 @total_ordering
-class ZId:
+class Id:
     """
     Datatype for a Neon tenant and timeline IDs. Internally it's a 16-byte array, and
-    the string representation is in hex. This corresponds to the ZId / ZTenantId /
-    ZTimelineIds in the Rust code.
+    the string representation is in hex. This corresponds to the Id / TenantId /
+    TimelineIds in the Rust code.
     """
 
     def __init__(self, x: str):
@@ -79,11 +79,11 @@ class ZId:
         return cls(random.randbytes(16).hex())
 
 
-class ZTenantId(ZId):
+class TenantId(Id):
     def __repr__(self):
-        return f'ZTenantId("{self.id.hex()}")'
+        return f'`TenantId("{self.id.hex()}")'
 
 
-class ZTimelineId(ZId):
+class TimelineId(Id):
     def __repr__(self):
-        return f'ZTimelineId("{self.id.hex()}")'
+        return f'TimelineId("{self.id.hex()}")'

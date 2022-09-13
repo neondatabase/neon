@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::*;
 
-use utils::{lsn::Lsn, zid::ZTenantTimelineId};
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::safekeeper::SafeKeeperState;
 
@@ -86,7 +86,7 @@ struct WalStorageMetrics {
 }
 
 impl WalStorageMetrics {
-    fn new(zttid: &ZTenantTimelineId) -> Self {
+    fn new(zttid: &TenantTimelineId) -> Self {
         let tenant_id = zttid.tenant_id.to_string();
         let timeline_id = zttid.timeline_id.to_string();
         Self {
@@ -130,7 +130,7 @@ pub trait Storage {
 /// When storage is just created, all LSNs are zeroes and there are no segments on disk.
 pub struct PhysicalStorage {
     metrics: WalStorageMetrics,
-    zttid: ZTenantTimelineId,
+    zttid: TenantTimelineId,
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
 
@@ -161,7 +161,7 @@ pub struct PhysicalStorage {
 }
 
 impl PhysicalStorage {
-    pub fn new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> PhysicalStorage {
+    pub fn new(zttid: &TenantTimelineId, conf: &SafeKeeperConf) -> PhysicalStorage {
         let timeline_dir = conf.timeline_dir(zttid);
         PhysicalStorage {
             metrics: WalStorageMetrics::new(zttid),

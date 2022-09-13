@@ -29,7 +29,7 @@ pub mod crashsafe_dir;
 pub mod auth;
 
 // utility functions and helper traits for unified unique id generation/serialization etc.
-pub mod zid;
+pub mod id;
 // http endpoint utils
 pub mod http;
 

@@ -11,7 +11,7 @@ use std::{fmt::Display, str::FromStr};
 
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
-use utils::zid::{NodeId, ZTenantId, ZTenantTimelineId};
+use utils::id::{NodeId, TenantId, TenantTimelineId};
 
 /// The subscription kind to the timeline updates from safekeeper.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -30,13 +30,13 @@ pub enum SubscriptionKind {
     /// Get every update in etcd.
     All,
     /// Get etcd updates for any timeiline of a certain tenant, affected by any operation from any node kind.
-    TenantTimelines(ZTenantId),
+    TenantTimelines(TenantId),
     /// Get etcd updates for a certain timeline of a tenant, affected by any operation from any node kind.
-    Timeline(ZTenantTimelineId),
+    Timeline(TenantTimelineId),
     /// Get etcd timeline updates, specific to a certain node kind.
-    Node(ZTenantTimelineId, NodeKind),
+    Node(TenantTimelineId, NodeKind),
     /// Get etcd timeline updates for a certain operation on specific nodes.
-    Operation(ZTenantTimelineId, NodeKind, OperationKind),
+    Operation(TenantTimelineId, NodeKind, OperationKind),
 }
 
 /// All kinds of nodes, able to write into etcd.
@@ -67,7 +67,7 @@ static SUBSCRIPTION_FULL_KEY_REGEX: Lazy<Regex> = Lazy::new(|| {
 /// No other etcd keys are considered during system's work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionFullKey {
-    pub id: ZTenantTimelineId,
+    pub id: TenantTimelineId,
     pub node_kind: NodeKind,
     pub operation: OperationKind,
     pub node_id: NodeId,
@@ -83,7 +83,7 @@ impl SubscriptionKey {
     }
 
     /// Subscribes to a given timeline info updates from safekeepers.
-    pub fn sk_timeline_info(cluster_prefix: String, timeline: ZTenantTimelineId) -> Self {
+    pub fn sk_timeline_info(cluster_prefix: String, timeline: TenantTimelineId) -> Self {
         Self {
             cluster_prefix,
             kind: SubscriptionKind::Operation(
@@ -97,7 +97,7 @@ impl SubscriptionKey {
     /// Subscribes to all timeine updates during specific operations, running on the corresponding nodes.
     pub fn operation(
         cluster_prefix: String,
-        timeline: ZTenantTimelineId,
+        timeline: TenantTimelineId,
         node_kind: NodeKind,
         operation: OperationKind,
     ) -> Self {
@@ -175,7 +175,7 @@ impl FromStr for SubscriptionFullKey {
         };
 
         Ok(Self {
-            id: ZTenantTimelineId::new(
+            id: TenantTimelineId::new(
                 parse_capture(&key_captures, 1)?,
                 parse_capture(&key_captures, 2)?,
             ),
@@ -247,7 +247,7 @@ impl FromStr for SkOperationKind {
 
 #[cfg(test)]
 mod tests {
-    use utils::zid::ZTimelineId;
+    use utils::id::TimelineId;
 
     use super::*;
 
@@ -256,9 +256,9 @@ mod tests {
         let prefix = "neon";
         let node_kind = NodeKind::Safekeeper;
         let operation_kind = OperationKind::Safekeeper(SkOperationKind::WalBackup);
-        let tenant_id = ZTenantId::generate();
-        let timeline_id = ZTimelineId::generate();
-        let id = ZTenantTimelineId::new(tenant_id, timeline_id);
+        let tenant_id = TenantId::generate();
+        let timeline_id = TimelineId::generate();
+        let id = TenantTimelineId::new(tenant_id, timeline_id);
         let node_id = NodeId(1);
 
         let timeline_subscription_keys = [

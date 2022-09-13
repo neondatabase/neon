@@ -53,7 +53,7 @@ impl<'pg> ReceiveWalConn<'pg> {
 
     /// Receive WAL from wal_proposer
     pub fn run(&mut self, spg: &mut SafekeeperPostgresHandler) -> Result<()> {
-        let _enter = info_span!("WAL acceptor", timeline = %spg.ztimelineid.unwrap()).entered();
+        let _enter = info_span!("WAL acceptor", timeline = %spg.timeline_id.unwrap()).entered();
 
         // Notify the libpq client that it's allowed to send `CopyData` messages
         self.pg_backend
