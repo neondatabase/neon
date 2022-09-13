@@ -125,16 +125,18 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 # Create repository in .neon with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/neon_local init
-initializing tenantid 9ef87a5bf0d92544f6fafeeb3239695c
-created initial timeline de200bd42b49cc1814412c7e592dd6e9 timeline.lsn 0/16B5A50
-initial timeline de200bd42b49cc1814412c7e592dd6e9 created
-pageserver init succeeded
+Starting pageserver at '127.0.0.1:64000' in '.neon'
+
+Pageserver started
+Successfully initialized timeline 7dd0907914ac399ff3be45fb252bfdb7
+Stopping pageserver gracefully...done!
 
 # start pageserver and safekeeper
 > ./target/debug/neon_local start
+Starting etcd broker using /usr/bin/etcd
 Starting pageserver at '127.0.0.1:64000' in '.neon'
+
 Pageserver started
-initializing for sk 1 for 7676
 Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'
 Safekeeper started
 
