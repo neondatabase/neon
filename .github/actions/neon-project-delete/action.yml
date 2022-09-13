@@ -1,0 +1,54 @@
+name: 'Delete Neon Project'
+description: 'Delete Neon Project using API'
+
+inputs:
+  api_key:
+    desctiption: 'Neon API key'
+    required: true
+  environment:
+    desctiption: 'dev (aka captest) or stage'
+    required: true
+  project_id:
+    desctiption: 'ID of the Project to delete'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Parse Input
+      id: parse-input
+      shell: bash -euxo pipefail {0}
+      run: |
+        case "${ENVIRONMENT}" in
+          dev)
+            API_HOST=console.dev.neon.tech
+            ;;
+          staging)
+            API_HOST=console.stage.neon.tech
+            ;;
+          *)
+            echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
+            exit 1
+            ;;
+        esac
+
+        echo "::set-output name=api_host::${API_HOST}"
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+
+    - name: Delete Neon Project
+      shell: bash -euxo pipefail {0}
+      run: |
+        # Allow PROJECT_ID to be empty/null for cases when .github/actions/neon-project-create failed
+        if [ -n "${PROJECT_ID}" ]; then
+          curl -X "POST" \
+            "https://${API_HOST}/api/v1/projects/${PROJECT_ID}/delete" \
+            --fail \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${API_KEY}"
+        fi
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        PROJECT_ID: ${{ inputs.project_id }}
+        API_HOST: ${{ steps.parse-input.outputs.api_host }}

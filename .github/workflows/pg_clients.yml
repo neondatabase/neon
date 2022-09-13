@@ -47,11 +47,17 @@ jobs:
       shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
+    - name: Create Neon Project
+      id: create-neon-project
+      uses: ./.github/actions/neon-project-create
+      with:
+        environment: staging
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
     - name: Run pytest
       env:
         REMOTE_ENV: 1
-        BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
-
+        BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
         POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install/v14
       shell: bash -euxo pipefail {0}
       run: |
@@ -64,6 +70,14 @@ jobs:
           --verbose \
           -m "remote_cluster" \
           -rA "test_runner/pg_clients"
+
+    - name: Delete Neon Project
+      if: ${{ always() }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        environment: staging
+        project_id: ${{ steps.create-neon-project.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     # We use GitHub's action upload-artifact because `ubuntu-latest` doesn't have configured AWS CLI.
     # It will be fixed after switching to gen2 runner

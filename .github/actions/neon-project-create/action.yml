@@ -1,0 +1,81 @@
+name: 'Create Neon Project'
+description: 'Create Neon Project using API'
+
+inputs:
+  api_key:
+    desctiption: 'Neon API key'
+    required: true
+  environment:
+    desctiption: 'dev (aka captest) or stage'
+    required: true
+  region_id:
+    desctiption: 'Region ID, if not set the project will be created in the default region'
+    required: false
+outputs:
+  dsn:
+    description: 'Created Project DSN (for main database)'
+    value: ${{ steps.create-neon-project.outputs.dsn }}
+  project_id:
+    description: 'Created Project ID'
+    value: ${{ steps.create-neon-project.outputs.project_id }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Parse Input
+      id: parse-input
+      shell: bash -euxo pipefail {0}
+      run: |
+        case "${ENVIRONMENT}" in
+          dev)
+            API_HOST=console.dev.neon.tech
+            REGION_ID=${REGION_ID:-eu-west-1}
+            ;;
+          staging)
+            API_HOST=console.stage.neon.tech
+            REGION_ID=${REGION_ID:-us-east-1}
+            ;;
+          *)
+            echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
+            exit 1
+            ;;
+        esac
+
+        echo "::set-output name=api_host::${API_HOST}"
+        echo "::set-output name=region_id::${REGION_ID}"
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        REGION_ID: ${{ inputs.region_id }}
+
+    - name: Create Neon Project
+      id: create-neon-project
+      # A shell without `set -x` to not to expose password/dsn in logs
+      shell: bash -euo pipefail {0}
+      run: |
+        project=$(curl \
+          "https://${API_HOST}/api/v1/projects" \
+          --fail \
+          --header "Accept: application/json" \
+          --header "Content-Type: application/json" \
+          --header "Authorization: Bearer ${API_KEY}" \
+          --data "{
+            \"project\": {
+              \"platform_id\": \"serverless\",
+              \"region_id\": \"${REGION_ID}\",
+              \"settings\": { }
+            }
+          }")
+
+        # Mask password
+        echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
+
+        dsn=$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .dsn')/main
+        echo "::add-mask::${dsn}"
+        echo "::set-output name=dsn::${dsn}"
+
+        project_id=$(echo $project | jq --raw-output '.id')
+        echo "::set-output name=project_id::${project_id}"
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        API_HOST: ${{ steps.parse-input.outputs.api_host }}
+        REGION_ID: ${{ steps.parse-input.outputs.region_id }}
