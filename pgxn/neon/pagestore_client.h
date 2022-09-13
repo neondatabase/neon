@@ -83,8 +83,8 @@ typedef struct
 typedef struct
 {
 	ZenithRequest req;
-	Oid dbNode;
-} ZenithDbSizeRequest;
+	Oid			dbNode;
+}			ZenithDbSizeRequest;
 
 
 typedef struct
@@ -123,12 +123,13 @@ typedef struct
 {
 	ZenithMessageTag tag;
 	int64		db_size;
-} ZenithDbSizeResponse;
+}			ZenithDbSizeResponse;
 
 typedef struct
 {
 	ZenithMessageTag tag;
-	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error message */
+	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
+												 * message */
 } ZenithErrorResponse;
 
 extern StringInfoData zm_pack_request(ZenithRequest *msg);
@@ -142,12 +143,12 @@ extern char *zm_to_string(ZenithMessage *msg);
 typedef struct
 {
 	ZenithResponse *(*request) (ZenithRequest *request);
-	void (*send) (ZenithRequest *request);
+	void		(*send) (ZenithRequest *request);
 	ZenithResponse *(*receive) (void);
-	void (*flush) (void);
+	void		(*flush) (void);
 }			page_server_api;
 
-extern page_server_api *page_server;
+extern page_server_api * page_server;
 
 extern char *page_server_connstring;
 extern char *zenith_timeline;
@@ -179,7 +180,7 @@ extern void zenith_read(SMgrRelation reln, ForkNumber forknum, BlockNumber block
 						char *buffer);
 
 extern void zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
-			XLogRecPtr request_lsn, bool request_latest, char *buffer);
+							   XLogRecPtr request_lsn, bool request_latest, char *buffer);
 
 extern void zenith_write(SMgrRelation reln, ForkNumber forknum,
 						 BlockNumber blocknum, char *buffer, bool skipFsync);
@@ -217,7 +218,7 @@ extern void inmem_immedsync(SMgrRelation reln, ForkNumber forknum);
 
 /* utils for zenith relsize cache */
 extern void relsize_hash_init(void);
-extern bool get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber* size);
+extern bool get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size);
 extern void set_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);
 extern void update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(RelFileNode rnode, ForkNumber forknum);
