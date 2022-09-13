@@ -7,11 +7,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     NeonPageserverHttpClient,
 )
-from fixtures.types import ZTenantId, ZTimelineId
+from fixtures.types import TenantId, TimelineId
 
 
 def helper_compare_timeline_list(
-    pageserver_http_client: NeonPageserverHttpClient, env: NeonEnv, initial_tenant: ZTenantId
+    pageserver_http_client: NeonPageserverHttpClient, env: NeonEnv, initial_tenant: TenantId
 ):
     """
     Compare timelines list returned by CLI and directly via API.
@@ -20,7 +20,7 @@ def helper_compare_timeline_list(
 
     timelines_api = sorted(
         map(
-            lambda t: ZTimelineId(t["timeline_id"]),
+            lambda t: TimelineId(t["timeline_id"]),
             pageserver_http_client.timeline_list(initial_tenant),
         )
     )
@@ -85,7 +85,7 @@ def test_cli_tenant_list(neon_simple_env: NeonEnv):
     helper_compare_tenant_list(pageserver_http_client, env)
 
     res = env.neon_cli.list_tenants()
-    tenants = sorted(map(lambda t: ZTenantId(t.split()[0]), res.stdout.splitlines()))
+    tenants = sorted(map(lambda t: TenantId(t.split()[0]), res.stdout.splitlines()))
 
     assert env.initial_tenant in tenants
     assert tenant1 in tenants

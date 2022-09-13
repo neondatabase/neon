@@ -15,8 +15,8 @@ use toml_edit;
 use toml_edit::{Document, Item};
 use url::Url;
 use utils::{
+    id::{NodeId, TenantId, TimelineId},
     postgres_backend::AuthType,
-    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
 use crate::tenant::TIMELINES_SEGMENT_NAME;
@@ -342,16 +342,16 @@ impl PageServerConf {
         self.workdir.join("tenants")
     }
 
-    pub fn tenant_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenants_path().join(tenantid.to_string())
+    pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenants_path().join(tenant_id.to_string())
     }
 
-    pub fn timelines_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenant_path(tenantid).join(TIMELINES_SEGMENT_NAME)
+    pub fn timelines_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
     }
 
-    pub fn timeline_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
-        self.timelines_path(tenantid).join(timelineid.to_string())
+    pub fn timeline_path(&self, timeline_id: &TimelineId, tenant_id: &TenantId) -> PathBuf {
+        self.timelines_path(tenant_id).join(timeline_id.to_string())
     }
 
     //
@@ -419,7 +419,7 @@ impl PageServerConf {
 
         let mut conf = builder.build().context("invalid config")?;
 
-        if conf.auth_type == AuthType::ZenithJWT {
+        if conf.auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
                 .auth_validation_public_key_path
                 .get_or_insert_with(|| workdir.join("auth_public_key.pem"));

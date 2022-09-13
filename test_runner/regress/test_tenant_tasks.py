@@ -1,6 +1,6 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_until
-from fixtures.types import ZTenantId, ZTimelineId
+from fixtures.types import TenantId, TimelineId
 
 
 def get_only_element(l):  # noqa: E741
@@ -23,7 +23,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
 
     def get_state(tenant):
         all_states = client.tenant_list()
-        matching = [t for t in all_states if ZTenantId(t["id"]) == tenant]
+        matching = [t for t in all_states if TenantId(t["id"]) == tenant]
         return get_only_element(matching)["state"]
 
     def get_metric_value(name):
@@ -35,8 +35,8 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         value = line.lstrip(name).strip()
         return int(value)
 
-    def delete_all_timelines(tenant: ZTenantId):
-        timelines = [ZTimelineId(t["timeline_id"]) for t in client.timeline_list(tenant)]
+    def delete_all_timelines(tenant: TenantId):
+        timelines = [TimelineId(t["timeline_id"]) for t in client.timeline_list(tenant)]
         for t in timelines:
             client.timeline_delete(tenant, t)
 
@@ -56,7 +56,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
 
     # Delete all timelines on all tenants
     for tenant_info in client.tenant_list():
-        tenant_id = ZTenantId(tenant_info["id"])
+        tenant_id = TenantId(tenant_info["id"])
         delete_all_timelines(tenant_id)
         wait_until(10, 0.2, lambda: assert_active_without_jobs(tenant_id))
 

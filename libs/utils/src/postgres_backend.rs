@@ -63,7 +63,7 @@ pub enum AuthType {
     Trust,
     MD5,
     // This mimics postgres's AuthenticationCleartextPassword but instead of password expects JWT
-    ZenithJWT,
+    NeonJWT,
 }
 
 impl FromStr for AuthType {
@@ -73,8 +73,8 @@ impl FromStr for AuthType {
         match s {
             "Trust" => Ok(Self::Trust),
             "MD5" => Ok(Self::MD5),
-            "ZenithJWT" => Ok(Self::ZenithJWT),
-            _ => bail!("invalid value \"{}\" for auth type", s),
+            "NeonJWT" => Ok(Self::NeonJWT),
+            _ => bail!("invalid value \"{s}\" for auth type"),
         }
     }
 }
@@ -84,7 +84,7 @@ impl fmt::Display for AuthType {
         f.write_str(match self {
             AuthType::Trust => "Trust",
             AuthType::MD5 => "MD5",
-            AuthType::ZenithJWT => "ZenithJWT",
+            AuthType::NeonJWT => "NeonJWT",
         })
     }
 }
@@ -376,7 +376,7 @@ impl PostgresBackend {
                                 ))?;
                                 self.state = ProtoState::Authentication;
                             }
-                            AuthType::ZenithJWT => {
+                            AuthType::NeonJWT => {
                                 self.write_message(&BeMessage::AuthenticationCleartextPassword)?;
                                 self.state = ProtoState::Authentication;
                             }
@@ -403,7 +403,7 @@ impl PostgresBackend {
                             bail!("auth failed: {}", e);
                         }
                     }
-                    AuthType::ZenithJWT => {
+                    AuthType::NeonJWT => {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {

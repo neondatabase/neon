@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info_span;
 use utils::{
     bin_ser::BeSer,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::config::PageServerConf;
@@ -63,7 +63,7 @@ struct TimelineMetadataBody {
     // doing a clean shutdown, so that there is no more WAL beyond
     // 'disk_consistent_lsn'
     prev_record_lsn: Option<Lsn>,
-    ancestor_timeline: Option<ZTimelineId>,
+    ancestor_timeline: Option<TimelineId>,
     ancestor_lsn: Lsn,
     latest_gc_cutoff_lsn: Lsn,
     initdb_lsn: Lsn,
@@ -73,7 +73,7 @@ impl TimelineMetadata {
     pub fn new(
         disk_consistent_lsn: Lsn,
         prev_record_lsn: Option<Lsn>,
-        ancestor_timeline: Option<ZTimelineId>,
+        ancestor_timeline: Option<TimelineId>,
         ancestor_lsn: Lsn,
         latest_gc_cutoff_lsn: Lsn,
         initdb_lsn: Lsn,
@@ -149,7 +149,7 @@ impl TimelineMetadata {
         self.body.prev_record_lsn
     }
 
-    pub fn ancestor_timeline(&self) -> Option<ZTimelineId> {
+    pub fn ancestor_timeline(&self) -> Option<TimelineId> {
         self.body.ancestor_timeline
     }
 
@@ -170,23 +170,23 @@ impl TimelineMetadata {
 /// where certain timeline's metadata file should be located.
 pub fn metadata_path(
     conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
+    timeline_id: TimelineId,
+    tenant_id: TenantId,
 ) -> PathBuf {
-    conf.timeline_path(&timelineid, &tenantid)
+    conf.timeline_path(&timeline_id, &tenant_id)
         .join(METADATA_FILE_NAME)
 }
 
 /// Save timeline metadata to file
 pub fn save_metadata(
     conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
+    timeline_id: TimelineId,
+    tenant_id: TenantId,
     data: &TimelineMetadata,
     first_save: bool,
 ) -> anyhow::Result<()> {
     let _enter = info_span!("saving metadata").entered();
-    let path = metadata_path(conf, timelineid, tenantid);
+    let path = metadata_path(conf, timeline_id, tenant_id);
     // use OpenOptions to ensure file presence is consistent with first_save
     let mut file = VirtualFile::open_with_options(
         &path,

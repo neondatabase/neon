@@ -17,8 +17,8 @@ use tracing::log::warn;
 
 use crate::{config::PageServerConf, tenant::metadata::TimelineMetadata};
 use utils::{
+    id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use super::download::TenantIndexParts;
@@ -49,7 +49,7 @@ impl RelativePath {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct TenantEntry(HashMap<ZTimelineId, RemoteTimeline>);
+pub struct TenantEntry(HashMap<TimelineId, RemoteTimeline>);
 
 impl TenantEntry {
     pub fn has_in_progress_downloads(&self) -> bool {
@@ -59,7 +59,7 @@ impl TenantEntry {
 }
 
 impl Deref for TenantEntry {
-    type Target = HashMap<ZTimelineId, RemoteTimeline>;
+    type Target = HashMap<TimelineId, RemoteTimeline>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -72,8 +72,8 @@ impl DerefMut for TenantEntry {
     }
 }
 
-impl From<HashMap<ZTimelineId, RemoteTimeline>> for TenantEntry {
-    fn from(inner: HashMap<ZTimelineId, RemoteTimeline>) -> Self {
+impl From<HashMap<TimelineId, RemoteTimeline>> for TenantEntry {
+    fn from(inner: HashMap<TimelineId, RemoteTimeline>) -> Self {
         Self(inner)
     }
 }
@@ -81,7 +81,7 @@ impl From<HashMap<ZTimelineId, RemoteTimeline>> for TenantEntry {
 /// An index to track tenant files that exist on the remote storage.
 #[derive(Debug, Clone, Default)]
 pub struct RemoteTimelineIndex {
-    entries: HashMap<ZTenantId, TenantEntry>,
+    entries: HashMap<TenantId, TenantEntry>,
 }
 
 /// A wrapper to synchronize the access to the index, should be created and used before dealing with any [`RemoteTimelineIndex`].
@@ -91,9 +91,9 @@ pub struct RemoteIndex(Arc<RwLock<RemoteTimelineIndex>>);
 impl RemoteIndex {
     pub fn from_parts(
         conf: &'static PageServerConf,
-        index_parts: HashMap<ZTenantId, TenantIndexParts>,
+        index_parts: HashMap<TenantId, TenantIndexParts>,
     ) -> anyhow::Result<Self> {
-        let mut entries: HashMap<ZTenantId, TenantEntry> = HashMap::new();
+        let mut entries: HashMap<TenantId, TenantEntry> = HashMap::new();
 
         for (tenant_id, index_parts) in index_parts {
             match index_parts {
@@ -136,30 +136,30 @@ impl Clone for RemoteIndex {
 impl RemoteTimelineIndex {
     pub fn timeline_entry(
         &self,
-        ZTenantTimelineId {
+        TenantTimelineId {
             tenant_id,
             timeline_id,
-        }: &ZTenantTimelineId,
+        }: &TenantTimelineId,
     ) -> Option<&RemoteTimeline> {
         self.entries.get(tenant_id)?.get(timeline_id)
     }
 
     pub fn timeline_entry_mut(
         &mut self,
-        ZTenantTimelineId {
+        TenantTimelineId {
             tenant_id,
             timeline_id,
-        }: &ZTenantTimelineId,
+        }: &TenantTimelineId,
     ) -> Option<&mut RemoteTimeline> {
         self.entries.get_mut(tenant_id)?.get_mut(timeline_id)
     }
 
     pub fn add_timeline_entry(
         &mut self,
-        ZTenantTimelineId {
+        TenantTimelineId {
             tenant_id,
             timeline_id,
-        }: ZTenantTimelineId,
+        }: TenantTimelineId,
         entry: RemoteTimeline,
     ) {
         self.entries
@@ -170,10 +170,10 @@ impl RemoteTimelineIndex {
 
     pub fn remove_timeline_entry(
         &mut self,
-        ZTenantTimelineId {
+        TenantTimelineId {
             tenant_id,
             timeline_id,
-        }: ZTenantTimelineId,
+        }: TenantTimelineId,
     ) -> Option<RemoteTimeline> {
         self.entries
             .entry(tenant_id)
@@ -181,25 +181,25 @@ impl RemoteTimelineIndex {
             .remove(&timeline_id)
     }
 
-    pub fn tenant_entry(&self, tenant_id: &ZTenantId) -> Option<&TenantEntry> {
+    pub fn tenant_entry(&self, tenant_id: &TenantId) -> Option<&TenantEntry> {
         self.entries.get(tenant_id)
     }
 
-    pub fn tenant_entry_mut(&mut self, tenant_id: &ZTenantId) -> Option<&mut TenantEntry> {
+    pub fn tenant_entry_mut(&mut self, tenant_id: &TenantId) -> Option<&mut TenantEntry> {
         self.entries.get_mut(tenant_id)
     }
 
-    pub fn add_tenant_entry(&mut self, tenant_id: ZTenantId) -> &mut TenantEntry {
+    pub fn add_tenant_entry(&mut self, tenant_id: TenantId) -> &mut TenantEntry {
         self.entries.entry(tenant_id).or_default()
     }
 
-    pub fn remove_tenant_entry(&mut self, tenant_id: &ZTenantId) -> Option<TenantEntry> {
+    pub fn remove_tenant_entry(&mut self, tenant_id: &TenantId) -> Option<TenantEntry> {
         self.entries.remove(tenant_id)
     }
 
     pub fn set_awaits_download(
         &mut self,
-        id: &ZTenantTimelineId,
+        id: &TenantTimelineId,
         awaits_download: bool,
     ) -> anyhow::Result<()> {
         self.timeline_entry_mut(id)

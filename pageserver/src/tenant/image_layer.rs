@@ -4,7 +4,7 @@
 //! but does not exist in the layer, does not exist.
 //!
 //! An image layer is stored in a file on disk. The file is stored in
-//! timelines/<timelineid> directory.  Currently, there are no
+//! timelines/<timeline_id> directory.  Currently, there are no
 //! subdirectories, and each image layer file is named like this:
 //!
 //!    <key start>-<key end>__<LSN>
@@ -44,8 +44,8 @@ use tracing::*;
 
 use utils::{
     bin_ser::BeSer,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 ///
@@ -56,12 +56,12 @@ use utils::{
 ///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
-    /// Magic value to identify this as a zenith image file. Always IMAGE_FILE_MAGIC.
+    /// Magic value to identify this as a neon image file. Always IMAGE_FILE_MAGIC.
     magic: u16,
     format_version: u16,
 
-    tenantid: ZTenantId,
-    timelineid: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     key_range: Range<Key>,
     lsn: Lsn,
 
@@ -77,8 +77,8 @@ impl From<&ImageLayer> for Summary {
         Self {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenantid: layer.tenantid,
-            timelineid: layer.timelineid,
+            tenant_id: layer.tenant_id,
+            timeline_id: layer.timeline_id,
             key_range: layer.key_range.clone(),
             lsn: layer.lsn,
 
@@ -97,8 +97,8 @@ impl From<&ImageLayer> for Summary {
 ///
 pub struct ImageLayer {
     path_or_conf: PathOrConf,
-    pub tenantid: ZTenantId,
-    pub timelineid: ZTimelineId,
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
     pub key_range: Range<Key>,
 
     // This entry contains an image of all pages as of this LSN
@@ -128,12 +128,12 @@ impl Layer for ImageLayer {
         Some(self.path())
     }
 
-    fn get_tenant_id(&self) -> ZTenantId {
-        self.tenantid
+    fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
     }
 
-    fn get_timeline_id(&self) -> ZTimelineId {
-        self.timelineid
+    fn get_timeline_id(&self) -> TimelineId {
+        self.timeline_id
     }
 
     fn get_key_range(&self) -> Range<Key> {
@@ -202,7 +202,7 @@ impl Layer for ImageLayer {
     fn dump(&self, verbose: bool) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} ----",
-            self.tenantid, self.timelineid, self.key_range.start, self.key_range.end, self.lsn
+            self.tenant_id, self.timeline_id, self.key_range.start, self.key_range.end, self.lsn
         );
 
         if !verbose {
@@ -228,22 +228,22 @@ impl Layer for ImageLayer {
 impl ImageLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         fname: &ImageFileName,
     ) -> PathBuf {
         match path_or_conf {
             PathOrConf::Path(path) => path.to_path_buf(),
             PathOrConf::Conf(conf) => conf
-                .timeline_path(&timelineid, &tenantid)
+                .timeline_path(&timeline_id, &tenant_id)
                 .join(fname.to_string()),
         }
     }
 
     fn temp_path_for(
         conf: &PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         fname: &ImageFileName,
     ) -> PathBuf {
         let rand_string: String = rand::thread_rng()
@@ -252,7 +252,7 @@ impl ImageLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&timelineid, &tenantid)
+        conf.timeline_path(&timeline_id, &tenant_id)
             .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
     }
 
@@ -336,14 +336,14 @@ impl ImageLayer {
     /// Create an ImageLayer struct representing an existing file on disk
     pub fn new(
         conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         filename: &ImageFileName,
     ) -> ImageLayer {
         ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
-            timelineid,
-            tenantid,
+            timeline_id,
+            tenant_id,
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
             inner: RwLock::new(ImageLayerInner {
@@ -369,8 +369,8 @@ impl ImageLayer {
 
         Ok(ImageLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
-            timelineid: summary.timelineid,
-            tenantid: summary.tenantid,
+            timeline_id: summary.timeline_id,
+            tenant_id: summary.tenant_id,
             key_range: summary.key_range,
             lsn: summary.lsn,
             inner: RwLock::new(ImageLayerInner {
@@ -393,8 +393,8 @@ impl ImageLayer {
     pub fn path(&self) -> PathBuf {
         Self::path_for(
             &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
+            self.timeline_id,
+            self.tenant_id,
             &self.layer_name(),
         )
     }
@@ -414,8 +414,8 @@ impl ImageLayer {
 pub struct ImageLayerWriter {
     conf: &'static PageServerConf,
     path: PathBuf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
+    timeline_id: TimelineId,
+    tenant_id: TenantId,
     key_range: Range<Key>,
     lsn: Lsn,
 
@@ -426,8 +426,8 @@ pub struct ImageLayerWriter {
 impl ImageLayerWriter {
     pub fn new(
         conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {
@@ -435,8 +435,8 @@ impl ImageLayerWriter {
         // We'll atomically rename it to the final name when we're done.
         let path = ImageLayer::temp_path_for(
             conf,
-            timelineid,
-            tenantid,
+            timeline_id,
+            tenant_id,
             &ImageFileName {
                 key_range: key_range.clone(),
                 lsn,
@@ -458,8 +458,8 @@ impl ImageLayerWriter {
         let writer = ImageLayerWriter {
             conf,
             path,
-            timelineid,
-            tenantid,
+            timeline_id,
+            tenant_id,
             key_range: key_range.clone(),
             lsn,
             tree: tree_builder,
@@ -502,8 +502,8 @@ impl ImageLayerWriter {
         let summary = Summary {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenantid: self.tenantid,
-            timelineid: self.timelineid,
+            tenant_id: self.tenant_id,
+            timeline_id: self.timeline_id,
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             index_start_blk,
@@ -517,8 +517,8 @@ impl ImageLayerWriter {
         // set inner.file here. The first read will have to re-open it.
         let layer = ImageLayer {
             path_or_conf: PathOrConf::Conf(self.conf),
-            timelineid: self.timelineid,
-            tenantid: self.tenantid,
+            timeline_id: self.timeline_id,
+            tenant_id: self.tenant_id,
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             inner: RwLock::new(ImageLayerInner {
@@ -538,8 +538,8 @@ impl ImageLayerWriter {
         // FIXME: throw an error instead?
         let final_path = ImageLayer::path_for(
             &PathOrConf::Conf(self.conf),
-            self.timelineid,
-            self.tenantid,
+            self.timeline_id,
+            self.tenant_id,
             &ImageFileName {
                 key_range: self.key_range.clone(),
                 lsn: self.lsn,

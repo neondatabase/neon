@@ -10,9 +10,9 @@ use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use crate::tenant_mgr;
 use tracing::*;
-use utils::zid::ZTenantId;
+use utils::id::TenantId;
 
-pub fn start_background_loops(tenant_id: ZTenantId) {
+pub fn start_background_loops(tenant_id: TenantId) {
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
@@ -42,9 +42,8 @@ pub fn start_background_loops(tenant_id: ZTenantId) {
 ///
 /// Compaction task's main loop
 ///
-async fn compaction_loop(tenant_id: ZTenantId) {
+async fn compaction_loop(tenant_id: TenantId) {
     let wait_duration = Duration::from_secs(2);
-
     info!("starting compaction loop for {tenant_id}");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
@@ -90,9 +89,8 @@ async fn compaction_loop(tenant_id: ZTenantId) {
 ///
 /// GC task's main loop
 ///
-async fn gc_loop(tenant_id: ZTenantId) {
+async fn gc_loop(tenant_id: TenantId) {
     let wait_duration = Duration::from_secs(2);
-
     info!("starting gc loop for {tenant_id}");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
@@ -138,7 +136,7 @@ async fn gc_loop(tenant_id: ZTenantId) {
 }
 
 async fn wait_for_active_tenant(
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     wait: Duration,
 ) -> ControlFlow<(), Arc<Tenant>> {
     let tenant = loop {

@@ -32,13 +32,13 @@ from fixtures.neon_fixtures import (
     wait_for_last_record_lsn,
     wait_for_upload,
 )
-from fixtures.types import Lsn, ZTenantId, ZTimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar
 
 
 def wait_lsn_force_checkpoint(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     pg: Postgres,
     ps: NeonPageserver,
     pageserver_conn_options={},
@@ -74,7 +74,7 @@ def wait_lsn_force_checkpoint(
 
 @dataclass
 class TimelineMetrics:
-    timeline_id: ZTimelineId
+    timeline_id: TimelineId
     last_record_lsn: Lsn
     # One entry per each Safekeeper, order is the same
     flush_lsns: List[Lsn] = field(default_factory=list)
@@ -126,7 +126,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
 
         timeline_metrics = []
         for timeline_detail in timeline_details:
-            timeline_id = ZTimelineId(timeline_detail["timeline_id"])
+            timeline_id = TimelineId(timeline_detail["timeline_id"])
 
             local_timeline_detail = timeline_detail.get("local")
             if local_timeline_detail is None:
@@ -273,8 +273,8 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
     # learn neon timeline from compute
-    tenant_id = ZTenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = ZTimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     # wait until remote_consistent_lsn gets advanced on all safekeepers
     clients = [sk.http_client() for sk in env.safekeepers]
@@ -325,8 +325,8 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         ]
     )
 
-    tenant_id = ZTenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = ZTimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     # force checkpoint to advance remote_consistent_lsn
     pageserver_conn_options = {}
@@ -348,7 +348,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             auth_token=env.auth_keys.generate_tenant_token(tenant_id)
         )
         http_cli_other = env.safekeepers[0].http_client(
-            auth_token=env.auth_keys.generate_tenant_token(ZTenantId.generate())
+            auth_token=env.auth_keys.generate_tenant_token(TenantId.generate())
         )
         http_cli_noauth = env.safekeepers[0].http_client()
 
@@ -438,8 +438,8 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
     pg = env.postgres.create_start("test_safekeepers_wal_backup")
 
     # learn neon timeline from compute
-    tenant_id = ZTenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = ZTimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
@@ -493,8 +493,8 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     pg = env.postgres.create_start("test_s3_wal_replay")
 
     # learn neon timeline from compute
-    tenant_id = ZTenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = ZTimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     expected_sum = 0
 
@@ -584,8 +584,8 @@ class ProposerPostgres(PgProtocol):
         self,
         pgdata_dir: str,
         pg_bin,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         listen_addr: str,
         port: int,
     ):
@@ -593,8 +593,8 @@ class ProposerPostgres(PgProtocol):
 
         self.pgdata_dir: str = pgdata_dir
         self.pg_bin: PgBin = pg_bin
-        self.tenant_id: ZTenantId = tenant_id
-        self.timeline_id: ZTimelineId = timeline_id
+        self.tenant_id: TenantId = tenant_id
+        self.timeline_id: TimelineId = timeline_id
         self.listen_addr: str = listen_addr
         self.port: int = port
 
@@ -672,8 +672,8 @@ def test_sync_safekeepers(
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    tenant_id = ZTenantId.generate()
-    timeline_id = ZTimelineId.generate()
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
 
     # write config for proposer
     pgdata_dir = os.path.join(env.repo_dir, "proposer_pgdata")
@@ -725,8 +725,8 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     wa = env.safekeepers[0]
 
     # learn neon timeline from compute
-    tenant_id = ZTenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = ZTimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     if not auth_enabled:
         wa_http_cli = wa.http_client()
@@ -735,7 +735,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         wa_http_cli = wa.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
         wa_http_cli.check_status()
         wa_http_cli_bad = wa.http_client(
-            auth_token=env.auth_keys.generate_tenant_token(ZTenantId.generate())
+            auth_token=env.auth_keys.generate_tenant_token(TenantId.generate())
         )
         wa_http_cli_bad.check_status()
         wa_http_cli_noauth = wa.http_client()
@@ -785,15 +785,15 @@ class SafekeeperEnv:
         self.bin_safekeeper = os.path.join(str(neon_binpath), "safekeeper")
         self.safekeepers: Optional[List[subprocess.CompletedProcess[Any]]] = None
         self.postgres: Optional[ProposerPostgres] = None
-        self.tenant_id: Optional[ZTenantId] = None
-        self.timeline_id: Optional[ZTimelineId] = None
+        self.tenant_id: Optional[TenantId] = None
+        self.timeline_id: Optional[TimelineId] = None
 
     def init(self) -> "SafekeeperEnv":
         assert self.postgres is None, "postgres is already initialized"
         assert self.safekeepers is None, "safekeepers are already initialized"
 
-        self.tenant_id = ZTenantId.generate()
-        self.timeline_id = ZTimelineId.generate()
+        self.tenant_id = TenantId.generate()
+        self.timeline_id = TimelineId.generate()
         self.repo_dir.mkdir(exist_ok=True)
 
         # Create config and a Safekeeper object for each safekeeper
@@ -912,9 +912,7 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
                 sum_after = query_scalar(cur, "SELECT SUM(key) FROM t")
                 assert sum_after == sum_before + 5000050000
 
-    def show_statuses(
-        safekeepers: List[Safekeeper], tenant_id: ZTenantId, timeline_id: ZTimelineId
-    ):
+    def show_statuses(safekeepers: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
         for sk in safekeepers:
             http_cli = sk.http_client()
             try:
@@ -935,8 +933,8 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
     pg.start()
 
     # learn neon timeline from compute
-    tenant_id = ZTenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = ZTimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     execute_payload(pg)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
@@ -1134,7 +1132,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
     # Remove non-existing branch, should succeed
-    assert sk_http.timeline_delete_force(tenant_id, ZTimelineId("00" * 16)) == {
+    assert sk_http.timeline_delete_force(tenant_id, TimelineId("00" * 16)) == {
         "dir_existed": False,
         "was_active": False,
     }

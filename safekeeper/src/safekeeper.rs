@@ -19,9 +19,9 @@ use crate::send_wal::HotStandbyFeedback;
 use crate::wal_storage;
 use utils::{
     bin_ser::LeSer,
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
     pq_proto::{ReplicationFeedback, SystemId},
-    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
@@ -166,10 +166,9 @@ pub struct Peers(pub Vec<(NodeId, PeerInfo)>);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperState {
     #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
-    /// Zenith timelineid
+    pub tenant_id: TenantId,
     #[serde(with = "hex")]
-    pub timeline_id: ZTimelineId,
+    pub timeline_id: TimelineId,
     /// persistent acceptor state
     pub acceptor_state: AcceptorState,
     /// information about server
@@ -219,7 +218,7 @@ pub struct SafekeeperMemState {
 }
 
 impl SafeKeeperState {
-    pub fn new(zttid: &ZTenantTimelineId, peers: Vec<NodeId>) -> SafeKeeperState {
+    pub fn new(zttid: &TenantTimelineId, peers: Vec<NodeId>) -> SafeKeeperState {
         SafeKeeperState {
             tenant_id: zttid.tenant_id,
             timeline_id: zttid.timeline_id,
@@ -245,7 +244,7 @@ impl SafeKeeperState {
 
     #[cfg(test)]
     pub fn empty() -> Self {
-        SafeKeeperState::new(&ZTenantTimelineId::empty(), vec![])
+        SafeKeeperState::new(&TenantTimelineId::empty(), vec![])
     }
 }
 
@@ -260,9 +259,8 @@ pub struct ProposerGreeting {
     pub pg_version: u32,
     pub proposer_id: PgUuid,
     pub system_id: SystemId,
-    /// Zenith timelineid
-    pub ztli: ZTimelineId,
-    pub tenant_id: ZTenantId,
+    pub timeline_id: TimelineId,
+    pub tenant_id: TenantId,
     pub tli: TimeLineID,
     pub wal_seg_size: u32,
 }
@@ -507,13 +505,13 @@ where
 {
     // constructor
     pub fn new(
-        ztli: ZTimelineId,
+        timeline_id: TimelineId,
         state: CTRL,
         mut wal_store: WAL,
         node_id: NodeId,
     ) -> Result<SafeKeeper<CTRL, WAL>> {
-        if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
-            bail!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
+        if state.timeline_id != TimelineId::from([0u8; 16]) && timeline_id != state.timeline_id {
+            bail!("Calling SafeKeeper::new with inconsistent timeline_id ({}) and SafeKeeperState.server.timeline_id ({})", timeline_id, state.timeline_id);
         }
 
         // initialize wal_store, if state is already initialized
@@ -600,10 +598,10 @@ where
                 self.state.tenant_id
             );
         }
-        if msg.ztli != self.state.timeline_id {
+        if msg.timeline_id != self.state.timeline_id {
             bail!(
                 "invalid timeline ID, got {}, expected {}",
-                msg.ztli,
+                msg.timeline_id,
                 self.state.timeline_id
             );
         }
@@ -982,9 +980,9 @@ mod tests {
             persisted_state: SafeKeeperState::empty(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
-        let ztli = ZTimelineId::from([0u8; 16]);
+        let timeline_id = TimelineId::from([0u8; 16]);
 
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(timeline_id, storage, wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -1000,7 +998,7 @@ mod tests {
             persisted_state: state,
         };
 
-        sk = SafeKeeper::new(ztli, storage, sk.wal_store, NodeId(0)).unwrap();
+        sk = SafeKeeper::new(timeline_id, storage, sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -1016,9 +1014,9 @@ mod tests {
             persisted_state: SafeKeeperState::empty(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
-        let ztli = ZTimelineId::from([0u8; 16]);
+        let timeline_id = TimelineId::from([0u8; 16]);
 
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(timeline_id, storage, wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,

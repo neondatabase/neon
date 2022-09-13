@@ -68,7 +68,7 @@
 //! Pageserver maintains similar to the local file structure remotely: all layer files are uploaded with the same names under the same directory structure.
 //! Yet instead of keeping the `metadata` file remotely, we wrap it with more data in [`IndexPart`], containing the list of remote files.
 //! This file gets read to populate the cache, if the remote timeline data is missing from it and gets updated after every successful download.
-//! This way, we optimize S3 storage access by not running the `S3 list` command that could be expencive and slow: knowing both [`ZTenantId`] and [`ZTimelineId`],
+//! This way, we optimize S3 storage access by not running the `S3 list` command that could be expencive and slow: knowing both [`TenantId`] and [`TimelineId`],
 //! we can always reconstruct the path to the timeline, use this to get the same path on the remote storage and retrieve its shard contents, if needed, same as any layer files.
 //!
 //! By default, pageserver reads the remote storage index data only for timelines located locally, to synchronize those, if needed.
@@ -183,7 +183,7 @@ use crate::{
     TenantTimelineValues,
 };
 
-use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 use self::download::download_index_parts;
 pub use self::download::gather_tenant_timelines_index_parts;
@@ -227,7 +227,7 @@ pub struct SyncStartupData {
 struct SyncQueue {
     max_timelines_per_batch: NonZeroUsize,
 
-    queue: Mutex<VecDeque<(ZTenantTimelineId, SyncTask)>>,
+    queue: Mutex<VecDeque<(TenantTimelineId, SyncTask)>>,
     condvar: Condvar,
 }
 
@@ -241,7 +241,7 @@ impl SyncQueue {
     }
 
     /// Queue a new task
-    fn push(&self, sync_id: ZTenantTimelineId, new_task: SyncTask) {
+    fn push(&self, sync_id: TenantTimelineId, new_task: SyncTask) {
         let mut q = self.queue.lock().unwrap();
 
         q.push_back((sync_id, new_task));
@@ -254,7 +254,7 @@ impl SyncQueue {
     /// A timeline has to care to not to delete certain layers from the remote storage before the corresponding uploads happen.
     /// Other than that, due to "immutable" nature of the layers, the order of their deletion/uploading/downloading does not matter.
     /// Hence, we merge the layers together into single task per timeline and run those concurrently (with the deletion happening only after successful uploading).
-    fn next_task_batch(&self) -> (HashMap<ZTenantTimelineId, SyncTaskBatch>, usize) {
+    fn next_task_batch(&self) -> (HashMap<TenantTimelineId, SyncTaskBatch>, usize) {
         // Wait for the first task in blocking fashion
         let mut q = self.queue.lock().unwrap();
         while q.is_empty() {
@@ -488,8 +488,8 @@ struct LayersDeletion {
 ///
 /// Ensure that the loop is started otherwise the task is never processed.
 pub fn schedule_layer_upload(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     layers_to_upload: HashSet<PathBuf>,
     metadata: Option<TimelineMetadata>,
 ) {
@@ -501,7 +501,7 @@ pub fn schedule_layer_upload(
         }
     };
     sync_queue.push(
-        ZTenantTimelineId {
+        TenantTimelineId {
             tenant_id,
             timeline_id,
         },
@@ -519,8 +519,8 @@ pub fn schedule_layer_upload(
 ///
 /// Ensure that the loop is started otherwise the task is never processed.
 pub fn schedule_layer_delete(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     layers_to_delete: HashSet<PathBuf>,
 ) {
     let sync_queue = match SYNC_QUEUE.get() {
@@ -531,7 +531,7 @@ pub fn schedule_layer_delete(
         }
     };
     sync_queue.push(
-        ZTenantTimelineId {
+        TenantTimelineId {
             tenant_id,
             timeline_id,
         },
@@ -551,7 +551,7 @@ pub fn schedule_layer_delete(
 /// On any failure, the task gets retried, omitting already downloaded layers.
 ///
 /// Ensure that the loop is started otherwise the task is never processed.
-pub fn schedule_layer_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
+pub fn schedule_layer_download(tenant_id: TenantId, timeline_id: TimelineId) {
     debug!("Scheduling layer download for tenant {tenant_id}, timeline {timeline_id}");
     let sync_queue = match SYNC_QUEUE.get() {
         Some(queue) => queue,
@@ -561,7 +561,7 @@ pub fn schedule_layer_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
         }
     };
     sync_queue.push(
-        ZTenantTimelineId {
+        TenantTimelineId {
             tenant_id,
             timeline_id,
         },
@@ -604,7 +604,7 @@ pub fn spawn_storage_sync_task(
             let _ = empty_tenants.0.entry(tenant_id).or_default();
         } else {
             for (timeline_id, timeline_data) in timeline_data {
-                let id = ZTenantTimelineId::new(tenant_id, timeline_id);
+                let id = TenantTimelineId::new(tenant_id, timeline_id);
                 keys_for_index_part_downloads.insert(id);
                 timelines_to_sync.insert(id, timeline_data);
             }
@@ -766,9 +766,9 @@ async fn process_batches(
     max_sync_errors: NonZeroU32,
     storage: GenericRemoteStorage,
     index: &RemoteIndex,
-    batched_tasks: HashMap<ZTenantTimelineId, SyncTaskBatch>,
+    batched_tasks: HashMap<TenantTimelineId, SyncTaskBatch>,
     sync_queue: &SyncQueue,
-) -> HashSet<ZTenantId> {
+) -> HashSet<TenantId> {
     let mut sync_results = batched_tasks
         .into_iter()
         .map(|(sync_id, batch)| {
@@ -808,7 +808,7 @@ async fn process_sync_task_batch(
     conf: &'static PageServerConf,
     (storage, index, sync_queue): (GenericRemoteStorage, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     batch: SyncTaskBatch,
 ) -> DownloadStatus {
     let sync_start = Instant::now();
@@ -949,7 +949,7 @@ async fn download_timeline_data(
     conf: &'static PageServerConf,
     (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
     current_remote_timeline: Option<&RemoteTimeline>,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     new_download_data: SyncData<LayersDownload>,
     sync_start: Instant,
     task_name: &str,
@@ -999,7 +999,7 @@ async fn download_timeline_data(
 
 async fn update_local_metadata(
     conf: &'static PageServerConf,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     remote_timeline: Option<&RemoteTimeline>,
 ) -> anyhow::Result<()> {
     let remote_metadata = match remote_timeline {
@@ -1031,7 +1031,7 @@ async fn update_local_metadata(
         info!("Updating local timeline metadata from remote timeline: local disk_consistent_lsn={local_lsn:?}, remote disk_consistent_lsn={remote_lsn}");
         // clone because spawn_blocking requires static lifetime
         let cloned_metadata = remote_metadata.to_owned();
-        let ZTenantTimelineId {
+        let TenantTimelineId {
             tenant_id,
             timeline_id,
         } = sync_id;
@@ -1061,7 +1061,7 @@ async fn update_local_metadata(
 async fn delete_timeline_data(
     conf: &'static PageServerConf,
     (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     mut new_delete_data: SyncData<LayersDeletion>,
     sync_start: Instant,
     task_name: &str,
@@ -1104,7 +1104,7 @@ async fn upload_timeline_data(
     conf: &'static PageServerConf,
     (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
     current_remote_timeline: Option<&RemoteTimeline>,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     new_upload_data: SyncData<LayersUpload>,
     sync_start: Instant,
     task_name: &str,
@@ -1163,7 +1163,7 @@ async fn update_remote_data(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
     index: &RemoteIndex,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     update: RemoteDataUpdate<'_>,
 ) -> anyhow::Result<()> {
     let updated_remote_timeline = {
@@ -1261,7 +1261,7 @@ async fn validate_task_retries(
 fn schedule_first_sync_tasks(
     index: &mut RemoteTimelineIndex,
     sync_queue: &SyncQueue,
-    local_timeline_files: HashMap<ZTenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
+    local_timeline_files: HashMap<TenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
 ) -> TenantTimelineValues<LocalTimelineInitStatus> {
     let mut local_timeline_init_statuses = TenantTimelineValues::new();
 
@@ -1331,8 +1331,8 @@ fn schedule_first_sync_tasks(
 
 /// bool in return value stands for awaits_download
 fn compare_local_and_remote_timeline(
-    new_sync_tasks: &mut VecDeque<(ZTenantTimelineId, SyncTask)>,
-    sync_id: ZTenantTimelineId,
+    new_sync_tasks: &mut VecDeque<(TenantTimelineId, SyncTask)>,
+    sync_id: TenantTimelineId,
     local_metadata: TimelineMetadata,
     local_files: HashSet<PathBuf>,
     remote_entry: &RemoteTimeline,
@@ -1377,7 +1377,7 @@ fn compare_local_and_remote_timeline(
 }
 
 fn register_sync_status(
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     sync_start: Instant,
     sync_name: &str,
     sync_status: Option<bool>,
@@ -1409,7 +1409,7 @@ mod test_utils {
 
     pub(super) async fn create_local_timeline(
         harness: &TenantHarness<'_>,
-        timeline_id: ZTimelineId,
+        timeline_id: TimelineId,
         filenames: &[&str],
         metadata: TimelineMetadata,
     ) -> anyhow::Result<LayersUpload> {
@@ -1454,8 +1454,8 @@ mod tests {
 
     use super::*;
 
-    const TEST_SYNC_ID: ZTenantTimelineId = ZTenantTimelineId {
-        tenant_id: ZTenantId::from_array(hex!("11223344556677881122334455667788")),
+    const TEST_SYNC_ID: TenantTimelineId = TenantTimelineId {
+        tenant_id: TenantId::from_array(hex!("11223344556677881122334455667788")),
         timeline_id: TIMELINE_ID,
     };
 
@@ -1464,12 +1464,12 @@ mod tests {
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         assert_eq!(sync_queue.len(), 0);
 
-        let sync_id_2 = ZTenantTimelineId {
-            tenant_id: ZTenantId::from_array(hex!("22223344556677881122334455667788")),
+        let sync_id_2 = TenantTimelineId {
+            tenant_id: TenantId::from_array(hex!("22223344556677881122334455667788")),
             timeline_id: TIMELINE_ID,
         };
-        let sync_id_3 = ZTenantTimelineId {
-            tenant_id: ZTenantId::from_array(hex!("33223344556677881122334455667788")),
+        let sync_id_3 = TenantTimelineId {
+            tenant_id: TenantId::from_array(hex!("33223344556677881122334455667788")),
             timeline_id: TIMELINE_ID,
         };
         assert!(sync_id_2 != TEST_SYNC_ID);
@@ -1591,8 +1591,8 @@ mod tests {
             layers_to_skip: HashSet::from([PathBuf::from("sk4")]),
         };
 
-        let sync_id_2 = ZTenantTimelineId {
-            tenant_id: ZTenantId::from_array(hex!("22223344556677881122334455667788")),
+        let sync_id_2 = TenantTimelineId {
+            tenant_id: TenantId::from_array(hex!("22223344556677881122334455667788")),
             timeline_id: TIMELINE_ID,
         };
         assert!(sync_id_2 != TEST_SYNC_ID);

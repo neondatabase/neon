@@ -21,8 +21,8 @@ use utils::{
         request::{ensure_no_body, parse_request_param},
         RequestExt, RouterBuilder,
     },
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use super::models::TimelineCreateRequest;
@@ -68,9 +68,9 @@ struct AcceptorStateStatus {
 #[derive(Debug, Serialize)]
 struct TimelineStatus {
     #[serde(serialize_with = "display_serialize")]
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     #[serde(serialize_with = "display_serialize")]
-    timeline_id: ZTimelineId,
+    timeline_id: TimelineId,
     acceptor_state: AcceptorStateStatus,
     #[serde(serialize_with = "display_serialize")]
     flush_lsn: Lsn,
@@ -90,7 +90,7 @@ struct TimelineStatus {
 
 /// Report info about timeline.
 async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let zttid = ZTenantTimelineId::new(
+    let zttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
@@ -125,7 +125,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
 
-    let zttid = ZTenantTimelineId {
+    let zttid = TenantTimelineId {
         tenant_id: parse_request_param(&request, "tenant_id")?,
         timeline_id: request_data.timeline_id,
     };
@@ -146,7 +146,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 async fn timeline_delete_force_handler(
     mut request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let zttid = ZTenantTimelineId::new(
+    let zttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
@@ -181,7 +181,7 @@ async fn tenant_delete_force_handler(
 
 /// Used only in tests to hand craft required data.
 async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let zttid = ZTenantTimelineId::new(
+    let zttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );

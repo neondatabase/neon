@@ -2,7 +2,7 @@
 /// Module for parsing postgresql.conf file.
 ///
 /// NOTE: This doesn't implement the full, correct postgresql.conf syntax. Just
-/// enough to extract a few settings we need in Zenith, assuming you don't do
+/// enough to extract a few settings we need in Neon, assuming you don't do
 /// funny stuff like include-directives or funny escaping.
 use anyhow::{bail, Context, Result};
 use once_cell::sync::Lazy;

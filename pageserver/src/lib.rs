@@ -26,7 +26,7 @@ pub mod walredo;
 use std::collections::HashMap;
 
 use tracing::info;
-use utils::zid::{ZTenantId, ZTimelineId};
+use utils::id::{TenantId, TimelineId};
 
 use crate::task_mgr::TaskKind;
 
@@ -105,12 +105,12 @@ fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds
 }
 
 /// A newtype to store arbitrary data grouped by tenant and timeline ids.
-/// One could use [`utils::zid::ZTenantTimelineId`] for grouping, but that would
+/// One could use [`utils::zid::TenantTimelineId`] for grouping, but that would
 /// not include the cases where a certain tenant has zero timelines.
 /// This is sometimes important: a tenant could be registered during initial load from FS,
 /// even if he has no timelines on disk.
 #[derive(Debug)]
-pub struct TenantTimelineValues<T>(HashMap<ZTenantId, HashMap<ZTimelineId, T>>);
+pub struct TenantTimelineValues<T>(HashMap<TenantId, HashMap<TimelineId, T>>);
 
 impl<T> TenantTimelineValues<T> {
     fn new() -> Self {
@@ -187,8 +187,8 @@ mod tests {
 
     #[test]
     fn tenant_timeline_value_mapping() {
-        let first_tenant = ZTenantId::generate();
-        let second_tenant = ZTenantId::generate();
+        let first_tenant = TenantId::generate();
+        let second_tenant = TenantId::generate();
         assert_ne!(first_tenant, second_tenant);
 
         let mut initial = TenantTimelineValues::new();

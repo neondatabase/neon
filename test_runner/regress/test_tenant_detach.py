@@ -4,10 +4,10 @@ import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException
-from fixtures.types import ZTenantId, ZTimelineId
+from fixtures.types import TenantId, TimelineId
 
 
-def do_gc_target(env: NeonEnv, tenant_id: ZTenantId, timeline_id: ZTimelineId):
+def do_gc_target(env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId):
     """Hack to unblock main, see https://github.com/neondatabase/neon/issues/2211"""
     try:
         env.pageserver.safe_psql(f"do_gc {tenant_id} {timeline_id} 0")
@@ -20,7 +20,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     pageserver_http = env.pageserver.http_client()
 
     # first check for non existing tenant
-    tenant_id = ZTenantId.generate()
+    tenant_id = TenantId.generate()
     with pytest.raises(
         expected_exception=NeonPageserverApiException,
         match=f"Tenant not found for id {tenant_id}",
@@ -46,7 +46,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     with pytest.raises(
         expected_exception=psycopg2.DatabaseError, match="gc target timeline does not exist"
     ):
-        bogus_timeline_id = ZTimelineId.generate()
+        bogus_timeline_id = TimelineId.generate()
         env.pageserver.safe_psql(f"do_gc {tenant_id} {bogus_timeline_id} 0")
 
     # try to concurrently run gc and detach

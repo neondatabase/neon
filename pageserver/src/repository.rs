@@ -1,4 +1,4 @@
-use crate::walrecord::ZenithWalRecord;
+use crate::walrecord::NeonWalRecord;
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
@@ -157,7 +157,7 @@ pub enum Value {
     /// replayed get the full value. Replaying the WAL record
     /// might need a previous version of the value (if will_init()
     /// returns false), or it may be replayed stand-alone (true).
-    WalRecord(ZenithWalRecord),
+    WalRecord(NeonWalRecord),
 }
 
 impl Value {

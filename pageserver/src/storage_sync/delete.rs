@@ -8,7 +8,7 @@ use tracing::{debug, error, info};
 
 use crate::storage_sync::{SyncQueue, SyncTask};
 use remote_storage::GenericRemoteStorage;
-use utils::zid::ZTenantTimelineId;
+use utils::id::TenantTimelineId;
 
 use super::{LayersDeletion, SyncData};
 
@@ -17,7 +17,7 @@ use super::{LayersDeletion, SyncData};
 pub(super) async fn delete_timeline_layers(
     storage: &GenericRemoteStorage,
     sync_queue: &SyncQueue,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     mut delete_data: SyncData<LayersDeletion>,
 ) -> bool {
     if !delete_data.data.deletion_registered {
@@ -123,7 +123,7 @@ mod tests {
     async fn delete_timeline_negative() -> anyhow::Result<()> {
         let harness = TenantHarness::create("delete_timeline_negative")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_path_buf(),
             harness.conf.workdir.clone(),
@@ -157,7 +157,7 @@ mod tests {
         let harness = TenantHarness::create("delete_timeline")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
 
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "c", "d"];
         let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_path_buf(),

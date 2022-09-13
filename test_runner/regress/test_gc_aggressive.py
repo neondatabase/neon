@@ -3,7 +3,7 @@ import random
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
-from fixtures.types import ZTimelineId
+from fixtures.types import TimelineId
 from fixtures.utils import query_scalar
 
 # Test configuration
@@ -29,7 +29,7 @@ async def update_table(pg: Postgres):
 
 
 # Perform aggressive GC with 0 horizon
-async def gc(env: NeonEnv, timeline: ZTimelineId):
+async def gc(env: NeonEnv, timeline: TimelineId):
     psconn = await env.pageserver.connect_async()
 
     while updates_performed < updates_to_perform:
@@ -37,7 +37,7 @@ async def gc(env: NeonEnv, timeline: ZTimelineId):
 
 
 # At the same time, run UPDATEs and GC
-async def update_and_gc(env: NeonEnv, pg: Postgres, timeline: ZTimelineId):
+async def update_and_gc(env: NeonEnv, pg: Postgres, timeline: TimelineId):
     workers = []
     for worker_id in range(num_connections):
         workers.append(asyncio.create_task(update_table(pg)))
@@ -62,7 +62,7 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
     log.info("postgres is running on test_gc_aggressive branch")
 
     with pg.cursor() as cur:
-        timeline = ZTimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
+        timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
         # Create table, and insert the first 100 rows
         cur.execute("CREATE TABLE foo (id int, counter int, t text)")

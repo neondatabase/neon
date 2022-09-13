@@ -11,7 +11,7 @@ use utils::{lsn::Lsn, project_git_version};
 project_git_version!(GIT_VERSION);
 
 fn main() -> Result<()> {
-    let arg_matches = App::new("Zenith update metadata utility")
+    let arg_matches = App::new("Neon update metadata utility")
         .about("Dump or update metadata file")
         .version(GIT_VERSION)
         .arg(

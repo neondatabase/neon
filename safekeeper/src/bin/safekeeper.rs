@@ -30,8 +30,8 @@ use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
 use utils::auth::JwtAuth;
 use utils::{
-    http::endpoint, logging, project_git_version, shutdown::exit_now, signals, tcp_listener,
-    zid::NodeId,
+    http::endpoint, id::NodeId, logging, project_git_version, shutdown::exit_now, signals,
+    tcp_listener,
 };
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
@@ -39,7 +39,7 @@ const ID_FILE_NAME: &str = "safekeeper.id";
 project_git_version!(GIT_VERSION);
 
 fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("Zenith safekeeper")
+    let arg_matches = App::new("Neon safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .version(GIT_VERSION)
         .arg(

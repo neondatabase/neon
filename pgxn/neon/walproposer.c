@@ -71,14 +71,13 @@
 #include "walproposer_utils.h"
 #include "replication/walpropshim.h"
 
-
 char	   *wal_acceptors_list;
 int			wal_acceptor_reconnect_timeout;
 int			wal_acceptor_connect_timeout;
 bool		am_wal_proposer;
 
-char	   *zenith_timeline_walproposer = NULL;
-char	   *zenith_tenant_walproposer = NULL;
+char	   *neon_timeline_walproposer = NULL;
+char	   *neon_tenant_walproposer = NULL;
 
 /* Declared in walproposer.h, defined here, initialized in libpqwalproposer.c */
 WalProposerFunctionsType *WalProposerFunctions = NULL;
@@ -89,7 +88,7 @@ static int	n_safekeepers = 0;
 static int	quorum = 0;
 static Safekeeper safekeeper[MAX_SAFEKEEPERS];
 static XLogRecPtr availableLsn; /* WAL has been generated up to this point */
-static XLogRecPtr lastSentCommitLsn;	/* last commitLsn broadcast to
+static XLogRecPtr lastSentCommitLsn;	/* last commitLsn broadcast to*
 										 * safekeepers */
 static ProposerGreeting greetRequest;
 static VoteRequest voteRequest; /* Vote request for safekeeper */
@@ -162,7 +161,6 @@ static bool BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, Safekeeper
 static bool AsyncWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState flush_state);
 static bool AsyncFlush(Safekeeper *sk);
 
-
 static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
 static void nwp_prepare_shmem(void);
@@ -175,7 +173,6 @@ static shmem_startup_hook_type prev_shmem_startup_hook_type;
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void walproposer_shmem_request(void);
 #endif
-
 
 void
 pg_init_walproposer(void)
@@ -207,10 +204,9 @@ nwp_register_gucs(void)
 							   &wal_acceptors_list, /* valueAddr */
 							   "",	/* bootValue */
 							   PGC_POSTMASTER,
-							   GUC_LIST_INPUT,	/* extensions can't use
+							   GUC_LIST_INPUT,	/* extensions can't use*
 												 * GUC_LIST_QUOTE */
-							   NULL, NULL, NULL
-		);
+							   NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_reconnect_timeout",
@@ -220,8 +216,7 @@ nwp_register_gucs(void)
 							1000, 0, INT_MAX,	/* default, min, max */
 							PGC_SIGHUP, /* context */
 							GUC_UNIT_MS,	/* flags */
-							NULL, NULL, NULL
-		);
+							NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_connect_timeout",
@@ -231,9 +226,7 @@ nwp_register_gucs(void)
 							5000, 0, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
-							NULL, NULL, NULL
-		);
-
+							NULL, NULL, NULL);
 }
 
 /* shmem handling */
@@ -499,19 +492,19 @@ WalProposerInitImpl(XLogRecPtr flushRecPtr, uint64 systemId)
 	greetRequest.pgVersion = PG_VERSION_NUM;
 	pg_strong_random(&greetRequest.proposerId, sizeof(greetRequest.proposerId));
 	greetRequest.systemId = systemId;
-	if (!zenith_timeline_walproposer)
+	if (!neon_timeline_walproposer)
 		elog(FATAL, "neon.timeline_id is not provided");
-	if (*zenith_timeline_walproposer != '\0' &&
-		!HexDecodeString(greetRequest.ztimelineid, zenith_timeline_walproposer, 16))
-		elog(FATAL, "Could not parse neon.timeline_id, %s", zenith_timeline_walproposer);
-	if (!zenith_tenant_walproposer)
+	if (*neon_timeline_walproposer != '\0' &&
+		!HexDecodeString(greetRequest.timeline_id, neon_timeline_walproposer, 16))
+		elog(FATAL, "Could not parse neon.timeline_id, %s", neon_timeline_walproposer);
+	if (!neon_tenant_walproposer)
 		elog(FATAL, "neon.tenant_id is not provided");
-	if (*zenith_tenant_walproposer != '\0' &&
-		!HexDecodeString(greetRequest.ztenantid, zenith_tenant_walproposer, 16))
-		elog(FATAL, "Could not parse neon.tenant_id, %s", zenith_tenant_walproposer);
+	if (*neon_tenant_walproposer != '\0' &&
+		!HexDecodeString(greetRequest.tenant_id, neon_tenant_walproposer, 16))
+		elog(FATAL, "Could not parse neon.tenant_id, %s", neon_tenant_walproposer);
 
 #if PG_VERSION_NUM >= 150000
-/*  FIXME don't use hardcoded timeline id */
+	/* FIXME don't use hardcoded timeline id */
 	greetRequest.timeline = 1;
 #else
 	greetRequest.timeline = ThisTimeLineID;
@@ -657,8 +650,8 @@ ResetConnection(Safekeeper *sk)
 		int			written = 0;
 
 		written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-						   "host=%s port=%s dbname=replication options='-c ztimelineid=%s ztenantid=%s'",
-						   sk->host, sk->port, zenith_timeline_walproposer, zenith_tenant_walproposer);
+						   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+						   sk->host, sk->port, neon_timeline_walproposer, neon_tenant_walproposer);
 
 		/*
 		 * currently connection string is not that long, but once we pass
@@ -1326,8 +1319,7 @@ DetermineEpochStartLsn(void)
 		 propTerm,
 		 LSN_FORMAT_ARGS(propEpochStartLsn),
 		 safekeeper[donor].host, safekeeper[donor].port,
-		 LSN_FORMAT_ARGS(truncateLsn)
-		);
+		 LSN_FORMAT_ARGS(truncateLsn));
 
 	/*
 	 * Ensure the basebackup we are running (at RedoStartLsn) matches LSN
@@ -1373,8 +1365,8 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 	WalReceiverConn *wrconn;
 	WalRcvStreamOptions options;
 
-	sprintf(conninfo, "host=%s port=%s dbname=replication options='-c ztimelineid=%s ztenantid=%s'",
-			safekeeper[donor].host, safekeeper[donor].port, zenith_timeline_walproposer, zenith_tenant_walproposer);
+	sprintf(conninfo, "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+			safekeeper[donor].host, safekeeper[donor].port, neon_timeline_walproposer, neon_tenant_walproposer);
 	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
 	if (!wrconn)
 	{
@@ -1544,8 +1536,7 @@ SendProposerElected(Safekeeper *sk)
 		else
 		{
 			XLogRecPtr	propEndLsn = propTermHistory.entries[i + 1].lsn;
-			XLogRecPtr	skEndLsn = (i + 1 < th->n_entries ? th->entries[i + 1].lsn :
-									sk->voteResponse.flushLsn);
+			XLogRecPtr	skEndLsn = (i + 1 < th->n_entries ? th->entries[i + 1].lsn : sk->voteResponse.flushLsn);
 
 			sk->startStreamingAt = Min(propEndLsn, skEndLsn);
 		}
@@ -1759,7 +1750,7 @@ SendAppendRequests(Safekeeper *sk)
 					 req->beginLsn,
 					 req->endLsn - req->beginLsn,
 #if PG_VERSION_NUM >= 150000
-		/* FIXME don't use hardcoded timelineid here */
+		/* FIXME don't use hardcoded timeline_id here */
 					 1,
 #else
 					 ThisTimeLineID,
@@ -1784,9 +1775,9 @@ SendAppendRequests(Safekeeper *sk)
 			case PG_ASYNC_WRITE_TRY_FLUSH:
 
 				/*
-				 * We still need to call PQflush some more to finish the job.
-				 * Caller function will handle this by setting right event
-				 * set.
+				 * * We still need to call PQflush some more to finish the
+				 * job. Caller function will handle this by setting right
+				 * event* set.
 				 */
 				sk->flushWrite = true;
 				return true;
@@ -1885,40 +1876,40 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 		if (strcmp(key, "current_timeline_size") == 0)
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
-			//read value length
-				rf->currentClusterSize = pq_getmsgint64(reply_message);
+			/* read value length */
+			rf->currentClusterSize = pq_getmsgint64(reply_message);
 			elog(DEBUG2, "ParseReplicationFeedbackMessage: current_timeline_size %lu",
 				 rf->currentClusterSize);
 		}
 		else if (strcmp(key, "ps_writelsn") == 0)
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
-			//read value length
-				rf->ps_writelsn = pq_getmsgint64(reply_message);
+			/* read value length */
+			rf->ps_writelsn = pq_getmsgint64(reply_message);
 			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_writelsn %X/%X",
 				 LSN_FORMAT_ARGS(rf->ps_writelsn));
 		}
 		else if (strcmp(key, "ps_flushlsn") == 0)
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
-			//read value length
-				rf->ps_flushlsn = pq_getmsgint64(reply_message);
+			/* read value length */
+			rf->ps_flushlsn = pq_getmsgint64(reply_message);
 			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_flushlsn %X/%X",
 				 LSN_FORMAT_ARGS(rf->ps_flushlsn));
 		}
 		else if (strcmp(key, "ps_applylsn") == 0)
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
-			//read value length
-				rf->ps_applylsn = pq_getmsgint64(reply_message);
+			/* read value length */
+			rf->ps_applylsn = pq_getmsgint64(reply_message);
 			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_applylsn %X/%X",
 				 LSN_FORMAT_ARGS(rf->ps_applylsn));
 		}
 		else if (strcmp(key, "ps_replytime") == 0)
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
-			//read value length
-				rf->ps_replytime = pq_getmsgint64(reply_message);
+			/* read value length */
+			rf->ps_replytime = pq_getmsgint64(reply_message);
 			{
 				char	   *replyTimeStr;
 
@@ -1933,13 +1924,13 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 		else
 		{
 			len = pq_getmsgint(reply_message, sizeof(int32));
-			//read value length
+			/* read value length */
 
 			/*
 			 * Skip unknown keys to support backward compatibile protocol
 			 * changes
 			 */
-				elog(LOG, "ParseReplicationFeedbackMessage: unknown key: %s len %d", key, len);
+			elog(LOG, "ParseReplicationFeedbackMessage: unknown key: %s len %d", key, len);
 			pq_getmsgbytes(reply_message, len);
 		};
 	}
@@ -1972,7 +1963,6 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback * hs)
 		}
 	}
 }
-
 
 /*
  * Get minimum of flushed LSNs of all safekeepers, which is the LSN of the
@@ -2009,8 +1999,7 @@ GetAcknowledgedByQuorumWALPosition(void)
 		 * Like in Raft, we aren't allowed to commit entries from previous
 		 * terms, so ignore reported LSN until it gets to epochStartLsn.
 		 */
-		responses[i] = safekeeper[i].appendResponse.flushLsn >= propEpochStartLsn ?
-			safekeeper[i].appendResponse.flushLsn : 0;
+		responses[i] = safekeeper[i].appendResponse.flushLsn >= propEpochStartLsn ? safekeeper[i].appendResponse.flushLsn : 0;
 	}
 	qsort(responses, n_safekeepers, sizeof(XLogRecPtr), CompareLsn);
 
@@ -2058,7 +2047,6 @@ replication_feedback_set(ReplicationFeedback * rf)
 	SpinLockRelease(&walprop_shared->mutex);
 }
 
-
 void
 replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn)
 {
@@ -2069,12 +2057,11 @@ replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRe
 	SpinLockRelease(&walprop_shared->mutex);
 }
 
-
 /*
  * Get ReplicationFeedback fields from the most advanced safekeeper
  */
 static void
-GetLatestZentihFeedback(ReplicationFeedback * rf)
+GetLatestNeonFeedback(ReplicationFeedback * rf)
 {
 	int			latest_safekeeper = 0;
 	XLogRecPtr	ps_writelsn = InvalidXLogRecPtr;
@@ -2094,7 +2081,7 @@ GetLatestZentihFeedback(ReplicationFeedback * rf)
 	rf->ps_applylsn = safekeeper[latest_safekeeper].appendResponse.rf.ps_applylsn;
 	rf->ps_replytime = safekeeper[latest_safekeeper].appendResponse.rf.ps_replytime;
 
-	elog(DEBUG2, "GetLatestZentihFeedback: currentClusterSize %lu,"
+	elog(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
 		 " ps_writelsn %X/%X, ps_flushlsn %X/%X, ps_applylsn %X/%X, ps_replytime %lu",
 		 rf->currentClusterSize,
 		 LSN_FORMAT_ARGS(rf->ps_writelsn),
@@ -2113,14 +2100,13 @@ HandleSafekeeperResponse(void)
 	XLogRecPtr	diskConsistentLsn;
 	XLogRecPtr	minFlushLsn;
 
-
 	minQuorumLsn = GetAcknowledgedByQuorumWALPosition();
 	diskConsistentLsn = quorumFeedback.rf.ps_flushlsn;
 
 	if (!syncSafekeepers)
 	{
 		/* Get ReplicationFeedback fields from the most advanced safekeeper */
-		GetLatestZentihFeedback(&quorumFeedback.rf);
+		GetLatestNeonFeedback(&quorumFeedback.rf);
 		SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
 	}
 
@@ -2139,7 +2125,7 @@ HandleSafekeeperResponse(void)
 								quorumFeedback.flushLsn,
 
 			/*
-			 * apply_lsn - This is what processed and durably saved at
+			 * apply_lsn - This is what processed and durably saved at*
 			 * pageserver.
 			 */
 								quorumFeedback.rf.ps_flushlsn,
@@ -2460,7 +2446,7 @@ backpressure_lag_impl(void)
 		XLogRecPtr	myFlushLsn = GetFlushRecPtr();
 #endif
 		replication_feedback_get_lsns(&writePtr, &flushPtr, &applyPtr);
-#define MB ((XLogRecPtr)1024*1024)
+#define MB ((XLogRecPtr)1024 * 1024)
 
 		elog(DEBUG2, "current flushLsn %X/%X ReplicationFeedback: write %X/%X flush %X/%X apply %X/%X",
 			 LSN_FORMAT_ARGS(myFlushLsn),
@@ -2468,23 +2454,17 @@ backpressure_lag_impl(void)
 			 LSN_FORMAT_ARGS(flushPtr),
 			 LSN_FORMAT_ARGS(applyPtr));
 
-		if ((writePtr != InvalidXLogRecPtr
-			 && max_replication_write_lag > 0
-			 && myFlushLsn > writePtr + max_replication_write_lag * MB))
+		if ((writePtr != InvalidXLogRecPtr && max_replication_write_lag > 0 && myFlushLsn > writePtr + max_replication_write_lag * MB))
 		{
 			return (myFlushLsn - writePtr - max_replication_write_lag * MB);
 		}
 
-		if ((flushPtr != InvalidXLogRecPtr
-			 && max_replication_flush_lag > 0
-			 && myFlushLsn > flushPtr + max_replication_flush_lag * MB))
+		if ((flushPtr != InvalidXLogRecPtr && max_replication_flush_lag > 0 && myFlushLsn > flushPtr + max_replication_flush_lag * MB))
 		{
 			return (myFlushLsn - flushPtr - max_replication_flush_lag * MB);
 		}
 
-		if ((applyPtr != InvalidXLogRecPtr
-			 && max_replication_apply_lag > 0
-			 && myFlushLsn > applyPtr + max_replication_apply_lag * MB))
+		if ((applyPtr != InvalidXLogRecPtr && max_replication_apply_lag > 0 && myFlushLsn > applyPtr + max_replication_apply_lag * MB))
 		{
 			return (myFlushLsn - applyPtr - max_replication_apply_lag * MB);
 		}

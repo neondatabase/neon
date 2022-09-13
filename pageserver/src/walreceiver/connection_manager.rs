@@ -34,8 +34,8 @@ use crate::{
     DEFAULT_MAX_BACKOFF_SECONDS,
 };
 use utils::{
+    id::{NodeId, TenantTimelineId},
     lsn::Lsn,
-    zid::{NodeId, ZTenantTimelineId},
 };
 
 use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
@@ -101,7 +101,7 @@ async fn connection_manager_loop_step(
     etcd_client: &mut Client,
     walreceiver_state: &mut WalreceiverState,
 ) {
-    let id = ZTenantTimelineId {
+    let id = TenantTimelineId {
         tenant_id: walreceiver_state.timeline.tenant_id,
         timeline_id: walreceiver_state.timeline.timeline_id,
     };
@@ -230,7 +230,7 @@ fn cleanup_broker_connection(
 async fn subscribe_for_timeline_updates(
     etcd_client: &mut Client,
     broker_prefix: &str,
-    id: ZTenantTimelineId,
+    id: TenantTimelineId,
 ) -> BrokerSubscription<SkTimelineInfo> {
     let mut attempt = 0;
     loop {
@@ -266,7 +266,7 @@ const WALCONNECTION_RETRY_BACKOFF_MULTIPLIER: f64 = 1.5;
 
 /// All data that's needed to run endless broker loop and keep the WAL streaming connection alive, if possible.
 struct WalreceiverState {
-    id: ZTenantTimelineId,
+    id: TenantTimelineId,
 
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
     timeline: Arc<Timeline>,
@@ -331,7 +331,7 @@ impl WalreceiverState {
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
     ) -> Self {
-        let id = ZTenantTimelineId {
+        let id = TenantTimelineId {
             tenant_id: timeline.tenant_id,
             timeline_id: timeline.timeline_id,
         };
@@ -746,10 +746,10 @@ enum ReconnectReason {
 }
 
 fn wal_stream_connection_string(
-    ZTenantTimelineId {
+    TenantTimelineId {
         tenant_id,
         timeline_id,
-    }: ZTenantTimelineId,
+    }: TenantTimelineId,
     listen_pg_addr_str: &str,
 ) -> anyhow::Result<String> {
     let sk_connstr = format!("postgresql://no_user@{listen_pg_addr_str}/no_db");
@@ -760,7 +760,7 @@ fn wal_stream_connection_string(
         })?;
     let (host, port) = utils::connstring::connection_host_port(&me_conf);
     Ok(format!(
-        "host={host} port={port} options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
+        "host={host} port={port} options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
     ))
 }
 
@@ -1355,7 +1355,7 @@ mod tests {
 
     fn dummy_state(harness: &TenantHarness) -> WalreceiverState {
         WalreceiverState {
-            id: ZTenantTimelineId {
+            id: TenantTimelineId {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
             },

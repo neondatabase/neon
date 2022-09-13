@@ -56,7 +56,7 @@ static void relsize_shmem_request(void);
 #define DEFAULT_RELSIZE_HASH_SIZE (64 * 1024)
 
 static void
-zenith_smgr_shmem_startup(void)
+neon_smgr_shmem_startup(void)
 {
 	static HASHCTL info;
 
@@ -174,14 +174,14 @@ relsize_hash_init(void)
 #endif
 
 		prev_shmem_startup_hook = shmem_startup_hook;
-		shmem_startup_hook = zenith_smgr_shmem_startup;
+		shmem_startup_hook = neon_smgr_shmem_startup;
 	}
 }
 
 #if PG_VERSION_NUM >= 150000
 /*
  * shmem_request hook: request additional shared resources.  We'll allocate or
- * attach to the shared resources in zenith_smgr_shmem_startup().
+ * attach to the shared resources in neon_smgr_shmem_startup().
  */
 static void
 relsize_shmem_request(void)

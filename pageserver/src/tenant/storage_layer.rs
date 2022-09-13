@@ -3,15 +3,15 @@
 //!
 
 use crate::repository::{Key, Value};
-use crate::walrecord::ZenithWalRecord;
+use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
 
 use utils::{
+    id::{TenantId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
@@ -50,7 +50,7 @@ where
 ///
 #[derive(Debug)]
 pub struct ValueReconstructState {
-    pub records: Vec<(Lsn, ZenithWalRecord)>,
+    pub records: Vec<(Lsn, NeonWalRecord)>,
     pub img: Option<(Lsn, Bytes)>,
 }
 
@@ -84,10 +84,10 @@ pub enum ValueReconstructResult {
 /// LSN
 ///
 pub trait Layer: Send + Sync {
-    fn get_tenant_id(&self) -> ZTenantId;
+    fn get_tenant_id(&self) -> TenantId;
 
     /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> ZTimelineId;
+    fn get_timeline_id(&self) -> TimelineId;
 
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;

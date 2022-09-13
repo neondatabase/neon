@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::time::Duration;
-use utils::zid::ZTenantId;
+use utils::id::TenantId;
 
 pub const TENANT_CONFIG_NAME: &str = "config";
 
@@ -217,8 +217,8 @@ impl TenantConf {
 
     /// Points to a place in pageserver's local directory,
     /// where certain tenant's tenantconf file should be located.
-    pub fn path(conf: &'static PageServerConf, tenantid: ZTenantId) -> PathBuf {
-        conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME)
+    pub fn path(conf: &'static PageServerConf, tenant_id: TenantId) -> PathBuf {
+        conf.tenant_path(&tenant_id).join(TENANT_CONFIG_NAME)
     }
 
     #[cfg(test)]

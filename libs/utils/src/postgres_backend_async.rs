@@ -346,7 +346,7 @@ impl PostgresBackend {
                                 ))?;
                                 self.state = ProtoState::Authentication;
                             }
-                            AuthType::ZenithJWT => {
+                            AuthType::NeonJWT => {
                                 self.write_message(&BeMessage::AuthenticationCleartextPassword)?;
                                 self.state = ProtoState::Authentication;
                             }
@@ -374,7 +374,7 @@ impl PostgresBackend {
                             bail!("auth failed: {}", e);
                         }
                     }
-                    AuthType::ZenithJWT => {
+                    AuthType::NeonJWT => {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {

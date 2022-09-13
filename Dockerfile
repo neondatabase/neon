@@ -22,7 +22,7 @@ RUN set -e \
     && rm -rf pg_install/v15/build \
     && tar -C pg_install/v14 -czf /home/nonroot/postgres_install.tar.gz .
 
-# Build zenith binaries
+# Build neon binaries
 FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
@@ -60,12 +60,12 @@ RUN set -e \
         openssl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-    && useradd -d /data zenith \
-    && chown -R zenith:zenith /data
+    && useradd -d /data neon \
+    && chown -R neon:neon /data
 
-COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/pageserver /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/safekeeper /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/proxy      /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy      /usr/local/bin
 
 # v14 is default for now
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/
@@ -73,7 +73,7 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
-RUN mkdir -p /data/.neon/ && chown -R zenith:zenith /data/.neon/ \
+RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
     && /usr/local/bin/pageserver -D /data/.neon/ --init \
        -c "id=1234" \
        -c "broker_endpoints=['http://etcd:2379']" \
@@ -82,7 +82,7 @@ RUN mkdir -p /data/.neon/ && chown -R zenith:zenith /data/.neon/ \
        -c "listen_http_addr='0.0.0.0:9898'"
 
 VOLUME ["/data"]
-USER zenith
+USER neon
 EXPOSE 6400
 EXPOSE 9898
 CMD ["/bin/bash"]

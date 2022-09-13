@@ -8,7 +8,7 @@ use remote_storage::GenericRemoteStorage;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
 
-use utils::zid::ZTenantTimelineId;
+use utils::id::TenantTimelineId;
 
 use super::{
     index::{IndexPart, RemoteTimeline},
@@ -21,7 +21,7 @@ use crate::{config::PageServerConf, storage_sync::SyncTask, tenant::metadata::me
 pub(super) async fn upload_index_part(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     index_part: IndexPart,
 ) -> anyhow::Result<()> {
     let index_part_bytes = serde_json::to_vec(&index_part)
@@ -58,7 +58,7 @@ pub(super) async fn upload_timeline_layers<'a>(
     storage: &'a GenericRemoteStorage,
     sync_queue: &SyncQueue,
     remote_timeline: Option<&'a RemoteTimeline>,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     mut upload_data: SyncData<LayersUpload>,
 ) -> UploadedTimeline {
     let upload = &mut upload_data.data;
@@ -213,7 +213,7 @@ mod tests {
     async fn regular_layer_upload() -> anyhow::Result<()> {
         let harness = TenantHarness::create("regular_layer_upload")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a", "b"];
         let storage = GenericRemoteStorage::new(LocalFs::new(
@@ -301,7 +301,7 @@ mod tests {
     async fn layer_upload_after_local_fs_update() -> anyhow::Result<()> {
         let harness = TenantHarness::create("layer_upload_after_local_fs_update")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a1", "b1"];
         let storage = GenericRemoteStorage::new(LocalFs::new(
@@ -395,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn test_upload_index_part() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_upload_index_part")?;
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),

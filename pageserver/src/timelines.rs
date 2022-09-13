@@ -14,8 +14,8 @@ use tracing::*;
 
 use remote_storage::path_with_suffix_extension;
 use utils::{
+    id::{TenantId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::config::PageServerConf;
@@ -61,8 +61,8 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 //
 fn bootstrap_timeline(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     tenant: &Tenant,
 ) -> Result<Arc<Timeline>> {
     // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
@@ -115,12 +115,12 @@ fn bootstrap_timeline(
 ///
 pub(crate) async fn create_timeline(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    new_timeline_id: Option<ZTimelineId>,
-    ancestor_timeline_id: Option<ZTimelineId>,
+    tenant_id: TenantId,
+    new_timeline_id: Option<TimelineId>,
+    ancestor_timeline_id: Option<TimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
 ) -> Result<Option<Arc<Timeline>>> {
-    let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
+    let new_timeline_id = new_timeline_id.unwrap_or_else(TimelineId::generate);
     let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
     if conf.timeline_path(&new_timeline_id, &tenant_id).exists() {

@@ -10,16 +10,16 @@
 #include "utils/uuid.h"
 #include "replication/walreceiver.h"
 
-#define SK_MAGIC              0xCafeCeefu
-#define SK_PROTOCOL_VERSION   2
+#define SK_MAGIC 0xCafeCeefu
+#define SK_PROTOCOL_VERSION 2
 
-#define MAX_SAFEKEEPERS        32
-#define MAX_SEND_SIZE         (XLOG_BLCKSZ * 16)	/* max size of a single
-													 * WAL message */
-#define XLOG_HDR_SIZE         (1+8*3)	/* 'w' + startPos + walEnd + timestamp */
-#define XLOG_HDR_START_POS    1 /* offset of start position in wal sender
+#define MAX_SAFEKEEPERS 32
+#define MAX_SEND_SIZE (XLOG_BLCKSZ * 16)	/* max size of a single* WAL
+											 * message */
+#define XLOG_HDR_SIZE (1 + 8 * 3)	/* 'w' + startPos + walEnd + timestamp */
+#define XLOG_HDR_START_POS 1	/* offset of start position in wal sender*
 								 * message header */
-#define XLOG_HDR_END_POS      (1+8) /* offset of end position in wal sender
+#define XLOG_HDR_END_POS (1 + 8)	/* offset of end position in wal sender*
 									 * message header */
 
 /*
@@ -39,8 +39,8 @@ typedef struct WalProposerConn WalProposerConn;
 struct WalMessage;
 typedef struct WalMessage WalMessage;
 
-extern char *zenith_timeline_walproposer;
-extern char *zenith_tenant_walproposer;
+extern char *neon_timeline_walproposer;
+extern char *neon_tenant_walproposer;
 
 /* Possible return values from ReadPGAsync */
 typedef enum
@@ -170,8 +170,8 @@ typedef struct ProposerGreeting
 	uint32		pgVersion;
 	pg_uuid_t	proposerId;
 	uint64		systemId;		/* Postgres system identifier */
-	uint8		ztimelineid[16];	/* Zenith timeline id */
-	uint8		ztenantid[16];
+	uint8		timeline_id[16];	/* Neon timeline id */
+	uint8		tenant_id[16];
 	TimeLineID	timeline;
 	uint32		walSegSize;
 }			ProposerGreeting;
@@ -226,7 +226,7 @@ typedef struct VoteResponse
 	 * proposer to choose the most advanced one.
 	 */
 	XLogRecPtr	flushLsn;
-	XLogRecPtr	truncateLsn;	/* minimal LSN which may be needed for
+	XLogRecPtr	truncateLsn;	/* minimal LSN which may be needed for*
 								 * recovery of some safekeeper */
 	TermHistory termHistory;
 	XLogRecPtr	timelineStartLsn;	/* timeline globally starts at this LSN */
@@ -283,7 +283,6 @@ typedef struct HotStandbyFeedback
 	FullTransactionId catalog_xmin;
 }			HotStandbyFeedback;
 
-
 typedef struct ReplicationFeedback
 {
 	/* current size of the timeline on pageserver */
@@ -294,7 +293,6 @@ typedef struct ReplicationFeedback
 	XLogRecPtr	ps_applylsn;
 	TimestampTz ps_replytime;
 }			ReplicationFeedback;
-
 
 typedef struct WalproposerShmemState
 {
@@ -323,7 +321,7 @@ typedef struct AppendResponse
 	XLogRecPtr	commitLsn;
 	HotStandbyFeedback hs;
 	/* Feedback recieved from pageserver includes standby_status_update fields */
-	/* and custom zenith feedback. */
+	/* and custom neon feedback. */
 	/* This part of the message is extensible. */
 	ReplicationFeedback rf;
 }			AppendResponse;
@@ -332,7 +330,6 @@ typedef struct AppendResponse
 /*  Other fields are fixed part */
 #define APPENDRESPONSE_FIXEDPART_SIZE offsetof(AppendResponse, rf)
 
-
 /*
  * Descriptor of safekeeper
  */
@@ -340,7 +337,7 @@ typedef struct Safekeeper
 {
 	char const *host;
 	char const *port;
-	char		conninfo[MAXCONNINFO];	/* connection info for
+	char		conninfo[MAXCONNINFO];	/* connection info for*
 										 * connecting/reconnecting */
 
 	/*
@@ -366,12 +363,12 @@ typedef struct Safekeeper
 	 */
 	XLogRecPtr	startStreamingAt;
 
-	bool		flushWrite;		/* set to true if we need to call AsyncFlush,
+	bool		flushWrite;		/* set to true if we need to call AsyncFlush,*
 								 * to flush pending messages */
 	XLogRecPtr	streamingAt;	/* current streaming position */
 	AppendRequestHeader appendRequest;	/* request for sending to safekeeper */
 
-	int			eventPos;		/* position in wait event set. Equal to -1 if
+	int			eventPos;		/* position in wait event set. Equal to -1 if*
 								 * no event */
 	SafekeeperState state;		/* safekeeper state machine state */
 	TimestampTz startedConnAt;	/* when connection attempt started */
@@ -379,7 +376,6 @@ typedef struct Safekeeper
 	VoteResponse voteResponse;	/* the vote */
 	AppendResponse appendResponse;	/* feedback for master */
 } Safekeeper;
-
 
 extern PGDLLIMPORT void WalProposerMain(Datum main_arg);
 void		WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos);

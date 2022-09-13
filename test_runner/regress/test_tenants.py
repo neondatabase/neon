@@ -8,7 +8,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import PAGESERVER_PER_TENANT_METRICS, parse_metrics
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
-from fixtures.types import Lsn, ZTenantId
+from fixtures.types import Lsn, TenantId
 from prometheus_client.samples import Sample
 
 
@@ -188,7 +188,7 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
                 cur.execute("SELECT sum(key) FROM t")
                 assert cur.fetchone() == (5000050000,)
 
-    def get_ps_metric_samples_for_tenant(tenant_id: ZTenantId) -> List[Sample]:
+    def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
         ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
         samples = []
         for metric_name in ps_metrics.metrics:

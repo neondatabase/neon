@@ -28,31 +28,29 @@
 typedef enum
 {
 	/* pagestore_client -> pagestore */
-	T_ZenithExistsRequest = 0,
-	T_ZenithNblocksRequest,
-	T_ZenithGetPageRequest,
-	T_ZenithDbSizeRequest,
+	T_NeonExistsRequest = 0,
+	T_NeonNblocksRequest,
+	T_NeonGetPageRequest,
+	T_NeonDbSizeRequest,
 
 	/* pagestore -> pagestore_client */
-	T_ZenithExistsResponse = 100,
-	T_ZenithNblocksResponse,
-	T_ZenithGetPageResponse,
-	T_ZenithErrorResponse,
-	T_ZenithDbSizeResponse,
-} ZenithMessageTag;
-
-
+	T_NeonExistsResponse = 100,
+	T_NeonNblocksResponse,
+	T_NeonGetPageResponse,
+	T_NeonErrorResponse,
+	T_NeonDbSizeResponse,
+}			NeonMessageTag;
 
 /* base struct for c-style inheritance */
 typedef struct
 {
-	ZenithMessageTag tag;
-} ZenithMessage;
+	NeonMessageTag tag;
+}			NeonMessage;
 
-#define messageTag(m)		(((const ZenithMessage *)(m))->tag)
+#define messageTag(m) (((const NeonMessage *)(m))->tag)
 
 /*
- * supertype of all the Zenith*Request structs below
+ * supertype of all the Neon*Request structs below
  *
  * If 'latest' is true, we are requesting the latest page version, and 'lsn'
  * is just a hint to the server that we know there are no versions of the page
@@ -60,81 +58,79 @@ typedef struct
  */
 typedef struct
 {
-	ZenithMessageTag tag;
+	NeonMessageTag tag;
 	bool		latest;			/* if true, request latest page version */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
-} ZenithRequest;
+}			NeonRequest;
 
 typedef struct
 {
-	ZenithRequest req;
+	NeonRequest req;
 	RelFileNode rnode;
 	ForkNumber	forknum;
-} ZenithExistsRequest;
+}			NeonExistsRequest;
 
 typedef struct
 {
-	ZenithRequest req;
+	NeonRequest req;
 	RelFileNode rnode;
 	ForkNumber	forknum;
-} ZenithNblocksRequest;
-
+}			NeonNblocksRequest;
 
 typedef struct
 {
-	ZenithRequest req;
+	NeonRequest req;
 	Oid			dbNode;
-}			ZenithDbSizeRequest;
-
+}			NeonDbSizeRequest;
 
 typedef struct
 {
-	ZenithRequest req;
+	NeonRequest req;
 	RelFileNode rnode;
 	ForkNumber	forknum;
 	BlockNumber blkno;
-} ZenithGetPageRequest;
+}			NeonGetPageRequest;
 
-/* supertype of all the Zenith*Response structs below */
+/* supertype of all the Neon*Response structs below */
 typedef struct
 {
-	ZenithMessageTag tag;
-} ZenithResponse;
+	NeonMessageTag tag;
+}			NeonResponse;
 
 typedef struct
 {
-	ZenithMessageTag tag;
+	NeonMessageTag tag;
 	bool		exists;
-} ZenithExistsResponse;
+}			NeonExistsResponse;
 
 typedef struct
 {
-	ZenithMessageTag tag;
+	NeonMessageTag tag;
 	uint32		n_blocks;
-} ZenithNblocksResponse;
+}			NeonNblocksResponse;
 
 typedef struct
 {
-	ZenithMessageTag tag;
+	NeonMessageTag tag;
 	char		page[FLEXIBLE_ARRAY_MEMBER];
-} ZenithGetPageResponse;
+}			NeonGetPageResponse;
 
 typedef struct
 {
-	ZenithMessageTag tag;
+	NeonMessageTag tag;
 	int64		db_size;
-}			ZenithDbSizeResponse;
+}			NeonDbSizeResponse;
 
 typedef struct
 {
-	ZenithMessageTag tag;
+	NeonMessageTag tag;
 	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
 												 * message */
-} ZenithErrorResponse;
+}			NeonErrorResponse;
 
-extern StringInfoData zm_pack_request(ZenithRequest *msg);
-extern ZenithResponse *zm_unpack_response(StringInfo s);
-extern char *zm_to_string(ZenithMessage *msg);
+extern StringInfoData zm_pack_request(NeonRequest * msg);
+extern NeonResponse * zm_unpack_response(StringInfo s);
+extern char *zm_to_string(NeonMessage * msg);
 
 /*
  * API
@@ -142,57 +138,57 @@ extern char *zm_to_string(ZenithMessage *msg);
 
 typedef struct
 {
-	ZenithResponse *(*request) (ZenithRequest *request);
-	void		(*send) (ZenithRequest *request);
-	ZenithResponse *(*receive) (void);
+	NeonResponse *(*request) (NeonRequest * request);
+	void		(*send) (NeonRequest * request);
+	NeonResponse *(*receive) (void);
 	void		(*flush) (void);
 }			page_server_api;
 
 extern page_server_api * page_server;
 
 extern char *page_server_connstring;
-extern char *zenith_timeline;
-extern char *zenith_tenant;
+extern char *neon_timeline;
+extern char *neon_tenant;
 extern bool wal_redo;
 extern int32 max_cluster_size;
 
-extern const f_smgr *smgr_zenith(BackendId backend, RelFileNode rnode);
-extern void smgr_init_zenith(void);
+extern const f_smgr *smgr_neon(BackendId backend, RelFileNode rnode);
+extern void smgr_init_neon(void);
 
 extern const f_smgr *smgr_inmem(BackendId backend, RelFileNode rnode);
 extern void smgr_init_inmem(void);
 extern void smgr_shutdown_inmem(void);
 
-/* zenith storage manager functionality */
+/* Neon storage manager functionality */
 
-extern void zenith_init(void);
-extern void zenith_open(SMgrRelation reln);
-extern void zenith_close(SMgrRelation reln, ForkNumber forknum);
-extern void zenith_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);
-extern bool zenith_exists(SMgrRelation reln, ForkNumber forknum);
-extern void zenith_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo);
-extern void zenith_extend(SMgrRelation reln, ForkNumber forknum,
-						  BlockNumber blocknum, char *buffer, bool skipFsync);
-extern bool zenith_prefetch(SMgrRelation reln, ForkNumber forknum,
-							BlockNumber blocknum);
-extern void zenith_reset_prefetch(SMgrRelation reln);
-extern void zenith_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-						char *buffer);
+extern void neon_init(void);
+extern void neon_open(SMgrRelation reln);
+extern void neon_close(SMgrRelation reln, ForkNumber forknum);
+extern void neon_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);
+extern bool neon_exists(SMgrRelation reln, ForkNumber forknum);
+extern void neon_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo);
+extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
+						BlockNumber blocknum, char *buffer, bool skipFsync);
+extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
+						  BlockNumber blocknum);
+extern void neon_reset_prefetch(SMgrRelation reln);
+extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+					  char *buffer);
 
-extern void zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
-							   XLogRecPtr request_lsn, bool request_latest, char *buffer);
+extern void neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+							 XLogRecPtr request_lsn, bool request_latest, char *buffer);
 
-extern void zenith_write(SMgrRelation reln, ForkNumber forknum,
-						 BlockNumber blocknum, char *buffer, bool skipFsync);
-extern void zenith_writeback(SMgrRelation reln, ForkNumber forknum,
-							 BlockNumber blocknum, BlockNumber nblocks);
-extern BlockNumber zenith_nblocks(SMgrRelation reln, ForkNumber forknum);
-extern int64 zenith_dbsize(Oid dbNode);
-extern void zenith_truncate(SMgrRelation reln, ForkNumber forknum,
-							BlockNumber nblocks);
-extern void zenith_immedsync(SMgrRelation reln, ForkNumber forknum);
+extern void neon_write(SMgrRelation reln, ForkNumber forknum,
+					   BlockNumber blocknum, char *buffer, bool skipFsync);
+extern void neon_writeback(SMgrRelation reln, ForkNumber forknum,
+						   BlockNumber blocknum, BlockNumber nblocks);
+extern BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
+extern int64 neon_dbsize(Oid dbNode);
+extern void neon_truncate(SMgrRelation reln, ForkNumber forknum,
+						  BlockNumber nblocks);
+extern void neon_immedsync(SMgrRelation reln, ForkNumber forknum);
 
-/* zenith wal-redo storage manager functionality */
+/* neon wal-redo storage manager functionality */
 
 extern void inmem_init(void);
 extern void inmem_open(SMgrRelation reln);
@@ -215,8 +211,7 @@ extern void inmem_truncate(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber nblocks);
 extern void inmem_immedsync(SMgrRelation reln, ForkNumber forknum);
 
-
-/* utils for zenith relsize cache */
+/* utils for neon relsize cache */
 extern void relsize_hash_init(void);
 extern bool get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size);
 extern void set_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);

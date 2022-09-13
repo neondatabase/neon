@@ -53,8 +53,8 @@ pub struct VirtualFile {
     pub path: PathBuf,
     open_options: OpenOptions,
 
-    tenantid: String,
-    timelineid: String,
+    tenant_id: String,
+    timeline_id: String,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -149,7 +149,7 @@ impl OpenFiles {
         // old file.
         //
         if let Some(old_file) = slot_guard.file.take() {
-            // We do not have information about tenantid/timelineid of evicted file.
+            // We do not have information about tenant_id/timeline_id of evicted file.
             // It is possible to store path together with file or use filepath crate,
             // but as far as close() is not expected to be fast, it is not so critical to gather
             // precise per-tenant statistic here.
@@ -197,18 +197,18 @@ impl VirtualFile {
     ) -> Result<VirtualFile, std::io::Error> {
         let path_str = path.to_string_lossy();
         let parts = path_str.split('/').collect::<Vec<&str>>();
-        let tenantid;
-        let timelineid;
+        let tenant_id;
+        let timeline_id;
         if parts.len() > 5 && parts[parts.len() - 5] == "tenants" {
-            tenantid = parts[parts.len() - 4].to_string();
-            timelineid = parts[parts.len() - 2].to_string();
+            tenant_id = parts[parts.len() - 4].to_string();
+            timeline_id = parts[parts.len() - 2].to_string();
         } else {
-            tenantid = "*".to_string();
-            timelineid = "*".to_string();
+            tenant_id = "*".to_string();
+            timeline_id = "*".to_string();
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot();
         let file = STORAGE_IO_TIME
-            .with_label_values(&["open", &tenantid, &timelineid])
+            .with_label_values(&["open", &tenant_id, &timeline_id])
             .observe_closure_duration(|| open_options.open(path))?;
 
         // Strip all options other than read and write.
@@ -226,8 +226,8 @@ impl VirtualFile {
             pos: 0,
             path: path.to_path_buf(),
             open_options: reopen_options,
-            tenantid,
-            timelineid,
+            tenant_id,
+            timeline_id,
         };
 
         slot_guard.file.replace(file);
@@ -267,7 +267,7 @@ impl VirtualFile {
                             // Found a cached file descriptor.
                             slot.recently_used.store(true, Ordering::Relaxed);
                             return Ok(STORAGE_IO_TIME
-                                .with_label_values(&[op, &self.tenantid, &self.timelineid])
+                                .with_label_values(&[op, &self.tenant_id, &self.timeline_id])
                                 .observe_closure_duration(|| func(file)));
                         }
                     }
@@ -294,7 +294,7 @@ impl VirtualFile {
 
         // Open the physical file
         let file = STORAGE_IO_TIME
-            .with_label_values(&["open", &self.tenantid, &self.timelineid])
+            .with_label_values(&["open", &self.tenant_id, &self.timeline_id])
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
 
         // Perform the requested operation on it
@@ -308,7 +308,7 @@ impl VirtualFile {
         // may deadlock on subsequent read calls.
         // Simply replacing all `RwLock` in project causes deadlocks, so use it sparingly.
         let result = STORAGE_IO_TIME
-            .with_label_values(&[op, &self.tenantid, &self.timelineid])
+            .with_label_values(&[op, &self.tenant_id, &self.timeline_id])
             .observe_closure_duration(|| func(&file));
 
         // Store the File in the slot and update the handle in the VirtualFile
@@ -333,11 +333,11 @@ impl Drop for VirtualFile {
         if slot_guard.tag == handle.tag {
             slot.recently_used.store(false, Ordering::Relaxed);
             // Unlike files evicted by replacement algorithm, here
-            // we group close time by tenantid/timelineid.
+            // we group close time by tenant_id/timeline_id.
             // At allows to compare number/time of "normal" file closes
             // with file eviction.
             STORAGE_IO_TIME
-                .with_label_values(&["close", &self.tenantid, &self.timelineid])
+                .with_label_values(&["close", &self.tenant_id, &self.timeline_id])
                 .observe_closure_duration(|| slot_guard.file.take());
         }
     }
@@ -399,7 +399,7 @@ impl FileExt for VirtualFile {
         let result = self.with_file("read", |file| file.read_at(buf, offset))?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
-                .with_label_values(&["read", &self.tenantid, &self.timelineid])
+                .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
                 .add(size as i64);
         }
         result
@@ -409,7 +409,7 @@ impl FileExt for VirtualFile {
         let result = self.with_file("write", |file| file.write_at(buf, offset))?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
-                .with_label_values(&["write", &self.tenantid, &self.timelineid])
+                .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
                 .add(size as i64);
         }
         result

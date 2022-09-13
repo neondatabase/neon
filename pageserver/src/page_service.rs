@@ -23,12 +23,12 @@ use tokio_util::io::SyncIoBridge;
 use tracing::*;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
+    id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
     postgres_backend_async::{self, PostgresBackend},
     pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
     simple_rcu::RcuReadGuard,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::basebackup;
@@ -123,7 +123,7 @@ impl PagestreamFeMessage {
     fn parse(mut body: Bytes) -> anyhow::Result<PagestreamFeMessage> {
         // TODO these gets can fail
 
-        // these correspond to the ZenithMessageTag enum in pagestore_client.h
+        // these correspond to the NeonMessageTag enum in pagestore_client.h
         //
         // TODO: consider using protobuf or serde bincode for less error prone
         // serialization.
@@ -370,7 +370,7 @@ struct PageRequestMetrics {
 }
 
 impl PageRequestMetrics {
-    fn new(tenant_id: &ZTenantId, timeline_id: &ZTimelineId) -> Self {
+    fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
 
@@ -415,8 +415,8 @@ impl PageServerHandler {
     async fn handle_pagerequests(
         &self,
         pgb: &mut PostgresBackend,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
         // NOTE: pagerequests handler exits when connection is closed,
         //       so there is no need to reset the association
@@ -452,11 +452,11 @@ impl PageServerHandler {
                 None => break, // client disconnected
             };
 
-            trace!("query: {:?}", copy_data_bytes);
+            trace!("query: {copy_data_bytes:?}");
 
-            let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+            let neon_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
 
-            let response = match zenith_fe_msg {
+            let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
                     self.handle_get_rel_exists_request(&timeline, &req).await
@@ -494,8 +494,8 @@ impl PageServerHandler {
     async fn handle_import_basebackup(
         &self,
         pgb: &mut PostgresBackend,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         base_lsn: Lsn,
         _end_lsn: Lsn,
     ) -> anyhow::Result<()> {
@@ -557,8 +557,8 @@ impl PageServerHandler {
     async fn handle_import_wal(
         &self,
         pgb: &mut PostgresBackend,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         start_lsn: Lsn,
         end_lsn: Lsn,
     ) -> anyhow::Result<()> {
@@ -750,8 +750,8 @@ impl PageServerHandler {
     async fn handle_basebackup_request(
         &self,
         pgb: &mut PostgresBackend,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
@@ -792,7 +792,7 @@ impl PageServerHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<ZTenantId>) -> Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<()> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -815,7 +815,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
         _pgb: &mut PostgresBackend,
         jwt_response: &[u8],
     ) -> anyhow::Result<()> {
-        // this unwrap is never triggered, because check_auth_jwt only called when auth_type is ZenithJWT
+        // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
             .auth
@@ -853,8 +853,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 params.len() == 2,
                 "invalid param number for pagestream command"
             );
-            let tenant_id = ZTenantId::from_str(params[0])?;
-            let timeline_id = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenant_id))?;
 
@@ -869,8 +869,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 "invalid param number for basebackup command"
             );
 
-            let tenant_id = ZTenantId::from_str(params[0])?;
-            let timeline_id = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenant_id))?;
 
@@ -895,8 +895,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 "invalid param number for get_last_record_rlsn command"
             );
 
-            let tenant_id = ZTenantId::from_str(params[0])?;
-            let timeline_id = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenant_id))?;
             let timeline = get_local_timeline(tenant_id, timeline_id)?;
@@ -923,8 +923,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 "invalid param number for fullbackup command"
             );
 
-            let tenant_id = ZTenantId::from_str(params[0])?;
-            let timeline_id = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
 
             // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
@@ -959,8 +959,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             ensure!(params.len() == 4);
-            let tenant_id = ZTenantId::from_str(params[0])?;
-            let timeline_id = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
             let base_lsn = Lsn::from_str(params[2])?;
             let end_lsn = Lsn::from_str(params[3])?;
 
@@ -984,8 +984,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("import wal ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             ensure!(params.len() == 4);
-            let tenant_id = ZTenantId::from_str(params[0])?;
-            let timeline_id = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
             let start_lsn = Lsn::from_str(params[2])?;
             let end_lsn = Lsn::from_str(params[3])?;
 
@@ -1035,7 +1035,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(params.len() == 1, "invalid param number for config command");
-            let tenant_id = ZTenantId::from_str(params[0])?;
+            let tenant_id = TenantId::from_str(params[0])?;
             let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
@@ -1087,8 +1087,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid do_gc: '{}'", query_string))?;
 
-            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
             let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
@@ -1131,8 +1131,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("Invalid compact: '{}'", query_string))?;
 
-            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let timeline = get_local_timeline(tenant_id, timeline_id)?;
             timeline.compact()?;
 
@@ -1148,8 +1148,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid checkpoint command: '{}'", query_string))?;
 
-            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
             // Checkpoint the timeline and also compact it (due to `CheckpointConfig::Forced`).
@@ -1166,8 +1166,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
 
-            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
             let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
@@ -1192,7 +1192,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
     }
 }
 
-fn get_local_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
+fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
     tenant_mgr::get_tenant(tenant_id, true).and_then(|tenant| tenant.get_timeline(timeline_id))
 }
 

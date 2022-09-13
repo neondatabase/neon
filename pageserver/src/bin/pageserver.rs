@@ -40,7 +40,7 @@ fn version() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("Zenith page server")
+    let arg_matches = App::new("Neon page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(&*version())
         .arg(
@@ -293,7 +293,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
         AuthType::Trust | AuthType::MD5 => None,
-        AuthType::ZenithJWT => {
+        AuthType::NeonJWT => {
             // unwrap is ok because check is performed when creating config, so path is set and file exists
             let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
             Some(JwtAuth::from_key_path(key_path)?.into())

@@ -12,7 +12,7 @@ use utils::project_git_version;
 project_git_version!(GIT_VERSION);
 
 fn main() -> Result<()> {
-    let arg_matches = App::new("Zenith dump_layerfile utility")
+    let arg_matches = App::new("Neon dump_layerfile utility")
         .about("Dump contents of one layer file, for debugging")
         .version(GIT_VERSION)
         .arg(
