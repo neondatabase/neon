@@ -125,6 +125,7 @@ impl PagestreamFeMessage {
 
         match self {
             Self::Exists(req) => {
+                bytes.put_u8(0);
                 bytes.put_u8(if req.latest { 1 } else { 0 });
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.rel.spcnode);
@@ -151,6 +152,7 @@ impl PagestreamFeMessage {
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
                 bytes.put_u8(req.rel.forknum);
+                bytes.put_u32(req.blkno);
             }
 
             Self::DbSize(req) => {
