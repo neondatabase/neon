@@ -362,6 +362,39 @@ async fn page_service_conn_main(
     }
 }
 
+struct PageRequestMetrics {
+    get_rel_exists: metrics::Histogram,
+    get_rel_size: metrics::Histogram,
+    get_page_at_lsn: metrics::Histogram,
+    get_db_size: metrics::Histogram,
+}
+
+impl PageRequestMetrics {
+    fn new(tenant_id: &ZTenantId, timeline_id: &ZTimelineId) -> Self {
+        let tenant_id = tenant_id.to_string();
+        let timeline_id = timeline_id.to_string();
+
+        let get_rel_exists =
+            SMGR_QUERY_TIME.with_label_values(&["get_rel_exists", &tenant_id, &timeline_id]);
+
+        let get_rel_size =
+            SMGR_QUERY_TIME.with_label_values(&["get_rel_size", &tenant_id, &timeline_id]);
+
+        let get_page_at_lsn =
+            SMGR_QUERY_TIME.with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id]);
+
+        let get_db_size =
+            SMGR_QUERY_TIME.with_label_values(&["get_db_size", &tenant_id, &timeline_id]);
+
+        Self {
+            get_rel_exists,
+            get_rel_size,
+            get_page_at_lsn,
+            get_db_size,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PageServerHandler {
     conf: &'static PageServerConf,
@@ -396,6 +429,8 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyBothResponse)?;
         pgb.flush().await?;
 
+        let metrics = PageRequestMetrics::new(&tenant_id, &timeline_id);
+
         loop {
             let msg = tokio::select! {
                 biased;
@@ -420,32 +455,22 @@ impl PageServerHandler {
             trace!("query: {:?}", copy_data_bytes);
 
             let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
-            let tenant_str = tenant_id.to_string();
-            let timeline_str = timeline_id.to_string();
 
             let response = match zenith_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
-                    let _timer = SMGR_QUERY_TIME
-                        .with_label_values(&["get_rel_exists", &tenant_str, &timeline_str])
-                        .start_timer();
+                    let _timer = metrics.get_rel_exists.start_timer();
                     self.handle_get_rel_exists_request(&timeline, &req).await
                 }
                 PagestreamFeMessage::Nblocks(req) => {
-                    let _timer = SMGR_QUERY_TIME
-                        .with_label_values(&["get_rel_size", &tenant_str, &timeline_str])
-                        .start_timer();
+                    let _timer = metrics.get_rel_size.start_timer();
                     self.handle_get_nblocks_request(&timeline, &req).await
                 }
                 PagestreamFeMessage::GetPage(req) => {
-                    let _timer = SMGR_QUERY_TIME
-                        .with_label_values(&["get_page_at_lsn", &tenant_str, &timeline_str])
-                        .start_timer();
+                    let _timer = metrics.get_page_at_lsn.start_timer();
                     self.handle_get_page_at_lsn_request(&timeline, &req).await
                 }
                 PagestreamFeMessage::DbSize(req) => {
-                    let _timer = SMGR_QUERY_TIME
-                        .with_label_values(&["get_db_size", &tenant_str, &timeline_str])
-                        .start_timer();
+                    let _timer = metrics.get_db_size.start_timer();
                     self.handle_db_size_request(&timeline, &req).await
                 }
             };
