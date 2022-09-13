@@ -1296,7 +1296,7 @@ impl Timeline {
     // Write out the given frozen in-memory layer as a new L0 delta file
     fn create_delta_layer(&self, frozen_layer: &InMemoryLayer) -> Result<PathBuf> {
         // Write it out
-        let new_delta = frozen_layer.write_to_disk()?;
+        let new_delta = frozen_layer.write_to_disk(&self.walredo_mgr)?;
         let new_delta_path = new_delta.path();
 
         // Sync it to disk.

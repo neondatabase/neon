@@ -5,14 +5,17 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
+use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use crate::walrecord;
+use crate::walrecord::{self, ZenithWalRecord};
+use crate::walredo::WalRedoManager;
 use anyhow::{bail, ensure, Result};
+use postgres_ffi::v14::XLogRecord;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -27,13 +30,15 @@ use utils::{
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
     /// This buffer is reused for each serialization to avoid additional malloc calls.
     static SER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
 }
+
+const COLLAPSE_THRESHOLD: usize = PAGE_SZ / 2;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -326,7 +331,10 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub fn write_to_disk(&self) -> Result<DeltaLayer> {
+    pub fn write_to_disk(
+        &self,
+        walredo_mgr: &Arc<dyn WalRedoManager + Sync + Send>,
+    ) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -352,17 +360,85 @@ impl InMemoryLayer {
 
         let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
         keys.sort_by_key(|k| k.0);
-
+        let mut total_pages = 0usize;
+        let mut total_records = 0usize;
+        let mut collapsed_records = 0usize;
+        let mut generated_images = 0usize;
         for (key, vec_map) in keys.iter() {
             let key = **key;
             // Write all page versions
-            for (lsn, pos) in vec_map.as_slice() {
+            let page_updates = vec_map.as_slice();
+            let mut first_record = true;
+            let mut xid = 0u32;
+            let mut last_lsn: Lsn = Lsn::INVALID;
+            let mut records: Vec<(Lsn, ZenithWalRecord)> = Vec::new();
+            total_pages += 1;
+            total_records += page_updates.len();
+            for (lsn, pos) in page_updates {
                 cursor.read_blob_into_buf(*pos, &mut buf)?;
-                let will_init = Value::des(&buf)?.will_init();
-                delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
+                last_lsn = *lsn;
+                let value = Value::des(&buf)?;
+                let will_init = value.will_init();
+                // If sequence of WAL records for this page belongs to the same transaction, starts with initialization record
+                // and total size of records is larger than page size, then better materialize this page and store it as page image
+                if first_record {
+                    first_record = false;
+                    if will_init {
+                        if let Value::WalRecord(wal_rec) = value {
+                            if let ZenithWalRecord::Postgres { will_init: _, rec } = &wal_rec {
+                                let last_pos = page_updates.last().unwrap().1;
+                                if (last_pos - pos) as usize + buf.len() > COLLAPSE_THRESHOLD {
+                                    let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
+                                    xid = xlogrec.xl_xid;
+                                    records.push((*lsn, wal_rec));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
+                } else {
+                    if !records.is_empty() {
+                        if let Value::WalRecord(wal_rec) = value {
+                            if let ZenithWalRecord::Postgres { will_init, rec } = &wal_rec {
+                                let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
+                                if !will_init && xid == xlogrec.xl_xid {
+                                    records.push((*lsn, wal_rec));
+                                    continue;
+                                }
+                            }
+                        }
+                        let mut will_init = true;
+                        for (lsn, rec) in &records {
+                            delta_layer_writer.put_value_bytes(
+                                key,
+                                *lsn,
+                                &Value::WalRecord(rec.clone()).ser()?,
+                                will_init,
+                            )?;
+                            will_init = false;
+                        }
+                        records.clear();
+                    }
+                    delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
+                }
+            }
+            if !records.is_empty() {
+                generated_images += 1;
+                collapsed_records += records.len();
+                let img = walredo_mgr.request_redo(key, last_lsn, None, records)?;
+                delta_layer_writer.put_value_bytes(
+                    key,
+                    last_lsn,
+                    &Value::Image(img).ser()?,
+                    true,
+                )?;
             }
         }
-
+        info!(
+            "Generate delta layer: {} records, {} pages, {} records collapsed into {} images",
+            total_records, total_pages, collapsed_records, generated_images
+        );
         let delta_layer = delta_layer_writer.finish(Key::MAX)?;
         Ok(delta_layer)
     }
