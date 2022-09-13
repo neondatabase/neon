@@ -37,7 +37,7 @@ class PasswordFilter(logging.Filter):
     FILTER = re.compile(r"(\s*)password=[^\s]+(\s*)")
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = self.FILTER.sub(r"\1password=<hidden>\2", record.msg)
+        record.msg = self.FILTER.sub(r"\1password=<hidden>\2", str(record.msg))
         return True
 
 
