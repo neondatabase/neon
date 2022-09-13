@@ -57,6 +57,8 @@
 #include "postmaster/interrupt.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
+#include "storage/relfilenode.h"
+#include "storage/buf_internals.h"
 #include "storage/md.h"
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -109,6 +111,49 @@ typedef enum
 
 static SMgrRelation unlogged_build_rel = NULL;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+
+
+/*
+ * Prefetch implementation:
+ * Prefetch is performed locally by each backend.
+ * There can be up to MAX_PREFETCH_REQUESTS registered using smgr_prefetch
+ * before smgr_read. All this requests are appended to primary smgr_read request.
+ * It is assumed that pages will be requested in prefetch order.
+ * Reading of prefetch responses is delayed until them are actually needed (smgr_read).
+ * It make it possible to parallelize processing and receiving of prefetched pages.
+ * In case of prefetch miss or any other SMGR request other than smgr_read,
+ * all prefetch responses has to be consumed.
+ */
+
+#define MAX_PREFETCH_REQUESTS 128
+
+BufferTag prefetch_requests[MAX_PREFETCH_REQUESTS];
+BufferTag prefetch_responses[MAX_PREFETCH_REQUESTS];
+int n_prefetch_requests;
+int n_prefetch_responses;
+int n_prefetched_buffers;
+int n_prefetch_hits;
+int n_prefetch_misses;
+XLogRecPtr prefetch_lsn;
+
+static void
+consume_prefetch_responses(void)
+{
+	for (int i = n_prefetched_buffers; i < n_prefetch_responses; i++) {
+		ZenithResponse*	resp = page_server->receive();
+		pfree(resp);
+	}
+	n_prefetched_buffers = 0;
+	n_prefetch_responses = 0;
+}
+
+static ZenithResponse*
+page_server_request(void const* req)
+{
+	consume_prefetch_responses();
+	return page_server->request((ZenithRequest*)req);
+}
+
 
 StringInfoData
 zm_pack_request(ZenithRequest *msg)
@@ -735,7 +780,7 @@ zenith_exists(SMgrRelation reln, ForkNumber forkNum)
 			.forknum = forkNum
 		};
 
-		resp = page_server->request((ZenithRequest *) &request);
+		resp = page_server_request(&request);
 	}
 
 	switch (resp->tag)
@@ -948,6 +993,16 @@ zenith_close(SMgrRelation reln, ForkNumber forknum)
 	mdclose(reln, forknum);
 }
 
+
+/*
+ *	zenith_reset_prefetch() -- reoe all previously rgistered prefeth requests
+ */
+void
+zenith_reset_prefetch(SMgrRelation reln)
+{
+	n_prefetch_requests = 0;
+}
+
 /*
  *	zenith_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
@@ -971,9 +1026,15 @@ zenith_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	/* not implemented */
-	elog(SmgrTrace, "[ZENITH_SMGR] prefetch noop");
-	return true;
+	if (n_prefetch_requests < MAX_PREFETCH_REQUESTS)
+	{
+		prefetch_requests[n_prefetch_requests].rnode = reln->smgr_rnode.node;
+		prefetch_requests[n_prefetch_requests].forkNum = forknum;
+		prefetch_requests[n_prefetch_requests].blockNum = blocknum;
+		n_prefetch_requests += 1;
+		return true;
+	}
+	return false;
 }
 
 /*
@@ -1022,7 +1083,47 @@ void zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno
 			XLogRecPtr request_lsn, bool request_latest, char *buffer)
 {
 	ZenithResponse *resp;
+	int			    i;
 
+	/*
+	 * Try to find prefetched page.
+	 * It is assumed that pages will be requested in the same order as them are prefetched,
+	 * but some other backend may load page in shared buffers, so some prefetch responses should
+	 * be skipped.
+	 */
+	for (i = n_prefetched_buffers; i < n_prefetch_responses; i++)
+	{
+		resp = page_server->receive();
+		if (resp->tag == T_ZenithGetPageResponse &&
+			RelFileNodeEquals(prefetch_responses[i].rnode, rnode) &&
+			prefetch_responses[i].forkNum == forkNum &&
+			prefetch_responses[i].blockNum == blkno)
+		{
+			char* page = ((ZenithGetPageResponse *) resp)->page;
+			/*
+			 * Check if prefetched page is still relevant.
+			 * If it is updated by some other backend, then it should not
+			 * be requested from smgr unless it is evicted from shared buffers.
+			 * In the last case last_evicted_lsn should be updated and
+			 * request_lsn should be greater than prefetch_lsn.
+			 * Maximum with page LSN is used because page returned by page server
+			 * may have LSN either greater either smaller than requested.
+			 */
+			if (Max(prefetch_lsn, PageGetLSN(page)) >= request_lsn)
+			{
+				n_prefetched_buffers = i+1;
+				n_prefetch_hits += 1;
+				n_prefetch_requests = 0;
+				memcpy(buffer, page, BLCKSZ);
+				pfree(resp);
+				return;
+			}
+		}
+		pfree(resp);
+	}
+	n_prefetched_buffers = 0;
+	n_prefetch_responses = 0;
+	n_prefetch_misses += 1;
 	{
 		ZenithGetPageRequest request = {
 			.req.tag = T_ZenithGetPageRequest,
@@ -1032,10 +1133,29 @@ void zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno
 			.forknum = forkNum,
 			.blkno = blkno
 		};
-
-		resp = page_server->request((ZenithRequest *) &request);
+		if (n_prefetch_requests > 0)
+		{
+			/* Combine all prefetch requests with primary request */
+			page_server->send((ZenithRequest *) &request);
+			for (i = 0; i < n_prefetch_requests; i++)
+			{
+				request.rnode = prefetch_requests[i].rnode;
+				request.forknum = prefetch_requests[i].forkNum;
+				request.blkno = prefetch_requests[i].blockNum;
+				prefetch_responses[i] = prefetch_requests[i];
+				page_server->send((ZenithRequest *) &request);
+			}
+			page_server->flush();
+			n_prefetch_responses = n_prefetch_requests;
+			n_prefetch_requests = 0;
+			prefetch_lsn = request_lsn;
+			resp = page_server->receive();
+		}
+		else
+		{
+			resp = page_server->request((ZenithRequest *) &request);
+		}
 	}
-
 	switch (resp->tag)
 	{
 		case T_ZenithGetPageResponse:
@@ -1305,7 +1425,7 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 			.forknum = forknum,
 		};
 
-		resp = page_server->request((ZenithRequest *) &request);
+		resp = page_server_request(&request);
 	}
 
 	switch (resp->tag)
@@ -1365,7 +1485,7 @@ zenith_dbsize(Oid dbNode)
 			.dbNode = dbNode,
 		};
 
-		resp = page_server->request((ZenithRequest *) &request);
+		resp = page_server_request(&request);
 	}
 
 	switch (resp->tag)
@@ -1680,6 +1800,7 @@ static const struct f_smgr zenith_smgr =
 	.smgr_unlink = zenith_unlink,
 	.smgr_extend = zenith_extend,
 	.smgr_prefetch = zenith_prefetch,
+	.smgr_reset_prefetch = zenith_reset_prefetch,
 	.smgr_read = zenith_read,
 	.smgr_write = zenith_write,
 	.smgr_writeback = zenith_writeback,

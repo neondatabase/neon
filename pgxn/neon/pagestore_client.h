@@ -142,7 +142,10 @@ extern char *zm_to_string(ZenithMessage *msg);
 typedef struct
 {
 	ZenithResponse *(*request) (ZenithRequest *request);
-} page_server_api;
+	void (*send) (ZenithRequest *request);
+	ZenithResponse *(*receive) (void);
+	void (*flush) (void);
+}			page_server_api;
 
 extern page_server_api *page_server;
 
@@ -171,6 +174,7 @@ extern void zenith_extend(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum, char *buffer, bool skipFsync);
 extern bool zenith_prefetch(SMgrRelation reln, ForkNumber forknum,
 							BlockNumber blocknum);
+extern void zenith_reset_prefetch(SMgrRelation reln);
 extern void zenith_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 						char *buffer);
 
