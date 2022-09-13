@@ -18,5 +18,7 @@ def test_trace_replay(neon_env_builder: NeonEnvBuilder, replay_bin: ReplayBin):
     trace_path = env.repo_dir / "traces" / str(tenant) / str(timeline) / str(timeline)
     assert trace_path.exists()
 
-    output = replay_bin.replay_all()
+    print("replaying")
+    ps_connstr = env.pageserver.connstr().replace("'", "\\'")
+    output = replay_bin.replay_all(ps_connstr)
     print(output)

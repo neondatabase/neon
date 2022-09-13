@@ -1642,13 +1642,15 @@ class ReplayBin:
 
     traces_dir: str
 
-    def replay_all(self) -> str:
+    def replay_all(self, pageserver_connstr):
         replay_binpath = os.path.join(str(neon_binpath), "replay")
         args = [
             replay_binpath,
             self.traces_dir,
+            pageserver_connstr,
         ]
-        return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
+        # return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
+        subprocess.run(args)
 
 
 @pytest.fixture(scope="function")

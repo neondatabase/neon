@@ -10,6 +10,7 @@
 //
 
 use anyhow::{bail, ensure, Context, Result};
+use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use regex::Regex;
 use std::io::{self, Read};
@@ -47,6 +48,7 @@ use postgres_ffi::BLCKSZ;
 
 // Wrapped in libpq CopyData
 // TODO these should be in a library outside the pageserver
+#[derive(Debug)]
 pub enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
@@ -162,52 +164,52 @@ impl PagestreamFeMessage {
         bytes.into()
     }
 
-    fn parse(mut body: Bytes) -> anyhow::Result<PagestreamFeMessage> {
+    pub fn parse<R: std::io::Read>(body: &mut R) -> anyhow::Result<PagestreamFeMessage> {
         // TODO these gets can fail
 
         // these correspond to the ZenithMessageTag enum in pagestore_client.h
         //
         // TODO: consider using protobuf or serde bincode for less error prone
         // serialization.
-        let msg_tag = body.get_u8();
+        let msg_tag = body.read_u8()?;
         match msg_tag {
             0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
+                latest: body.read_u8()? != 0,
+                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
+                    spcnode: body.read_u32::<BigEndian>()?,
+                    dbnode: body.read_u32::<BigEndian>()?,
+                    relnode: body.read_u32::<BigEndian>()?,
+                    forknum: body.read_u8()?,
                 },
             })),
             1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
+                latest: body.read_u8()? != 0,
+                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
+                    spcnode: body.read_u32::<BigEndian>()?,
+                    dbnode: body.read_u32::<BigEndian>()?,
+                    relnode: body.read_u32::<BigEndian>()?,
+                    forknum: body.read_u8()?,
                 },
             })),
             2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
+                latest: body.read_u8()? != 0,
+                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
+                    spcnode: body.read_u32::<BigEndian>()?,
+                    dbnode: body.read_u32::<BigEndian>()?,
+                    relnode: body.read_u32::<BigEndian>()?,
+                    forknum: body.read_u8()?,
                 },
-                blkno: body.get_u32(),
+                blkno: body.read_u32::<BigEndian>()?,
             })),
             3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                dbnode: body.get_u32(),
+                latest: body.read_u8()? != 0,
+                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                dbnode: body.read_u32::<BigEndian>()?,
             })),
-            _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
+            _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
 }
@@ -528,7 +530,8 @@ impl PageServerHandler {
                             t.trace(&copy_data_bytes)
                         }
 
-                        let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+                        let zenith_fe_msg =
+                            PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
                         let tenant_id = tenant_id.to_string();
                         let timeline_id = timeline_id.to_string();
 
