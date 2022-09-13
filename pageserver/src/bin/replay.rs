@@ -51,20 +51,19 @@ impl PagestreamApi {
             let msg_bytes = msg.serialize();
             let mut buf = BytesMut::new();
             let copy_msg = BeMessage::CopyData(&msg_bytes);
+
+            // TODO it's actually a fe message but it doesn't have a serializer yet
             BeMessage::write(&mut buf, &copy_msg)?;
             buf.freeze()
         };
-        println!("sending msg");
         self.stream.write_all(&request).await?;
-        println!("sent");
 
         // TODO It's actually a be message, but it doesn't have a parser.
         // So error response (code b'E' parses incorrectly as FeExecuteMessage)
-        let response = match FeMessage::read_fut(&mut self.stream).await? {
+        let _response = match FeMessage::read_fut(&mut self.stream).await? {
             Some(FeMessage::CopyData(page)) => page,
             r => panic!("Expected CopyData message, got: {:?}", r),
         };
-        println!("received");
 
         Ok(())
     }
