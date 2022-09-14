@@ -26,8 +26,15 @@ pub trait WalStreamDecoderHandler {
 }
 
 //
-// WalRecordStream is a Stream that returns a stream of WAL records
-// FIXME: This isn't a proper rust stream
+// This is a trick to support several postgres versions simultaneously.
+//
+// Page decoding code depends on postgres bindings, so it is compiled for each version.
+// Thus WalStreamDecoder implements several WalStreamDecoderHandler traits.
+// WalStreamDecoder poll_decode() method dispatches to the right handler based on the postgres version.
+// Other methods are internal and are not dispatched.
+//
+// It is similar to having several impl blocks for the same struct,
+// but the impls here are in different modules, so need to use a trait.
 //
 impl WalStreamDecoderHandler for WalStreamDecoder {
     fn validate_page_header(&self, hdr: &XLogPageHeaderData) -> Result<(), WalDecodeError> {
