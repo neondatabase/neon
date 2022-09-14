@@ -22,7 +22,8 @@
 //! bespoken Rust code.
 
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
-use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
+use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_segment;
+use postgres_ffi::v14::nonrelfile_utils::csnlogpage_precedes;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
 use anyhow::Result;
@@ -43,6 +44,7 @@ use postgres_ffi::v14::xlog_utils::*;
 use postgres_ffi::v14::CheckPoint;
 use postgres_ffi::TransactionId;
 use postgres_ffi::BLCKSZ;
+use postgres_ffi::XidCSN;
 use utils::lsn::Lsn;
 
 pub struct WalIngest<'a> {
@@ -305,6 +307,27 @@ impl<'a> WalIngest<'a> {
                     self.checkpoint_modified = true;
                 }
             }
+        } else if decoded.xl_rmid == pg_constants::RM_CSNLOG_ID {
+            let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
+            if info == pg_constants::XLOG_CSN_ZEROPAGE {
+                let pageno = buf.get_u32_le();
+                let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                self.put_slru_page_image(
+                    modification,
+                    SlruKind::Csn,
+                    segno,
+                    rpageno,
+                    ZERO_PAGE.clone(),
+                ).await?;
+            } else if info == pg_constants::XLOG_CSN_TRUNCATE {
+                let pageno: u32 = buf.get_u32_le();
+                self.ingest_csnlog_truncate_record(modification, pageno).await?;
+            }
+            // We don't handle assignment and set records to avoid the
+            // ambiguity of the commit order. Instead we rely on the 
+            // XLOG records to determine the LSN and thus commit order.
+
         }
 
         // Iterate through all the blocks that the record modifies, and
@@ -761,6 +784,48 @@ impl<'a> WalIngest<'a> {
             },
         )?;
 
+        // Record update of CSN pages.
+        let mut csn_pageno = parsed.xid / pg_constants::CSN_LOG_XACTS_PER_PAGE;
+        let mut csn_segno = csn_pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+        let mut csn_rpageno = csn_pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+        let mut csn_page_xids: Vec<TransactionId> = vec![parsed.xid];
+        let lsn : XidCSN = modification.lsn.0;
+
+        for subxact in &parsed.subxacts {
+            let csn_subxact_pageno = subxact / pg_constants::CSN_LOG_XACTS_PER_PAGE;
+            if csn_subxact_pageno != csn_pageno {
+                // This subxact goes to different page. Write the record
+                // for all the XIDs on the previous page, and continue
+                // accumulating XIDs on this new page.
+                modification.put_slru_wal_record(
+                    SlruKind::Csn,
+                    csn_segno,
+                    csn_rpageno,
+                    if is_commit {
+                        NeonWalRecord::CsnLogSetCommitted { xids: csn_page_xids, lsn: lsn }
+                    } else {
+                        NeonWalRecord::CsnLogSetAborted { xids: csn_page_xids }
+                    },
+                )?;
+                csn_page_xids = Vec::new();
+            }
+            csn_pageno = csn_subxact_pageno;
+            csn_segno = csn_pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+            csn_rpageno = csn_pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+            csn_page_xids.push(*subxact);
+        }
+        modification.put_slru_wal_record(
+            SlruKind::Csn,
+            csn_segno,
+            csn_rpageno,
+            if is_commit {
+                NeonWalRecord::CsnLogSetCommitted { xids: csn_page_xids, lsn: lsn }
+            } else {
+                NeonWalRecord::CsnLogSetAborted { xids: csn_page_xids }
+            },
+        )?;
+
+
         for xnode in &parsed.xnodes {
             for forknum in MAIN_FORKNUM..=VISIBILITYMAP_FORKNUM {
                 let rel = RelTag {
@@ -833,7 +898,7 @@ impl<'a> WalIngest<'a> {
             .await?
         {
             let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
-            if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
+            if slru_may_delete_segment(segpage, xlrec.pageno) {
                 modification
                     .drop_slru_segment(SlruKind::Clog, segno, ctx)
                     .await?;
@@ -980,6 +1045,45 @@ impl<'a> WalIngest<'a> {
                 ctx,
             )
             .await
+    }
+
+    async fn ingest_csnlog_truncate_record(
+        &mut self,
+        modification: &mut DatadirModification<'_>,
+        pageno: u32,
+    ) -> Result<()> {
+        info!("XLOG_CSN_TRUNCATE truncate pageno {} ", pageno);
+
+        let latest_page_number = 
+            self.checkpoint.nextXid.value as u32 / pg_constants::CSN_LOG_XACTS_PER_PAGE;
+
+        // First, make an important safety check:
+        // the current endpoint page must not be eligible for removal.
+        // See SimpleLruTruncate() in slru.c
+        if csnlogpage_precedes(latest_page_number, pageno) {
+            info!("could not truncate directory pg_csn apparent wraparound");
+            return Ok(());
+        }
+
+        // Iterate via SLRU CsnLog segments and drop segments that we're ready to truncate
+        //
+        // We cannot pass 'lsn' to the Timeline.list_nonrels(), or it
+        // will block waiting for the last valid LSN to advance up to
+        // it. So we use the previous record's LSN in the get calls
+        // instead.
+        let req_lsn = modification.tline.get_last_record_lsn();
+        for segno in modification
+            .tline
+            .list_slru_segments(SlruKind::Csn, req_lsn)
+            .await?
+        {
+            let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
+            if slru_may_delete_segment(segpage, pageno) {
+                modification.drop_slru_segment(SlruKind::Csn, segno).await?;
+                trace!("Drop Csn segment {:>04X}", segno);
+            }
+        }
+        Ok(())
     }
 
     async fn put_rel_creation(

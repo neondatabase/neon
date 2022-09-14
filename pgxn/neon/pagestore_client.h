@@ -107,6 +107,7 @@ typedef enum
 	NEON_CLOG = 0,
 	NEON_MULTI_XACT_MEMBERS,
 	NEON_MULTI_XACT_OFFSETS,
+	NEON_CSNLOG,
 } NeonSlruKind;
 
 typedef struct
@@ -199,6 +200,7 @@ extern bool wal_redo;
 extern int32 max_cluster_size;
 extern bool neon_slru_clog;
 extern bool neon_slru_multixact;
+extern bool neon_slru_csnlog;
 
 extern const f_smgr *smgr_neon(BackendId backend, RelFileNode rnode);
 extern void smgr_init_neon(void);
