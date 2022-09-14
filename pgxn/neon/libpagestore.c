@@ -441,6 +441,7 @@ pg_init_libpagestore(void)
 							 &prefetch_enabled,
 							 false,
 							 PGC_SIGHUP,
+							 0,
 							 NULL, NULL, NULL);
 
 	relsize_hash_init();
