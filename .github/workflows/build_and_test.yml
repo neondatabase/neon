@@ -94,15 +94,17 @@ jobs:
       # CARGO_FEATURES is passed to "cargo metadata". It is separate from CARGO_FLAGS,
       #   because "cargo metadata" doesn't accept --release or --debug options
       #
+      # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
+      # corresponding Cargo.toml files for their descriptions.
       - name: Set env variables
         run: |
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-            CARGO_FEATURES=""
+            CARGO_FEATURES="--features failpoints"
             CARGO_FLAGS="--locked --timings"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
-            CARGO_FEATURES="--features profiling"
+            CARGO_FEATURES="--features failpoints,profiling"
             CARGO_FLAGS="--locked --timings --release $CARGO_FEATURES"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV

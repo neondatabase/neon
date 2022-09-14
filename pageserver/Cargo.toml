@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# It is simpler infra-wise to have failpoints enabled by default
-# It shouldn't affect performance in any way because failpoints
-# are not placed in hot code paths
-default = ["failpoints"]
-profiling = ["pprof"]
+default = []
+
+# Feature that enables a special API, fail_point! macro (adds some runtime cost)
+# to run tests on outage conditions
 failpoints = ["fail/failpoints"]
+profiling = ["pprof"]
 
 [dependencies]
 async-stream = "0.3"

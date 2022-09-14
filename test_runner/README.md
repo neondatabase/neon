@@ -6,6 +6,7 @@ Prerequisites:
 - Correctly configured Python, see [`/docs/sourcetree.md`](/docs/sourcetree.md#using-python)
 - Neon and Postgres binaries
     - See the root [README.md](/README.md) for build directions
+      If you want to test tests with failpoints, you would need to add `--features failpoints` to Rust code build commands.
     - Tests can be run from the git tree; or see the environment variables
       below to run from other directories.
 - The neon git repo, including the postgres submodule
