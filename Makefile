@@ -34,6 +34,12 @@ ifeq ($(UNAME_S),Darwin)
     PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
 endif
 
+# Use -C option so that when PostgreSQL "make install" installs the
+# headers, the mtime of the headers are not changed when there have
+# been no changes to the files. Changing the mtime triggers an
+# unnecessary rebuild of 'postgres_ffi'.
+PG_CONFIGURE_OPTS += INSTALL='install -C'
+
 # Choose whether we should be silent or verbose
 CARGO_BUILD_FLAGS += --$(if $(filter s,$(MAKEFLAGS)),quiet,verbose)
 # Fix for a corner case when make doesn't pass a jobserver
