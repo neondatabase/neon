@@ -31,9 +31,11 @@ use crate::task_mgr::TaskKind;
 
 /// Current storage format version
 ///
-/// This is embedded in the metadata file, and also in the header of all the
-/// layer files. If you make any backwards-incompatible changes to the storage
+/// This is embedded in the header of all the layer files.
+/// If you make any backwards-incompatible changes to the storage
 /// format, bump this!
+/// Note that TimelineMetadata uses its own version number to track
+/// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
 pub const DEFAULT_PG_VERSION: u32 = 14;
