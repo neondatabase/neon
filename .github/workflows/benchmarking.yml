@@ -144,6 +144,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # neon-captest: Run pgbench, reusing existing project
+        # neon-captest-new: Same, but on a freshly created project
         platform: [ neon-captest, neon-captest-new, rds-aurora ]
 
     runs-on: dev
@@ -183,7 +185,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest' or 'rds-aurora'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest', 'neon-captest-new' or 'rds-aurora'"
             exit 1
             ;;
         esac
