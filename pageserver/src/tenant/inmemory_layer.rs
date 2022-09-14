@@ -15,7 +15,7 @@ use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstru
 use crate::walrecord::{self, ZenithWalRecord};
 use crate::walredo::WalRedoManager;
 use anyhow::{bail, ensure, Result};
-use postgres_ffi::v14::XLogRecord;
+use postgres_ffi::v14::{pg_constants, XLogRecord};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -370,6 +370,7 @@ impl InMemoryLayer {
             let page_updates = vec_map.as_slice();
             let mut first_record = true;
             let mut xid = 0u32;
+            let mut first_lsn: Lsn = Lsn::INVALID;
             let mut last_lsn: Lsn = Lsn::INVALID;
             let mut records: Vec<(Lsn, ZenithWalRecord)> = Vec::new();
             total_pages += 1;
@@ -389,9 +390,19 @@ impl InMemoryLayer {
                                 let last_pos = page_updates.last().unwrap().1;
                                 if (last_pos - pos) as usize + buf.len() > COLLAPSE_THRESHOLD {
                                     let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
-                                    xid = xlogrec.xl_xid;
-                                    records.push((*lsn, wal_rec));
-                                    continue;
+									// We need to provie heap-index consistency; index pages should contains references tids) only to
+									// existed head records. So perform collapseony for insert records and make sure that
+									//  heap updates are placed before index updates (by assignng to the image LSNof first collapsed record)
+									if (xlogrec.xl_rmid == pg_constants::RM_HEAP_ID &&
+										(xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP_INSERT) ||
+									   (xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID &&
+										(xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP2_MULTI_INSERT)
+									{
+										xid = xlogrec.xl_xid;
+										first_lsn = *lsn;
+										records.push((*lsn, wal_rec));
+										continue;
+									}
                                 }
                             }
                         }
@@ -402,7 +413,13 @@ impl InMemoryLayer {
                         if let Value::WalRecord(wal_rec) = value {
                             if let ZenithWalRecord::Postgres { will_init, rec } = &wal_rec {
                                 let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
-                                if !will_init && xid == xlogrec.xl_xid {
+                                if !will_init &&
+									xid == xlogrec.xl_xid &&
+									((xlogrec.xl_rmid == pg_constants::RM_HEAP_ID &&
+									  (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP_INSERT) ||
+									 (xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID &&
+									  (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP2_MULTI_INSERT))
+								{
                                     records.push((*lsn, wal_rec));
                                     continue;
                                 }
@@ -429,7 +446,7 @@ impl InMemoryLayer {
                 let img = walredo_mgr.request_redo(key, last_lsn, None, records)?;
                 delta_layer_writer.put_value_bytes(
                     key,
-                    last_lsn,
+                    first_lsn, // to make sure that index contains valid tids
                     &Value::Image(img).ser()?,
                     true,
                 )?;
