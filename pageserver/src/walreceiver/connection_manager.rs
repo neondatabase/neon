@@ -1366,7 +1366,7 @@ mod tests {
             },
             timeline: harness
                 .load()
-                .create_empty_timeline(TIMELINE_ID, Lsn(0))
+                .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
                 .expect("Failed to create an empty timeline for dummy wal connection manager"),
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),

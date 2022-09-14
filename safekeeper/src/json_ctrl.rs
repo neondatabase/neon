@@ -22,7 +22,7 @@ use crate::safekeeper::{
 use crate::safekeeper::{SafeKeeperState, Term, TermHistory, TermSwitchEntry};
 use crate::timeline::Timeline;
 use crate::GlobalTimelines;
-use postgres_ffi::v14::xlog_utils;
+use postgres_ffi::encode_logical_message;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use utils::{
     lsn::Lsn,
@@ -47,6 +47,7 @@ pub struct AppendLogicalMessage {
     epoch_start_lsn: Lsn,
     begin_lsn: Lsn,
     truncate_lsn: Lsn,
+    pg_version: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -68,7 +69,7 @@ pub fn handle_json_ctrl(
     info!("JSON_CTRL request: {:?}", append_request);
 
     // need to init safekeeper state before AppendRequest
-    let tli = prepare_safekeeper(spg.ttid)?;
+    let tli = prepare_safekeeper(spg.ttid, append_request.pg_version)?;
 
     // if send_proposer_elected is true, we need to update local history
     if append_request.send_proposer_elected {
@@ -95,11 +96,11 @@ pub fn handle_json_ctrl(
 
 /// Prepare safekeeper to process append requests without crashes,
 /// by sending ProposerGreeting with default server.wal_seg_size.
-fn prepare_safekeeper(ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+fn prepare_safekeeper(ttid: TenantTimelineId, pg_version: u32) -> Result<Arc<Timeline>> {
     GlobalTimelines::create(
         ttid,
         ServerInfo {
-            pg_version: 0, // unknown
+            pg_version,
             wal_seg_size: WAL_SEGMENT_SIZE as u32,
             system_id: 0,
         },
@@ -135,7 +136,7 @@ struct InsertedWAL {
 /// Extend local WAL with new LogicalMessage record. To do that,
 /// create AppendRequest with new WAL and pass it to safekeeper.
 fn append_logical_message(tli: &Arc<Timeline>, msg: &AppendLogicalMessage) -> Result<InsertedWAL> {
-    let wal_data = xlog_utils::encode_logical_message(&msg.lm_prefix, &msg.lm_message);
+    let wal_data = encode_logical_message(&msg.lm_prefix, &msg.lm_message);
     let sk_state = tli.get_state().1;
 
     let begin_lsn = msg.begin_lsn;

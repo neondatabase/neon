@@ -13,7 +13,7 @@ use crate::tenant::Timeline;
 use crate::walrecord::NeonWalRecord;
 use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
-use postgres_ffi::v14::pg_constants;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
@@ -125,8 +125,7 @@ impl Timeline {
             return Ok(nblocks);
         }
 
-        if (tag.forknum == pg_constants::FSM_FORKNUM
-            || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
+        if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
             && !self.get_rel_exists(tag, lsn, latest)?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
@@ -1090,6 +1089,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // 03 misc
 //    controlfile
 //    checkpoint
+//    pg_version
 //
 // Below is a full list of the keyspace allocation:
 //
@@ -1128,7 +1128,6 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
-
 //-- Section 01: relation data and metadata
 
 const DBDIR_KEY: Key = Key {
@@ -1402,8 +1401,9 @@ fn is_slru_block_key(key: Key) -> bool {
 pub fn create_test_timeline(
     tenant: &crate::tenant::Tenant,
     timeline_id: utils::id::TimelineId,
+    pg_version: u32,
 ) -> Result<std::sync::Arc<Timeline>> {
-    let tline = tenant.create_empty_timeline(timeline_id, Lsn(8))?;
+    let tline = tenant.create_empty_timeline(timeline_id, Lsn(8), pg_version)?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;

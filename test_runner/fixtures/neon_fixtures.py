@@ -59,7 +59,7 @@ Env = Dict[str, str]
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 DEFAULT_OUTPUT_DIR = "test_output"
-DEFAULT_POSTGRES_DIR = "pg_install/v14"
+DEFAULT_PG_VERSION_DEFAULT = "14"
 DEFAULT_BRANCH_NAME = "main"
 
 BASE_PORT = 15000
@@ -71,6 +71,7 @@ base_dir = ""
 neon_binpath = ""
 pg_distrib_dir = ""
 top_output_dir = ""
+pg_version = ""
 
 
 def pytest_configure(config):
@@ -100,12 +101,21 @@ def pytest_configure(config):
     Path(top_output_dir).mkdir(exist_ok=True)
 
     # Find the postgres installation.
+    global pg_version
+    pg_version = os.environ.get("DEFAULT_PG_VERSION", DEFAULT_PG_VERSION_DEFAULT)
+
     global pg_distrib_dir
+
+    # TODO get rid of the POSTGRES_DISTRIB_DIR env var ?
+    # use DEFAULT_PG_VERSION instead to generate the path
     env_postgres_bin = os.environ.get("POSTGRES_DISTRIB_DIR")
     if env_postgres_bin:
         pg_distrib_dir = env_postgres_bin
     else:
-        pg_distrib_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
+        pg_distrib_dir = os.path.normpath(
+            os.path.join(base_dir, "pg_install/v{}".format(pg_version))
+        )
+
     log.info(f"pg_distrib_dir is {pg_distrib_dir}")
     if os.getenv("REMOTE_ENV"):
         # When testing against a remote server, we only need the client binary.
@@ -1185,6 +1195,7 @@ class AbstractNeonCli(abc.ABC):
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
         env_vars["POSTGRES_DISTRIB_DIR"] = str(pg_distrib_dir)
+        env_vars["DEFAULT_PG_VERSION"] = str(pg_version)
         if self.env.rust_log_override is not None:
             env_vars["RUST_LOG"] = self.env.rust_log_override
         for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
@@ -1251,6 +1262,8 @@ class NeonCli(AbstractNeonCli):
                     str(tenant_id),
                     "--timeline-id",
                     str(timeline_id),
+                    "--pg-version",
+                    pg_version,
                 ]
             )
         else:
@@ -1262,6 +1275,8 @@ class NeonCli(AbstractNeonCli):
                     str(tenant_id),
                     "--timeline-id",
                     str(timeline_id),
+                    "--pg-version",
+                    pg_version,
                 ]
                 + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
             )
@@ -1296,6 +1311,8 @@ class NeonCli(AbstractNeonCli):
             new_branch_name,
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
+            "--pg-version",
+            pg_version,
         ]
 
         res = self.raw_cli(cmd)
@@ -1317,6 +1334,8 @@ class NeonCli(AbstractNeonCli):
             branch_name,
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
+            "--pg-version",
+            pg_version,
         ]
 
         res = self.raw_cli(cmd)
@@ -1395,6 +1414,9 @@ class NeonCli(AbstractNeonCli):
             cmd = ["init", f"--config={tmp.name}"]
             if initial_timeline_id:
                 cmd.extend(["--timeline-id", str(initial_timeline_id)])
+
+            cmd.extend(["--pg-version", pg_version])
+
             append_pageserver_param_overrides(
                 params_to_update=cmd,
                 remote_storage=self.env.remote_storage,
@@ -1476,6 +1498,8 @@ class NeonCli(AbstractNeonCli):
             str(tenant_id or self.env.initial_tenant),
             "--branch-name",
             branch_name,
+            "--pg-version",
+            pg_version,
         ]
         if lsn is not None:
             args.extend(["--lsn", str(lsn)])
@@ -1500,6 +1524,8 @@ class NeonCli(AbstractNeonCli):
             "start",
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
+            "--pg-version",
+            pg_version,
         ]
         if lsn is not None:
             args.append(f"--lsn={lsn}")

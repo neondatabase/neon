@@ -63,6 +63,7 @@ struct TimelineMetadataBody {
     ancestor_lsn: Lsn,
     latest_gc_cutoff_lsn: Lsn,
     initdb_lsn: Lsn,
+    pg_version: u32,
 }
 
 impl TimelineMetadata {
@@ -73,6 +74,7 @@ impl TimelineMetadata {
         ancestor_lsn: Lsn,
         latest_gc_cutoff_lsn: Lsn,
         initdb_lsn: Lsn,
+        pg_version: u32,
     ) -> Self {
         Self {
             hdr: TimelineMetadataHeader {
@@ -87,6 +89,7 @@ impl TimelineMetadata {
                 ancestor_lsn,
                 latest_gc_cutoff_lsn,
                 initdb_lsn,
+                pg_version,
             },
         }
     }
@@ -160,6 +163,10 @@ impl TimelineMetadata {
     pub fn initdb_lsn(&self) -> Lsn {
         self.body.initdb_lsn
     }
+
+    pub fn pg_version(&self) -> u32 {
+        self.body.pg_version
+    }
 }
 
 /// Save timeline metadata to file
@@ -212,6 +219,8 @@ mod tests {
             Lsn(0),
             Lsn(0),
             Lsn(0),
+            // Any version will do here, so use the default
+            crate::DEFAULT_PG_VERSION,
         );
 
         let metadata_bytes = original_metadata

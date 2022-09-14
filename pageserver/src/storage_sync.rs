@@ -1445,7 +1445,17 @@ mod test_utils {
     }
 
     pub(super) fn dummy_metadata(disk_consistent_lsn: Lsn) -> TimelineMetadata {
-        TimelineMetadata::new(disk_consistent_lsn, None, None, Lsn(0), Lsn(0), Lsn(0))
+        TimelineMetadata::new(
+            disk_consistent_lsn,
+            None,
+            None,
+            Lsn(0),
+            Lsn(0),
+            Lsn(0),
+            // Any version will do
+            // but it should be consistent with the one in the tests
+            crate::DEFAULT_PG_VERSION,
+        )
     }
 }
 

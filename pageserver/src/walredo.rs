@@ -46,11 +46,12 @@ use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
 use crate::walrecord::NeonWalRecord;
 use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
+use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
 };
-use postgres_ffi::v14::pg_constants;
 use postgres_ffi::BLCKSZ;
 
 ///
@@ -82,6 +83,7 @@ pub trait WalRedoManager: Send + Sync {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, NeonWalRecord)>,
+        pg_version: u32,
     ) -> Result<Bytes, WalRedoError>;
 }
 
@@ -144,6 +146,7 @@ impl WalRedoManager for PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, NeonWalRecord)>,
+        pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         if records.is_empty() {
             error!("invalid WAL redo request with no records");
@@ -166,6 +169,7 @@ impl WalRedoManager for PostgresRedoManager {
                         img,
                         &records[batch_start..i],
                         self.conf.wal_redo_timeout,
+                        pg_version,
                     )
                 };
                 img = Some(result?);
@@ -184,6 +188,7 @@ impl WalRedoManager for PostgresRedoManager {
                 img,
                 &records[batch_start..],
                 self.conf.wal_redo_timeout,
+                pg_version,
             )
         }
     }
@@ -212,6 +217,7 @@ impl PostgresRedoManager {
         base_img: Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
+        pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
 
@@ -222,7 +228,7 @@ impl PostgresRedoManager {
 
         // launch the WAL redo process on first use
         if process_guard.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, &self.tenant_id)?;
+            let p = PostgresRedoProcess::launch(self.conf, &self.tenant_id, pg_version)?;
             *process_guard = Some(p);
         }
         let process = process_guard.as_mut().unwrap();
@@ -326,7 +332,7 @@ impl PostgresRedoManager {
                 // sanity check that this is modifying the correct relation
                 let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert!(
-                    rel.forknum == pg_constants::VISIBILITYMAP_FORKNUM,
+                    rel.forknum == VISIBILITYMAP_FORKNUM,
                     "ClearVisibilityMapFlags record on unexpected rel {}",
                     rel
                 );
@@ -570,7 +576,11 @@ impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    fn launch(conf: &PageServerConf, tenant_id: &TenantId) -> Result<PostgresRedoProcess, Error> {
+    fn launch(
+        conf: &PageServerConf,
+        tenant_id: &TenantId,
+        pg_version: u32,
+    ) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
@@ -588,12 +598,12 @@ impl PostgresRedoProcess {
             fs::remove_dir_all(&datadir)?;
         }
         info!("running initdb in {}", datadir.display());
-        let initdb = Command::new(conf.pg_bin_dir().join("initdb"))
+        let initdb = Command::new(conf.pg_bin_dir(pg_version).join("initdb"))
             .args(&["-D", &datadir.to_string_lossy()])
             .arg("-N")
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
             .close_fds()
             .output()
             .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
@@ -619,14 +629,14 @@ impl PostgresRedoProcess {
         }
 
         // Start postgres itself
-        let mut child = Command::new(conf.pg_bin_dir().join("postgres"))
+        let mut child = Command::new(conf.pg_bin_dir(pg_version).join("postgres"))
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
             .env("PGDATA", &datadir)
             // The redo process is not trusted, so it runs in seccomp mode
             // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't

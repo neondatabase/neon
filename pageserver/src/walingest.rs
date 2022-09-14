@@ -34,8 +34,9 @@ use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::tenant::Timeline;
 use crate::walrecord::*;
+use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
-use postgres_ffi::v14::pg_constants;
 use postgres_ffi::v14::xlog_utils::*;
 use postgres_ffi::v14::CheckPoint;
 use postgres_ffi::TransactionId;
@@ -82,7 +83,8 @@ impl<'a> WalIngest<'a> {
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
         modification.lsn = lsn;
-        decode_wal_record(recdata, decoded).context("failed decoding wal record")?;
+        decode_wal_record(recdata, decoded, self.timeline.pg_version)
+            .context("failed decoding wal record")?;
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -113,18 +115,49 @@ impl<'a> WalIngest<'a> {
             let truncate = XlSmgrTruncate::decode(&mut buf);
             self.ingest_xlog_smgr_truncate(modification, &truncate)?;
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
-            if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_DBASE_CREATE
-            {
-                let createdb = XlCreateDatabase::decode(&mut buf);
-                self.ingest_xlog_dbase_create(modification, &createdb)?;
-            } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_DBASE_DROP
-            {
-                let dropdb = XlDropDatabase::decode(&mut buf);
-                for tablespace_id in dropdb.tablespace_ids {
-                    trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                    modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+            debug!(
+                "handle RM_DBASE_ID for Postgres version {:?}",
+                self.timeline.pg_version
+            );
+            if self.timeline.pg_version == 14 {
+                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE
+                {
+                    let createdb = XlCreateDatabase::decode(&mut buf);
+                    debug!("XLOG_DBASE_CREATE v14");
+
+                    self.ingest_xlog_dbase_create(modification, &createdb)?;
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v14::bindings::XLOG_DBASE_DROP
+                {
+                    let dropdb = XlDropDatabase::decode(&mut buf);
+                    for tablespace_id in dropdb.tablespace_ids {
+                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                        modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+                    }
+                }
+            } else if self.timeline.pg_version == 15 {
+                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG
+                {
+                    debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY
+                {
+                    // The XLOG record was renamed between v14 and v15,
+                    // but the record format is the same.
+                    // So we can reuse XlCreateDatabase here.
+                    debug!("XLOG_DBASE_CREATE_FILE_COPY");
+                    let createdb = XlCreateDatabase::decode(&mut buf);
+                    self.ingest_xlog_dbase_create(modification, &createdb)?;
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v15::bindings::XLOG_DBASE_DROP
+                {
+                    let dropdb = XlDropDatabase::decode(&mut buf);
+                    for tablespace_id in dropdb.tablespace_ids {
+                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                        modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+                    }
                 }
             }
         } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
@@ -291,7 +324,7 @@ impl<'a> WalIngest<'a> {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
         // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0
+            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, self.timeline.pg_version)
         {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;
@@ -392,7 +425,7 @@ impl<'a> WalIngest<'a> {
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
             let vm_rel = RelTag {
-                forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                forknum: VISIBILITYMAP_FORKNUM,
                 spcnode: decoded.blocks[0].rnode_spcnode,
                 dbnode: decoded.blocks[0].rnode_dbnode,
                 relnode: decoded.blocks[0].rnode_relnode,
@@ -568,7 +601,7 @@ impl<'a> WalIngest<'a> {
                 spcnode,
                 dbnode,
                 relnode,
-                forknum: pg_constants::MAIN_FORKNUM,
+                forknum: MAIN_FORKNUM,
             };
             self.put_rel_truncation(modification, rel, rec.blkno)?;
         }
@@ -577,7 +610,7 @@ impl<'a> WalIngest<'a> {
                 spcnode,
                 dbnode,
                 relnode,
-                forknum: pg_constants::FSM_FORKNUM,
+                forknum: FSM_FORKNUM,
             };
 
             // FIXME: 'blkno' stored in the WAL record is the new size of the
@@ -600,7 +633,7 @@ impl<'a> WalIngest<'a> {
                 spcnode,
                 dbnode,
                 relnode,
-                forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                forknum: VISIBILITYMAP_FORKNUM,
             };
 
             // FIXME: Like with the FSM above, the logic to truncate the VM
@@ -672,7 +705,7 @@ impl<'a> WalIngest<'a> {
         )?;
 
         for xnode in &parsed.xnodes {
-            for forknum in pg_constants::MAIN_FORKNUM..=pg_constants::VISIBILITYMAP_FORKNUM {
+            for forknum in MAIN_FORKNUM..=VISIBILITYMAP_FORKNUM {
                 let rel = RelTag {
                     forknum,
                     spcnode: xnode.spcnode,
@@ -1032,6 +1065,8 @@ mod tests {
     use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
 
+    use crate::DEFAULT_PG_VERSION;
+
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
         spcnode: 0,
@@ -1059,7 +1094,7 @@ mod tests {
     #[test]
     fn test_relsize() -> Result<()> {
         let tenant = TenantHarness::create("test_relsize")?.load();
-        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
+        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1187,7 +1222,7 @@ mod tests {
     #[test]
     fn test_drop_extend() -> Result<()> {
         let tenant = TenantHarness::create("test_drop_extend")?.load();
-        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
+        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1227,7 +1262,7 @@ mod tests {
     #[test]
     fn test_truncate_extend() -> Result<()> {
         let tenant = TenantHarness::create("test_truncate_extend")?.load();
-        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
+        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1315,7 +1350,7 @@ mod tests {
     #[test]
     fn test_large_rel() -> Result<()> {
         let tenant = TenantHarness::create("test_large_rel")?.load();
-        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
+        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;
