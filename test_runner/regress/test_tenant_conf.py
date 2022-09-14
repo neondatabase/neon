@@ -1,11 +1,13 @@
 from contextlib import closing
 
 import psycopg2.extras
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
+    """Test per tenant configuration"""
     # set some non-default global config
     neon_env_builder.pageserver_config_override = """
 page_cache_size=444;
@@ -13,7 +15,15 @@ wait_lsn_timeout='111 s';
 tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
 
     env = neon_env_builder.init_start()
-    """Test per tenant configuration"""
+
+    # Check that we raise on misspelled configs
+    with pytest.raises(Exception):
+        env.neon_cli.create_tenant(
+            conf={
+                "some_invalid_setting_name_blah_blah": "20000",
+            }
+        )
+
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             "checkpoint_distance": "20000",
