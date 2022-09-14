@@ -390,19 +390,21 @@ impl InMemoryLayer {
                                 let last_pos = page_updates.last().unwrap().1;
                                 if (last_pos - pos) as usize + buf.len() > COLLAPSE_THRESHOLD {
                                     let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
-									// We need to provie heap-index consistency; index pages should contains references tids) only to
-									// existed head records. So perform collapseony for insert records and make sure that
-									//  heap updates are placed before index updates (by assignng to the image LSNof first collapsed record)
-									if (xlogrec.xl_rmid == pg_constants::RM_HEAP_ID &&
-										(xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP_INSERT) ||
-									   (xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID &&
-										(xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP2_MULTI_INSERT)
-									{
-										xid = xlogrec.xl_xid;
-										first_lsn = *lsn;
-										records.push((*lsn, wal_rec));
-										continue;
-									}
+                                    // We need to provie heap-index consistency; index pages should contains references tids) only to
+                                    // existed head records. So perform collapseony for insert records and make sure that
+                                    //  heap updates are placed before index updates (by assignng to the image LSNof first collapsed record)
+                                    if (xlogrec.xl_rmid == pg_constants::RM_HEAP_ID
+                                        && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
+                                            == pg_constants::XLOG_HEAP_INSERT)
+                                        || (xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID
+                                            && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
+                                                == pg_constants::XLOG_HEAP2_MULTI_INSERT)
+                                    {
+                                        xid = xlogrec.xl_xid;
+                                        first_lsn = *lsn;
+                                        records.push((*lsn, wal_rec));
+                                        continue;
+                                    }
                                 }
                             }
                         }
@@ -413,13 +415,15 @@ impl InMemoryLayer {
                         if let Value::WalRecord(wal_rec) = value {
                             if let ZenithWalRecord::Postgres { will_init, rec } = &wal_rec {
                                 let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
-                                if !will_init &&
-									xid == xlogrec.xl_xid &&
-									((xlogrec.xl_rmid == pg_constants::RM_HEAP_ID &&
-									  (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP_INSERT) ||
-									 (xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID &&
-									  (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP2_MULTI_INSERT))
-								{
+                                if !will_init
+                                    && xid == xlogrec.xl_xid
+                                    && ((xlogrec.xl_rmid == pg_constants::RM_HEAP_ID
+                                        && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
+                                            == pg_constants::XLOG_HEAP_INSERT)
+                                        || (xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID
+                                            && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
+                                                == pg_constants::XLOG_HEAP2_MULTI_INSERT))
+                                {
                                     records.push((*lsn, wal_rec));
                                     continue;
                                 }
