@@ -154,6 +154,7 @@ extern char *zenith_timeline;
 extern char *zenith_tenant;
 extern bool wal_redo;
 extern int32 max_cluster_size;
+extern bool prefetch_enabled;
 
 extern const f_smgr *smgr_zenith(BackendId backend, RelFileNode rnode);
 extern void smgr_init_zenith(void);
