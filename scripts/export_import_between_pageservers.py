@@ -470,9 +470,10 @@ def import_timeline(
     last_lsn,
     prev_lsn,
     tar_filename,
+    pg_version,
 ):
     # Import timelines to new pageserver
-    import_cmd = f"import basebackup {tenant_id} {timeline_id} {last_lsn} {last_lsn}"
+    import_cmd = f"import basebackup {tenant_id} {timeline_id} {last_lsn} {last_lsn} {pg_version}"
     full_cmd = rf"""cat {tar_filename} | {psql_path} {pageserver_connstr} -c '{import_cmd}' """
 
     stderr_filename2 = os.path.join(args.work_dir, f"import_{tenant_id}_{timeline_id}.stderr")
@@ -594,6 +595,7 @@ def main(args: argparse.Namespace):
                 last_lsn,
                 prev_lsn,
                 tar_filename,
+                timeline["local"]["pg_version"],
             )
 
             # Re-export and compare
