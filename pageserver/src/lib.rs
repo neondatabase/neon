@@ -16,7 +16,6 @@ pub mod tenant;
 pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_tasks;
-pub mod timelines;
 pub mod virtual_file;
 pub mod walingest;
 pub mod walreceiver;

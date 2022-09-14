@@ -12,6 +12,7 @@
 //!
 
 use anyhow::{bail, ensure, Context, Result};
+use remote_storage::path_with_suffix_extension;
 use tokio::sync::watch;
 use tracing::*;
 
@@ -27,6 +28,8 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::ops::Bound::Included;
 use std::path::Path;
+use std::process;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
@@ -34,9 +37,11 @@ use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
+use crate::import_datadir;
 use crate::metrics::remove_tenant_metrics;
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::TEMP_FILE_SUFFIX;
 
 use crate::metrics::STORAGE_TIME;
 use crate::repository::GcResult;
@@ -132,6 +137,10 @@ pub enum TenantState {
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
+    pub fn tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
     /// Get Timeline handle for given zenith timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
     pub fn get_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<Arc<Timeline>> {
@@ -142,8 +151,7 @@ impl Tenant {
             .with_context(|| {
                 format!(
                     "Timeline {} was not found for tenant {}",
-                    timeline_id,
-                    self.tenant_id()
+                    timeline_id, self.tenant_id
                 )
             })
             .map(Arc::clone)
@@ -498,6 +506,69 @@ impl Tenant {
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TenantState> {
         self.state.subscribe()
+    }
+
+    /// Create a new timeline.
+    ///
+    /// Returns the new timeline ID and reference to its Timeline object.
+    ///
+    /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
+    /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
+    /// a new unique ID is generated.
+    pub async fn create_timeline(
+        &self,
+        conf: &'static PageServerConf,
+        new_timeline_id: Option<TimelineId>,
+        ancestor_timeline_id: Option<TimelineId>,
+        mut ancestor_start_lsn: Option<Lsn>,
+    ) -> Result<Option<Arc<Timeline>>> {
+        let new_timeline_id = new_timeline_id.unwrap_or_else(TimelineId::generate);
+
+        if conf
+            .timeline_path(&new_timeline_id, &self.tenant_id)
+            .exists()
+        {
+            debug!("timeline {new_timeline_id} already exists");
+            return Ok(None);
+        }
+
+        let loaded_timeline = match ancestor_timeline_id {
+            Some(ancestor_timeline_id) => {
+                let ancestor_timeline = self
+                    .get_timeline(ancestor_timeline_id)
+                    .context("Cannot branch off the timeline that's not present in pageserver")?;
+
+                if let Some(lsn) = ancestor_start_lsn.as_mut() {
+                    // Wait for the WAL to arrive and be processed on the parent branch up
+                    // to the requested branch point. The repository code itself doesn't
+                    // require it, but if we start to receive WAL on the new timeline,
+                    // decoding the new WAL might need to look up previous pages, relation
+                    // sizes etc. and that would get confused if the previous page versions
+                    // are not in the repository yet.
+                    *lsn = lsn.align();
+                    ancestor_timeline.wait_lsn(*lsn).await?;
+
+                    let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
+                    if ancestor_ancestor_lsn > *lsn {
+                        // can we safely just branch from the ancestor instead?
+                        anyhow::bail!(
+                    "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
+                    lsn,
+                    ancestor_timeline_id,
+                    ancestor_ancestor_lsn,
+                );
+                    }
+                }
+
+                self.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
+            }
+            None => self.bootstrap_timeline(conf, new_timeline_id).await?,
+        };
+
+        // Have added new timeline into the tenant, now its background tasks are needed.
+        self.activate(true);
+
+        Ok(Some(loaded_timeline))
     }
 }
 
@@ -952,9 +1023,82 @@ impl Tenant {
         Ok(totals)
     }
 
-    pub fn tenant_id(&self) -> TenantId {
-        self.tenant_id
+    /// - run initdb to init temporary instance and get bootstrap data
+    /// - after initialization complete, remove the temp dir.
+    async fn bootstrap_timeline(
+        &self,
+        conf: &'static PageServerConf,
+        timeline_id: TimelineId,
+    ) -> Result<Arc<Timeline>> {
+        // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
+        // temporary directory for basebackup files for the given timeline.
+        let initdb_path = path_with_suffix_extension(
+            conf.timelines_path(&self.tenant_id)
+                .join(format!("basebackup-{timeline_id}")),
+            TEMP_FILE_SUFFIX,
+        );
+
+        // Init temporarily repo to get bootstrap data
+        run_initdb(conf, &initdb_path)?;
+        let pgdata_path = initdb_path;
+
+        let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+
+        // Import the contents of the data directory at the initial checkpoint
+        // LSN, and any WAL after that.
+        // Initdb lsn will be equal to last_record_lsn which will be set after import.
+        // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
+        let timeline = self.create_empty_timeline(timeline_id, lsn)?;
+        import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
+
+        fail::fail_point!("before-checkpoint-new-timeline", |_| {
+            bail!("failpoint before-checkpoint-new-timeline");
+        });
+
+        timeline.checkpoint(CheckpointConfig::Forced)?;
+
+        info!(
+            "created root timeline {} timeline.lsn {}",
+            timeline_id,
+            timeline.get_last_record_lsn()
+        );
+
+        // Remove temp dir. We don't need it anymore
+        fs::remove_dir_all(pgdata_path)?;
+
+        Ok(timeline)
     }
+}
+
+/// Create the cluster temporarily in 'initdbpath' directory inside the repository
+/// to get bootstrap data for timeline initialization.
+fn run_initdb(conf: &'static PageServerConf, initdb_target_path: &Path) -> Result<()> {
+    info!("running initdb in {}... ", initdb_target_path.display());
+
+    let initdb_path = conf.pg_bin_dir().join("initdb");
+    let initdb_output = process::Command::new(&initdb_path)
+        .args(&["-D", &initdb_target_path.to_string_lossy()])
+        .args(&["-U", &conf.superuser])
+        .args(&["-E", "utf8"])
+        .arg("--no-instructions")
+        // This is only used for a temporary installation that is deleted shortly after,
+        // so no need to fsync it
+        .arg("--no-sync")
+        .env_clear()
+        .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+        .stdout(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to execute {}", initdb_path.display()))?;
+    if !initdb_output.status.success() {
+        bail!(
+            "{} failed: '{}'",
+            initdb_path.display(),
+            String::from_utf8_lossy(&initdb_output.stderr)
+        );
+    }
+
+    Ok(())
 }
 
 impl Drop for Tenant {
