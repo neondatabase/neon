@@ -170,7 +170,7 @@ impl TimelineMetadata {
         if hdr.format_version != METADATA_FORMAT_VERSION {
             // If metadata has the old format,
             // upgrade it and return the result
-            TimelineMetadata::upgrade_timeline_metadata(&metadata_bytes)
+            TimelineMetadata::upgrade_timeline_metadata(metadata_bytes)
         } else {
             let body =
                 TimelineMetadataBodyV2::des(&metadata_bytes[METADATA_HDR_SIZE..metadata_size])?;
