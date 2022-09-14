@@ -1128,9 +1128,6 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
-//
-// PG_VERSION:
-// 03 00000000 00000000 00000000 00   00000002
 //-- Section 01: relation data and metadata
 
 const DBDIR_KEY: Key = Key {

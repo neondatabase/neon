@@ -267,17 +267,12 @@ where
             None
         };
 
-        // TODO pass this as a parameter
-
         if spcnode == GLOBALTABLESPACE_OID {
             let pg_version_str = self.timeline.pg_version.to_string();
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
             self.ar.append(&header, pg_version_str.as_bytes())?;
 
             info!("timeline.pg_version {}", self.timeline.pg_version);
-
-            let header = new_tar_header("global/PG_VERSION", pg_version_str.len() as u64)?;
-            self.ar.append(&header, pg_version_str.as_bytes())?;
 
             if let Some(img) = relmap_img {
                 // filenode map for global tablespace
