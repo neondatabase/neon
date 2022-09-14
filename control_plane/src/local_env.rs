@@ -20,6 +20,8 @@ use utils::{
 
 use crate::safekeeper::SafekeeperNode;
 
+pub const DEFAULT_PG_VERSION: u32 = 14;
+
 //
 // This data structures represents neon_local CLI config
 //
@@ -195,12 +197,40 @@ impl Default for SafekeeperConf {
 }
 
 impl LocalEnv {
-    // postgres installation paths
-    pub fn pg_bin_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("bin")
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> PathBuf {
+        let mut path = self.pg_distrib_dir.clone();
+
+        if pg_version != DEFAULT_PG_VERSION {
+            // step up to the parent directory
+            // We assume that the pg_distrib subdirs
+            // for different pg versions
+            // are located in the same directory
+            // and follow the naming convention: v14, v15, etc.
+            path.pop();
+
+            match pg_version {
+                14 => return path.join(format!("v{pg_version}")),
+                15 => return path.join(format!("v{pg_version}")),
+                _ => panic!("Unsupported postgres version: {}", pg_version),
+            };
+        }
+
+        path
     }
-    pub fn pg_lib_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("lib")
+
+    pub fn pg_bin_dir(&self, pg_version: u32) -> PathBuf {
+        match pg_version {
+            14 => self.pg_distrib_dir(pg_version).join("bin"),
+            15 => self.pg_distrib_dir(pg_version).join("bin"),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
+    }
+    pub fn pg_lib_dir(&self, pg_version: u32) -> PathBuf {
+        match pg_version {
+            14 => self.pg_distrib_dir(pg_version).join("lib"),
+            15 => self.pg_distrib_dir(pg_version).join("lib"),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
     }
 
     pub fn pageserver_bin(&self) -> anyhow::Result<PathBuf> {
@@ -290,6 +320,8 @@ impl LocalEnv {
 
         // Find postgres binaries.
         // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install/v14".
+        // Note that later in the code we assume, that distrib dirs follow the same pattern
+        // for all postgres versions.
         if env.pg_distrib_dir == Path::new("") {
             if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
                 env.pg_distrib_dir = postgres_bin.into();
@@ -384,7 +416,7 @@ impl LocalEnv {
     //
     // Initialize a new Neon repository
     //
-    pub fn init(&mut self) -> anyhow::Result<()> {
+    pub fn init(&mut self, pg_version: u32) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         ensure!(
@@ -397,10 +429,10 @@ impl LocalEnv {
             "directory '{}' already exists. Perhaps already initialized?",
             base_path.display()
         );
-        if !self.pg_distrib_dir.join("bin/postgres").exists() {
+        if !self.pg_bin_dir(pg_version).join("postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
-                self.pg_distrib_dir.display()
+                self.pg_bin_dir(pg_version).display()
             );
         }
         for binary in ["pageserver", "safekeeper"] {

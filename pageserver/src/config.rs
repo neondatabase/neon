@@ -21,6 +21,7 @@ use utils::{
 
 use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::DEFAULT_PG_VERSION;
 
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
@@ -209,7 +210,7 @@ impl Default for PageServerConfigBuilder {
             workdir: Set(PathBuf::new()),
             pg_distrib_dir: Set(env::current_dir()
                 .expect("cannot access current directory")
-                .join("pg_install/v14")),
+                .join(format!("pg_install/v{}", DEFAULT_PG_VERSION))),
             auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
@@ -374,13 +375,40 @@ impl PageServerConf {
     //
     // Postgres distribution paths
     //
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> PathBuf {
+        let mut path = self.pg_distrib_dir.clone();
 
-    pub fn pg_bin_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("bin")
+        if pg_version != DEFAULT_PG_VERSION {
+            // step up to the parent directory
+            // We assume that the pg_distrib subdirs
+            // for different pg versions
+            // are located in the same directory
+            // and follow the naming convention: v14, v15, etc.
+            path.pop();
+
+            match pg_version {
+                14 => return path.join(format!("v{pg_version}")),
+                15 => return path.join(format!("v{pg_version}")),
+                _ => panic!("Unsupported postgres version: {}", pg_version),
+            };
+        }
+
+        path
     }
 
-    pub fn pg_lib_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("lib")
+    pub fn pg_bin_dir(&self, pg_version: u32) -> PathBuf {
+        match pg_version {
+            14 => self.pg_distrib_dir(pg_version).join("bin"),
+            15 => self.pg_distrib_dir(pg_version).join("bin"),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
+    }
+    pub fn pg_lib_dir(&self, pg_version: u32) -> PathBuf {
+        match pg_version {
+            14 => self.pg_distrib_dir(pg_version).join("lib"),
+            15 => self.pg_distrib_dir(pg_version).join("lib"),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
     }
 
     /// Parse a configuration file (pageserver.toml) into a PageServerConf struct,
@@ -449,10 +477,11 @@ impl PageServerConf {
             );
         }
 
-        if !conf.pg_distrib_dir.join("bin/postgres").exists() {
+        let pg_version = DEFAULT_PG_VERSION;
+        if !conf.pg_bin_dir(pg_version).join("postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
-                conf.pg_distrib_dir.display()
+                conf.pg_bin_dir(pg_version).display()
             );
         }
 
@@ -863,7 +892,7 @@ broker_endpoints = ['{broker_endpoint}']
         let workdir = tempdir_path.join("workdir");
         fs::create_dir_all(&workdir)?;
 
-        let pg_distrib_dir = tempdir_path.join("pg_distrib");
+        let pg_distrib_dir = tempdir_path.join(format!("pg_distrib/v{DEFAULT_PG_VERSION}"));
         fs::create_dir_all(&pg_distrib_dir)?;
         let postgres_bin_dir = pg_distrib_dir.join("bin");
         fs::create_dir_all(&postgres_bin_dir)?;

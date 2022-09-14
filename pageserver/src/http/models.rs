@@ -21,6 +21,7 @@ pub struct TimelineCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_start_lsn: Option<Lsn>,
+    pub pg_version: Option<u32>,
 }
 
 #[serde_as]

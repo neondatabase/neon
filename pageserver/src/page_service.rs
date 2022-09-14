@@ -43,9 +43,9 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
 use crate::tenant_mgr;
 use crate::CheckpointConfig;
-use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 
-use postgres_ffi::v14::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi::to_pg_timestamp;
 use postgres_ffi::BLCKSZ;
 
 // Wrapped in libpq CopyData
@@ -498,12 +498,16 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         base_lsn: Lsn,
         _end_lsn: Lsn,
+        pg_version: u32,
     ) -> anyhow::Result<()> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let timeline = tenant_mgr::get_tenant(tenant_id, true)?
-            .create_empty_timeline(timeline_id, base_lsn)?;
+        let timeline = tenant_mgr::get_tenant(tenant_id, true)?.create_empty_timeline(
+            timeline_id,
+            base_lsn,
+            pg_version,
+        )?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -958,16 +962,31 @@ impl postgres_backend_async::Handler for PageServerHandler {
             //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN"
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 4);
+            ensure!(params.len() >= 4);
             let tenant_id = TenantId::from_str(params[0])?;
             let timeline_id = TimelineId::from_str(params[1])?;
             let base_lsn = Lsn::from_str(params[2])?;
             let end_lsn = Lsn::from_str(params[3])?;
 
+            let pg_version = if params.len() == 5 {
+                u32::from_str(params[4])?
+            } else {
+                // If version is not provided, assume default.
+                // TODO: this may lead to weird errors if the version is wrong.
+                crate::DEFAULT_PG_VERSION
+            };
+
             self.check_permission(Some(tenant_id))?;
 
             match self
-                .handle_import_basebackup(pgb, tenant_id, timeline_id, base_lsn, end_lsn)
+                .handle_import_basebackup(
+                    pgb,
+                    tenant_id,
+                    timeline_id,
+                    base_lsn,
+                    end_lsn,
+                    pg_version,
+                )
                 .await
             {
                 Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,

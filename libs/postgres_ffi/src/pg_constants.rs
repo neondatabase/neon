@@ -1,28 +1,22 @@
 //!
 //! Misc constants, copied from PostgreSQL headers.
 //!
+//! Only place version-independent constants here.
+//!
 //! TODO: These probably should be auto-generated using bindgen,
 //! rather than copied by hand. Although on the other hand, it's nice
 //! to have them all here in one place, and have the ability to add
 //! comments on them.
 //!
 
-use super::bindings::{PageHeaderData, XLogRecord};
 use crate::BLCKSZ;
+use crate::{PageHeaderData, XLogRecord};
 
 //
 // From pg_tablespace_d.h
 //
 pub const DEFAULTTABLESPACE_OID: u32 = 1663;
 pub const GLOBALTABLESPACE_OID: u32 = 1664;
-
-//
-// Fork numbers, from relpath.h
-//
-pub const MAIN_FORKNUM: u8 = 0;
-pub const FSM_FORKNUM: u8 = 1;
-pub const VISIBILITYMAP_FORKNUM: u8 = 2;
-pub const INIT_FORKNUM: u8 = 3;
 
 // From storage_xlog.h
 pub const XLOG_SMGR_CREATE: u8 = 0x10;
@@ -114,7 +108,6 @@ pub const XLOG_NEXTOID: u8 = 0x30;
 pub const XLOG_SWITCH: u8 = 0x40;
 pub const XLOG_FPI_FOR_HINT: u8 = 0xA0;
 pub const XLOG_FPI: u8 = 0xB0;
-pub const DB_SHUTDOWNED: u32 = 1;
 
 // From multixact.h
 pub const FIRST_MULTIXACT_ID: u32 = 1;
@@ -169,10 +162,6 @@ pub const RM_HEAP_ID: u8 = 10;
 pub const XLR_INFO_MASK: u8 = 0x0F;
 pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;
 
-// from dbcommands_xlog.h
-pub const XLOG_DBASE_CREATE: u8 = 0x00;
-pub const XLOG_DBASE_DROP: u8 = 0x10;
-
 pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
 pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
@@ -197,8 +186,6 @@ pub const BKPBLOCK_SAME_REL: u8 = 0x80; /* RelFileNode omitted, same as previous
 
 /* Information stored in bimg_info */
 pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
-pub const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
-pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
 
 /* From transam.h */
 pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;

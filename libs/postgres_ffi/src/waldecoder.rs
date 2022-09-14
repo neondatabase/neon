@@ -8,6 +8,7 @@
 //! to look deeper into the WAL records to also understand which blocks they modify, the code
 //! for that is in pageserver/src/walrecord.rs
 //!
+use super::super::waldecoder::{State, WalDecodeError, WalStreamDecoder};
 use super::bindings::{XLogLongPageHeaderData, XLogPageHeaderData, XLogRecord, XLOG_PAGE_MAGIC};
 use super::xlog_utils::*;
 use crate::WAL_SEGMENT_SIZE;
@@ -16,55 +17,19 @@ use crc32c::*;
 use log::*;
 use std::cmp::min;
 use std::num::NonZeroU32;
-use thiserror::Error;
 use utils::lsn::Lsn;
 
-enum State {
-    WaitingForRecord,
-    ReassemblingRecord {
-        recordbuf: BytesMut,
-        contlen: NonZeroU32,
-    },
-    SkippingEverything {
-        skip_until_lsn: Lsn,
-    },
-}
-
-pub struct WalStreamDecoder {
-    lsn: Lsn,
-    inputbuf: BytesMut,
-    state: State,
-}
-
-#[derive(Error, Debug, Clone)]
-#[error("{msg} at {lsn}")]
-pub struct WalDecodeError {
-    msg: String,
-    lsn: Lsn,
+pub trait WalStreamDecoderHandler {
+    fn validate_page_header(&self, hdr: &XLogPageHeaderData) -> Result<(), WalDecodeError>;
+    fn poll_decode_internal(&mut self) -> Result<Option<(Lsn, Bytes)>, WalDecodeError>;
+    fn complete_record(&mut self, recordbuf: Bytes) -> Result<(Lsn, Bytes), WalDecodeError>;
 }
 
 //
 // WalRecordStream is a Stream that returns a stream of WAL records
 // FIXME: This isn't a proper rust stream
 //
-impl WalStreamDecoder {
-    pub fn new(lsn: Lsn) -> WalStreamDecoder {
-        WalStreamDecoder {
-            lsn,
-            inputbuf: BytesMut::new(),
-            state: State::WaitingForRecord,
-        }
-    }
-
-    // The latest LSN position fed to the decoder.
-    pub fn available(&self) -> Lsn {
-        self.lsn + self.inputbuf.remaining() as u64
-    }
-
-    pub fn feed_bytes(&mut self, buf: &[u8]) {
-        self.inputbuf.extend_from_slice(buf);
-    }
-
+impl WalStreamDecoderHandler for WalStreamDecoder {
     fn validate_page_header(&self, hdr: &XLogPageHeaderData) -> Result<(), WalDecodeError> {
         let validate_impl = || {
             if hdr.xlp_magic != XLOG_PAGE_MAGIC as u16 {
@@ -125,7 +90,7 @@ impl WalStreamDecoder {
     ///     Ok(None): there is not enough data in the input buffer. Feed more by calling the `feed_bytes` function
     ///     Err(WalDecodeError): an error occurred while decoding, meaning the input was invalid.
     ///
-    pub fn poll_decode(&mut self) -> Result<Option<(Lsn, Bytes)>, WalDecodeError> {
+    fn poll_decode_internal(&mut self) -> Result<Option<(Lsn, Bytes)>, WalDecodeError> {
         // Run state machine that validates page headers, and reassembles records
         // that cross page boundaries.
         loop {

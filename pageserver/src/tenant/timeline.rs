@@ -37,7 +37,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
 
-use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
+use postgres_ffi::to_pg_timestamp;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn, RecordLsn},
@@ -60,6 +60,8 @@ pub struct Timeline {
 
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
+
+    pub pg_version: u32,
 
     pub layers: RwLock<LayerMap>,
 
@@ -533,6 +535,7 @@ impl Timeline {
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_layers: bool,
+        pg_version: u32,
     ) -> Timeline {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
@@ -541,6 +544,7 @@ impl Timeline {
             tenant_conf,
             timeline_id,
             tenant_id,
+            pg_version,
             layers: RwLock::new(LayerMap::default()),
 
             walredo_mgr,
@@ -1260,6 +1264,7 @@ impl Timeline {
                 self.ancestor_lsn,
                 *self.latest_gc_cutoff_lsn.read(),
                 self.initdb_lsn,
+                self.pg_version,
             );
 
             fail_point!("checkpoint-before-saving-metadata", |x| bail!(
@@ -2133,9 +2138,13 @@ impl Timeline {
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
-                let img =
-                    self.walredo_mgr
-                        .request_redo(key, request_lsn, base_img, data.records)?;
+                let img = self.walredo_mgr.request_redo(
+                    key,
+                    request_lsn,
+                    base_img,
+                    data.records,
+                    self.pg_version,
+                )?;
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();

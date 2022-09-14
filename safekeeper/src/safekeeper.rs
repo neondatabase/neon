@@ -27,7 +27,7 @@ use utils::{
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 6;
 const SK_PROTOCOL_VERSION: u32 = 2;
-const UNKNOWN_SERVER_VERSION: u32 = 0;
+pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 /// Consensus logical timestamp.
 pub type Term = u64;
@@ -594,15 +594,20 @@ where
                 SK_PROTOCOL_VERSION
             );
         }
-        // Postgres upgrade is not treated as fatal error
-        if msg.pg_version != self.state.server.pg_version
+        /* Postgres major version mismatch is treated as fatal error
+         * because safekeepers parse WAL headers and the format
+         * may change between versions.
+         */
+        if msg.pg_version / 10000 != self.state.server.pg_version / 10000
             && self.state.server.pg_version != UNKNOWN_SERVER_VERSION
         {
-            warn!(
+            bail!(
                 "incompatible server version {}, expected {}",
-                msg.pg_version, self.state.server.pg_version
+                msg.pg_version,
+                self.state.server.pg_version
             );
         }
+
         if msg.tenant_id != self.state.tenant_id {
             bail!(
                 "invalid tenant ID, got {}, expected {}",
@@ -634,6 +639,10 @@ where
 
             let mut state = self.state.clone();
             state.server.system_id = msg.system_id;
+            state.server.wal_seg_size = msg.wal_seg_size;
+            if msg.pg_version != UNKNOWN_SERVER_VERSION {
+                state.server.pg_version = msg.pg_version;
+            }
             self.state.persist(&state)?;
         }
 
