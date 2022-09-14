@@ -695,17 +695,17 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             // TODO validate both or none are provided
             let pg_wal = end_lsn.zip(wal_tarfile);
 
-            let mut cplane = ComputeControlPlane::load(env.clone())?;
-            println!("Importing timeline into pageserver ...");
-            pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal)?;
-            println!("Creating node for imported timeline ...");
-            env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
-
             let pg_version = import_match
                 .value_of("pg-version")
                 .unwrap()
                 .parse::<u32>()
                 .context("Failed to parse postgres version from the argument string")?;
+
+            let mut cplane = ComputeControlPlane::load(env.clone())?;
+            println!("Importing timeline into pageserver ...");
+            pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)?;
+            println!("Creating node for imported timeline ...");
+            env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
             cplane.new_node(tenant_id, name, timeline_id, None, None, pg_version)?;
             println!("Done");
