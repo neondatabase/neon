@@ -100,6 +100,7 @@ bool		wal_redo = false;
 int32		max_cluster_size;
 bool		neon_slru_clog;
 bool		neon_slru_multixact;
+bool		neon_slru_csnlog;
 
 /* unlogged relation build states */
 typedef enum
@@ -1847,10 +1848,13 @@ slru_kind_to_string(ZenithSlruKind kind)
 	{
 		case ZENITH_CLOG:
 			return "pg_xact";
+
 		case ZENITH_MULTI_XACT_MEMBERS:
 			return "pg_multixact/members";
 		case ZENITH_MULTI_XACT_OFFSETS:
 			return "pg_multixact/offsets";
+		case ZENITH_CSNLOG:
+			return "pg_csn";
 		default:
 			return "invalid";
 	}
@@ -1874,6 +1878,11 @@ slru_kind_from_string(const char* str, ZenithSlruKind* kind)
 		*kind = ZENITH_MULTI_XACT_OFFSETS;
 		return true;
 	}
+	else if (strcmp(str, "pg_csn") == 0)
+	{
+		*kind = ZENITH_CSNLOG;
+		return true;
+	}
 	return false;
 }
 
@@ -1892,6 +1901,11 @@ neon_slru_kind_check(SlruCtl ctl)
 
 	if ((strcmp(dir, "pg_multixact/members") == 0 || strcmp(dir, "pg_multixact/offsets") == 0) &&
 		neon_slru_multixact)
+	{
+		return true;
+	}
+
+	if (strcmp(dir, "pg_csn") == 0 && neon_slru_csnlog) 
 	{
 		return true;
 	}

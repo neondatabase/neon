@@ -53,6 +53,8 @@ pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
 pub type TimestampTz = i64;
 pub type XLogSegNo = u64;
+pub type XidCSN = u64; 
+pub type SnapshotCSN = u64;
 
 /// Interval of checkpointing metadata file. We should store metadata file to enforce
 /// predicate that checkpoint.nextXid is larger than any XID in WAL.

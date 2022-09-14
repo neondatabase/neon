@@ -231,7 +231,8 @@ where
             let img = self
                 .timeline
                 .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
-
+ 
+            // TODO(pooja): Figure out if we need special handling for csnlog.
             if slru == SlruKind::Clog {
                 ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
             } else {

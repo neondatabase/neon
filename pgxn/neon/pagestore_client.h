@@ -104,6 +104,7 @@ typedef enum
 	ZENITH_CLOG = 0,
 	ZENITH_MULTI_XACT_MEMBERS,
 	ZENITH_MULTI_XACT_OFFSETS,
+	ZENITH_CSNLOG,
 } ZenithSlruKind;
 
 typedef struct
@@ -185,6 +186,7 @@ extern bool wal_redo;
 extern int32 max_cluster_size;
 extern bool neon_slru_clog;
 extern bool neon_slru_multixact;
+extern bool neon_slru_csnlog;
 
 extern const f_smgr *smgr_zenith(BackendId backend, RelFileNode rnode);
 extern void smgr_init_zenith(void);
