@@ -29,13 +29,14 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::metrics::{time_io_closure, WalStorageMetrics};
 use crate::safekeeper::SafeKeeperState;
+use crate::safekeeper::UNKNOWN_SERVER_VERSION;
 
 use crate::wal_backup::read_object;
 use crate::SafeKeeperConf;
-use postgres_ffi::v14::xlog_utils::XLogFileName;
+use postgres_ffi::XLogFileName;
 use postgres_ffi::XLOG_BLCKSZ;
 
-use postgres_ffi::v14::waldecoder::WalStreamDecoder;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -139,7 +140,7 @@ impl PhysicalStorage {
             write_lsn,
             write_record_lsn: write_lsn,
             flush_record_lsn: flush_lsn,
-            decoder: WalStreamDecoder::new(write_lsn),
+            decoder: WalStreamDecoder::new(write_lsn, UNKNOWN_SERVER_VERSION),
             file: None,
         })
     }
@@ -291,7 +292,8 @@ impl Storage for PhysicalStorage {
                 self.decoder.available(),
                 startpos,
             );
-            self.decoder = WalStreamDecoder::new(startpos);
+            let pg_version = self.decoder.pg_version;
+            self.decoder = WalStreamDecoder::new(startpos, pg_version);
         }
         self.decoder.feed_bytes(buf);
         loop {

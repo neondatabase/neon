@@ -50,6 +50,7 @@ fn main() -> Result<()> {
             meta.ancestor_lsn(),
             meta.latest_gc_cutoff_lsn(),
             meta.initdb_lsn(),
+            meta.pg_version(),
         );
         update_meta = true;
     }
@@ -62,6 +63,7 @@ fn main() -> Result<()> {
             meta.ancestor_lsn(),
             meta.latest_gc_cutoff_lsn(),
             meta.initdb_lsn(),
+            meta.pg_version(),
         );
         update_meta = true;
     }

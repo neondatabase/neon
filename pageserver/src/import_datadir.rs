@@ -16,11 +16,13 @@ use crate::reltag::{RelTag, SlruKind};
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
-use postgres_ffi::v14::relfile_utils::*;
-use postgres_ffi::v14::waldecoder::*;
-use postgres_ffi::v14::xlog_utils::*;
-use postgres_ffi::v14::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
+use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::*;
+use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::ControlFileData;
+use postgres_ffi::DBState_DB_SHUTDOWNED;
 use postgres_ffi::Oid;
+use postgres_ffi::XLogFileName;
 use postgres_ffi::{BLCKSZ, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
@@ -236,7 +238,7 @@ fn import_slru<Reader: Read>(
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
 fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) -> Result<()> {
-    let mut waldecoder = WalStreamDecoder::new(startpoint);
+    let mut waldecoder = WalStreamDecoder::new(startpoint, tline.pg_version);
 
     let mut segno = startpoint.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
@@ -354,7 +356,7 @@ pub fn import_wal_from_tar<Reader: Read>(
     end_lsn: Lsn,
 ) -> Result<()> {
     // Set up walingest mutable state
-    let mut waldecoder = WalStreamDecoder::new(start_lsn);
+    let mut waldecoder = WalStreamDecoder::new(start_lsn, tline.pg_version);
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
@@ -439,7 +441,7 @@ fn import_file<Reader: Read>(
     len: usize,
 ) -> Result<Option<ControlFileData>> {
     if file_path.starts_with("global") {
-        let spcnode = pg_constants::GLOBALTABLESPACE_OID;
+        let spcnode = postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
         match file_path
@@ -467,7 +469,7 @@ fn import_file<Reader: Read>(
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
-                debug!("ignored");
+                debug!("ignored PG_VERSION file");
             }
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, reader, len)?;
@@ -495,7 +497,7 @@ fn import_file<Reader: Read>(
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
-                debug!("ignored");
+                debug!("ignored PG_VERSION file");
             }
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, reader, len)?;

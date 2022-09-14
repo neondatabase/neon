@@ -341,13 +341,21 @@ mod tests {
 
     use super::*;
     use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
+    use crate::DEFAULT_PG_VERSION;
 
     #[test]
     fn index_part_conversion() {
         let harness = TenantHarness::create("index_part_conversion").unwrap();
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
-        let metadata =
-            TimelineMetadata::new(Lsn(5).align(), Some(Lsn(4)), None, Lsn(3), Lsn(2), Lsn(1));
+        let metadata = TimelineMetadata::new(
+            Lsn(5).align(),
+            Some(Lsn(4)),
+            None,
+            Lsn(3),
+            Lsn(2),
+            Lsn(1),
+            DEFAULT_PG_VERSION,
+        );
         let remote_timeline = RemoteTimeline {
             timeline_layers: HashSet::from([
                 timeline_path.join("layer_1"),
@@ -464,8 +472,15 @@ mod tests {
     fn index_part_conversion_negatives() {
         let harness = TenantHarness::create("index_part_conversion_negatives").unwrap();
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
-        let metadata =
-            TimelineMetadata::new(Lsn(5).align(), Some(Lsn(4)), None, Lsn(3), Lsn(2), Lsn(1));
+        let metadata = TimelineMetadata::new(
+            Lsn(5).align(),
+            Some(Lsn(4)),
+            None,
+            Lsn(3),
+            Lsn(2),
+            Lsn(1),
+            DEFAULT_PG_VERSION,
+        );
 
         let conversion_result = IndexPart::from_remote_timeline(
             &timeline_path,

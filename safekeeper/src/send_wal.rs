@@ -8,7 +8,7 @@ use crate::GlobalTimelines;
 use anyhow::{bail, Context, Result};
 
 use bytes::Bytes;
-use postgres_ffi::v14::xlog_utils::get_current_timestamp;
+use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::min;

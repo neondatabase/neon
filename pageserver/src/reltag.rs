@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
-use postgres_ffi::v14::pg_constants;
-use postgres_ffi::v14::relfile_utils::forknumber_to_name;
+use postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
+use postgres_ffi::relfile_utils::forknumber_to_name;
 use postgres_ffi::Oid;
 
 ///
@@ -78,7 +78,7 @@ impl fmt::Display for RelTag {
 
 impl RelTag {
     pub fn to_segfile_name(&self, segno: u32) -> String {
-        let mut name = if self.spcnode == pg_constants::GLOBALTABLESPACE_OID {
+        let mut name = if self.spcnode == GLOBALTABLESPACE_OID {
             "global/".to_string()
         } else {
             format!("base/{}/", self.dbnode)

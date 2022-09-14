@@ -3,12 +3,11 @@
 //!
 use anyhow::Result;
 use bytes::{Buf, Bytes};
-use postgres_ffi::v14::pg_constants;
-use postgres_ffi::v14::xlog_utils::XLOG_SIZE_OF_XLOG_RECORD;
-use postgres_ffi::v14::XLogRecord;
+use postgres_ffi::pg_constants;
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{BlockNumber, OffsetNumber, TimestampTz};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
+use postgres_ffi::{XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::bin_ser::DeserializeError;
@@ -390,6 +389,16 @@ impl XlXactParsedRecord {
             xid = buf.get_u32_le();
             trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
         }
+
+        if xinfo & postgres_ffi::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS != 0 {
+            let nitems = buf.get_i32_le();
+            debug!(
+                "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
+                nitems
+            );
+            //FIXME: do we need to handle dropped stats here?
+        }
+
         XlXactParsedRecord {
             xid,
             info,
@@ -517,6 +526,7 @@ impl XlMultiXactTruncate {
 pub fn decode_wal_record(
     record: Bytes,
     decoded: &mut DecodedWALRecord,
+    pg_version: u32,
 ) -> Result<(), DeserializeError> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
@@ -610,9 +620,21 @@ pub fn decode_wal_record(
                     blk.hole_offset = buf.get_u16_le();
                     blk.bimg_info = buf.get_u8();
 
-                    blk.apply_image = (blk.bimg_info & pg_constants::BKPIMAGE_APPLY) != 0;
+                    blk.apply_image = if pg_version == 14 {
+                        (blk.bimg_info & postgres_ffi::v14::bindings::BKPIMAGE_APPLY) != 0
+                    } else {
+                        assert_eq!(pg_version, 15);
+                        (blk.bimg_info & postgres_ffi::v15::bindings::BKPIMAGE_APPLY) != 0
+                    };
 
-                    if blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED != 0 {
+                    let blk_img_is_compressed =
+                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version);
+
+                    if blk_img_is_compressed {
+                        debug!("compressed block image , pg_version = {}", pg_version);
+                    }
+
+                    if blk_img_is_compressed {
                         if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0 {
                             blk.hole_length = buf.get_u16_le();
                         } else {
@@ -665,9 +687,7 @@ pub fn decode_wal_record(
                      * cross-check that bimg_len < BLCKSZ if the IS_COMPRESSED
                      * flag is set.
                      */
-                    if (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0)
-                        && blk.bimg_len == BLCKSZ
-                    {
+                    if !blk_img_is_compressed && blk.bimg_len == BLCKSZ {
                         // TODO
                         /*
                         report_invalid_record(state,
@@ -683,7 +703,7 @@ pub fn decode_wal_record(
                      * IS_COMPRESSED flag is set.
                      */
                     if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE == 0
-                        && blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0
+                        && !blk_img_is_compressed
                         && blk.bimg_len != BLCKSZ
                     {
                         // TODO

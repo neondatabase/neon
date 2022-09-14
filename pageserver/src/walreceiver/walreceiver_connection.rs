@@ -29,7 +29,7 @@ use crate::{
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
-use postgres_ffi::v14::waldecoder::WalStreamDecoder;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::id::TenantTimelineId;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
 
@@ -166,7 +166,7 @@ pub async fn handle_walreceiver_connection(
     let physical_stream = ReplicationStream::new(copy_stream);
     pin!(physical_stream);
 
-    let mut waldecoder = WalStreamDecoder::new(startpoint);
+    let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint)?;
 

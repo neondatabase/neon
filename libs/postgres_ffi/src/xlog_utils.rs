@@ -9,12 +9,13 @@
 
 use crc32c::crc32c_append;
 
+use super::super::waldecoder::WalStreamDecoder;
 use super::bindings::{
-    CheckPoint, FullTransactionId, TimeLineID, TimestampTz, XLogLongPageHeaderData,
-    XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
+    CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
+    XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
 };
-use super::pg_constants;
-use super::waldecoder::WalStreamDecoder;
+use super::PG_MAJORVERSION;
+use crate::pg_constants;
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
 use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
@@ -113,6 +114,30 @@ pub fn normalize_lsn(lsn: Lsn, seg_sz: usize) -> Lsn {
     }
 }
 
+pub fn generate_pg_control(
+    pg_control_bytes: &[u8],
+    checkpoint_bytes: &[u8],
+    lsn: Lsn,
+) -> anyhow::Result<(Bytes, u64)> {
+    let mut pg_control = ControlFileData::decode(pg_control_bytes)?;
+    let mut checkpoint = CheckPoint::decode(checkpoint_bytes)?;
+
+    // Generate new pg_control needed for bootstrap
+    checkpoint.redo = normalize_lsn(lsn, WAL_SEGMENT_SIZE).0;
+
+    //reset some fields we don't want to preserve
+    //TODO Check this.
+    //We may need to determine the value from twophase data.
+    checkpoint.oldestActiveXid = 0;
+
+    //save new values in pg_control
+    pg_control.checkPoint = 0;
+    pg_control.checkPointCopy = checkpoint;
+    pg_control.state = DBState_DB_SHUTDOWNED;
+
+    Ok((pg_control.encode(), pg_control.system_identifier))
+}
+
 pub fn get_current_timestamp() -> TimestampTz {
     to_pg_timestamp(SystemTime::now())
 }
@@ -144,7 +169,10 @@ pub fn find_end_of_wal(
     let mut result = start_lsn;
     let mut curr_lsn = start_lsn;
     let mut buf = [0u8; XLOG_BLCKSZ];
-    let mut decoder = WalStreamDecoder::new(start_lsn);
+    let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+    info!("find_end_of_wal PG_VERSION: {}", pg_version);
+
+    let mut decoder = WalStreamDecoder::new(start_lsn, pg_version);
 
     // loop over segments
     loop {

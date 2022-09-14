@@ -29,6 +29,7 @@ from fixtures.neon_fixtures import (
     SafekeeperPort,
     available_remote_storages,
     neon_binpath,
+    pg_version,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -634,6 +635,9 @@ class ProposerPostgres(PgProtocol):
         }
 
         basepath = self.pg_bin.run_capture(command, env)
+
+        log.info(f"postgres --sync-safekeepers output: {basepath}")
+
         stdout_filename = basepath + ".stdout"
 
         with open(stdout_filename, "r") as stdout_f:
@@ -662,7 +666,9 @@ class ProposerPostgres(PgProtocol):
 
 # insert wal in all safekeepers and run sync on proposer
 def test_sync_safekeepers(
-    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, port_distributor: PortDistributor
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+    port_distributor: PortDistributor,
 ):
 
     # We don't really need the full environment for this test, just the
@@ -699,6 +705,7 @@ def test_sync_safekeepers(
                 "begin_lsn": int(begin_lsn),
                 "epoch_start_lsn": int(epoch_start_lsn),
                 "truncate_lsn": int(epoch_start_lsn),
+                "pg_version": int(pg_version) * 10000,
             },
         )
         lsn = Lsn(res["inserted_wal"]["end_lsn"])

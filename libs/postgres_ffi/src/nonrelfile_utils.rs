@@ -1,7 +1,7 @@
 //!
 //! Common utilities for dealing with PostgreSQL non-relation files.
 //!
-use super::pg_constants;
+use crate::pg_constants;
 use crate::transaction_id_precedes;
 use bytes::BytesMut;
 use log::*;
