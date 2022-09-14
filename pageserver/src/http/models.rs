@@ -138,6 +138,7 @@ pub struct LocalTimelineInfo {
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
+    pub pg_version: u32,
 }
 
 #[serde_as]

@@ -959,22 +959,15 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // 1. Get start/end LSN from backup_manifest file
             // 2. Run:
             // cat my_backup/base.tar | psql -h $PAGESERVER \
-            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN"
+            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() >= 4);
+            ensure!(params.len() == 5);
             let tenant_id = TenantId::from_str(params[0])?;
             let timeline_id = TimelineId::from_str(params[1])?;
             let base_lsn = Lsn::from_str(params[2])?;
             let end_lsn = Lsn::from_str(params[3])?;
-
-            let pg_version = if params.len() == 5 {
-                u32::from_str(params[4])?
-            } else {
-                // If version is not provided, assume default.
-                // TODO: this may lead to weird errors if the version is wrong.
-                crate::DEFAULT_PG_VERSION
-            };
+            let pg_version = u32::from_str(params[4])?;
 
             self.check_permission(Some(tenant_id))?;
 

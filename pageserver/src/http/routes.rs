@@ -130,6 +130,7 @@ fn local_timeline_info_from_timeline(
         wal_source_connstr,
         last_received_msg_lsn,
         last_received_msg_ts,
+        pg_version: timeline.pg_version,
     };
     Ok(info)
 }

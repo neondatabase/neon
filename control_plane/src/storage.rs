@@ -547,6 +547,7 @@ impl PageServerNode {
         timeline_id: TimelineId,
         base: (Lsn, PathBuf),
         pg_wal: Option<(Lsn, PathBuf)>,
+        pg_version: u32,
     ) -> anyhow::Result<()> {
         let mut client = self.pg_connection_config.connect(NoTls).unwrap();
 
@@ -565,8 +566,9 @@ impl PageServerNode {
         };
 
         // Import base
-        let import_cmd =
-            format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+        let import_cmd = format!(
+            "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
+        );
         let mut writer = client.copy_in(&import_cmd)?;
         io::copy(&mut base_reader, &mut writer)?;
         writer.finish()?;
