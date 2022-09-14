@@ -551,12 +551,8 @@ impl Tenant {
                     let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                     if ancestor_ancestor_lsn > *lsn {
                         // can we safely just branch from the ancestor instead?
-                        anyhow::bail!(
-                    "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
-                    lsn,
-                    ancestor_timeline_id,
-                    ancestor_ancestor_lsn,
-                );
+                        anyhow::bail!("invalid start lsn {lsn} for ancestor timeline {ancestor_timeline_id}: \
+                            less than timeline ancestor lsn {ancestor_ancestor_lsn}");
                     }
                 }
 
@@ -1030,7 +1026,10 @@ impl Tenant {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
     ) -> Result<Arc<Timeline>> {
-        // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
+        // XXX: ensure no other condurrent processes run initdb for the new timeline
+        let timelines_guard = self.timelines.lock();
+
+        // construct a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
         let initdb_path = path_with_suffix_extension(
             conf.timelines_path(&self.tenant_id)
@@ -1038,18 +1037,26 @@ impl Tenant {
             TEMP_FILE_SUFFIX,
         );
 
+        anyhow::ensure!(
+            !initdb_path.exists(),
+            "Cannot run initdb: directory {} is already present",
+            initdb_path.display()
+        );
+
         // Init temporarily repo to get bootstrap data
         run_initdb(conf, &initdb_path)?;
-        let pgdata_path = initdb_path;
+        // initdb_path directory is created successfully, all future concurrent attempts will bail on the directory created
+        // future timeline creation needs this lock also
+        drop(timelines_guard);
 
-        let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+        let lsn = import_datadir::get_lsn_from_controlfile(&initdb_path)?.align();
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.
         // Initdb lsn will be equal to last_record_lsn which will be set after import.
         // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
         let timeline = self.create_empty_timeline(timeline_id, lsn)?;
-        import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
+        import_datadir::import_timeline_from_postgres_datadir(&initdb_path, &*timeline, lsn)?;
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
             bail!("failpoint before-checkpoint-new-timeline");
@@ -1064,7 +1071,7 @@ impl Tenant {
         );
 
         // Remove temp dir. We don't need it anymore
-        fs::remove_dir_all(pgdata_path)?;
+        fs::remove_dir_all(initdb_path)?;
 
         Ok(timeline)
     }
