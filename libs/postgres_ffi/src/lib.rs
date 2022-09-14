@@ -31,7 +31,7 @@ macro_rules! postgres_ffi {
             }
             pub mod controlfile_utils;
             pub mod nonrelfile_utils;
-            pub mod waldecoder;
+            pub mod waldecoder_handler;
             pub mod xlog_utils;
 
             pub const PG_MAJORVERSION: &str = stringify!($version);
@@ -216,12 +216,14 @@ pub mod waldecoder {
 
         pub fn poll_decode(&mut self) -> Result<Option<(Lsn, Bytes)>, WalDecodeError> {
             match self.pg_version {
+                // This is a trick to support both versions simultaneously.
+                // See WalStreamDecoderHandler comments.
                 14 => {
-                    use self::v14::waldecoder::WalStreamDecoderHandler;
+                    use self::v14::waldecoder_handler::WalStreamDecoderHandler;
                     self.poll_decode_internal()
                 }
                 15 => {
-                    use self::v15::waldecoder::WalStreamDecoderHandler;
+                    use self::v15::waldecoder_handler::WalStreamDecoderHandler;
                     self.poll_decode_internal()
                 }
                 _ => Err(WalDecodeError {
