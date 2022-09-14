@@ -6,9 +6,6 @@ pub use link::LinkAuthError;
 mod console;
 pub use console::{GetAuthInfoError, WakeComputeError};
 
-mod legacy_console;
-pub use legacy_console::LegacyAuthError;
-
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute, config, mgmt,
@@ -56,7 +53,7 @@ impl std::fmt::Debug for DatabaseInfo {
         fmt.debug_struct("DatabaseInfo")
             .field("host", &self.host)
             .field("port", &self.port)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -88,8 +85,6 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
 ///   backends which require them for the authentication process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendType<T> {
-    /// Legacy Cloud API (V1) + link auth.
-    LegacyConsole(T),
     /// Current Cloud API (V2).
     Console(T),
     /// Local mock of Cloud API (V2).
@@ -105,7 +100,6 @@ impl<T> BackendType<T> {
     pub fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<R> {
         use BackendType::*;
         match self {
-            LegacyConsole(x) => LegacyConsole(f(x)),
             Console(x) => Console(f(x)),
             Postgres(x) => Postgres(f(x)),
             Link => Link,
@@ -119,7 +113,6 @@ impl<T, E> BackendType<Result<T, E>> {
     pub fn transpose(self) -> Result<BackendType<T>, E> {
         use BackendType::*;
         match self {
-            LegacyConsole(x) => x.map(LegacyConsole),
             Console(x) => x.map(Console),
             Postgres(x) => x.map(Postgres),
             Link => Ok(Link),
@@ -176,15 +169,6 @@ impl BackendType<ClientCredentials<'_>> {
         }
 
         match self {
-            LegacyConsole(creds) => {
-                legacy_console::handle_user(
-                    &urls.auth_endpoint,
-                    &urls.auth_link_uri,
-                    &creds,
-                    client,
-                )
-                .await
-            }
             Console(creds) => {
                 console::Api::new(&urls.auth_endpoint, &creds)
                     .handle_user(client)
@@ -208,7 +192,6 @@ mod tests {
     #[test]
     fn test_backend_type_map() {
         let values = [
-            BackendType::LegacyConsole(0),
             BackendType::Console(0),
             BackendType::Postgres(0),
             BackendType::Link,
@@ -222,8 +205,7 @@ mod tests {
     #[test]
     fn test_backend_type_transpose() {
         let values = [
-            BackendType::LegacyConsole(Ok::<_, ()>(0)),
-            BackendType::Console(Ok(0)),
+            BackendType::Console(Ok::<_, ()>(0)),
             BackendType::Postgres(Ok(0)),
             BackendType::Link,
         ];
