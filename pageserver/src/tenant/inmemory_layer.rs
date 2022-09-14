@@ -12,7 +12,7 @@ use crate::tenant::block_io::BlockReader;
 use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use crate::walrecord::{self, ZenithWalRecord};
+use crate::walrecord::{self, NeonWalRecord};
 use crate::walredo::WalRedoManager;
 use anyhow::{bail, ensure, Result};
 use postgres_ffi::v14::{pg_constants, XLogRecord};
@@ -372,7 +372,7 @@ impl InMemoryLayer {
             let mut xid = 0u32;
             let mut first_lsn: Lsn = Lsn::INVALID;
             let mut last_lsn: Lsn = Lsn::INVALID;
-            let mut records: Vec<(Lsn, ZenithWalRecord)> = Vec::new();
+            let mut records: Vec<(Lsn, NeonWalRecord)> = Vec::new();
             total_pages += 1;
             total_records += page_updates.len();
             for (lsn, pos) in page_updates {
@@ -386,7 +386,7 @@ impl InMemoryLayer {
                     first_record = false;
                     if will_init {
                         if let Value::WalRecord(wal_rec) = value {
-                            if let ZenithWalRecord::Postgres { will_init: _, rec } = &wal_rec {
+                            if let NeonWalRecord::Postgres { will_init: _, rec } = &wal_rec {
                                 let last_pos = page_updates.last().unwrap().1;
                                 if (last_pos - pos) as usize + buf.len() > COLLAPSE_THRESHOLD {
                                     let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
@@ -413,7 +413,7 @@ impl InMemoryLayer {
                 } else {
                     if !records.is_empty() {
                         if let Value::WalRecord(wal_rec) = value {
-                            if let ZenithWalRecord::Postgres { will_init, rec } = &wal_rec {
+                            if let NeonWalRecord::Postgres { will_init, rec } = &wal_rec {
                                 let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
                                 if !will_init
                                     && xid == xlogrec.xl_xid
