@@ -435,6 +435,14 @@ pg_init_libpagestore(void)
 							GUC_UNIT_MB,
 							NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("neon.prefetch",
+							 "Enable Neon prefetch mechanism",
+							 NULL,
+							 &prefetch_enabled,
+							 false,
+							 PGC_SIGHUP,
+							 NULL, NULL, NULL);
+
 	relsize_hash_init();
 
 	if (page_server != NULL)

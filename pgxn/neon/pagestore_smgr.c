@@ -100,6 +100,7 @@ char	   *page_server_connstring; // with substituted password
 char	   *zenith_timeline;
 char	   *zenith_tenant;
 bool		wal_redo = false;
+bool		prefetch_enabled;
 int32		max_cluster_size;
 
 /* unlogged relation build states */
@@ -1054,7 +1055,7 @@ zenith_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (n_prefetch_requests < MAX_PREFETCH_REQUESTS)
+	if (prefetch_enabled && n_prefetch_requests < MAX_PREFETCH_REQUESTS)
 	{
 		prefetch_requests[n_prefetch_requests].rnode = reln->smgr_rnode.node;
 		prefetch_requests[n_prefetch_requests].forkNum = forknum;
