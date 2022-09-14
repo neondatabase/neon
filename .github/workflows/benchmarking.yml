@@ -144,7 +144,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ neon-captest, rds-aurora ]
+        # neon-captest: Run pgbench, reusing existing project
+        # neon-captest-new: Same, but on a freshly created project
+        platform: [ neon-captest, neon-captest-new, rds-aurora ]
 
     runs-on: dev
     container:
@@ -162,7 +164,7 @@ jobs:
         sudo apt install -y postgresql-14
 
     - name: Create Neon Project
-      if: matrix.platform == 'neon-captest'
+      if: matrix.platform == 'neon-captest-new'
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -174,13 +176,16 @@ jobs:
       run: |
         case "${PLATFORM}" in
           neon-captest)
+            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
+            ;;
+          neon-captest-new)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
             CONNSTR=${{ secrets.BENCHMARK_RDS_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest' or 'rds-aurora'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest', 'neon-captest-new' or 'rds-aurora'"
             exit 1
             ;;
         esac
@@ -240,7 +245,7 @@ jobs:
         build_type: ${{ env.BUILD_TYPE }}
 
     - name: Delete Neon Project
-      if: ${{ matrix.platform == 'neon-captest' && always() }}
+      if: ${{ matrix.platform == 'neon-captest-new' && always() }}
       uses: ./.github/actions/neon-project-delete
       with:
         environment: dev
@@ -252,6 +257,6 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: "Periodic perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
