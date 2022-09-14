@@ -10,7 +10,7 @@
 //!
 
 use crate::BLCKSZ;
-use crate::{PageHeaderData, XLogRecord};
+use crate::{PageHeaderData, XLogRecord, XidCSN};
 
 //
 // From pg_tablespace_d.h
@@ -48,6 +48,23 @@ pub const TRANSACTION_STATUS_SUB_COMMITTED: u8 = 0x03;
 
 pub const CLOG_ZEROPAGE: u8 = 0x00;
 pub const CLOG_TRUNCATE: u8 = 0x10;
+
+//
+// Constants from csn_log.c, csn_log.h, and csn_snapshpot.h
+// 
+
+pub const CSN_LOG_XACTS_PER_PAGE: u32 = BLCKSZ as u32 / std::mem::size_of::<XidCSN>() as u32;
+
+pub const InProgressXidCSN: u64 = 0x0;
+pub const AbortedXidCSN: u64 = 0x1;
+pub const FrozenXidCSN: u64 = 0x2; 
+pub const InDoubtXidCSN: u64 = 0x3; 
+pub const FirstNormalXidCSN: u64 = 0x4;
+
+pub const XLOG_CSN_ASSIGNMENT: u8 = 0x00;
+pub const XLOG_CSN_SETXIDCSN: u8 = 0x10;
+pub const XLOG_CSN_ZEROPAGE: u8 = 0x20;
+pub const XLOG_CSN_TRUNCATE: u8 = 0x30;
 
 //
 // Constants from visibilitymap.h, visibilitymapdefs.h and visibilitymap.c
@@ -157,6 +174,7 @@ pub const RM_RELMAP_ID: u8 = 7;
 pub const RM_STANDBY_ID: u8 = 8;
 pub const RM_HEAP2_ID: u8 = 9;
 pub const RM_HEAP_ID: u8 = 10;
+pub const RM_CSNLOG_ID: u8 = 22;
 
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;

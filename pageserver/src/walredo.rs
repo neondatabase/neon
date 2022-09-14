@@ -53,9 +53,10 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
-    transaction_id_set_status,
+    transaction_id_set_status, transaction_id_set_csn,
 };
 use postgres_ffi::BLCKSZ;
+use postgres_ffi::pg_constants::AbortedXidCSN;
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -535,6 +536,71 @@ impl PostgresRedoManager {
                     flagsval |= member.status << bshift;
                     LittleEndian::write_u32(&mut page[flagsoff..flagsoff + 4], flagsval);
                     LittleEndian::write_u32(&mut page[memberoff..memberoff + 4], member.xid);
+                }
+            }
+            NeonWalRecord::CsnLogSetCommitted { xids, lsn } => {
+                let (slru_kind, segno, blknum) =
+                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                assert_eq!(
+                    slru_kind,
+                    SlruKind::Csn,
+                    "CsnLogSetCommitted record with unexpected key {}",
+                    key
+                );
+
+                for &xid in xids {
+                    let pageno = xid as u32 / pg_constants::CSN_LOG_XACTS_PER_PAGE;
+                    let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+
+                    // Check that we're modifying the correct CsnLog block.
+                    assert!(
+                        segno == expected_segno,
+                        "CsnLogSetCommitted record for XID {} with unexpected key {}",
+                        xid,
+                        key
+                    );
+                    assert!(
+                        blknum == expected_blknum,
+                        "CsnLogSetCommitted record for XID {} with unexpected key {}",
+                        xid,
+                        key
+                    );
+                    transaction_id_set_csn(xid, *lsn, page);
+                }
+
+
+            }
+            NeonWalRecord::CsnLogSetAborted { xids } => {
+                let (slru_kind, segno, blknum) =
+                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                assert_eq!(
+                    slru_kind,
+                    SlruKind::Csn,
+                    "CsnLogSetAborted record with unexpected key {}",
+                    key
+                );
+
+                for &xid in xids {
+                    let pageno = xid as u32 / pg_constants::CSN_LOG_XACTS_PER_PAGE;
+                    let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+
+                    // Check that we're modifying the correct CSN block.
+                    assert!(
+                        segno == expected_segno,
+                        "CsnLogSetAborted record for XID {} with unexpected key {}",
+                        xid,
+                        key
+                    );
+                    assert!(
+                        blknum == expected_blknum,
+                        "CsnLogSetAborted record for XID {} with unexpected key {}",
+                        xid,
+                        key
+                    );
+
+                    transaction_id_set_csn(xid, AbortedXidCSN, page);
                 }
             }
         }

@@ -102,6 +102,7 @@ char	   *neon_tenant;
 int32		max_cluster_size;
 bool		neon_slru_clog;
 bool		neon_slru_multixact;
+bool		neon_slru_csnlog;
 
 /* unlogged relation build states */
 typedef enum
@@ -2437,6 +2438,8 @@ slru_kind_to_string(NeonSlruKind kind)
 			return "pg_multixact/members";
 		case NEON_MULTI_XACT_OFFSETS:
 			return "pg_multixact/offsets";
+		case NEON_CSNLOG:
+			return "pg_csn";
 		default:
 			return "invalid";
 	}
@@ -2460,6 +2463,11 @@ slru_kind_from_string(const char* str, NeonSlruKind* kind)
 		*kind = NEON_MULTI_XACT_OFFSETS;
 		return true;
 	}
+	else if (strcmp(str, "pg_csn") == 0)
+	{
+		*kind = NEON_CSNLOG;
+		return true;
+	}
 	return false;
 }
 
@@ -2478,6 +2486,11 @@ neon_slru_kind_check(SlruCtl ctl)
 
 	if ((strcmp(dir, "pg_multixact/members") == 0 || strcmp(dir, "pg_multixact/offsets") == 0) &&
 		neon_slru_multixact)
+	{
+		return true;
+	}
+
+	if (strcmp(dir, "pg_csn") == 0 && neon_slru_csnlog) 
 	{
 		return true;
 	}

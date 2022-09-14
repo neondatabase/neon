@@ -487,6 +487,15 @@ pg_init_libpagestore(void)
 							 0, /* no flags required */
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("neon.slru_csnlog",
+							 "read csnlog from the page server",
+							 NULL,
+							 &neon_slru_csnlog,
+							 false,
+							 PGC_POSTMASTER,
+							 0, /* no flags required */
+							 NULL, NULL, NULL);
+
 	DefineMultiRegionCustomVariables();
 
 	relsize_hash_init();

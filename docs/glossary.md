@@ -202,8 +202,8 @@ relation exceeds that size, it is split into multiple segments.
 
 ### SLRU
 
-SLRUs include pg_clog, pg_multixact/members, and
-pg_multixact/offsets. There are other SLRUs in PostgreSQL, but
+SLRUs include pg_clog, pg_multixact/members, pg_multixact/offsets,
+and pg_csn. There are other SLRUs in PostgreSQL, but
 they don't need to be stored permanently (e.g. pg_subtrans),
 or we do not support them in neon yet (pg_commit_ts).
 

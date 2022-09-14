@@ -230,7 +230,7 @@ where
             let img = self
                 .timeline
                 .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
-
+ 
             if slru == SlruKind::Clog {
                 ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
             } else {
