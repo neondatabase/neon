@@ -56,14 +56,12 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         tenant_http_client.tenant_create()
 
 
-@pytest.mark.parametrize("with_safekeepers", [False, True])
-def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder, with_safekeepers: bool):
+def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
-    if with_safekeepers:
-        neon_env_builder.num_safekeepers = 3
+    neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    branch = f"test_compute_auth_to_pageserver{with_safekeepers}"
+    branch = "test_compute_auth_to_pageserver"
     env.neon_cli.create_branch(branch)
     pg = env.postgres.create_start(branch)
 

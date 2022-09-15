@@ -12,8 +12,6 @@ from fixtures.utils import print_gc_result, query_scalar
 # Insert some data, run GC and create a branch in the past.
 #
 def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
-
-    neon_env_builder.num_safekeepers = 1
     # Set pitr interval such that we need to keep the data
     neon_env_builder.pageserver_config_override = (
         "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"

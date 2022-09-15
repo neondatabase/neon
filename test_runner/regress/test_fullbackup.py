@@ -18,8 +18,6 @@ num_rows = 1000
 def test_fullbackup(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, port_distributor: PortDistributor
 ):
-
-    neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_fullbackup")

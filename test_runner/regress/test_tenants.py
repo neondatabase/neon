@@ -50,29 +50,23 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     ), "pageserver should clean its temp tenant dirs on restart"
 
 
-@pytest.mark.parametrize("with_safekeepers", [False, True])
-def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder, with_safekeepers: bool):
-    if with_safekeepers:
-        neon_env_builder.num_safekeepers = 3
+def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
 
     env = neon_env_builder.init_start()
     """Tests tenants with and without wal acceptors"""
     tenant_1, _ = env.neon_cli.create_tenant()
     tenant_2, _ = env.neon_cli.create_tenant()
 
-    env.neon_cli.create_timeline(
-        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}", tenant_id=tenant_1
-    )
-    env.neon_cli.create_timeline(
-        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}", tenant_id=tenant_2
-    )
+    env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_1)
+    env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_2)
 
     pg_tenant1 = env.postgres.create_start(
-        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}",
+        "test_tenants_normal_work",
         tenant_id=tenant_1,
     )
     pg_tenant2 = env.postgres.create_start(
-        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}",
+        "test_tenants_normal_work",
         tenant_id=tenant_2,
     )
 
