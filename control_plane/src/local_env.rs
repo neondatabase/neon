@@ -197,25 +197,18 @@ impl Default for SafekeeperConf {
 }
 
 impl LocalEnv {
+    pub fn pg_distrib_dir_raw(&self) -> PathBuf {
+        self.pg_distrib_dir.clone()
+    }
+
     pub fn pg_distrib_dir(&self, pg_version: u32) -> PathBuf {
-        let mut path = self.pg_distrib_dir.clone();
+        let path = self.pg_distrib_dir.clone();
 
-        if pg_version != DEFAULT_PG_VERSION {
-            // step up to the parent directory
-            // We assume that the pg_distrib subdirs
-            // for different pg versions
-            // are located in the same directory
-            // and follow the naming convention: v14, v15, etc.
-            path.pop();
-
-            match pg_version {
-                14 => return path.join(format!("v{pg_version}")),
-                15 => return path.join(format!("v{pg_version}")),
-                _ => panic!("Unsupported postgres version: {}", pg_version),
-            };
+        match pg_version {
+            14 => path.join(format!("v{pg_version}")),
+            15 => path.join(format!("v{pg_version}")),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
         }
-
-        path
     }
 
     pub fn pg_bin_dir(&self, pg_version: u32) -> PathBuf {
@@ -319,7 +312,7 @@ impl LocalEnv {
         let mut env: LocalEnv = toml::from_str(toml)?;
 
         // Find postgres binaries.
-        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install/v14".
+        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install".
         // Note that later in the code we assume, that distrib dirs follow the same pattern
         // for all postgres versions.
         if env.pg_distrib_dir == Path::new("") {
@@ -327,7 +320,7 @@ impl LocalEnv {
                 env.pg_distrib_dir = postgres_bin.into();
             } else {
                 let cwd = env::current_dir()?;
-                env.pg_distrib_dir = cwd.join("pg_install/v14")
+                env.pg_distrib_dir = cwd.join("pg_install")
             }
         }
 
