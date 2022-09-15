@@ -10,7 +10,6 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 # Test pageserver recovery after crash
 #
 def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.num_safekeepers = 1
     # Override default checkpointer settings to run it more often
     neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
 
