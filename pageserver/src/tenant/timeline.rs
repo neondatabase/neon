@@ -232,14 +232,16 @@ impl LogicalSize {
     }
 
     fn current_size(&self) -> anyhow::Result<CurrentLogicalSize> {
-        let size_increment = self.size_added_after_initial.load(AtomicOrdering::Acquire);
+        let size_increment: i64 = self.size_added_after_initial.load(AtomicOrdering::Acquire);
+        //                  ^^^ keep this type explicit so that the casts in this function break if
+        //                  we change the type.
         match self.initial_logical_size.get() {
             Some(initial_size) => {
                 let absolute_size_increment = u64::try_from(
                     size_increment
                         .checked_abs()
                         .with_context(|| format!("Size added after initial {size_increment} is not expected to be i64::MIN"))?,
-                ).with_context(|| format!("Failed to convert size increment {size_increment} to u64"))?;
+                    ).expect("casting nonnegative i64 to u64 should not fail");
 
                 if size_increment < 0 {
                     initial_size.checked_sub(absolute_size_increment)
@@ -249,11 +251,7 @@ impl LogicalSize {
                 .map(CurrentLogicalSize::Exact)
             }
             None => {
-                let non_negative_size_increment = if size_increment < 0 {
-                    0
-                } else {
-                    u64::try_from(size_increment).expect("not negative, cannot fail")
-                };
+                let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
                 Ok(CurrentLogicalSize::Approximate(non_negative_size_increment))
             }
         }
