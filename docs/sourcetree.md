@@ -165,7 +165,7 @@ C code requires some extra care, as it's built via Make, not CMake. Some of our 
 3. Open CLion, click "Open File or Project" and choose the generated `compile_commands.json` file to be opened "as a project". You cannot add a compilation database into an existing CLion project, you have to create a new one. _Do not_ open the directory as a project, open the file.
 4. The newly created project should start indexing Postgres source code in C, as well as the C standard library. You may have to [configure the C compiler for the compilation database](https://www.jetbrains.com/help/clion/compilation-database.html#compdb_toolchain).
 5. Open the `Cargo.toml` file in an editor in the same project. CLion should pick up the hint and start indexing Rust code.
-7. Now you have a CLion project which knows about C files, Rust files. It should pick up Python files automatically as well.
+6. Now you have a CLion project which knows about C files, Rust files. It should pick up Python files automatically as well.
 
 You can also enable Cargo Clippy diagnostics and enable Rustfmt instead of built-in code formatter.
 
@@ -176,3 +176,4 @@ Known issues (fixes and suggestions are welcome):
 * Test results may be hard to read in CLion, both for unit tests in Rust and integration tests in Python. Use command line to run them instead.
 * CLion does not support non-local Python interpreters, unlike PyCharm. E.g. if you use WSL, CLion does not see `poetry` and installed dependencies. Python support is limited.
 * Cargo Clippy diagnostics in CLion may take a lot of resources.
+* `poetry add -D` updates some packages and changes `poetry.lock` drastically even when followed by `poetry remove -D`. Feel free to `git checkout poetry.lock` and `./scripts/pysync` to revert these changes.
