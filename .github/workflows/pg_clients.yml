@@ -58,12 +58,12 @@ jobs:
       env:
         REMOTE_ENV: 1
         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install/v14
+        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       shell: bash -euxo pipefail {0}
       run: |
         # Test framework expects we have psql binary;
         # but since we don't really need it in this test, let's mock it
-        mkdir -p "$POSTGRES_DISTRIB_DIR/bin" && touch "$POSTGRES_DISTRIB_DIR/bin/psql";
+        mkdir -p "$POSTGRES_DISTRIB_DIR/v14/bin" && touch "$POSTGRES_DISTRIB_DIR/v14/bin/psql";
         ./scripts/pytest \
           --junitxml=$TEST_OUTPUT/junit.xml \
           --tb=short \
