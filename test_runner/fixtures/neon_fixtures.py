@@ -970,10 +970,13 @@ class NeonPageserverHttpClient(requests.Session):
         else:
             pairs = config_strings
 
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
+
         res = self.put(
             f"http://localhost:{self.port}/v1/failpoints",
             json=[{"name": name, "actions": actions} for name, actions in pairs],
         )
+        log.info(f"Got failpoints request response code {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
@@ -1079,10 +1082,14 @@ class NeonPageserverHttpClient(requests.Session):
     def timeline_gc(
         self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
     ) -> dict[str, Any]:
+        log.info(
+            f"Requesting GC: tenant {tenant_id}, timeline {timeline_id}, gc_horizon {repr(gc_horizon)}"
+        )
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc",
             json={"gc_horizon": gc_horizon if gc_horizon else None},
         )
+        log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is not None
@@ -1090,18 +1097,22 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_compact(self, tenant_id: TenantId, timeline_id: TimelineId):
+        log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact"
         )
+        log.info(f"Got compact request response code: {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
         return res_json
 
     def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
+        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint"
         )
+        log.info(f"Got checkpoint request response code: {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
