@@ -173,7 +173,6 @@ def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 def test_pgbench_flamegraph(zenbenchmark, pg_bin, neon_env_builder, scale: int, duration: int):
-    neon_env_builder.num_safekeepers = 1
     neon_env_builder.pageserver_config_override = """
 profiling="page_requests"
 """

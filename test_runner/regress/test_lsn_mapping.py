@@ -9,7 +9,6 @@ from fixtures.utils import query_scalar
 # Test pageserver get_lsn_by_timestamp API
 #
 def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
 
     new_timeline_id = env.neon_cli.create_branch("test_lsn_mapping")
