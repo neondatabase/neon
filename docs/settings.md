@@ -155,6 +155,8 @@ for other files and for sockets for incoming connections.
 #### pg_distrib_dir
 
 A directory with Postgres installation to use during pageserver activities.
+Since pageserver supports several postgres versions, `pg_distrib_dir` contains
+a subdirectory for each version with naming convention `v{PG_MAJOR_VERSION}/`.
 Inside that dir, a `bin/postgres` binary should be present.
 
 The default distrib dir is `./pg_install/`.

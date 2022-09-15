@@ -118,7 +118,7 @@ impl PageServerNode {
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
-            self.env.pg_distrib_dir(pg_version).display()
+            self.env.pg_distrib_dir_raw().display()
         );
 
         let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
