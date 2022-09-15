@@ -12,10 +12,9 @@ use crate::tenant::block_io::BlockReader;
 use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use crate::walrecord::{self, NeonWalRecord};
+use crate::walrecord;
 use crate::walredo::WalRedoManager;
 use anyhow::{bail, ensure, Result};
-use postgres_ffi::v14::{pg_constants, XLogRecord};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -38,7 +37,7 @@ thread_local! {
     static SER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
 }
 
-const COLLAPSE_THRESHOLD: usize = PAGE_SZ / 2;
+const WAL_RECORD_RECONSTURCT_THRESHOLD: usize = PAGE_SZ / 2;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -360,106 +359,32 @@ impl InMemoryLayer {
 
         let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
         keys.sort_by_key(|k| k.0);
-        let mut total_pages = 0usize;
-        let mut total_records = 0usize;
-        let mut collapsed_records = 0usize;
-        let mut generated_images = 0usize;
         for (key, vec_map) in keys.iter() {
             let key = **key;
             // Write all page versions
-            let page_updates = vec_map.as_slice();
-            let mut first_record = true;
-            let mut xid = 0u32;
-            let mut first_lsn: Lsn = Lsn::INVALID;
-            let mut last_lsn: Lsn = Lsn::INVALID;
-            let mut records: Vec<(Lsn, NeonWalRecord)> = Vec::new();
-            total_pages += 1;
-            total_records += page_updates.len();
-            for (lsn, pos) in page_updates {
+            for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf)?;
-                last_lsn = *lsn;
                 let value = Value::des(&buf)?;
                 let will_init = value.will_init();
-                // If sequence of WAL records for this page belongs to the same transaction, starts with initialization record
-                // and total size of records is larger than page size, then better materialize this page and store it as page image
-                if first_record {
-                    first_record = false;
-                    if will_init {
-                        if let Value::WalRecord(wal_rec) = value {
-                            if let NeonWalRecord::Postgres { will_init: _, rec } = &wal_rec {
-                                let last_pos = page_updates.last().unwrap().1;
-                                if (last_pos - pos) as usize + buf.len() > COLLAPSE_THRESHOLD {
-                                    let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
-                                    // We need to provie heap-index consistency; index pages should contains references tids) only to
-                                    // existed head records. So perform collapseony for insert records and make sure that
-                                    //  heap updates are placed before index updates (by assignng to the image LSNof first collapsed record)
-                                    if (xlogrec.xl_rmid == pg_constants::RM_HEAP_ID
-                                        && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
-                                            == pg_constants::XLOG_HEAP_INSERT)
-                                        || (xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID
-                                            && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
-                                                == pg_constants::XLOG_HEAP2_MULTI_INSERT)
-                                    {
-                                        xid = xlogrec.xl_xid;
-                                        first_lsn = *lsn;
-                                        records.push((*lsn, wal_rec));
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
+
+                // If record is large enough (i.e. MULTIINSERT) it may be reasonable to reconstruct correspondent
+                // page image and store it instead of original WAL record to avoid page recostruction overhead
+                // on subsequent get_page_at_lsn()
+                if will_init && buf.len() > WAL_RECORD_RECONSTURCT_THRESHOLD {
+                    if let Value::WalRecord(rec) = value {
+                        let img = walredo_mgr.request_redo(key, *lsn, None, vec![(*lsn, rec)])?;
+                        delta_layer_writer.put_value_bytes(
+                            key,
+                            *lsn,
+                            &Value::Image(img).ser()?,
+                            true,
+                        )?;
+                        continue;
                     }
-                    delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
-                } else {
-                    if !records.is_empty() {
-                        if let Value::WalRecord(wal_rec) = value {
-                            if let NeonWalRecord::Postgres { will_init, rec } = &wal_rec {
-                                let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
-                                if !will_init
-                                    && xid == xlogrec.xl_xid
-                                    && ((xlogrec.xl_rmid == pg_constants::RM_HEAP_ID
-                                        && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
-                                            == pg_constants::XLOG_HEAP_INSERT)
-                                        || (xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID
-                                            && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
-                                                == pg_constants::XLOG_HEAP2_MULTI_INSERT))
-                                {
-                                    records.push((*lsn, wal_rec));
-                                    continue;
-                                }
-                            }
-                        }
-                        let mut will_init = true;
-                        for (lsn, rec) in &records {
-                            delta_layer_writer.put_value_bytes(
-                                key,
-                                *lsn,
-                                &Value::WalRecord(rec.clone()).ser()?,
-                                will_init,
-                            )?;
-                            will_init = false;
-                        }
-                        records.clear();
-                    }
-                    delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
                 }
-            }
-            if !records.is_empty() {
-                generated_images += 1;
-                collapsed_records += records.len();
-                let img = walredo_mgr.request_redo(key, last_lsn, None, records)?;
-                delta_layer_writer.put_value_bytes(
-                    key,
-                    first_lsn, // to make sure that index contains valid tids
-                    &Value::Image(img).ser()?,
-                    true,
-                )?;
+                delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
             }
         }
-        info!(
-            "Generate delta layer: {} records, {} pages, {} records collapsed into {} images",
-            total_records, total_pages, collapsed_records, generated_images
-        );
         let delta_layer = delta_layer_writer.finish(Key::MAX)?;
         Ok(delta_layer)
     }
