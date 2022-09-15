@@ -99,7 +99,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid)?;
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from_internal_err)?;
     let (inmem, state) = tli.get_state();
     let flush_lsn = tli.get_flush_lsn();
 
@@ -134,7 +134,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     };
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    Err(ApiError::from_err(anyhow!("not implemented")))
+    Err(ApiError::from_internal_err(anyhow!("not implemented")))
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -149,7 +149,7 @@ async fn timeline_delete_force_handler(
     ensure_no_body(&mut request).await?;
     let resp = tokio::task::spawn_blocking(move || GlobalTimelines::delete_force(&ttid))
         .await
-        .map_err(ApiError::from_err)??;
+        .map_err(ApiError::from_internal_err)??;
     json_response(StatusCode::OK, resp)
 }
 
@@ -165,7 +165,7 @@ async fn tenant_delete_force_handler(
         GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_internal_err)??;
     json_response(
         StatusCode::OK,
         delete_info
@@ -184,7 +184,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
     check_permission(&request, Some(ttid.tenant_id))?;
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
-    let tli = GlobalTimelines::get(ttid)?;
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from_internal_err)?;
     tli.record_safekeeper_info(&safekeeper_info, NodeId(1))
         .await?;
 

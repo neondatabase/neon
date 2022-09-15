@@ -25,7 +25,7 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    pub fn from_err<E: Into<anyhow::Error>>(err: E) -> Self {
+    pub fn from_internal_err<E: Into<anyhow::Error>>(err: E) -> Self {
         Self::InternalServerError(anyhow!(err))
     }
 

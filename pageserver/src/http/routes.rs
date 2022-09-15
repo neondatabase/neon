@@ -189,7 +189,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     }
     .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn))
         .await
-            .map_err(ApiError::from_err)?;
+            .map_err(ApiError::from_internal_err)?;
 
     Ok(match new_timeline_info {
         Some(info) => json_response(StatusCode::CREATED, info)?,
@@ -210,7 +210,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         Ok::<_, anyhow::Error>(tenant_mgr::get_tenant(tenant_id, true)?.list_timelines())
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_internal_err)??;
 
     let mut response_data = Vec::with_capacity(timelines.len());
     for (timeline_id, timeline) in timelines {
@@ -275,7 +275,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             tenant_mgr::get_tenant(tenant_id, true)?.get_timeline(timeline_id)
         })
         .await
-        .map_err(ApiError::from_err)?;
+        .map_err(ApiError::from_internal_err)?;
 
         let local_timeline_info = match timeline.and_then(|timeline| {
             local_timeline_info_from_timeline(
@@ -339,7 +339,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         Ok(())
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_internal_err)??;
 
     let state = get_state(&request);
     let remote_index = &state.remote_index;
@@ -438,7 +438,7 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     tenant_mgr::delete_timeline(tenant_id, timeline_id)
         .instrument(info_span!("timeline_delete", tenant = %tenant_id, timeline = %timeline_id))
         .await
-        .map_err(ApiError::from_err)?;
+        .map_err(ApiError::from_internal_err)?;
 
     let mut remote_index = state.remote_index.write().await;
     remote_index.remove_timeline_entry(TenantTimelineId {
@@ -458,7 +458,7 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     tenant_mgr::detach_tenant(conf, tenant_id)
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await
-        .map_err(ApiError::from_err)?;
+        .map_err(ApiError::from_internal_err)?;
 
     let mut remote_index = state.remote_index.write().await;
     remote_index.remove_tenant_entry(&tenant_id);
@@ -478,7 +478,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
         crate::tenant_mgr::list_tenant_info(&remote_index)
     })
     .await
-    .map_err(ApiError::from_err)?;
+    .map_err(ApiError::from_internal_err)?;
 
     json_response(StatusCode::OK, response_data)
 }
@@ -490,7 +490,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     // if tenant is in progress of downloading it can be absent in global tenant map
     let tenant = tokio::task::spawn_blocking(move || tenant_mgr::get_tenant(tenant_id, false))
         .await
-        .map_err(ApiError::from_err)?;
+        .map_err(ApiError::from_internal_err)?;
 
     let state = get_state(&request);
     let remote_index = &state.remote_index;
@@ -519,7 +519,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     let current_physical_size =
         match tokio::task::spawn_blocking(move || list_local_timelines(tenant_id, false, false))
             .await
-            .map_err(ApiError::from_err)?
+            .map_err(ApiError::from_internal_err)?
         {
             Err(err) => {
                 // Getting local timelines can fail when no local tenant directory is on disk (e.g, when tenant data is being downloaded).
@@ -554,24 +554,26 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let mut tenant_conf = TenantConfOpt::default();
     if let Some(gc_period) = request_data.gc_period {
         tenant_conf.gc_period =
-            Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?);
+            Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_internal_err)?);
     }
     tenant_conf.gc_horizon = request_data.gc_horizon;
     tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
 
     if let Some(pitr_interval) = request_data.pitr_interval {
         tenant_conf.pitr_interval =
-            Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_err)?);
+            Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_internal_err)?);
     }
 
     if let Some(walreceiver_connect_timeout) = request_data.walreceiver_connect_timeout {
         tenant_conf.walreceiver_connect_timeout = Some(
-            humantime::parse_duration(&walreceiver_connect_timeout).map_err(ApiError::from_err)?,
+            humantime::parse_duration(&walreceiver_connect_timeout)
+                .map_err(ApiError::from_internal_err)?,
         );
     }
     if let Some(lagging_wal_timeout) = request_data.lagging_wal_timeout {
-        tenant_conf.lagging_wal_timeout =
-            Some(humantime::parse_duration(&lagging_wal_timeout).map_err(ApiError::from_err)?);
+        tenant_conf.lagging_wal_timeout = Some(
+            humantime::parse_duration(&lagging_wal_timeout).map_err(ApiError::from_internal_err)?,
+        );
     }
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
         tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
@@ -579,16 +581,18 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
-        tenant_conf.checkpoint_timeout =
-            Some(humantime::parse_duration(&checkpoint_timeout).map_err(ApiError::from_err)?);
+        tenant_conf.checkpoint_timeout = Some(
+            humantime::parse_duration(&checkpoint_timeout).map_err(ApiError::from_internal_err)?,
+        );
     }
 
     tenant_conf.compaction_target_size = request_data.compaction_target_size;
     tenant_conf.compaction_threshold = request_data.compaction_threshold;
 
     if let Some(compaction_period) = request_data.compaction_period {
-        tenant_conf.compaction_period =
-            Some(humantime::parse_duration(&compaction_period).map_err(ApiError::from_err)?);
+        tenant_conf.compaction_period = Some(
+            humantime::parse_duration(&compaction_period).map_err(ApiError::from_internal_err)?,
+        );
     }
 
     let target_tenant_id = request_data
@@ -603,7 +607,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         tenant_mgr::create_tenant(conf, tenant_conf, target_tenant_id, remote_index)
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_internal_err)??;
 
     Ok(match new_tenant_id {
         Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,
@@ -619,23 +623,25 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     let mut tenant_conf: TenantConfOpt = Default::default();
     if let Some(gc_period) = request_data.gc_period {
         tenant_conf.gc_period =
-            Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?);
+            Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_internal_err)?);
     }
     tenant_conf.gc_horizon = request_data.gc_horizon;
     tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
 
     if let Some(pitr_interval) = request_data.pitr_interval {
         tenant_conf.pitr_interval =
-            Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_err)?);
+            Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_internal_err)?);
     }
     if let Some(walreceiver_connect_timeout) = request_data.walreceiver_connect_timeout {
         tenant_conf.walreceiver_connect_timeout = Some(
-            humantime::parse_duration(&walreceiver_connect_timeout).map_err(ApiError::from_err)?,
+            humantime::parse_duration(&walreceiver_connect_timeout)
+                .map_err(ApiError::from_internal_err)?,
         );
     }
     if let Some(lagging_wal_timeout) = request_data.lagging_wal_timeout {
-        tenant_conf.lagging_wal_timeout =
-            Some(humantime::parse_duration(&lagging_wal_timeout).map_err(ApiError::from_err)?);
+        tenant_conf.lagging_wal_timeout = Some(
+            humantime::parse_duration(&lagging_wal_timeout).map_err(ApiError::from_internal_err)?,
+        );
     }
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
         tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
@@ -643,15 +649,17 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
-        tenant_conf.checkpoint_timeout =
-            Some(humantime::parse_duration(&checkpoint_timeout).map_err(ApiError::from_err)?);
+        tenant_conf.checkpoint_timeout = Some(
+            humantime::parse_duration(&checkpoint_timeout).map_err(ApiError::from_internal_err)?,
+        );
     }
     tenant_conf.compaction_target_size = request_data.compaction_target_size;
     tenant_conf.compaction_threshold = request_data.compaction_threshold;
 
     if let Some(compaction_period) = request_data.compaction_period {
-        tenant_conf.compaction_period =
-            Some(humantime::parse_duration(&compaction_period).map_err(ApiError::from_err)?);
+        tenant_conf.compaction_period = Some(
+            humantime::parse_duration(&compaction_period).map_err(ApiError::from_internal_err)?,
+        );
     }
 
     tokio::task::spawn_blocking(move || {
@@ -661,7 +669,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
         tenant_mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_internal_err)??;
 
     json_response(StatusCode::OK, ())
 }
