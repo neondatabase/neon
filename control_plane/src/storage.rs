@@ -411,7 +411,7 @@ impl PageServerNode {
                 .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
         };
         if !settings.is_empty() {
-            bail!("Unrecognized tenant settings: {:?}", settings)
+            bail!("Unrecognized tenant settings: {settings:?}")
         }
         self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))
             .json(&request)
