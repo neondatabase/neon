@@ -166,6 +166,7 @@ C code requires some extra care, as it's built via Make, not CMake. Some of our 
 4. The newly created project should start indexing Postgres source code in C, as well as the C standard library. You may have to [configure the C compiler for the compilation database](https://www.jetbrains.com/help/clion/compilation-database.html#compdb_toolchain).
 5. Open the `Cargo.toml` file in an editor in the same project. CLion should pick up the hint and start indexing Rust code.
 6. Now you have a CLion project which knows about C files, Rust files. It should pick up Python files automatically as well.
+7. Set up correct code indentation in CLion's settings: Editor > Code Style > C/C++, choose the "Project" scheme on the top, and tick the "Use tab character" on the "Tabs and Indents" tab. Ensure that "Tab size" is 4.
 
 You can also enable Cargo Clippy diagnostics and enable Rustfmt instead of built-in code formatter.
 
