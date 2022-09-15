@@ -147,8 +147,16 @@ C code requires some extra care, as it's built via Make, not CMake. Some of our 
    ```bash
    # Install a `compiledb` tool which can parse make's output and generate the compilation database.
    poetry add -D compiledb
-   # Run Make without actually compiling code so we can generate the compilation database. It still may take a few minutes.
-   make --dry-run --print-directory --keep-going --assume-new=* postgres neon-pg-ext | poetry run compiledb --verbose --no-build
+   # Clean the build tree so the 
+   make distclean
+   # Rebuild the Postgres parts from scratch and save the compilation commands to the compilation database.
+   # You can alter the -j parameter to your liking.
+   # Note that we only build for a specific version of Postgres. The extension code is shared, but headers are
+   # different, so we set up CLion to only use a specific version of the headers.
+   # Unfortunately, our and Postgres Makefiles do not work well with either --dry-run or --assume-new,
+   # so we don't know a way to generate the compilation database without recompiling everything,
+   # see https://github.com/neondatabase/neon/issues/2378#issuecomment-1241421325
+   make -j$(nproc) --print-directory postgres-v15 neon-pg-ext-v15 | poetry run compiledb --verbose --no-build
    # Uninstall the tool
    poetry remove -D compiledb
    # Make sure the compile_commands.json file is not committed.
