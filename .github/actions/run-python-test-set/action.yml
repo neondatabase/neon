@@ -85,7 +85,7 @@ runs:
         # PLATFORM will be embedded in the perf test report
         # and it is needed to distinguish different environments
         export PLATFORM=${PLATFORM:-github-actions-selfhosted}
-        export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install/v14}
+        export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
@@ -126,7 +126,7 @@ runs:
 
         # Wake up the cluster if we use remote neon instance
         if [ "${{ inputs.build_type }}" = "remote" ] && [ -n "${BENCHMARK_CONNSTR}" ]; then
-          ${POSTGRES_DISTRIB_DIR}/bin/psql ${BENCHMARK_CONNSTR} -c "SELECT version();"
+          ${POSTGRES_DISTRIB_DIR}/v14/bin/psql ${BENCHMARK_CONNSTR} -c "SELECT version();"
         fi
 
         # Run the tests.

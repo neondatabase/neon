@@ -68,8 +68,8 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver /usr
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy      /usr/local/bin
 
-# v14 is default for now
-COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/
+COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
+COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
@@ -78,7 +78,7 @@ RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
     && /usr/local/bin/pageserver -D /data/.neon/ --init \
        -c "id=1234" \
        -c "broker_endpoints=['http://etcd:2379']" \
-       -c "pg_distrib_dir='/usr/local'" \
+       -c "pg_distrib_dir='/usr/local/'" \
        -c "listen_pg_addr='0.0.0.0:6400'" \
        -c "listen_http_addr='0.0.0.0:9898'"
 
