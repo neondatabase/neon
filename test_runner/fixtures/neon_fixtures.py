@@ -1087,7 +1087,7 @@ class NeonPageserverHttpClient(requests.Session):
         )
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc",
-            json={"gc_horizon": gc_horizon if gc_horizon else None},
+            json={"gc_horizon": gc_horizon},
         )
         log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
