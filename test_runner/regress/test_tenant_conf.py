@@ -1,7 +1,6 @@
 from contextlib import closing
 
 import psycopg2.extras
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -17,12 +16,17 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
     env = neon_env_builder.init_start()
 
     # Check that we raise on misspelled configs
-    with pytest.raises(Exception):
+    invalid_conf_key = "some_invalid_setting_name_blah_blah_123"
+    try:
         env.neon_cli.create_tenant(
             conf={
-                "some_invalid_setting_name_blah_blah": "20000",
+                invalid_conf_key: "20000",
             }
         )
+    except Exception as e:
+        assert invalid_conf_key in str(e)
+    else:
+        raise AssertionError("Expected validation error")
 
     tenant, _ = env.neon_cli.create_tenant(
         conf={
