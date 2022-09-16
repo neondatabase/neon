@@ -101,7 +101,7 @@ jobs:
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_FEATURES="--features failpoints"
-            CARGO_FLAGS="--locked --timings"
+            CARGO_FLAGS="--locked --timings $CARGO_FEATURES"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FEATURES="--features failpoints,profiling"
@@ -160,7 +160,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
         shell: bash -euxo pipefail {0}
 
       - name: Run cargo test
