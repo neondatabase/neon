@@ -7,6 +7,8 @@ Prerequisites:
 - Neon and Postgres binaries
     - See the root [README.md](/README.md) for build directions
       If you want to test tests with failpoints, you would need to add `--features failpoints` to Rust code build commands.
+      For convenience, repository cargo config contains `build_testing` alias, that serves as a subcommand, adding the required feature flags.
+      Usage example: `cargo build_testing --release` is equivalent to `cargo build --features failpoints --release`
     - Tests can be run from the git tree; or see the environment variables
       below to run from other directories.
 - The neon git repo, including the postgres submodule
