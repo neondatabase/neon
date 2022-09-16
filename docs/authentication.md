@@ -2,7 +2,7 @@
 
 ### Overview
 We use JWT tokens in communication between almost all components (compute, pageserver, safekeeper, CLI) regardless of the protocol used (HTTP/PostgreSQL).
-Etcd currently has no authentication.
+storage_broker currently has no authentication.
 Authentication is optional and is disabled by default for easier debugging.
 It is used in some tests, though.
 Note that we do not cover authentication with `pg.neon.tech` here.
@@ -84,7 +84,7 @@ the scope is the tenant and the token is usually passed through the
 Pageserver keeps track of multiple tenants, each having multiple timelines.
 For each timeline, it connects to the corresponding Safekeeper.
 Information about "corresponding Safekeeper" is published by Safekeepers
-in the Etcd, but they do not publish access tokens, otherwise what is
+in the storage_broker, but they do not publish access tokens, otherwise what is
 the point of authentication.
 
 Pageserver keeps a connection to some set of Safekeepers, which

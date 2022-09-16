@@ -13,7 +13,6 @@ use std::thread;
 use tokio::sync::mpsc;
 use toml_edit::Document;
 use tracing::*;
-use url::{ParseError, Url};
 use utils::pid_file;
 
 use metrics::set_build_info_metric;
@@ -29,6 +28,7 @@ use safekeeper::wal_backup;
 use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
+use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::JwtAuth;
 use utils::{
     http::endpoint,
@@ -82,12 +82,8 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let Some(addr) = arg_matches.get_one::<String>("broker-endpoints") {
-        let collected_ep: Result<Vec<Url>, ParseError> = addr.split(',').map(Url::parse).collect();
-        conf.broker_endpoints = collected_ep.context("Failed to parse broker endpoint urls")?;
-    }
-    if let Some(prefix) = arg_matches.get_one::<String>("broker-etcd-prefix") {
-        conf.broker_etcd_prefix = prefix.to_string();
+    if let Some(addr) = arg_matches.get_one::<String>("broker-endpoint") {
+        conf.broker_endpoint = addr.parse().context("failed to parse broker endpoint")?;
     }
 
     if let Some(heartbeat_timeout_str) = arg_matches.get_one::<String>("heartbeat-timeout") {
@@ -224,19 +220,15 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
 
     threads.push(safekeeper_thread);
 
-    if !conf.broker_endpoints.is_empty() {
-        let conf_ = conf.clone();
-        threads.push(
-            thread::Builder::new()
-                .name("broker thread".into())
-                .spawn(|| {
-                    // TODO: add auth?
-                    broker::thread_main(conf_);
-                })?,
-        );
-    } else {
-        warn!("No broker endpoints providing, starting without node sync")
-    }
+    let conf_ = conf.clone();
+    threads.push(
+        thread::Builder::new()
+            .name("broker thread".into())
+            .spawn(|| {
+                // TODO: add auth?
+                broker::thread_main(conf_);
+            })?,
+    );
 
     let conf_ = conf.clone();
     threads.push(
@@ -369,14 +361,9 @@ fn cli() -> Command {
         .arg(
             Arg::new("id").long("id").help("safekeeper node id: integer")
         ).arg(
-            Arg::new("broker-endpoints")
-            .long("broker-endpoints")
-            .help("a comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'"),
-        )
-        .arg(
-            Arg::new("broker-etcd-prefix")
-            .long("broker-etcd-prefix")
-            .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
+            Arg::new("broker-endpoint")
+            .long("broker-endpoint")
+            .help(formatcp!("Broker endpoint for storage nodes coordination in the form http[s]://host:port, default '{DEFAULT_ENDPOINT}'. In case of https schema TLS is connection is established; plaintext otherwise.")),
         )
         .arg(
             Arg::new("heartbeat-timeout")

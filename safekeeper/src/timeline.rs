@@ -2,7 +2,6 @@
 //! to glue together SafeKeeper and all other background services.
 
 use anyhow::{bail, Result};
-use etcd_broker::subscription_value::SkTimelineInfo;
 use parking_lot::{Mutex, MutexGuard};
 use postgres_ffi::XLogSegNo;
 use pq_proto::ReplicationFeedback;
@@ -17,6 +16,9 @@ use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
 };
+
+use storage_broker::proto::SafekeeperTimelineInfo;
+use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
@@ -47,13 +49,13 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    fn from_sk_info(sk_id: NodeId, sk_info: &SkTimelineInfo, ts: Instant) -> PeerInfo {
+    fn from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
         PeerInfo {
-            sk_id,
-            _last_log_term: sk_info.last_log_term.unwrap_or(0),
-            _flush_lsn: sk_info.flush_lsn.unwrap_or(Lsn::INVALID),
-            commit_lsn: sk_info.commit_lsn.unwrap_or(Lsn::INVALID),
-            local_start_lsn: sk_info.local_start_lsn.unwrap_or(Lsn::INVALID),
+            sk_id: NodeId(sk_info.safekeeper_id),
+            _last_log_term: sk_info.last_log_term,
+            _flush_lsn: Lsn(sk_info.flush_lsn),
+            commit_lsn: Lsn(sk_info.commit_lsn),
+            local_start_lsn: Lsn(sk_info.local_start_lsn),
             ts,
         }
     }
@@ -308,21 +310,31 @@ impl SharedState {
         pos
     }
 
-    fn get_safekeeper_info(&self, conf: &SafeKeeperConf) -> SkTimelineInfo {
-        SkTimelineInfo {
-            last_log_term: Some(self.sk.get_epoch()),
-            flush_lsn: Some(self.sk.wal_store.flush_lsn()),
+    fn get_safekeeper_info(
+        &self,
+        ttid: &TenantTimelineId,
+        conf: &SafeKeeperConf,
+    ) -> SafekeeperTimelineInfo {
+        SafekeeperTimelineInfo {
+            safekeeper_id: conf.my_id.0,
+            tenant_timeline_id: Some(ProtoTenantTimelineId {
+                tenant_id: ttid.tenant_id.as_ref().to_owned(),
+                timeline_id: ttid.timeline_id.as_ref().to_owned(),
+            }),
+            last_log_term: self.sk.get_epoch(),
+            flush_lsn: self.sk.wal_store.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
-            commit_lsn: Some(self.sk.inmem.commit_lsn),
+            commit_lsn: self.sk.inmem.commit_lsn.0,
             // TODO: rework feedbacks to avoid max here
-            remote_consistent_lsn: Some(max(
+            remote_consistent_lsn: max(
                 self.get_replicas_state().remote_consistent_lsn,
                 self.sk.inmem.remote_consistent_lsn,
-            )),
-            peer_horizon_lsn: Some(self.sk.inmem.peer_horizon_lsn),
-            safekeeper_connstr: Some(conf.listen_pg_addr.clone()),
-            backup_lsn: Some(self.sk.inmem.backup_lsn),
-            local_start_lsn: Some(self.sk.state.local_start_lsn),
+            )
+            .0,
+            peer_horizon_lsn: self.sk.inmem.peer_horizon_lsn.0,
+            safekeeper_connstr: conf.listen_pg_addr.clone(),
+            backup_lsn: self.sk.inmem.backup_lsn.0,
+            local_start_lsn: self.sk.state.local_start_lsn.0,
         }
     }
 }
@@ -682,23 +694,19 @@ impl Timeline {
     }
 
     /// Get safekeeper info for broadcasting to broker and other peers.
-    pub fn get_safekeeper_info(&self, conf: &SafeKeeperConf) -> SkTimelineInfo {
+    pub fn get_safekeeper_info(&self, conf: &SafeKeeperConf) -> SafekeeperTimelineInfo {
         let shared_state = self.write_shared_state();
-        shared_state.get_safekeeper_info(conf)
+        shared_state.get_safekeeper_info(&self.ttid, conf)
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub async fn record_safekeeper_info(
-        &self,
-        sk_info: &SkTimelineInfo,
-        sk_id: NodeId,
-    ) -> Result<()> {
+    pub async fn record_safekeeper_info(&self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
         let is_wal_backup_action_pending: bool;
         let commit_lsn: Lsn;
         {
             let mut shared_state = self.write_shared_state();
             shared_state.sk.record_safekeeper_info(sk_info)?;
-            let peer_info = PeerInfo::from_sk_info(sk_id, sk_info, Instant::now());
+            let peer_info = PeerInfo::from_sk_info(sk_info, Instant::now());
             shared_state.peers_info.upsert(&peer_info);
             is_wal_backup_action_pending = shared_state.update_status(self.ttid);
             commit_lsn = shared_state.sk.inmem.commit_lsn;

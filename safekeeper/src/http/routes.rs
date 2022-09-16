@@ -3,11 +3,14 @@ use hyper::{Body, Request, Response, StatusCode, Uri};
 use anyhow::Context;
 use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
+use safekeeper_api::models::SkTimelineInfo;
 use serde::Serialize;
 use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
+use storage_broker::proto::SafekeeperTimelineInfo;
+use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::task::JoinError;
 
 use crate::safekeeper::ServerInfo;
@@ -16,7 +19,6 @@ use crate::safekeeper::Term;
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
-use etcd_broker::subscription_value::SkTimelineInfo;
 use utils::{
     auth::JwtAuth,
     http::{
@@ -241,7 +243,22 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         parse_request_param(&request, "timeline_id")?,
     );
     check_permission(&request, Some(ttid.tenant_id))?;
-    let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
+    let sk_info: SkTimelineInfo = json_request(&mut request).await?;
+    let proto_sk_info = SafekeeperTimelineInfo {
+        safekeeper_id: 0,
+        tenant_timeline_id: Some(ProtoTenantTimelineId {
+            tenant_id: ttid.tenant_id.as_ref().to_owned(),
+            timeline_id: ttid.timeline_id.as_ref().to_owned(),
+        }),
+        last_log_term: sk_info.last_log_term.unwrap_or(0),
+        flush_lsn: sk_info.flush_lsn.0,
+        commit_lsn: sk_info.commit_lsn.0,
+        remote_consistent_lsn: sk_info.remote_consistent_lsn.0,
+        peer_horizon_lsn: sk_info.peer_horizon_lsn.0,
+        safekeeper_connstr: sk_info.safekeeper_connstr.unwrap_or_else(|| "".to_owned()),
+        backup_lsn: sk_info.backup_lsn.0,
+        local_start_lsn: sk_info.local_start_lsn.0,
+    };
 
     let tli = GlobalTimelines::get(ttid)
         // `GlobalTimelines::get` returns an error when it can't find the timeline.
@@ -252,7 +269,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
             )
         })
         .map_err(ApiError::NotFound)?;
-    tli.record_safekeeper_info(&safekeeper_info, NodeId(1))
+    tli.record_safekeeper_info(&proto_sk_info)
         .await
         .map_err(ApiError::InternalServerError)?;
 

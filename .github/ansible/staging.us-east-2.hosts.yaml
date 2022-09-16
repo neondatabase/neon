@@ -3,7 +3,7 @@ storage:
     bucket_name: neon-staging-storage-us-east-2
     bucket_region: us-east-2
     console_mgmt_base_url: http://console-staging.local
-    etcd_endpoints: etcd-0.us-east-2.aws.neon.build:2379
+    broker_endpoint: https://storage-broker.beta.us-east-2.internal.aws.neon.build:443
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
       remote_storage:

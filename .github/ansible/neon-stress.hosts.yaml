@@ -3,7 +3,7 @@ storage:
     bucket_name: neon-storage-ireland
     bucket_region: eu-west-1
     console_mgmt_base_url: http://neon-stress-console.local
-    etcd_endpoints: neon-stress-etcd.local:2379
+    broker_endpoint: http://storage-broker.neon-stress.local:50051
     safekeeper_enable_s3_offload: 'false'
     pageserver_config_stub:
       pg_distrib_dir: /usr/local

@@ -3,7 +3,7 @@ storage:
     bucket_name: neon-prod-storage-eu-central-1
     bucket_region: eu-central-1
     console_mgmt_base_url: http://console-release.local
-    etcd_endpoints: etcd-0.eu-central-1.aws.neon.tech:2379
+    broker_endpoint: https://storage-broker.gamma.eu-central-1.internal.aws.neon.tech:443
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
       remote_storage:

@@ -2,6 +2,7 @@ use hyper::body::HttpBody;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tonic::codegen::StdError;
+use tonic::transport::{ClientTlsConfig, Endpoint};
 use tonic::{transport::Channel, Code, Status};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
@@ -20,11 +21,34 @@ pub mod metrics;
 pub use tonic::Request;
 pub use tonic::Streaming;
 
-pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
+pub use hyper::Uri;
 
-// NeonBrokerClient charged with tonic provided Channel transport; helps to
+pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
+pub const DEFAULT_ENDPOINT: &str = const_format::formatcp!("http://{DEFAULT_LISTEN_ADDR}");
+
+// BrokerServiceClient charged with tonic provided Channel transport; helps to
 // avoid depending on tonic directly in user crates.
 pub type BrokerClientChannel = BrokerServiceClient<Channel>;
+
+// Create connection object configured to run TLS if schema starts with https://
+// and plain text otherwise. Connection is lazy, only endpoint sanity is
+// validated here.
+pub fn connect<U>(endpoint: U) -> anyhow::Result<BrokerClientChannel>
+where
+    U: std::convert::TryInto<Uri>,
+    U::Error: std::error::Error + Send + Sync + 'static,
+{
+    let uri: Uri = endpoint.try_into()?;
+    let mut tonic_endpoint: Endpoint = uri.into();
+    // If schema starts with https, start encrypted connection; do plain text
+    // otherwise.
+    if let Some("https") = tonic_endpoint.uri().scheme_str() {
+        let tls = ClientTlsConfig::new();
+        tonic_endpoint = tonic_endpoint.tls_config(tls)?;
+    }
+    let channel = tonic_endpoint.connect_lazy();
+    Ok(BrokerClientChannel::new(channel))
+}
 
 impl BrokerClientChannel {
     /// Create a new client to the given endpoint, but don't actually connect until the first request.

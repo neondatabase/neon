@@ -59,13 +59,13 @@ tracing = "0.1.36"
 url = "2"
 walkdir = "2.3.2"
 
-etcd_broker = { path = "../libs/etcd_broker" }
 metrics = { path = "../libs/metrics" }
 pageserver_api = { path = "../libs/pageserver_api" }
 postgres_connection = { path = "../libs/postgres_connection" }
 postgres_ffi = { path = "../libs/postgres_ffi" }
 pq_proto = { path = "../libs/pq_proto" }
 remote_storage = { path = "../libs/remote_storage" }
+storage_broker = { version = "0.1", path = "../storage_broker" }
 tenant_size_model = { path = "../libs/tenant_size_model" }
 utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }

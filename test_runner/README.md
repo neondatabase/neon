@@ -13,8 +13,6 @@ Prerequisites:
       below to run from other directories.
 - The neon git repo, including the postgres submodule
   (for some tests, e.g. `pg_regress`)
-- Some tests (involving storage nodes coordination) require etcd installed. Follow
-  [`the guide`](https://etcd.io/docs/v3.5/install/) to obtain it.
 
 ### Test Organization
 

@@ -25,5 +25,7 @@ url = "2.2.2"
 pageserver_api = { path = "../libs/pageserver_api" }
 postgres_connection = { path = "../libs/postgres_connection" }
 safekeeper_api = { path = "../libs/safekeeper_api" }
+# Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
+storage_broker = { version = "0.1", path = "../storage_broker" }
 utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
