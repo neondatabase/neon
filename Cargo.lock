@@ -2448,6 +2448,7 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "utils",
  "workspace_hack",
 ]
 

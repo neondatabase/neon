@@ -16,8 +16,9 @@ use tokio::{
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 use tracing::*;
+use utils::crashsafe_dir::path_with_suffix_extension;
 
-use crate::{path_with_suffix_extension, Download, DownloadError, RemoteObjectId};
+use crate::{Download, DownloadError, RemoteObjectId};
 
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
 

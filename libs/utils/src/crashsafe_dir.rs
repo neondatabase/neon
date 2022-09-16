@@ -1,30 +1,60 @@
 use std::{
+    borrow::Cow,
+    ffi::OsStr,
     fs::{self, File},
     io,
-    path::Path,
+    path::{Path, PathBuf},
 };
+
+use anyhow::Context;
+
+/// Adds a suffix to the file(directory) name, either appending the suffux to the end of its extension,
+/// or if there's no extension, creates one and puts a suffix there.
+pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str) -> PathBuf {
+    let new_extension = match original_path
+        .as_ref()
+        .extension()
+        .map(OsStr::to_string_lossy)
+    {
+        Some(extension) => Cow::Owned(format!("{extension}.{suffix}")),
+        None => Cow::Borrowed(suffix),
+    };
+    original_path
+        .as_ref()
+        .with_extension(new_extension.as_ref())
+}
+
+pub fn fsync_file_and_parent(file_path: &Path) -> anyhow::Result<()> {
+    let parent = file_path
+        .parent()
+        .with_context(|| format!("File {} has no parent", file_path.display()))?;
+
+    fsync(&file_path)?;
+    fsync(&parent)?;
+    Ok(())
+}
+
+pub fn fsync(path: &Path) -> anyhow::Result<()> {
+    File::open(path)
+        .context("Failed to open the file")
+        .and_then(|file| file.sync_all().context("Failed to sync file metadata"))
+        .with_context(|| format!("Failed to fsync file {}", path.display()))
+}
 
 /// Similar to [`std::fs::create_dir`], except we fsync the
 /// created directory and its parent.
-pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
-    let path = path.as_ref();
+pub fn create_dir(path: impl AsRef<Path>) -> anyhow::Result<()> {
+    let directory_path = path.as_ref();
 
-    fs::create_dir(path)?;
-    File::open(path)?.sync_all()?;
-
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "can't find parent",
-        ))
-    }
+    fs::create_dir(directory_path)
+        .with_context(|| format!("Failed to create directory {}", directory_path.display()))?;
+    fsync_file_and_parent(&directory_path).context("failed to fsync created directory")?;
+    Ok(())
 }
 
 /// Similar to [`std::fs::create_dir_all`], except we fsync all
 /// newly created directories and the pre-existing parent.
-pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+pub fn create_dir_all(path: impl AsRef<Path>) -> anyhow::Result<()> {
     let mut path = path.as_ref();
 
     let mut dirs_to_create = Vec::new();
@@ -33,26 +63,20 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     loop {
         match path.metadata() {
             Ok(metadata) if metadata.is_dir() => break,
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("non-directory found in path: {}", path.display()),
-                ));
-            }
+            Ok(_) => anyhow::bail!("non-directory found in path: {}", path.display()),
             Err(ref e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+            Err(e) => anyhow::bail!(
+                "Error during path {} metadata retrieval: {}",
+                path.display(),
+                e
+            ),
         }
 
         dirs_to_create.push(path);
 
         match path.parent() {
             Some(parent) => path = parent,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("can't find parent of path '{}'", path.display()).as_str(),
-                ));
-            }
+            None => anyhow::bail!("can't find parent of path '{}'", path.display()),
         }
     }
 
@@ -63,12 +87,12 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 
     // Fsync the created directories from child to parent.
     for &path in dirs_to_create.iter() {
-        File::open(path)?.sync_all()?;
+        fsync(path)?;
     }
 
     // If we created any new directories, fsync the parent.
     if !dirs_to_create.is_empty() {
-        File::open(path)?.sync_all()?;
+        fsync(path)?;
     }
 
     Ok(())
@@ -81,19 +105,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_path_with_suffix_extension() {
+        let p = PathBuf::from("/foo/bar");
+        assert_eq!(
+            &path_with_suffix_extension(&p, "temp").to_string_lossy(),
+            "/foo/bar.temp"
+        );
+        let p = PathBuf::from("/foo/bar");
+        assert_eq!(
+            &path_with_suffix_extension(&p, "temp.temp").to_string_lossy(),
+            "/foo/bar.temp.temp"
+        );
+        let p = PathBuf::from("/foo/bar.baz");
+        assert_eq!(
+            &path_with_suffix_extension(&p, "temp.temp").to_string_lossy(),
+            "/foo/bar.baz.temp.temp"
+        );
+        let p = PathBuf::from("/foo/bar.baz");
+        assert_eq!(
+            &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
+            "/foo/bar.baz..temp"
+        );
+        let p = PathBuf::from("/foo/bar/dir/");
+        assert_eq!(
+            &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
+            "/foo/bar/dir..temp"
+        );
+    }
+
+    #[test]
     fn test_create_dir_fsyncd() {
         let dir = tempdir().unwrap();
 
         let existing_dir_path = dir.path();
         let err = create_dir(existing_dir_path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let error_message = format!("{:#}", err);
+        assert!(
+            error_message.contains("File exists"),
+            "Unexpected error message: {error_message}"
+        );
 
         let child_dir = existing_dir_path.join("child");
         create_dir(child_dir).unwrap();
 
         let nested_child_dir = existing_dir_path.join("child1").join("child2");
         let err = create_dir(nested_child_dir).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        // TODO kb bad? return types?
+        let error_message = format!("{:#}", err);
+        assert!(
+            error_message.contains("No such file or directory"),
+            "Unexpected error message: {error_message}"
+        );
     }
 
     #[test]
@@ -117,7 +179,11 @@ mod tests {
         std::fs::write(&file_path, b"").unwrap();
 
         let err = create_dir_all(&file_path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let error_message = format!("{:#}", err);
+        assert!(
+            error_message.contains("File exists"),
+            "Unexpected error message: {error_message}"
+        );
 
         let invalid_dir_path = file_path.join("folder");
         create_dir_all(&invalid_dir_path).unwrap_err();

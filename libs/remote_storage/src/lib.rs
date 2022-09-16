@@ -9,9 +9,7 @@ mod local_fs;
 mod s3_bucket;
 
 use std::{
-    borrow::Cow,
     collections::HashMap,
-    ffi::OsStr,
     fmt::{Debug, Display},
     num::{NonZeroU32, NonZeroUsize},
     ops::Deref,
@@ -344,22 +342,6 @@ impl Debug for S3Config {
     }
 }
 
-/// Adds a suffix to the file(directory) name, either appending the suffux to the end of its extension,
-/// or if there's no extension, creates one and puts a suffix there.
-pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str) -> PathBuf {
-    let new_extension = match original_path
-        .as_ref()
-        .extension()
-        .map(OsStr::to_string_lossy)
-    {
-        Some(extension) => Cow::Owned(format!("{extension}.{suffix}")),
-        None => Cow::Borrowed(suffix),
-    };
-    original_path
-        .as_ref()
-        .with_extension(new_extension.as_ref())
-}
-
 impl RemoteStorageConfig {
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
         let local_path = toml.get("local_path");
@@ -447,35 +429,6 @@ fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_path_with_suffix_extension() {
-        let p = PathBuf::from("/foo/bar");
-        assert_eq!(
-            &path_with_suffix_extension(&p, "temp").to_string_lossy(),
-            "/foo/bar.temp"
-        );
-        let p = PathBuf::from("/foo/bar");
-        assert_eq!(
-            &path_with_suffix_extension(&p, "temp.temp").to_string_lossy(),
-            "/foo/bar.temp.temp"
-        );
-        let p = PathBuf::from("/foo/bar.baz");
-        assert_eq!(
-            &path_with_suffix_extension(&p, "temp.temp").to_string_lossy(),
-            "/foo/bar.baz.temp.temp"
-        );
-        let p = PathBuf::from("/foo/bar.baz");
-        assert_eq!(
-            &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
-            "/foo/bar.baz..temp"
-        );
-        let p = PathBuf::from("/foo/bar/dir/");
-        assert_eq!(
-            &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
-            "/foo/bar/dir..temp"
-        );
-    }
 
     #[test]
     fn object_name() {

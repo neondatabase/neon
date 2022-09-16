@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use tracing::*;
 
-use remote_storage::{path_with_suffix_extension, GenericRemoteStorage};
+use remote_storage::GenericRemoteStorage;
 
 use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
@@ -22,11 +22,11 @@ use crate::tenant::{
     metadata::{TimelineMetadata, METADATA_FILE_NAME},
     Tenant, TenantState,
 };
-use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
 use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
 
-use utils::crashsafe_dir;
+use utils::crashsafe_dir::{self, path_with_suffix_extension};
 use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
@@ -222,52 +222,55 @@ pub async fn shutdown_all_tenants() {
     }
 }
 
-fn create_tenant_files(
+pub fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+    remote_index: RemoteIndex,
+) -> anyhow::Result<Option<TenantId>> {
     let target_tenant_directory = conf.tenant_path(&tenant_id);
-    anyhow::ensure!(
-        !target_tenant_directory.exists(),
-        "cannot create new tenant repo: '{tenant_id}' directory already exists",
-    );
-
     let temporary_tenant_dir =
         path_with_suffix_extension(&target_tenant_directory, TEMP_FILE_SUFFIX);
+
+    let tenants = tenants_state::write_tenants();
+    if tenants.get(&tenant_id).is_some() {
+        info!("tenant {tenant_id} already exists in pageserver's memory");
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        !target_tenant_directory.exists(),
+        "tenant {tenant_id} already exists in pageserver's FS, but is not present in its memory"
+    );
+    anyhow::ensure!(
+        !temporary_tenant_dir.exists(),
+        "tenant {tenant_id} is being initialised"
+    );
+    crashsafe_dir::create_dir_all(&temporary_tenant_dir).with_context(|| {
+        format!(
+            "Failed to start initializing tenant {tenant_id} by creating a temp dir at {}",
+            temporary_tenant_dir.display()
+        )
+    })?;
+    drop(tenants);
+    // by now we've ensured that the tenant is absent both in memory and local fs,
+    // and put a "tombstone": temporary directory for the tenant, fsynced.
+    // Now all further create_tenant will bail before.
+    // Tmp directory will be removed on pageserver restart, so we will leave no corrupt files on crash.
+
     debug!(
         "Creating temporary directory structure in {}",
         temporary_tenant_dir.display()
     );
 
-    let temporary_tenant_timelines_dir = rebase_directory(
-        &conf.timelines_path(&tenant_id),
-        &target_tenant_directory,
-        &temporary_tenant_dir,
-    )?;
-    let temporary_tenant_config_path = rebase_directory(
-        &TenantConf::path(conf, tenant_id),
-        &target_tenant_directory,
-        &temporary_tenant_dir,
-    )?;
-
-    // top-level dir may exist if we are creating it through CLI
-    crashsafe_dir::create_dir_all(&temporary_tenant_dir).with_context(|| {
-        format!(
-            "could not create temporary tenant directory {}",
-            temporary_tenant_dir.display()
-        )
-    })?;
+    // TODO kb refactor: extract creation parts into methods, deduplicate with timeline creation
+    let temporary_tenant_config_path = conf.construct_tenant_config_path(&temporary_tenant_dir);
+    let temporary_tenant_timelines_dir = conf.construct_timelines_path(&temporary_tenant_dir);
     // first, create a config in the top-level temp directory, fsync the file
-    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true)?;
+    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf)?;
+    crashsafe_dir::fsync_file_and_parent(&temporary_tenant_config_path)?;
     // then, create a subdirectory in the top-level temp directory, fsynced
-    crashsafe_dir::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
-        format!(
-            "could not create temporary tenant timelines directory {}",
-            temporary_tenant_timelines_dir.display()
-        )
-    })?;
-
+    crashsafe_dir::create_dir(&temporary_tenant_timelines_dir)
+        .context("failed to create temporary tenant timelines directory")?;
     fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
         anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
     });
@@ -286,54 +289,30 @@ fn create_tenant_files(
             target_tenant_directory.display()
         )
     })?;
-    fs::File::open(target_dir_parent)?.sync_all()?;
-
+    crashsafe_dir::fsync(target_dir_parent)?;
     info!(
         "created tenant directory structure in {}",
-        target_tenant_directory.display()
+        target_dir_parent.display()
     );
 
-    Ok(())
-}
-
-fn rebase_directory(original_path: &Path, base: &Path, new_base: &Path) -> anyhow::Result<PathBuf> {
-    let relative_path = original_path.strip_prefix(base).with_context(|| {
-        format!(
-            "Failed to strip base prefix '{}' off path '{}'",
-            base.display(),
-            original_path.display()
-        )
-    })?;
-    Ok(new_base.join(relative_path))
-}
-
-pub fn create_tenant(
-    conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
-    remote_index: RemoteIndex,
-) -> anyhow::Result<Option<TenantId>> {
+    // now we have created all local files in tenant directory, time to load it into memory
+    // wil do similar on crash.
+    let tenant = Arc::new(Tenant::new(
+        conf,
+        tenant_conf,
+        Arc::new(PostgresRedoManager::new(conf, tenant_id)),
+        tenant_id,
+        remote_index,
+        conf.remote_storage_config.is_some(),
+    ));
+    tenant.activate(false);
     match tenants_state::write_tenants().entry(tenant_id) {
-        hash_map::Entry::Occupied(_) => {
-            debug!("tenant {tenant_id} already exists");
-            Ok(None)
-        }
+        hash_map::Entry::Occupied(_) => anyhow::bail!("Tenant {tenant_id} received different in-memory state entry during initialization, cannot update it"),
         hash_map::Entry::Vacant(v) => {
-            let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-            create_tenant_files(conf, tenant_conf, tenant_id)?;
-            let tenant = Arc::new(Tenant::new(
-                conf,
-                tenant_conf,
-                wal_redo_manager,
-                tenant_id,
-                remote_index,
-                conf.remote_storage_config.is_some(),
-            ));
-            tenant.activate(false);
             v.insert(tenant);
-            Ok(Some(tenant_id))
-        }
+        },
     }
+    Ok(Some(tenant_id))
 }
 
 pub fn update_tenant_config(
@@ -342,8 +321,12 @@ pub fn update_tenant_config(
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
+
+    let tenant_conf_path = conf.tenant_config_path(tenant_id);
+    Tenant::persist_tenant_config(&tenant_conf_path, tenant_conf)?;
+    crashsafe_dir::fsync(&tenant_conf_path)?;
+
     get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);
-    Tenant::persist_tenant_config(&TenantConf::path(conf, tenant_id), tenant_conf, false)?;
     Ok(())
 }
 

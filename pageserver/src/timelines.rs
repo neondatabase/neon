@@ -12,8 +12,8 @@ use std::{
 use anyhow::{bail, Context, Result};
 use tracing::*;
 
-use remote_storage::path_with_suffix_extension;
 use utils::{
+    crashsafe_dir::path_with_suffix_extension,
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };

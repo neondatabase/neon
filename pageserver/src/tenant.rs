@@ -36,7 +36,7 @@ use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
 use crate::metrics::remove_tenant_metrics;
 use crate::storage_sync::index::RemoteIndex;
-use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::tenant_config::TenantConfOpt;
 
 use crate::metrics::STORAGE_TIME;
 use crate::repository::GcResult;
@@ -703,7 +703,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
-        let target_config_path = TenantConf::path(conf, tenant_id);
+        let target_config_path = conf.tenant_config_path(tenant_id);
         let target_config_display = target_config_path.display();
 
         info!("loading tenantconf from {target_config_display}");
@@ -744,7 +744,6 @@ impl Tenant {
     pub fn persist_tenant_config(
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
-        first_save: bool,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
         info!("persisting tenantconf to {}", target_config_path.display());
@@ -760,46 +759,17 @@ impl Tenant {
         // Convert the config to a toml file.
         conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
 
-        let mut target_config_file = VirtualFile::open_with_options(
-            target_config_path,
-            OpenOptions::new().write(true).create_new(first_save),
-        )?;
+        let mut target_config_file =
+            VirtualFile::open_with_options(target_config_path, OpenOptions::new().write(true))?;
 
         target_config_file
             .write(conf_content.as_bytes())
-            .context("Failed to write toml bytes into file")
-            .and_then(|_| {
-                target_config_file
-                    .sync_all()
-                    .context("Faile to fsync config file")
-            })
             .with_context(|| {
                 format!(
-                    "Failed to write config file into path '{}'",
+                    "Failed to write config file bytes into path '{}'",
                     target_config_path.display()
                 )
             })?;
-
-        // fsync the parent directory to ensure the directory entry is durable
-        if first_save {
-            target_config_path
-                .parent()
-                .context("Config file does not have a parent")
-                .and_then(|target_config_parent| {
-                    File::open(target_config_parent).context("Failed to open config parent")
-                })
-                .and_then(|tenant_dir| {
-                    tenant_dir
-                        .sync_all()
-                        .context("Failed to fsync config parent")
-                })
-                .with_context(|| {
-                    format!(
-                        "Failed to fsync on firts save for config {}",
-                        target_config_path.display()
-                    )
-                })?;
-        }
 
         Ok(())
     }
