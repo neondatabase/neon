@@ -324,6 +324,7 @@ jobs:
           build_type: ${{ matrix.build_type }}
 
       - name: Store Allure test stat in the DB
+        if: ${{ steps.create-allure-report.outputs.report-url }}
         env:
           BUILD_TYPE: ${{ matrix.build_type }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
