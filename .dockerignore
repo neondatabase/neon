@@ -18,3 +18,4 @@
 !vendor/postgres-v15/
 !workspace_hack/
 !neon_local/
+!scripts/ninstall.sh
