@@ -5,8 +5,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("Bad request: {0}")]
-    BadRequest(String),
+    #[error("Bad request: {0:?}")]
+    BadRequest(anyhow::Error),
 
     #[error("Forbidden: {0}")]
     Forbidden(String),
@@ -15,13 +15,13 @@ pub enum ApiError {
     Unauthorized(String),
 
     #[error("NotFound: {0}")]
-    NotFound(String),
+    NotFound(anyhow::Error),
 
     #[error("Conflict: {0}")]
     Conflict(String),
 
     #[error(transparent)]
-    InternalServerError(#[from] anyhow::Error),
+    InternalServerError(anyhow::Error),
 }
 
 impl ApiError {
@@ -29,10 +29,18 @@ impl ApiError {
         Self::InternalServerError(anyhow!(err))
     }
 
+    /// Creates an `ApiError::BadRequest` by converting it into an `anyhow::Error`
+    ///
+    /// If the type is already an `anyhow::Error`, directly using `BadRequest` enum variant should
+    /// be preferred.
+    pub fn from_bad_request<E: Into<anyhow::Error>>(err: E) -> Self {
+        Self::BadRequest(err.into())
+    }
+
     pub fn into_response(self) -> Response<Body> {
         match self {
-            ApiError::BadRequest(_) => HttpErrorBody::response_from_msg_and_status(
-                self.to_string(),
+            ApiError::BadRequest(err) => HttpErrorBody::response_from_msg_and_status(
+                format!("{err:#?}"), // use debug printing so that we give the cause
                 StatusCode::BAD_REQUEST,
             ),
             ApiError::Forbidden(_) => {

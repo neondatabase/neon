@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use remote_storage::GenericRemoteStorage;
@@ -166,7 +166,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+    let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
     let new_timeline_info = async {
         match tenant.create_timeline(
             request_data.new_timeline_id.map(TimelineId::from),
@@ -189,7 +189,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     }
     .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn))
         .await
-            .map_err(ApiError::from_internal_err)?;
+        // `await`-ing the task failed
+        .map_err(ApiError::from_internal_err)?;
 
     Ok(match new_timeline_info {
         Some(info) => json_response(StatusCode::CREATED, info)?,
@@ -210,7 +211,10 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         Ok::<_, anyhow::Error>(tenant_mgr::get_tenant(tenant_id, true)?.list_timelines())
     })
     .await
-    .map_err(ApiError::from_internal_err)??;
+    // `await`-ing the task failed
+    .map_err(ApiError::from_internal_err)?
+    // `get_tenant` failed, which only happens when there's no tenant with that id
+    .map_err(ApiError::NotFound)?;
 
     let mut response_data = Vec::with_capacity(timelines.len());
     for (timeline_id, timeline) in timelines {
@@ -275,6 +279,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             tenant_mgr::get_tenant(tenant_id, true)?.get_timeline(timeline_id)
         })
         .await
+        // `await`-ing the task failed
         .map_err(ApiError::from_internal_err)?;
 
         let local_timeline_info = match timeline.and_then(|timeline| {
@@ -303,13 +308,13 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
                     awaits_download: remote_entry.awaits_download,
                 })
         };
-        Ok::<_, anyhow::Error>((local_timeline_info, remote_timeline_info))
+        Ok::<_, ApiError>((local_timeline_info, remote_timeline_info))
     }
     .instrument(info_span!("timeline_detail", tenant = %tenant_id, timeline = %timeline_id))
     .await?;
 
     if local_timeline_info.is_none() && remote_timeline_info.is_none() {
-        Err(ApiError::NotFound(format!(
+        Err(ApiError::NotFound(anyhow!(
             "Timeline {tenant_id}/{timeline_id} is not found neither locally nor remotely"
         )))
     } else {
@@ -339,7 +344,10 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         Ok(())
     })
     .await
-    .map_err(ApiError::from_internal_err)??;
+    // `await`-ing the task failed
+    .map_err(ApiError::from_internal_err)?
+    // closure returned `Err` because the tenant is already present; user error
+    .map_err(|e: anyhow::Error| ApiError::Conflict(e.to_string()))?;
 
     let state = get_state(&request);
     let remote_index = &state.remote_index;
@@ -364,12 +372,12 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     // download index parts for every tenant timeline
     let remote_timelines = match gather_tenant_timelines_index_parts(state, tenant_id).await {
         Ok(Some(remote_timelines)) => remote_timelines,
-        Ok(None) => return Err(ApiError::NotFound("Unknown remote tenant".to_string())),
+        Ok(None) => return Err(ApiError::NotFound(anyhow!("Unknown remote tenant"))),
         Err(e) => {
             error!("Failed to retrieve remote tenant data: {:?}", e);
-            return Err(ApiError::NotFound(
-                "Failed to retrieve remote tenant".to_string(),
-            ));
+            return Err(ApiError::NotFound(anyhow!(
+                "Failed to retrieve remote tenant"
+            )));
         }
     };
 
@@ -392,7 +400,8 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     for (timeline_id, mut remote_timeline) in remote_timelines {
         tokio::fs::create_dir_all(state.conf.timeline_path(&timeline_id, &tenant_id))
             .await
-            .context("Failed to create new timeline directory")?;
+            .context("Failed to create new timeline directory")
+            .map_err(ApiError::InternalServerError)?;
 
         remote_timeline.awaits_download = true;
         tenant_entry.insert(timeline_id, remote_timeline);
@@ -438,7 +447,10 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     tenant_mgr::delete_timeline(tenant_id, timeline_id)
         .instrument(info_span!("timeline_delete", tenant = %tenant_id, timeline = %timeline_id))
         .await
-        .map_err(ApiError::from_internal_err)?;
+        // FIXME: Errors from `delete_timeline` can occur for a number of reasons, incuding both
+        // user and internal errors. Replace this with better handling once the error type permits
+        // it.
+        .map_err(ApiError::InternalServerError)?;
 
     let mut remote_index = state.remote_index.write().await;
     remote_index.remove_timeline_entry(TenantTimelineId {
@@ -458,7 +470,9 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     tenant_mgr::detach_tenant(conf, tenant_id)
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await
-        .map_err(ApiError::from_internal_err)?;
+        // FIXME: Errors from `detach_tenant` can be caused by both both user and internal errors.
+        // Replace this with better handling once the error type permits it.
+        .map_err(ApiError::InternalServerError)?;
 
     let mut remote_index = state.remote_index.write().await;
     remote_index.remove_tenant_entry(&tenant_id);
@@ -478,6 +492,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
         crate::tenant_mgr::list_tenant_info(&remote_index)
     })
     .await
+    // `await`-ing the task failed
     .map_err(ApiError::from_internal_err)?;
 
     json_response(StatusCode::OK, response_data)
@@ -490,6 +505,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     // if tenant is in progress of downloading it can be absent in global tenant map
     let tenant = tokio::task::spawn_blocking(move || tenant_mgr::get_tenant(tenant_id, false))
         .await
+        // `await`-ing the task failed
         .map_err(ApiError::from_internal_err)?;
 
     let state = get_state(&request);
@@ -519,6 +535,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     let current_physical_size =
         match tokio::task::spawn_blocking(move || list_local_timelines(tenant_id, false, false))
             .await
+            // `await`-ing the task failed
             .map_err(ApiError::from_internal_err)?
         {
             Err(err) => {
@@ -545,6 +562,16 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     )
 }
 
+// Helper function to standardize the error messages we produce on bad durations
+//
+// Intended to be used with anyhow's `with_context`, e.g.:
+//
+//   let value = result.with_context(bad_duration("name", &value))?;
+//
+fn bad_duration<'a>(field_name: &'static str, value: &'a str) -> impl 'a + Fn() -> String {
+    move || format!("Cannot parse `{field_name}` duration {value:?}")
+}
+
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
@@ -553,26 +580,38 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let mut tenant_conf = TenantConfOpt::default();
     if let Some(gc_period) = request_data.gc_period {
-        tenant_conf.gc_period =
-            Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_internal_err)?);
+        tenant_conf.gc_period = Some(
+            humantime::parse_duration(&gc_period)
+                .with_context(bad_duration("gc_period", &gc_period))
+                .map_err(ApiError::BadRequest)?,
+        );
     }
     tenant_conf.gc_horizon = request_data.gc_horizon;
     tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
 
     if let Some(pitr_interval) = request_data.pitr_interval {
-        tenant_conf.pitr_interval =
-            Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_internal_err)?);
+        tenant_conf.pitr_interval = Some(
+            humantime::parse_duration(&pitr_interval)
+                .with_context(bad_duration("pitr_interval", &pitr_interval))
+                .map_err(ApiError::BadRequest)?,
+        );
     }
 
     if let Some(walreceiver_connect_timeout) = request_data.walreceiver_connect_timeout {
         tenant_conf.walreceiver_connect_timeout = Some(
             humantime::parse_duration(&walreceiver_connect_timeout)
-                .map_err(ApiError::from_internal_err)?,
+                .with_context(bad_duration(
+                    "walreceiver_connect_timeout",
+                    &walreceiver_connect_timeout,
+                ))
+                .map_err(ApiError::BadRequest)?,
         );
     }
     if let Some(lagging_wal_timeout) = request_data.lagging_wal_timeout {
         tenant_conf.lagging_wal_timeout = Some(
-            humantime::parse_duration(&lagging_wal_timeout).map_err(ApiError::from_internal_err)?,
+            humantime::parse_duration(&lagging_wal_timeout)
+                .with_context(bad_duration("lagging_wal_timeout", &lagging_wal_timeout))
+                .map_err(ApiError::BadRequest)?,
         );
     }
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
@@ -582,7 +621,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
         tenant_conf.checkpoint_timeout = Some(
-            humantime::parse_duration(&checkpoint_timeout).map_err(ApiError::from_internal_err)?,
+            humantime::parse_duration(&checkpoint_timeout)
+                .with_context(bad_duration("checkpoint_timeout", &checkpoint_timeout))
+                .map_err(ApiError::BadRequest)?,
         );
     }
 
@@ -591,7 +632,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     if let Some(compaction_period) = request_data.compaction_period {
         tenant_conf.compaction_period = Some(
-            humantime::parse_duration(&compaction_period).map_err(ApiError::from_internal_err)?,
+            humantime::parse_duration(&compaction_period)
+                .with_context(bad_duration("compaction_period", &compaction_period))
+                .map_err(ApiError::BadRequest)?,
         );
     }
 
@@ -607,7 +650,11 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         tenant_mgr::create_tenant(conf, tenant_conf, target_tenant_id, remote_index)
     })
     .await
-    .map_err(ApiError::from_internal_err)??;
+    // `await`-ing the task failed
+    .map_err(ApiError::from_internal_err)?
+    // FIXME: `create_tenant` failed, which can occur from both user and internal errors. Replace
+    // this with better error handling once the type permits it
+    .map_err(ApiError::InternalServerError)?;
 
     Ok(match new_tenant_id {
         Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,
@@ -622,25 +669,37 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let mut tenant_conf: TenantConfOpt = Default::default();
     if let Some(gc_period) = request_data.gc_period {
-        tenant_conf.gc_period =
-            Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_internal_err)?);
+        tenant_conf.gc_period = Some(
+            humantime::parse_duration(&gc_period)
+                .with_context(bad_duration("gc_period", &gc_period))
+                .map_err(ApiError::BadRequest)?,
+        );
     }
     tenant_conf.gc_horizon = request_data.gc_horizon;
     tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
 
     if let Some(pitr_interval) = request_data.pitr_interval {
-        tenant_conf.pitr_interval =
-            Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_internal_err)?);
+        tenant_conf.pitr_interval = Some(
+            humantime::parse_duration(&pitr_interval)
+                .with_context(bad_duration("pitr_interval", &pitr_interval))
+                .map_err(ApiError::BadRequest)?,
+        );
     }
     if let Some(walreceiver_connect_timeout) = request_data.walreceiver_connect_timeout {
         tenant_conf.walreceiver_connect_timeout = Some(
             humantime::parse_duration(&walreceiver_connect_timeout)
-                .map_err(ApiError::from_internal_err)?,
+                .with_context(bad_duration(
+                    "walreceiver_connect_timeout",
+                    &walreceiver_connect_timeout,
+                ))
+                .map_err(ApiError::BadRequest)?,
         );
     }
     if let Some(lagging_wal_timeout) = request_data.lagging_wal_timeout {
         tenant_conf.lagging_wal_timeout = Some(
-            humantime::parse_duration(&lagging_wal_timeout).map_err(ApiError::from_internal_err)?,
+            humantime::parse_duration(&lagging_wal_timeout)
+                .with_context(bad_duration("lagging_wal_timeout", &lagging_wal_timeout))
+                .map_err(ApiError::BadRequest)?,
         );
     }
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
@@ -650,7 +709,9 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
         tenant_conf.checkpoint_timeout = Some(
-            humantime::parse_duration(&checkpoint_timeout).map_err(ApiError::from_internal_err)?,
+            humantime::parse_duration(&checkpoint_timeout)
+                .with_context(bad_duration("checkpoint_timeout", &checkpoint_timeout))
+                .map_err(ApiError::BadRequest)?,
         );
     }
     tenant_conf.compaction_target_size = request_data.compaction_target_size;
@@ -658,7 +719,9 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     if let Some(compaction_period) = request_data.compaction_period {
         tenant_conf.compaction_period = Some(
-            humantime::parse_duration(&compaction_period).map_err(ApiError::from_internal_err)?,
+            humantime::parse_duration(&compaction_period)
+                .with_context(bad_duration("compaction_period", &compaction_period))
+                .map_err(ApiError::BadRequest)?,
         );
     }
 
@@ -669,7 +732,11 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
         tenant_mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
     })
     .await
-    .map_err(ApiError::from_internal_err)??;
+    // `await`-ing the task failed
+    .map_err(ApiError::from_internal_err)?
+    // FIXME: `update_tenant_config` failed, which can happen because of both user and internal
+    // errors. Replace this one with better error handling once the type permits it
+    .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -677,10 +744,9 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
 #[cfg(any(feature = "testing", feature = "failpoints"))]
 async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     if !fail::has_failpoints() {
-        return Err(ApiError::BadRequest(
+        return Err(ApiError::BadRequest(anyhow!(
             "Cannot manage failpoints because pageserver was compiled without failpoints support"
-                .to_owned(),
-        ));
+        )));
     }
 
     let failpoints: ConfigureFailpointsRequest = json_request(&mut request).await?;
@@ -699,7 +765,7 @@ async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>
         };
 
         if let Err(err_msg) = cfg_result {
-            return Err(ApiError::BadRequest(format!(
+            return Err(ApiError::BadRequest(anyhow!(
                 "Failed to configure failpoints: {err_msg}"
             )));
         }
@@ -721,7 +787,7 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     // FIXME: currently this will return a 500 error on bad tenant id; it should be 4XX
-    let repo = tenant_mgr::get_tenant(tenant_id, false)?;
+    let repo = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::NotFound)?;
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
     let _span_guard =
@@ -730,7 +796,11 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
 
     // Use tenant's pitr setting
     let pitr = repo.get_pitr_interval();
-    let result = repo.gc_iteration(Some(timeline_id), gc_horizon, pitr, true)?;
+    let result = repo
+        .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
+        // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
+        // better once the types support it.
+        .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, result)
 }
 
@@ -744,12 +814,12 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let repo = tenant_mgr::get_tenant(tenant_id, true)?;
-    // FIXME: currently this will return a 500 error on bad timeline id; it should be 4XX
-    let timeline = repo.get_timeline(timeline_id).with_context(|| {
-        format!("No timeline {timeline_id} in repository for tenant {tenant_id}")
-    })?;
-    timeline.compact()?;
+    let repo = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
+    let timeline = repo
+        .get_timeline(timeline_id)
+        .with_context(|| format!("No timeline {timeline_id} in repository for tenant {tenant_id}"))
+        .map_err(ApiError::NotFound)?;
+    timeline.compact().map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -761,12 +831,14 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let repo = tenant_mgr::get_tenant(tenant_id, true)?;
-    // FIXME: currently this will return a 500 error on bad timeline id; it should be 4XX
-    let timeline = repo.get_timeline(timeline_id).with_context(|| {
-        format!("No timeline {timeline_id} in repository for tenant {tenant_id}")
-    })?;
-    timeline.checkpoint(CheckpointConfig::Forced)?;
+    let repo = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
+    let timeline = repo
+        .get_timeline(timeline_id)
+        .with_context(|| format!("No timeline {timeline_id} in repository for tenant {tenant_id}"))
+        .map_err(ApiError::NotFound)?;
+    timeline
+        .checkpoint(CheckpointConfig::Forced)
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -801,14 +873,11 @@ pub fn make_router(
         ($handler_desc:literal, $handler:path $(,)?) => {{
             #[cfg(not(feature = "testing"))]
             async fn cfg_disabled(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
-                Err(ApiError::BadRequest(
-                    concat!(
-                        "Cannot ",
-                        $handler_desc,
-                        " because pageserver was compiled without testing APIs",
-                    )
-                    .to_owned(),
-                ))
+                Err(ApiError::BadRequest(anyhow!(concat!(
+                    "Cannot ",
+                    $handler_desc,
+                    " because pageserver was compiled without testing APIs",
+                ))))
             }
 
             #[cfg(feature = "testing")]
