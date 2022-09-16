@@ -4,6 +4,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+use anyhow::{anyhow, Context};
 use bindgen::callbacks::ParseCallbacks;
 
 #[derive(Debug)]
@@ -42,7 +43,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=bindgen_deps.h");
 
@@ -58,7 +59,7 @@ fn main() {
     for pg_version in &["v14", "v15"] {
         let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
         if pg_install_dir_versioned.is_relative() {
-            let cwd = env::current_dir().unwrap();
+            let cwd = env::current_dir().context("Failed to get current_dir")?;
             pg_install_dir_versioned = cwd.join("..").join("..").join(pg_install_dir_versioned);
         }
 
@@ -70,21 +71,25 @@ fn main() {
             let output = Command::new(pg_config_bin)
                 .arg("--includedir-server")
                 .output()
-                .expect("failed to execute `pg_config --includedir-server`");
+                .context("failed to execute `pg_config --includedir-server`")?;
 
             if !output.status.success() {
                 panic!("`pg_config --includedir-server` failed")
             }
 
-            String::from_utf8(output.stdout).unwrap().trim_end().into()
+            String::from_utf8(output.stdout)
+                .context("pg_config output is not UTF-8")?
+                .trim_end()
+                .into()
         } else {
-            pg_install_dir_versioned
+            let server_path = pg_install_dir_versioned
                 .join("include")
                 .join("postgresql")
                 .join("server")
-                .into_os_string()
+                .into_os_string();
+            server_path
                 .into_string()
-                .unwrap()
+                .map_err(|s| anyhow!("Bad postgres server path {s:?}"))?
         };
 
         // The bindgen::Builder is the main entry point
@@ -132,14 +137,18 @@ fn main() {
             // Finish the builder and generate the bindings.
             //
             .generate()
-            .expect("Unable to generate bindings");
+            .context("Unable to generate bindings")?;
 
         // Write the bindings to the $OUT_DIR/bindings_$pg_version.rs file.
-        let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let out_path: PathBuf = env::var("OUT_DIR")
+            .context("Couldn't read OUT_DIR environment variable var")?
+            .into();
         let filename = format!("bindings_{pg_version}.rs");
 
         bindings
             .write_to_file(out_path.join(filename))
-            .expect("Couldn't write bindings!");
+            .context("Couldn't write bindings")?;
     }
+
+    Ok(())
 }
