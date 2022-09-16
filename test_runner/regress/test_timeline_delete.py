@@ -1,6 +1,6 @@
 import pytest
 from fixtures.neon_fixtures import NeonEnv, NeonPageserverApiException, wait_until
-from fixtures.types import ZTenantId, ZTimelineId
+from fixtures.types import TenantId, TimelineId
 
 
 def test_timeline_delete(neon_simple_env: NeonEnv):
@@ -10,15 +10,15 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     # first try to delete non existing timeline
     # for existing tenant:
-    invalid_timeline_id = ZTimelineId.generate()
+    invalid_timeline_id = TimelineId.generate()
     with pytest.raises(NeonPageserverApiException, match="timeline not found"):
         ps_http.timeline_delete(tenant_id=env.initial_tenant, timeline_id=invalid_timeline_id)
 
     # for non existing tenant:
-    invalid_tenant_id = ZTenantId.generate()
+    invalid_tenant_id = TenantId.generate()
     with pytest.raises(
         NeonPageserverApiException,
-        match=f"Tenant {invalid_tenant_id} not found in local tenant state",
+        match=f"Tenant {invalid_tenant_id} not found in the local state",
     ):
         ps_http.timeline_delete(tenant_id=invalid_tenant_id, timeline_id=invalid_timeline_id)
 
@@ -64,7 +64,8 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     # check 404
     with pytest.raises(
-        NeonPageserverApiException, match="is not found neither locally nor remotely"
+        NeonPageserverApiException,
+        match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} is not found neither locally nor remotely",
     ):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 

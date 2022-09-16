@@ -20,7 +20,7 @@ mod url;
 mod waiters;
 
 use anyhow::{bail, Context};
-use clap::{App, Arg};
+use clap::{self, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
 use std::{future::Future, net::SocketAddr};
@@ -36,9 +36,26 @@ async fn flatten_err(
     f.map(|r| r.context("join error").and_then(|x| x)).await
 }
 
+/// A proper parser for auth backend parameter.
+impl clap::ValueEnum for auth::BackendType<()> {
+    fn value_variants<'a>() -> &'a [Self] {
+        use auth::BackendType::*;
+        &[Console(()), Postgres(()), Link]
+    }
+
+    fn to_possible_value<'a>(&self) -> Option<clap::PossibleValue<'a>> {
+        use auth::BackendType::*;
+        Some(clap::PossibleValue::new(match self {
+            Console(_) => "console",
+            Postgres(_) => "postgres",
+            Link => "link",
+        }))
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("Neon proxy/router")
+    let arg_matches = clap::App::new("Neon proxy/router")
         .version(GIT_VERSION)
         .arg(
             Arg::new("proxy")
@@ -52,8 +69,8 @@ async fn main() -> anyhow::Result<()> {
             Arg::new("auth-backend")
                 .long("auth-backend")
                 .takes_value(true)
-                .help("Possible values: legacy | console | postgres | link")
-                .default_value("legacy"),
+                .value_parser(clap::builder::EnumValueParser::<auth::BackendType<()>>::new())
+                .default_value("link"),
         )
         .arg(
             Arg::new("mgmt")
@@ -118,6 +135,10 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
 
+    let auth_backend = *arg_matches
+        .try_get_one::<auth::BackendType<()>>("auth-backend")?
+        .unwrap();
+
     let auth_urls = config::AuthUrls {
         auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
         auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
@@ -125,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
-        auth_backend: arg_matches.value_of("auth-backend").unwrap().parse()?,
+        auth_backend,
         auth_urls,
     }));
 

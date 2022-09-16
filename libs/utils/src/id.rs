@@ -4,7 +4,7 @@ use hex::FromHex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-/// Zenith ID is a 128-bit random ID.
+/// Neon ID is a 128-bit random ID.
 /// Used to represent various identifiers. Provides handy utility methods and impls.
 ///
 /// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize};
 /// Use `#[serde_as(as = "DisplayFromStr")]` to (de)serialize it as hex string instead: `ad50847381e248feaac9876cc71ae418`.
 /// Check the `serde_with::serde_as` documentation for options for more complex types.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-struct ZId([u8; 16]);
+struct Id([u8; 16]);
 
-impl ZId {
-    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> ZId {
+impl Id {
+    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> Id {
         let mut arr = [0u8; 16];
         buf.copy_to_slice(&mut arr);
-        ZId::from(arr)
+        Id::from(arr)
     }
 
     pub fn as_arr(&self) -> [u8; 16] {
@@ -29,7 +29,7 @@ impl ZId {
     pub fn generate() -> Self {
         let mut tli_buf = [0u8; 16];
         rand::thread_rng().fill(&mut tli_buf);
-        ZId::from(tli_buf)
+        Id::from(tli_buf)
     }
 
     fn hex_encode(&self) -> String {
@@ -44,54 +44,54 @@ impl ZId {
     }
 }
 
-impl FromStr for ZId {
+impl FromStr for Id {
     type Err = hex::FromHexError;
 
-    fn from_str(s: &str) -> Result<ZId, Self::Err> {
+    fn from_str(s: &str) -> Result<Id, Self::Err> {
         Self::from_hex(s)
     }
 }
 
-// this is needed for pretty serialization and deserialization of ZId's using serde integration with hex crate
-impl FromHex for ZId {
+// this is needed for pretty serialization and deserialization of Id's using serde integration with hex crate
+impl FromHex for Id {
     type Error = hex::FromHexError;
 
     fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
         let mut buf: [u8; 16] = [0u8; 16];
         hex::decode_to_slice(hex, &mut buf)?;
-        Ok(ZId(buf))
+        Ok(Id(buf))
     }
 }
 
-impl AsRef<[u8]> for ZId {
+impl AsRef<[u8]> for Id {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
 }
 
-impl From<[u8; 16]> for ZId {
+impl From<[u8; 16]> for Id {
     fn from(b: [u8; 16]) -> Self {
-        ZId(b)
+        Id(b)
     }
 }
 
-impl fmt::Display for ZId {
+impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.hex_encode())
     }
 }
 
-impl fmt::Debug for ZId {
+impl fmt::Debug for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.hex_encode())
     }
 }
 
-macro_rules! zid_newtype {
+macro_rules! id_newtype {
     ($t:ident) => {
         impl $t {
             pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> $t {
-                $t(ZId::get_from_buf(buf))
+                $t(Id::get_from_buf(buf))
             }
 
             pub fn as_arr(&self) -> [u8; 16] {
@@ -99,11 +99,11 @@ macro_rules! zid_newtype {
             }
 
             pub fn generate() -> Self {
-                $t(ZId::generate())
+                $t(Id::generate())
             }
 
             pub const fn from_array(b: [u8; 16]) -> Self {
-                $t(ZId(b))
+                $t(Id(b))
             }
         }
 
@@ -111,14 +111,14 @@ macro_rules! zid_newtype {
             type Err = hex::FromHexError;
 
             fn from_str(s: &str) -> Result<$t, Self::Err> {
-                let value = ZId::from_str(s)?;
+                let value = Id::from_str(s)?;
                 Ok($t(value))
             }
         }
 
         impl From<[u8; 16]> for $t {
             fn from(b: [u8; 16]) -> Self {
-                $t(ZId::from(b))
+                $t(Id::from(b))
             }
         }
 
@@ -126,7 +126,7 @@ macro_rules! zid_newtype {
             type Error = hex::FromHexError;
 
             fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
-                Ok($t(ZId::from_hex(hex)?))
+                Ok($t(Id::from_hex(hex)?))
             }
         }
 
@@ -150,7 +150,7 @@ macro_rules! zid_newtype {
     };
 }
 
-/// Zenith timeline IDs are different from PostgreSQL timeline
+/// Neon timeline IDs are different from PostgreSQL timeline
 /// IDs. They serve a similar purpose though: they differentiate
 /// between different "histories" of the same cluster.  However,
 /// PostgreSQL timeline IDs are a bit cumbersome, because they are only
@@ -158,7 +158,7 @@ macro_rules! zid_newtype {
 /// timeline history.  Those limitations mean that we cannot generate a
 /// new PostgreSQL timeline ID by just generating a random number. And
 /// that in turn is problematic for the "pull/push" workflow, where you
-/// have a local copy of a zenith repository, and you periodically sync
+/// have a local copy of a Neon repository, and you periodically sync
 /// the local changes with a remote server. When you work "detached"
 /// from the remote server, you cannot create a PostgreSQL timeline ID
 /// that's guaranteed to be different from all existing timelines in
@@ -168,55 +168,55 @@ macro_rules! zid_newtype {
 /// branches? If they pick the same one, and later try to push the
 /// branches to the same remote server, they will get mixed up.
 ///
-/// To avoid those issues, Zenith has its own concept of timelines that
+/// To avoid those issues, Neon has its own concept of timelines that
 /// is separate from PostgreSQL timelines, and doesn't have those
-/// limitations. A zenith timeline is identified by a 128-bit ID, which
+/// limitations. A Neon timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
 ///
 /// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
 /// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
-/// See [`ZId`] for alternative ways to serialize it.
+/// See [`Id`] for alternative ways to serialize it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct ZTimelineId(ZId);
+pub struct TimelineId(Id);
 
-zid_newtype!(ZTimelineId);
+id_newtype!(TimelineId);
 
-/// Zenith Tenant Id represents identifiar of a particular tenant.
+/// Neon Tenant Id represents identifiar of a particular tenant.
 /// Is used for distinguishing requests and data belonging to different users.
 ///
 /// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
 /// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
-/// See [`ZId`] for alternative ways to serialize it.
+/// See [`Id`] for alternative ways to serialize it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct ZTenantId(ZId);
+pub struct TenantId(Id);
 
-zid_newtype!(ZTenantId);
+id_newtype!(TenantId);
 
-// A pair uniquely identifying Zenith instance.
+// A pair uniquely identifying Neon instance.
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ZTenantTimelineId {
-    pub tenant_id: ZTenantId,
-    pub timeline_id: ZTimelineId,
+pub struct TenantTimelineId {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
 }
 
-impl ZTenantTimelineId {
-    pub fn new(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Self {
-        ZTenantTimelineId {
+impl TenantTimelineId {
+    pub fn new(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+        TenantTimelineId {
             tenant_id,
             timeline_id,
         }
     }
 
     pub fn generate() -> Self {
-        Self::new(ZTenantId::generate(), ZTimelineId::generate())
+        Self::new(TenantId::generate(), TimelineId::generate())
     }
 
     pub fn empty() -> Self {
-        Self::new(ZTenantId::from([0u8; 16]), ZTimelineId::from([0u8; 16]))
+        Self::new(TenantId::from([0u8; 16]), TimelineId::from([0u8; 16]))
     }
 }
 
-impl fmt::Display for ZTenantTimelineId {
+impl fmt::Display for TenantTimelineId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}/{}", self.tenant_id, self.timeline_id)
     }

@@ -22,7 +22,7 @@ use etcd_broker::{
     subscription_key::{OperationKind, SkOperationKind, SubscriptionKey},
     Client, PutOptions,
 };
-use utils::zid::{NodeId, ZTenantTimelineId};
+use utils::id::{NodeId, TenantTimelineId};
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
@@ -45,7 +45,7 @@ pub fn thread_main(conf: SafeKeeperConf) {
 /// Key to per timeline per safekeeper data.
 fn timeline_safekeeper_path(
     broker_etcd_prefix: String,
-    zttid: ZTenantTimelineId,
+    zttid: TenantTimelineId,
     sk_id: NodeId,
 ) -> String {
     format!(
@@ -162,12 +162,12 @@ pub fn get_candiate_name(system_id: NodeId) -> String {
 }
 
 async fn push_sk_info(
-    zttid: ZTenantTimelineId,
+    zttid: TenantTimelineId,
     mut client: Client,
     key: String,
     sk_info: SkTimelineInfo,
     mut lease: Lease,
-) -> anyhow::Result<(ZTenantTimelineId, Lease)> {
+) -> anyhow::Result<(TenantTimelineId, Lease)> {
     let put_opts = PutOptions::new().with_lease(lease.id);
     client
         .put(
@@ -202,7 +202,7 @@ struct Lease {
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
     let mut client = Client::connect(&conf.broker_endpoints, None).await?;
-    let mut leases: HashMap<ZTenantTimelineId, Lease> = HashMap::new();
+    let mut leases: HashMap<TenantTimelineId, Lease> = HashMap::new();
 
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
     loop {

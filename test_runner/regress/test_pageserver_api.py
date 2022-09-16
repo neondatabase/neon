@@ -11,7 +11,7 @@ from fixtures.neon_fixtures import (
     pg_distrib_dir,
     wait_until,
 )
-from fixtures.types import Lsn, ZTenantId, ZTimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 
 
 # test that we cannot override node id after init
@@ -60,39 +60,39 @@ def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
     assert "has node id already, it cannot be overridden" in bad_update.stderr
 
 
-def check_client(client: NeonPageserverHttpClient, initial_tenant: ZTenantId):
+def check_client(client: NeonPageserverHttpClient, initial_tenant: TenantId):
     client.check_status()
 
     # check initial tenant is there
-    assert initial_tenant in {ZTenantId(t["id"]) for t in client.tenant_list()}
+    assert initial_tenant in {TenantId(t["id"]) for t in client.tenant_list()}
 
     # create new tenant and check it is also there
-    tenant_id = ZTenantId.generate()
+    tenant_id = TenantId.generate()
     client.tenant_create(tenant_id)
-    assert tenant_id in {ZTenantId(t["id"]) for t in client.tenant_list()}
+    assert tenant_id in {TenantId(t["id"]) for t in client.tenant_list()}
 
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) == 0, "initial tenant should not have any timelines"
 
     # create timeline
-    timeline_id = ZTimelineId.generate()
+    timeline_id = TimelineId.generate()
     client.timeline_create(tenant_id=tenant_id, new_timeline_id=timeline_id)
 
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) > 0
 
     # check it is there
-    assert timeline_id in {ZTimelineId(b["timeline_id"]) for b in client.timeline_list(tenant_id)}
+    assert timeline_id in {TimelineId(b["timeline_id"]) for b in client.timeline_list(tenant_id)}
     for timeline in timelines:
-        timeline_id = ZTimelineId(timeline["timeline_id"])
+        timeline_id = TimelineId(timeline["timeline_id"])
         timeline_details = client.timeline_detail(
             tenant_id=tenant_id,
             timeline_id=timeline_id,
             include_non_incremental_logical_size=True,
         )
 
-        assert ZTenantId(timeline_details["tenant_id"]) == tenant_id
-        assert ZTimelineId(timeline_details["timeline_id"]) == timeline_id
+        assert TenantId(timeline_details["tenant_id"]) == tenant_id
+        assert TimelineId(timeline_details["timeline_id"]) == timeline_id
         assert timeline_details.get("local") is not None
 
 
@@ -118,8 +118,8 @@ def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
 
 def expect_updated_msg_lsn(
     client: NeonPageserverHttpClient,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     prev_msg_lsn: Optional[Lsn],
 ) -> Lsn:
     timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)

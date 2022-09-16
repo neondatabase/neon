@@ -2,7 +2,7 @@ import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import Lsn, ZTimelineId
+from fixtures.types import Lsn, TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -10,13 +10,6 @@ from fixtures.utils import print_gc_result, query_scalar
 # Create a couple of branches off the main branch, at a historical point in time.
 #
 def test_branch_behind(neon_env_builder: NeonEnvBuilder):
-
-    # Use safekeeper in this test to avoid a subtle race condition.
-    # Without safekeeper, walreceiver reconnection can stuck
-    # because of IO deadlock.
-    #
-    # See https://github.com/neondatabase/neon/issues/1068
-    neon_env_builder.num_safekeepers = 1
     # Disable pitr, because here we want to test branch creation after GC
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
@@ -28,7 +21,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
 
     main_cur = pgmain.connect().cursor()
 
-    timeline = ZTimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
+    timeline = TimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
 
     # Create table, and insert the first 100 rows
     main_cur.execute("CREATE TABLE foo (t text)")

@@ -1,10 +1,10 @@
 //!
 //! Timeline repository implementation that keeps old data in files on disk, and
-//! the recent changes in memory. See layered_repository/*_layer.rs files.
+//! the recent changes in memory. See tenant/*_layer.rs files.
 //! The functions here are responsible for locating the correct layer for the
 //! get/put call, walking back the timeline branching history as needed.
 //!
-//! The files are stored in the .neon/tenants/<tenantid>/timelines/<timelineid>
+//! The files are stored in the .neon/tenants/<tenant_id>/timelines/<timeline_id>
 //! directory. See docs/pageserver-storage.md for how the files are managed.
 //! In addition to the layer files, there is a metadata file in the same
 //! directory that contains information about the timeline, in particular its
@@ -12,8 +12,8 @@
 //!
 
 use anyhow::{bail, ensure, Context, Result};
+use tokio::sync::watch;
 use tracing::*;
-use utils::zid::ZTenantTimelineId;
 
 use std::cmp::min;
 use std::collections::hash_map;
@@ -22,6 +22,8 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::num::NonZeroU64;
 use std::ops::Bound::Included;
 use std::path::Path;
@@ -30,7 +32,7 @@ use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use self::metadata::{metadata_path, TimelineMetadata};
+use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
 use crate::metrics::remove_tenant_metrics;
 use crate::storage_sync::index::RemoteIndex;
@@ -38,16 +40,16 @@ use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 use crate::metrics::STORAGE_TIME;
 use crate::repository::GcResult;
-use crate::tenant_mgr::LocalTimelineUpdate;
-use crate::thread_mgr;
+use crate::task_mgr;
+use crate::virtual_file::VirtualFile;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 
 use toml_edit;
 use utils::{
     crashsafe_dir,
+    id::{TenantId, TimelineId},
     lsn::{Lsn, RecordLsn},
-    zid::{ZTenantId, ZTimelineId},
 };
 
 mod blob_io;
@@ -70,35 +72,25 @@ use storage_layer::Layer;
 pub use timeline::Timeline;
 
 // re-export this function so that page_cache.rs can use it.
-pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
+pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
 
 // re-export for use in storage_sync.rs
-pub use crate::layered_repository::metadata::save_metadata;
+pub use crate::tenant::metadata::save_metadata;
 
 // re-export for use in walreceiver
-pub use crate::layered_repository::timeline::WalReceiverInfo;
+pub use crate::tenant::timeline::WalReceiverInfo;
 
-/// Parts of the `.neon/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
+/// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
 ///
-/// Repository consists of multiple timelines. Keep them in a hash table.
+/// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
-pub struct Repository {
+pub struct Tenant {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
-    // Allows us to gracefully cancel operations that edit the directory
-    // that backs this layered repository. Usage:
-    //
-    // Use `let _guard = file_lock.try_read()` while writing any files.
-    // Use `let _guard = file_lock.write().unwrap()` to wait for all writes to finish.
-    //
-    // TODO try_read this lock during checkpoint as well to prevent race
-    //      between checkpoint and detach/delete.
-    // TODO try_read this lock for all gc/compaction operations, not just
-    //      ones scheduled by the tenant task manager.
-    pub file_lock: RwLock<()>,
+    state: watch::Sender<TenantState>,
 
     // Overridden tenant-specific config parameters.
     // We keep TenantConfOpt sturct here to preserve the information
@@ -106,8 +98,8 @@ pub struct Repository {
     // This is necessary to allow global config updates.
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    tenant_id: ZTenantId,
-    timelines: Mutex<HashMap<ZTimelineId, Arc<Timeline>>>,
+    tenant_id: TenantId,
+    timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
@@ -125,18 +117,41 @@ pub struct Repository {
     upload_layers: bool,
 }
 
+/// A state of a tenant in pageserver's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TenantState {
+    /// Tenant is fully operational, its background jobs might be running or not.
+    Active { background_jobs_running: bool },
+    /// A tenant is recognized by pageserver, but not yet ready to operate:
+    /// e.g. not present locally and being downloaded or being read into memory from the file system.
+    Paused,
+    /// A tenant is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    Broken,
+}
+
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
-impl Repository {
+impl Tenant {
     /// Get Timeline handle for given zenith timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
-    pub fn get_timeline(&self, timeline_id: ZTimelineId) -> Option<Arc<Timeline>> {
-        self.timelines.lock().unwrap().get(&timeline_id).cloned()
+    pub fn get_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<Arc<Timeline>> {
+        self.timelines
+            .lock()
+            .unwrap()
+            .get(&timeline_id)
+            .with_context(|| {
+                format!(
+                    "Timeline {} was not found for tenant {}",
+                    timeline_id,
+                    self.tenant_id()
+                )
+            })
+            .map(Arc::clone)
     }
 
-    /// Lists timelines the repository contains.
-    /// Up to repository's implementation to omit certain timelines that ar not considered ready for use.
-    pub fn list_timelines(&self) -> Vec<(ZTimelineId, Arc<Timeline>)> {
+    /// Lists timelines the tenant contains.
+    /// Up to tenant's implementation to omit certain timelines that ar not considered ready for use.
+    pub fn list_timelines(&self) -> Vec<(TimelineId, Arc<Timeline>)> {
         self.timelines
             .lock()
             .unwrap()
@@ -149,7 +164,7 @@ impl Repository {
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
     pub fn create_empty_timeline(
         &self,
-        new_timeline_id: ZTimelineId,
+        new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
         // XXX: keep the lock to avoid races during timeline creation
@@ -192,8 +207,8 @@ impl Repository {
     /// Branch a timeline
     pub fn branch_timeline(
         &self,
-        src: ZTimelineId,
-        dst: ZTimelineId,
+        src: TimelineId,
+        dst: TimelineId,
         start_lsn: Option<Lsn>,
     ) -> Result<Arc<Timeline>> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
@@ -284,17 +299,17 @@ impl Repository {
     }
 
     /// perform one garbage collection iteration, removing old data files from disk.
-    /// this function is periodically called by gc thread.
+    /// this function is periodically called by gc task.
     /// also it can be explicitly requested through page server api 'do_gc' command.
     ///
-    /// 'timelineid' specifies the timeline to GC, or None for all.
+    /// 'target_timeline_id' specifies the timeline to GC, or None for all.
     /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
     /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
     /// to make tests more deterministic.
     /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
     pub fn gc_iteration(
         &self,
-        target_timeline_id: Option<ZTimelineId>,
+        target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
@@ -311,7 +326,7 @@ impl Repository {
     }
 
     /// Perform one compaction iteration.
-    /// This function is periodically called by compactor thread.
+    /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
     pub fn compaction_iteration(&self) -> Result<()> {
@@ -322,13 +337,13 @@ impl Repository {
         let timelines = self.timelines.lock().unwrap();
         let timelines_to_compact = timelines
             .iter()
-            .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
+            .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
             .collect::<Vec<_>>();
         drop(timelines);
 
-        for (timelineid, timeline) in &timelines_to_compact {
+        for (timeline_id, timeline) in &timelines_to_compact {
             let _entered =
-                info_span!("compact", timeline = %timelineid, tenant = %self.tenant_id).entered();
+                info_span!("compact", timeline = %timeline_id, tenant = %self.tenant_id).entered();
             timeline.compact()?;
         }
 
@@ -347,13 +362,13 @@ impl Repository {
         let timelines = self.timelines.lock().unwrap();
         let timelines_to_compact = timelines
             .iter()
-            .map(|(timelineid, timeline)| (*timelineid, Arc::clone(timeline)))
+            .map(|(timeline_id, timeline)| (*timeline_id, Arc::clone(timeline)))
             .collect::<Vec<_>>();
         drop(timelines);
 
-        for (timelineid, timeline) in &timelines_to_compact {
+        for (timeline_id, timeline) in &timelines_to_compact {
             let _entered =
-                info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenant_id)
+                info_span!("checkpoint", timeline = %timeline_id, tenant = %self.tenant_id)
                     .entered();
             timeline.checkpoint(CheckpointConfig::Flush)?;
         }
@@ -362,7 +377,7 @@ impl Repository {
     }
 
     /// Removes timeline-related in-memory data
-    pub fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    pub fn delete_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<()> {
         // in order to be retriable detach needs to be idempotent
         // (or at least to a point that each time the detach is called it can make progress)
         let mut timelines = self.timelines.lock().unwrap();
@@ -401,10 +416,10 @@ impl Repository {
 
     pub fn init_attach_timelines(
         &self,
-        timelines: Vec<(ZTimelineId, TimelineMetadata)>,
+        timelines: HashMap<TimelineId, TimelineMetadata>,
     ) -> anyhow::Result<()> {
         let sorted_timelines = if timelines.len() == 1 {
-            timelines
+            timelines.into_iter().collect()
         } else if !timelines.is_empty() {
             tree_sort_timelines(timelines)?
         } else {
@@ -436,19 +451,67 @@ impl Repository {
     pub fn get_remote_index(&self) -> &RemoteIndex {
         &self.remote_index
     }
+
+    pub fn current_state(&self) -> TenantState {
+        *self.state.borrow()
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self.current_state(), TenantState::Active { .. })
+    }
+
+    pub fn should_run_tasks(&self) -> bool {
+        matches!(
+            self.current_state(),
+            TenantState::Active {
+                background_jobs_running: true
+            }
+        )
+    }
+
+    /// Changes tenant status to active, if it was not broken before.
+    /// Otherwise, ignores the state change, logging an error.
+    pub fn activate(&self, enable_background_jobs: bool) {
+        self.set_state(TenantState::Active {
+            background_jobs_running: enable_background_jobs,
+        });
+    }
+
+    pub fn set_state(&self, new_state: TenantState) {
+        match (self.current_state(), new_state) {
+            (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
+                debug!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
+            }
+            (TenantState::Broken, _) => {
+                error!("Ignoring state update {new_state:?} for broken tenant");
+            }
+            (_, new_state) => {
+                self.state.send_replace(new_state);
+                if self.should_run_tasks() {
+                    // Spawn gc and compaction loops. The loops will shut themselves
+                    // down when they notice that the tenant is inactive.
+                    crate::tenant_tasks::start_background_loops(self.tenant_id);
+                }
+            }
+        }
+    }
+
+    pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TenantState> {
+        self.state.subscribe()
+    }
 }
 
 /// Given a Vec of timelines and their ancestors (timeline_id, ancestor_id),
 /// perform a topological sort, so that the parent of each timeline comes
 /// before the children.
 fn tree_sort_timelines(
-    timelines: Vec<(ZTimelineId, TimelineMetadata)>,
-) -> Result<Vec<(ZTimelineId, TimelineMetadata)>> {
+    timelines: HashMap<TimelineId, TimelineMetadata>,
+) -> Result<Vec<(TimelineId, TimelineMetadata)>> {
     let mut result = Vec::with_capacity(timelines.len());
 
     let mut now = Vec::with_capacity(timelines.len());
     // (ancestor, children)
-    let mut later: HashMap<ZTimelineId, Vec<(ZTimelineId, TimelineMetadata)>> =
+    let mut later: HashMap<TimelineId, Vec<(TimelineId, TimelineMetadata)>> =
         HashMap::with_capacity(timelines.len());
 
     for (timeline_id, metadata) in timelines {
@@ -482,7 +545,7 @@ fn tree_sort_timelines(
 }
 
 /// Private functions
-impl Repository {
+impl Tenant {
     pub fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -575,20 +638,15 @@ impl Repository {
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
-    pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) -> Result<()> {
-        let mut tenant_conf = self.tenant_conf.write().unwrap();
-
-        tenant_conf.update(&new_tenant_conf);
-
-        Repository::persist_tenant_config(self.conf, self.tenant_id, *tenant_conf)?;
-        Ok(())
+    pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
+        self.tenant_conf.write().unwrap().update(&new_tenant_conf);
     }
 
     fn initialize_new_timeline(
         &self,
-        new_timeline_id: ZTimelineId,
+        new_timeline_id: TimelineId,
         new_metadata: TimelineMetadata,
-        timelines: &mut MutexGuard<HashMap<ZTimelineId, Arc<Timeline>>>,
+        timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let ancestor = match new_metadata.ancestor_timeline() {
             Some(ancestor_timeline_id) => Some(
@@ -621,10 +679,7 @@ impl Repository {
             .load_layer_map(new_disk_consistent_lsn)
             .context("failed to load layermap")?;
 
-        crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
-            id: ZTenantTimelineId::new(self.tenant_id(), new_timeline_id),
-            timeline: Arc::clone(&new_timeline),
-        });
+        new_timeline.launch_wal_receiver()?;
 
         Ok(new_timeline)
     }
@@ -633,13 +688,13 @@ impl Repository {
         conf: &'static PageServerConf,
         tenant_conf: TenantConfOpt,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         remote_index: RemoteIndex,
         upload_layers: bool,
-    ) -> Repository {
-        Repository {
+    ) -> Tenant {
+        let (state, _) = watch::channel(TenantState::Paused);
+        Tenant {
             tenant_id,
-            file_lock: RwLock::new(()),
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
@@ -647,41 +702,47 @@ impl Repository {
             walredo_mgr,
             remote_index,
             upload_layers,
+            state,
         }
     }
 
     /// Locate and load config
     pub fn load_tenant_config(
         conf: &'static PageServerConf,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
         let target_config_path = TenantConf::path(conf, tenant_id);
+        let target_config_display = target_config_path.display();
 
-        info!("load tenantconf from {}", target_config_path.display());
+        info!("loading tenantconf from {target_config_display}");
 
         // FIXME If the config file is not found, assume that we're attaching
         // a detached tenant and config is passed via attach command.
         // https://github.com/neondatabase/neon/issues/1555
         if !target_config_path.exists() {
-            info!(
-                "tenant config not found in {}",
-                target_config_path.display()
-            );
-            return Ok(Default::default());
+            info!("tenant config not found in {target_config_display}");
+            return Ok(TenantConfOpt::default());
         }
 
         // load and parse file
-        let config = fs::read_to_string(target_config_path)?;
+        let config = fs::read_to_string(&target_config_path).with_context(|| {
+            format!("Failed to load config from path '{target_config_display}'")
+        })?;
 
-        let toml = config.parse::<toml_edit::Document>()?;
+        let toml = config.parse::<toml_edit::Document>().with_context(|| {
+            format!("Failed to parse config from file '{target_config_display}' as toml file")
+        })?;
 
-        let mut tenant_conf: TenantConfOpt = Default::default();
+        let mut tenant_conf = TenantConfOpt::default();
         for (key, item) in toml.iter() {
             match key {
                 "tenant_config" => {
-                    tenant_conf = PageServerConf::parse_toml_tenant_conf(item)?;
+                    tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
+                        format!("Failed to parse config from file '{target_config_display}' as pageserver config")
+                    })?;
                 }
-                _ => bail!("unrecognized pageserver option '{}'", key),
+                _ => bail!("config file {target_config_display} has unrecognized pageserver option '{key}'"),
+
             }
         }
 
@@ -689,14 +750,14 @@ impl Repository {
     }
 
     pub fn persist_tenant_config(
-        conf: &'static PageServerConf,
-        tenant_id: ZTenantId,
+        target_config_path: &Path,
         tenant_conf: TenantConfOpt,
+        first_save: bool,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
-        let target_config_path = TenantConf::path(conf, tenant_id);
-        info!("save tenantconf to {}", target_config_path.display());
+        info!("persisting tenantconf to {}", target_config_path.display());
 
+        // TODO this will prepend comments endlessly
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
 
@@ -707,12 +768,48 @@ impl Repository {
         // Convert the config to a toml file.
         conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
 
-        fs::write(&target_config_path, conf_content).with_context(|| {
-            format!(
-                "Failed to write config file into path '{}'",
-                target_config_path.display()
-            )
-        })
+        let mut target_config_file = VirtualFile::open_with_options(
+            target_config_path,
+            OpenOptions::new().write(true).create_new(first_save),
+        )?;
+
+        target_config_file
+            .write(conf_content.as_bytes())
+            .context("Failed to write toml bytes into file")
+            .and_then(|_| {
+                target_config_file
+                    .sync_all()
+                    .context("Faile to fsync config file")
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to write config file into path '{}'",
+                    target_config_path.display()
+                )
+            })?;
+
+        // fsync the parent directory to ensure the directory entry is durable
+        if first_save {
+            target_config_path
+                .parent()
+                .context("Config file does not have a parent")
+                .and_then(|target_config_parent| {
+                    File::open(target_config_parent).context("Failed to open config parent")
+                })
+                .and_then(|tenant_dir| {
+                    tenant_dir
+                        .sync_all()
+                        .context("Failed to fsync config parent")
+                })
+                .with_context(|| {
+                    format!(
+                        "Failed to fsync on firts save for config {}",
+                        target_config_path.display()
+                    )
+                })?;
+        }
+
+        Ok(())
     }
 
     //
@@ -741,7 +838,7 @@ impl Repository {
     //   we do.
     fn gc_iteration_internal(
         &self,
-        target_timeline_id: Option<ZTimelineId>,
+        target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
@@ -759,7 +856,7 @@ impl Repository {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
+        let mut all_branchpoints: BTreeSet<(TimelineId, Lsn)> = BTreeSet::new();
         let timeline_ids = {
             if let Some(target_timeline_id) = target_timeline_id.as_ref() {
                 if timelines.get(target_timeline_id).is_none() {
@@ -772,11 +869,11 @@ impl Repository {
                 .map(|(timeline_id, timeline_entry)| {
                     // This is unresolved question for now, how to do gc in presence of remote timelines
                     // especially when this is combined with branching.
-                    // Somewhat related: https://github.com/zenithdb/zenith/issues/999
+                    // Somewhat related: https://github.com/neondatabase/neon/issues/999
                     if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
                         // If target_timeline is specified, we only need to know branchpoints of its children
-                        if let Some(timelineid) = target_timeline_id {
-                            if ancestor_timeline_id == &timelineid {
+                        if let Some(timeline_id) = target_timeline_id {
+                            if ancestor_timeline_id == &timeline_id {
                                 all_branchpoints.insert((
                                     *ancestor_timeline_id,
                                     timeline_entry.get_ancestor_lsn(),
@@ -806,8 +903,8 @@ impl Repository {
                 .with_context(|| format!("Timeline {timeline_id} was not found"))?;
 
             // If target_timeline is specified, ignore all other timelines
-            if let Some(target_timelineid) = target_timeline_id {
-                if timeline_id != target_timelineid {
+            if let Some(target_timeline_id) = target_timeline_id {
+                if timeline_id != target_timeline_id {
                     continue;
                 }
             }
@@ -835,10 +932,10 @@ impl Repository {
         // compaction (both require `layer_removal_cs` lock),
         // but the GC iteration can run concurrently with branch creation.
         //
-        // See comments in [`Repository::branch_timeline`] for more information
+        // See comments in [`Tenant::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
-            if thread_mgr::is_shutdown_requested() {
+            if task_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
                 break;
@@ -863,12 +960,12 @@ impl Repository {
         Ok(totals)
     }
 
-    pub fn tenant_id(&self) -> ZTenantId {
+    pub fn tenant_id(&self) -> TenantId {
         self.tenant_id
     }
 }
 
-impl Drop for Repository {
+impl Drop for Tenant {
     fn drop(&mut self) {
         remove_tenant_metrics(&self.tenant_id);
     }
@@ -896,28 +993,8 @@ pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn load_metadata(
-    conf: &'static PageServerConf,
-    timeline_id: ZTimelineId,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<TimelineMetadata> {
-    let metadata_path = metadata_path(conf, timeline_id, tenant_id);
-    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
-        format!(
-            "Failed to read metadata bytes from path {}",
-            metadata_path.display()
-        )
-    })?;
-    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
-        format!(
-            "Failed to parse metadata bytes from path {}",
-            metadata_path.display()
-        )
-    })
-}
-
 #[cfg(test)]
-pub mod repo_harness {
+pub mod harness {
     use bytes::{Bytes, BytesMut};
     use once_cell::sync::Lazy;
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -927,21 +1004,22 @@ pub mod repo_harness {
     use crate::storage_sync::index::RemoteIndex;
     use crate::{
         config::PageServerConf,
-        layered_repository::Repository,
         repository::Key,
-        walrecord::ZenithWalRecord,
+        tenant::Tenant,
+        walrecord::NeonWalRecord,
         walredo::{WalRedoError, WalRedoManager},
     };
 
+    use super::metadata::metadata_path;
     use super::*;
     use crate::tenant_config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
-    use utils::zid::{ZTenantId, ZTimelineId};
+    use utils::id::{TenantId, TimelineId};
 
-    pub const TIMELINE_ID: ZTimelineId =
-        ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
-    pub const NEW_TIMELINE_ID: ZTimelineId =
-        ZTimelineId::from_array(hex!("AA223344556677881122334455667788"));
+    pub const TIMELINE_ID: TimelineId =
+        TimelineId::from_array(hex!("11223344556677881122334455667788"));
+    pub const NEW_TIMELINE_ID: TimelineId =
+        TimelineId::from_array(hex!("AA223344556677881122334455667788"));
 
     /// Convenience function to create a page image with given string as the only content
     #[allow(non_snake_case)]
@@ -974,10 +1052,10 @@ pub mod repo_harness {
         }
     }
 
-    pub struct RepoHarness<'a> {
+    pub struct TenantHarness<'a> {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
-        pub tenant_id: ZTenantId,
+        pub tenant_id: TenantId,
 
         pub lock_guard: (
             Option<RwLockReadGuard<'a, ()>>,
@@ -985,7 +1063,7 @@ pub mod repo_harness {
         ),
     }
 
-    impl<'a> RepoHarness<'a> {
+    impl<'a> TenantHarness<'a> {
         pub fn create(test_name: &'static str) -> Result<Self> {
             Self::create_internal(test_name, false)
         }
@@ -1010,7 +1088,7 @@ pub mod repo_harness {
 
             let tenant_conf = TenantConf::dummy_conf();
 
-            let tenant_id = ZTenantId::generate();
+            let tenant_id = TenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
@@ -1022,14 +1100,14 @@ pub mod repo_harness {
             })
         }
 
-        pub fn load(&self) -> Repository {
-            self.try_load().expect("failed to load test repo")
+        pub fn load(&self) -> Tenant {
+            self.try_load().expect("failed to load test tenant")
         }
 
-        pub fn try_load(&self) -> Result<Repository> {
+        pub fn try_load(&self) -> Result<Tenant> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
-            let repo = Repository::new(
+            let tenant = Tenant::new(
                 self.conf,
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
@@ -1037,29 +1115,50 @@ pub mod repo_harness {
                 RemoteIndex::default(),
                 false,
             );
-            // populate repo with locally available timelines
-            let mut timelines_to_load = Vec::new();
+            // populate tenant with locally available timelines
+            let mut timelines_to_load = HashMap::new();
             for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
                 .expect("should be able to read timelines dir")
             {
                 let timeline_dir_entry = timeline_dir_entry?;
-                let timeline_id: ZTimelineId = timeline_dir_entry
+                let timeline_id: TimelineId = timeline_dir_entry
                     .path()
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
                     .parse()?;
-                let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
-                timelines_to_load.push((timeline_id, timeline_metadata));
-            }
-            repo.init_attach_timelines(timelines_to_load)?;
 
-            Ok(repo)
+                let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
+                timelines_to_load.insert(timeline_id, timeline_metadata);
+            }
+            tenant.init_attach_timelines(timelines_to_load)?;
+
+            Ok(tenant)
         }
 
-        pub fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
+        pub fn timeline_path(&self, timeline_id: &TimelineId) -> PathBuf {
             self.conf.timeline_path(timeline_id, &self.tenant_id)
         }
+    }
+
+    fn load_metadata(
+        conf: &'static PageServerConf,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
+    ) -> anyhow::Result<TimelineMetadata> {
+        let metadata_path = metadata_path(conf, timeline_id, tenant_id);
+        let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
+            format!(
+                "Failed to read metadata bytes from path {}",
+                metadata_path.display()
+            )
+        })?;
+        TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
+            format!(
+                "Failed to parse metadata bytes from path {}",
+                metadata_path.display()
+            )
+        })
     }
 
     // Mock WAL redo manager that doesn't do much
@@ -1071,7 +1170,7 @@ pub mod repo_harness {
             key: Key,
             lsn: Lsn,
             base_img: Option<Bytes>,
-            records: Vec<(Lsn, ZenithWalRecord)>,
+            records: Vec<(Lsn, NeonWalRecord)>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
                 "redo for {} to get to {}, with {} and {} records",
@@ -1096,8 +1195,8 @@ mod tests {
     use super::metadata::METADATA_FILE_NAME;
     use super::*;
     use crate::keyspace::KeySpaceAccum;
-    use crate::layered_repository::repo_harness::*;
     use crate::repository::{Key, Value};
+    use crate::tenant::harness::*;
     use bytes::BytesMut;
     use hex_literal::hex;
     use once_cell::sync::Lazy;
@@ -1108,8 +1207,8 @@ mod tests {
 
     #[test]
     fn test_basic() -> Result<()> {
-        let repo = RepoHarness::create("test_basic")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant = TenantHarness::create("test_basic")?.load();
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -1130,10 +1229,10 @@ mod tests {
 
     #[test]
     fn no_duplicate_timelines() -> Result<()> {
-        let repo = RepoHarness::create("no_duplicate_timelines")?.load();
-        let _ = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant = TenantHarness::create("no_duplicate_timelines")?.load();
+        let _ = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
-        match repo.create_empty_timeline(TIMELINE_ID, Lsn(0)) {
+        match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0)) {
             Ok(_) => panic!("duplicate timeline creation should fail"),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -1156,8 +1255,8 @@ mod tests {
     ///
     #[test]
     fn test_branch() -> Result<()> {
-        let repo = RepoHarness::create("test_branch")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant = TenantHarness::create("test_branch")?.load();
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
         use std::str::from_utf8;
 
@@ -1179,8 +1278,8 @@ mod tests {
         //assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x30)))?;
-        let newtline = repo
+        tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x30)))?;
+        let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
         let new_writer = newtline.writer();
@@ -1249,19 +1348,20 @@ mod tests {
 
     #[test]
     fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
-        let repo =
-            RepoHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant =
+            TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
+                .load();
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         // FIXME: this doesn't actually remove any layer currently, given how the checkpointing
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
+        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
-        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
+        match tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
                 assert!(err.to_string().contains("invalid branch start lsn"));
@@ -1278,11 +1378,12 @@ mod tests {
 
     #[test]
     fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> Result<()> {
-        let repo = RepoHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load();
+        let tenant =
+            TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load();
 
-        repo.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
+        tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
         // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
-        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
+        match tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
                 assert!(&err.to_string().contains("invalid branch start lsn"));
@@ -1322,36 +1423,37 @@ mod tests {
 
     #[test]
     fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
-        let repo =
-            RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant =
+            TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
-        let newtline = repo
+        tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
+        let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
+        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
 
         Ok(())
     }
     #[test]
     fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
-        let repo = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant =
+            TenantHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
-        let newtline = repo
+        tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
+        let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
 
         make_some_layers(newtline.as_ref(), Lsn(0x60))?;
 
         // run gc on parent
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
+        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // Check that the data is still accessible on the branch.
         assert_eq!(
@@ -1365,16 +1467,17 @@ mod tests {
     #[test]
     fn timeline_load() -> Result<()> {
         const TEST_NAME: &str = "timeline_load";
-        let harness = RepoHarness::create(TEST_NAME)?;
+        let harness = TenantHarness::create(TEST_NAME)?;
         {
-            let repo = harness.load();
-            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0x8000))?;
+            let tenant = harness.load();
+            let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x8000))?;
             make_some_layers(tline.as_ref(), Lsn(0x8000))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
         }
 
-        let repo = harness.load();
-        repo.get_timeline(TIMELINE_ID)
+        let tenant = harness.load();
+        tenant
+            .get_timeline(TIMELINE_ID)
             .expect("cannot load timeline");
 
         Ok(())
@@ -1383,18 +1486,18 @@ mod tests {
     #[test]
     fn timeline_load_with_ancestor() -> Result<()> {
         const TEST_NAME: &str = "timeline_load_with_ancestor";
-        let harness = RepoHarness::create(TEST_NAME)?;
+        let harness = TenantHarness::create(TEST_NAME)?;
         // create two timelines
         {
-            let repo = harness.load();
-            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+            let tenant = harness.load();
+            let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
 
-            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
+            tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
 
-            let newtline = repo
+            let newtline = tenant
                 .get_timeline(NEW_TIMELINE_ID)
                 .expect("Should have a local timeline");
 
@@ -1403,14 +1506,14 @@ mod tests {
         }
 
         // check that both of them are initially unloaded
-        let repo = harness.load();
+        let tenant = harness.load();
 
         // check that both, child and ancestor are loaded
-        let _child_tline = repo
+        let _child_tline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("cannot get child timeline loaded");
 
-        let _ancestor_tline = repo
+        let _ancestor_tline = tenant
             .get_timeline(TIMELINE_ID)
             .expect("cannot get ancestor timeline loaded");
 
@@ -1420,11 +1523,11 @@ mod tests {
     #[test]
     fn corrupt_metadata() -> Result<()> {
         const TEST_NAME: &str = "corrupt_metadata";
-        let harness = RepoHarness::create(TEST_NAME)?;
-        let repo = harness.load();
+        let harness = TenantHarness::create(TEST_NAME)?;
+        let tenant = harness.load();
 
-        repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-        drop(repo);
+        tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        drop(tenant);
 
         let metadata_path = harness.timeline_path(&TIMELINE_ID).join(METADATA_FILE_NAME);
 
@@ -1459,8 +1562,8 @@ mod tests {
 
     #[test]
     fn test_images() -> Result<()> {
-        let repo = RepoHarness::create("test_images")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant = TenantHarness::create("test_images")?.load();
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -1509,8 +1612,8 @@ mod tests {
     //
     #[test]
     fn test_bulk_insert() -> Result<()> {
-        let repo = RepoHarness::create("test_bulk_insert")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant = TenantHarness::create("test_bulk_insert")?.load();
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         let mut lsn = Lsn(0x10);
 
@@ -1549,8 +1652,8 @@ mod tests {
 
     #[test]
     fn test_random_updates() -> Result<()> {
-        let repo = RepoHarness::create("test_random_updates")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant = TenantHarness::create("test_random_updates")?.load();
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -1619,8 +1722,8 @@ mod tests {
 
     #[test]
     fn test_traverse_branches() -> Result<()> {
-        let repo = RepoHarness::create("test_traverse_branches")?.load();
-        let mut tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant = TenantHarness::create("test_traverse_branches")?.load();
+        let mut tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -1652,9 +1755,9 @@ mod tests {
 
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
-            let new_tline_id = ZTimelineId::generate();
-            repo.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
-            tline = repo
+            let new_tline_id = TimelineId::generate();
+            tenant.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
+            tline = tenant
                 .get_timeline(new_tline_id)
                 .expect("Should have the branched timeline");
             tline_id = new_tline_id;
@@ -1698,8 +1801,8 @@ mod tests {
 
     #[test]
     fn test_traverse_ancestors() -> Result<()> {
-        let repo = RepoHarness::create("test_traverse_ancestors")?.load();
-        let mut tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tenant = TenantHarness::create("test_traverse_ancestors")?.load();
+        let mut tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;
@@ -1713,9 +1816,9 @@ mod tests {
 
         #[allow(clippy::needless_range_loop)]
         for idx in 0..NUM_TLINES {
-            let new_tline_id = ZTimelineId::generate();
-            repo.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
-            tline = repo
+            let new_tline_id = TimelineId::generate();
+            tenant.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
+            tline = tenant
                 .get_timeline(new_tline_id)
                 .expect("Should have the branched timeline");
             tline_id = new_tline_id;

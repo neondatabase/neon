@@ -2,71 +2,27 @@
 //! Timeline management code
 //
 
-use anyhow::{bail, ensure, Context, Result};
-
 use std::{
     fs,
     path::Path,
     process::{Command, Stdio},
     sync::Arc,
 };
+
+use anyhow::{bail, Context, Result};
 use tracing::*;
 
+use remote_storage::path_with_suffix_extension;
 use utils::{
-    crashsafe_dir,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::import_datadir;
+use crate::config::PageServerConf;
+use crate::tenant::{Tenant, Timeline};
 use crate::tenant_mgr;
 use crate::CheckpointConfig;
-use crate::{
-    config::PageServerConf, storage_sync::index::RemoteIndex, tenant_config::TenantConfOpt,
-};
-use crate::{
-    layered_repository::{Repository, Timeline},
-    walredo::WalRedoManager,
-};
-
-#[derive(Debug, Clone, Copy)]
-pub struct PointInTime {
-    pub timeline_id: ZTimelineId,
-    pub lsn: Lsn,
-}
-
-pub fn create_repo(
-    conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
-    tenant_id: ZTenantId,
-    wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-    remote_index: RemoteIndex,
-) -> Result<Arc<Repository>> {
-    let repo_dir = conf.tenant_path(&tenant_id);
-    ensure!(
-        !repo_dir.exists(),
-        "cannot create new tenant repo: '{}' directory already exists",
-        tenant_id
-    );
-
-    // top-level dir may exist if we are creating it through CLI
-    crashsafe_dir::create_dir_all(&repo_dir)
-        .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
-    crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
-    info!("created directory structure in {}", repo_dir.display());
-
-    // Save tenant's config
-    Repository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
-
-    Ok(Arc::new(Repository::new(
-        conf,
-        tenant_conf,
-        wal_redo_manager,
-        tenant_id,
-        remote_index,
-        conf.remote_storage_config.is_some(),
-    )))
-}
+use crate::{import_datadir, TEMP_FILE_SUFFIX};
 
 // Create the cluster temporarily in 'initdbpath' directory inside the repository
 // to get bootstrap data for timeline initialization.
@@ -105,13 +61,17 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 //
 fn bootstrap_timeline(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
-    tli: ZTimelineId,
-    repo: &Repository,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    tenant: &Tenant,
 ) -> Result<Arc<Timeline>> {
-    let initdb_path = conf
-        .tenant_path(&tenantid)
-        .join(format!("tmp-timeline-{}", tli));
+    // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
+    // temporary directory for basebackup files for the given timeline.
+    let initdb_path = path_with_suffix_extension(
+        conf.timelines_path(&tenant_id)
+            .join(format!("basebackup-{timeline_id}")),
+        TEMP_FILE_SUFFIX,
+    );
 
     // Init temporarily repo to get bootstrap data
     run_initdb(conf, &initdb_path)?;
@@ -123,7 +83,7 @@ fn bootstrap_timeline(
     // LSN, and any WAL after that.
     // Initdb lsn will be equal to last_record_lsn which will be set after import.
     // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
-    let timeline = repo.create_empty_timeline(tli, lsn)?;
+    let timeline = tenant.create_empty_timeline(timeline_id, lsn)?;
     import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
 
     fail::fail_point!("before-checkpoint-new-timeline", |_| {
@@ -134,7 +94,7 @@ fn bootstrap_timeline(
 
     info!(
         "created root timeline {} timeline.lsn {}",
-        tli,
+        timeline_id,
         timeline.get_last_record_lsn()
     );
 
@@ -153,24 +113,24 @@ fn bootstrap_timeline(
 /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
 /// a new unique ID is generated.
 ///
-pub(crate) fn create_timeline(
+pub(crate) async fn create_timeline(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    new_timeline_id: Option<ZTimelineId>,
-    ancestor_timeline_id: Option<ZTimelineId>,
+    tenant_id: TenantId,
+    new_timeline_id: Option<TimelineId>,
+    ancestor_timeline_id: Option<TimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
 ) -> Result<Option<Arc<Timeline>>> {
-    let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
-    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+    let new_timeline_id = new_timeline_id.unwrap_or_else(TimelineId::generate);
+    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
     if conf.timeline_path(&new_timeline_id, &tenant_id).exists() {
-        debug!("timeline {} already exists", new_timeline_id);
+        debug!("timeline {new_timeline_id} already exists");
         return Ok(None);
     }
 
     let loaded_timeline = match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
-            let ancestor_timeline = repo
+            let ancestor_timeline = tenant
                 .get_timeline(ancestor_timeline_id)
                 .context("Cannot branch off the timeline that's not present in pageserver")?;
 
@@ -182,7 +142,7 @@ pub(crate) fn create_timeline(
                 // sizes etc. and that would get confused if the previous page versions
                 // are not in the repository yet.
                 *lsn = lsn.align();
-                ancestor_timeline.wait_lsn(*lsn)?;
+                ancestor_timeline.wait_lsn(*lsn).await?;
 
                 let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                 if ancestor_ancestor_lsn > *lsn {
@@ -196,10 +156,13 @@ pub(crate) fn create_timeline(
                 }
             }
 
-            repo.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
+            tenant.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
         }
-        None => bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?,
+        None => bootstrap_timeline(conf, tenant_id, new_timeline_id, &tenant)?,
     };
+
+    // Have added new timeline into the tenant, now its background tasks are needed.
+    tenant.activate(true);
 
     Ok(Some(loaded_timeline))
 }

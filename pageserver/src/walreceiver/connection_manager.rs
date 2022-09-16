@@ -16,7 +16,10 @@ use std::{
     time::Duration,
 };
 
-use crate::layered_repository::Timeline;
+use crate::task_mgr;
+use crate::task_mgr::TaskKind;
+use crate::task_mgr::WALRECEIVER_RUNTIME;
+use crate::tenant::Timeline;
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use etcd_broker::{
@@ -26,38 +29,50 @@ use etcd_broker::{
 use tokio::select;
 use tracing::*;
 
-use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
+use crate::{
+    exponential_backoff, walreceiver::get_etcd_client, DEFAULT_BASE_BACKOFF_SECONDS,
+    DEFAULT_MAX_BACKOFF_SECONDS,
+};
 use utils::{
+    id::{NodeId, TenantTimelineId},
     lsn::Lsn,
-    zid::{NodeId, ZTenantTimelineId},
 };
 
 use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
 
 /// Spawns the loop to take care of the timeline's WAL streaming connection.
-pub(super) fn spawn_connection_manager_task(
-    id: ZTenantTimelineId,
+pub fn spawn_connection_manager_task(
     broker_loop_prefix: String,
-    mut client: Client,
-    local_timeline: Arc<Timeline>,
+    timeline: Arc<Timeline>,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
-) -> TaskHandle<()> {
-    TaskHandle::spawn(move |_, mut cancellation| {
+) -> anyhow::Result<()> {
+    let mut etcd_client = get_etcd_client().clone();
+
+    let tenant_id = timeline.tenant_id;
+    let timeline_id = timeline.timeline_id;
+
+    task_mgr::spawn(
+        WALRECEIVER_RUNTIME.handle(),
+        TaskKind::WalReceiverManager,
+        Some(tenant_id),
+        Some(timeline_id),
+        &format!("walreceiver for tenant {} timeline {}", timeline.tenant_id, timeline.timeline_id),
+        false,
         async move {
             info!("WAL receiver broker started, connecting to etcd");
             let mut walreceiver_state = WalreceiverState::new(
-                id,
-                local_timeline,
+                timeline,
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
             );
             loop {
                 select! {
-                    _ = cancellation.changed() => {
-                        info!("Broker subscription init cancelled, shutting down");
+                    _ = task_mgr::shutdown_watcher() => {
+                        info!("WAL receiver shutdown requested, shutting down");
+                        // Kill current connection, if any
                         if let Some(wal_connection) = walreceiver_state.wal_connection.take()
                         {
                             wal_connection.connection_task.shutdown().await;
@@ -67,14 +82,15 @@ pub(super) fn spawn_connection_manager_task(
 
                     _ = connection_manager_loop_step(
                         &broker_loop_prefix,
-                        &mut client,
+                        &mut etcd_client,
                         &mut walreceiver_state,
                     ) => {},
                 }
             }
         }
-        .instrument(info_span!("wal_connection_manager", id = %id))
-    })
+        .instrument(info_span!("wal_connection_manager", tenant_id = %tenant_id, timeline_id = %timeline_id))
+    );
+    Ok(())
 }
 
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
@@ -85,7 +101,10 @@ async fn connection_manager_loop_step(
     etcd_client: &mut Client,
     walreceiver_state: &mut WalreceiverState,
 ) {
-    let id = walreceiver_state.id;
+    let id = TenantTimelineId {
+        tenant_id: walreceiver_state.timeline.tenant_id,
+        timeline_id: walreceiver_state.timeline.timeline_id,
+    };
 
     // XXX: We never explicitly cancel etcd task, instead establishing one and never letting it go,
     // running the entire loop step as much as possible to an end.
@@ -98,6 +117,14 @@ async fn connection_manager_loop_step(
     loop {
         let time_until_next_retry = walreceiver_state.time_until_next_retry();
 
+        // These things are happening concurrently:
+        //
+        //  - keep receiving WAL on the current connection
+        //      - if the shared state says we need to change connection, disconnect and return
+        //      - this runs in a separate task and we receive updates via a watch channel
+        //  - change connection if the rules decide so, or if the current connection dies
+        //  - receive updates from broker
+        //      - this might change the current desired connection
         select! {
             broker_connection_result = &mut broker_subscription.watcher_handle => {
                 cleanup_broker_connection(broker_connection_result, walreceiver_state);
@@ -110,7 +137,8 @@ async fn connection_manager_loop_step(
                     None => None,
                 }
             } => {
-                let wal_connection = walreceiver_state.wal_connection.as_mut().expect("Should have a connection, as checked by the corresponding select! guard");
+                let wal_connection = walreceiver_state.wal_connection.as_mut()
+                    .expect("Should have a connection, as checked by the corresponding select! guard");
                 match wal_connection_update {
                     TaskEvent::Started => {},
                     TaskEvent::NewEvent(status) => {
@@ -123,16 +151,14 @@ async fn connection_manager_loop_step(
                         }
                         wal_connection.status = status;
                     },
-                    TaskEvent::End(end_result) => {
-                        match end_result {
-                            Ok(()) => debug!("WAL receiving task finished"),
-                            Err(e) => warn!("WAL receiving task failed: {e}"),
-                        };
+                    TaskEvent::End => {
+                        debug!("WAL receiving task finished");
                         walreceiver_state.drop_old_connection(false).await;
                     },
                 }
             },
 
+            // Got a new update from etcd
             broker_update = broker_subscription.value_updates.recv() => {
                 match broker_update {
                     Some(broker_update) => walreceiver_state.register_timeline_update(broker_update),
@@ -204,7 +230,7 @@ fn cleanup_broker_connection(
 async fn subscribe_for_timeline_updates(
     etcd_client: &mut Client,
     broker_prefix: &str,
-    id: ZTenantTimelineId,
+    id: TenantTimelineId,
 ) -> BrokerSubscription<SkTimelineInfo> {
     let mut attempt = 0;
     loop {
@@ -240,9 +266,10 @@ const WALCONNECTION_RETRY_BACKOFF_MULTIPLIER: f64 = 1.5;
 
 /// All data that's needed to run endless broker loop and keep the WAL streaming connection alive, if possible.
 struct WalreceiverState {
-    id: ZTenantTimelineId,
+    id: TenantTimelineId,
+
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
-    local_timeline: Arc<Timeline>,
+    timeline: Arc<Timeline>,
     /// The timeout on the connection to safekeeper for WAL streaming.
     wal_connect_timeout: Duration,
     /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
@@ -299,15 +326,18 @@ struct EtcdSkTimeline {
 
 impl WalreceiverState {
     fn new(
-        id: ZTenantTimelineId,
-        local_timeline: Arc<Timeline>,
+        timeline: Arc<Timeline>,
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
     ) -> Self {
+        let id = TenantTimelineId {
+            tenant_id: timeline.tenant_id,
+            timeline_id: timeline.timeline_id,
+        };
         Self {
             id,
-            local_timeline,
+            timeline,
             wal_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
@@ -323,10 +353,11 @@ impl WalreceiverState {
 
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
+        let timeline = Arc::clone(&self.timeline);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
-                    id,
+                    timeline,
                     &new_wal_source_connstr,
                     events_sender.as_ref(),
                     cancellation,
@@ -520,7 +551,7 @@ impl WalreceiverState {
 
                 let current_lsn = match existing_wal_connection.status.streaming_lsn {
                     Some(lsn) => lsn,
-                    None => self.local_timeline.get_last_record_lsn(),
+                    None => self.timeline.get_last_record_lsn(),
                 };
                 let current_commit_lsn = existing_wal_connection
                     .status
@@ -715,10 +746,10 @@ enum ReconnectReason {
 }
 
 fn wal_stream_connection_string(
-    ZTenantTimelineId {
+    TenantTimelineId {
         tenant_id,
         timeline_id,
-    }: ZTenantTimelineId,
+    }: TenantTimelineId,
     listen_pg_addr_str: &str,
 ) -> anyhow::Result<String> {
     let sk_connstr = format!("postgresql://no_user@{listen_pg_addr_str}/no_db");
@@ -729,18 +760,18 @@ fn wal_stream_connection_string(
         })?;
     let (host, port) = utils::connstring::connection_host_port(&me_conf);
     Ok(format!(
-        "host={host} port={port} options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
+        "host={host} port={port} options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::repo_harness::{RepoHarness, TIMELINE_ID};
+    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
 
     #[test]
     fn no_connection_no_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("no_connection_no_candidate")?;
+        let harness = TenantHarness::create("no_connection_no_candidate")?;
         let mut state = dummy_state(&harness);
         let now = Utc::now().naive_utc();
 
@@ -826,7 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_no_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("connection_no_candidate")?;
+        let harness = TenantHarness::create("connection_no_candidate")?;
         let mut state = dummy_state(&harness);
         let now = Utc::now().naive_utc();
 
@@ -917,7 +948,7 @@ mod tests {
 
     #[test]
     fn no_connection_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("no_connection_candidate")?;
+        let harness = TenantHarness::create("no_connection_candidate")?;
         let mut state = dummy_state(&harness);
         let now = Utc::now().naive_utc();
 
@@ -1022,7 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_with_many_connection_failures() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("candidate_with_many_connection_failures")?;
+        let harness = TenantHarness::create("candidate_with_many_connection_failures")?;
         let mut state = dummy_state(&harness);
         let now = Utc::now().naive_utc();
 
@@ -1086,7 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn lsn_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("lsn_wal_over_threshcurrent_candidate")?;
+        let harness = TenantHarness::create("lsn_wal_over_threshcurrent_candidate")?;
         let mut state = dummy_state(&harness);
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
@@ -1173,7 +1204,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_connection_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("timeout_connection_threshhold_current_candidate")?;
+        let harness = TenantHarness::create("timeout_connection_threshhold_current_candidate")?;
         let mut state = dummy_state(&harness);
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
@@ -1245,7 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("timeout_wal_over_threshhold_current_candidate")?;
+        let harness = TenantHarness::create("timeout_wal_over_threshhold_current_candidate")?;
         let mut state = dummy_state(&harness);
         let current_lsn = Lsn(100_000).align();
         let new_lsn = Lsn(100_100).align();
@@ -1322,13 +1353,13 @@ mod tests {
 
     const DUMMY_SAFEKEEPER_CONNSTR: &str = "safekeeper_connstr";
 
-    fn dummy_state(harness: &RepoHarness) -> WalreceiverState {
+    fn dummy_state(harness: &TenantHarness) -> WalreceiverState {
         WalreceiverState {
-            id: ZTenantTimelineId {
+            id: TenantTimelineId {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
             },
-            local_timeline: harness
+            timeline: harness
                 .load()
                 .create_empty_timeline(TIMELINE_ID, Lsn(0))
                 .expect("Failed to create an empty timeline for dummy wal connection manager"),

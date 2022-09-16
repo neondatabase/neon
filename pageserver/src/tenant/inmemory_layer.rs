@@ -5,14 +5,12 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
-use crate::layered_repository::blob_io::{BlobCursor, BlobWriter};
-use crate::layered_repository::block_io::BlockReader;
-use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
-use crate::layered_repository::ephemeral_file::EphemeralFile;
-use crate::layered_repository::storage_layer::{
-    Layer, ValueReconstructResult, ValueReconstructState,
-};
 use crate::repository::{Key, Value};
+use crate::tenant::blob_io::{BlobCursor, BlobWriter};
+use crate::tenant::block_io::BlockReader;
+use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
+use crate::tenant::ephemeral_file::EphemeralFile;
+use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
 use anyhow::{bail, ensure, Result};
 use std::cell::RefCell;
@@ -20,9 +18,9 @@ use std::collections::HashMap;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
     vec_map::VecMap,
-    zid::{ZTenantId, ZTimelineId},
 };
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
@@ -39,8 +37,8 @@ thread_local! {
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
-    timelineid: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
 
     ///
     /// This layer contains all the changes from 'start_lsn'. The
@@ -96,12 +94,12 @@ impl Layer for InMemoryLayer {
         None
     }
 
-    fn get_tenant_id(&self) -> ZTenantId {
-        self.tenantid
+    fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
     }
 
-    fn get_timeline_id(&self) -> ZTimelineId {
-        self.timelineid
+    fn get_timeline_id(&self) -> TimelineId {
+        self.timeline_id
     }
 
     fn get_key_range(&self) -> Range<Key> {
@@ -199,7 +197,7 @@ impl Layer for InMemoryLayer {
 
         println!(
             "----- in-memory layer for tli {} LSNs {}-{} ----",
-            self.timelineid, self.start_lsn, end_str,
+            self.timeline_id, self.start_lsn, end_str,
         );
 
         if !verbose {
@@ -253,22 +251,18 @@ impl InMemoryLayer {
     ///
     pub fn create(
         conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
         start_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
-        trace!(
-            "initializing new empty InMemoryLayer for writing on timeline {} at {}",
-            timelineid,
-            start_lsn
-        );
+        trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
-        let file = EphemeralFile::create(conf, tenantid, timelineid)?;
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
 
         Ok(InMemoryLayer {
             conf,
-            timelineid,
-            tenantid,
+            timeline_id,
+            tenant_id,
             start_lsn,
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
@@ -283,7 +277,7 @@ impl InMemoryLayer {
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
     pub fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
-        trace!("put_value key {} at {}/{}", key, self.timelineid, lsn);
+        trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
         let mut inner = self.inner.write().unwrap();
         inner.assert_writeable();
 
@@ -346,8 +340,8 @@ impl InMemoryLayer {
 
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
-            self.timelineid,
-            self.tenantid,
+            self.timeline_id,
+            self.tenant_id,
             Key::MIN,
             self.start_lsn..inner.end_lsn.unwrap(),
         )?;

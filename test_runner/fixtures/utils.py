@@ -155,7 +155,7 @@ def get_scale_for_db(size_mb: int) -> int:
 
 
 ATTACHMENT_NAME_REGEX = re.compile(
-    r".+\.log|.+\.stderr|.+\.stdout|.+\.filediff|.+\.metrics|flamegraph\.svg|regression\.diffs"
+    r".+\.log|.+\.stderr|.+\.stdout|.+\.filediff|.+\.metrics|flamegraph\.svg|regression\.diffs|.+\.html"
 )
 
 
@@ -180,6 +180,9 @@ def allure_attach_from_dir(dir: Path):
             elif source.endswith(".svg"):
                 attachment_type = "image/svg+xml"
                 extension = "svg"
+            elif source.endswith(".html"):
+                attachment_type = "text/html"
+                extension = "html"
             else:
                 attachment_type = "text/plain"
                 extension = attachment.suffix.removeprefix(".")

@@ -1,5 +1,5 @@
 //!
-//! Parse PostgreSQL WAL records and store them in a zenith Timeline.
+//! Parse PostgreSQL WAL records and store them in a neon Timeline.
 //!
 //! The pipeline for ingesting WAL looks like this:
 //!
@@ -9,7 +9,7 @@
 //! and decodes it to individual WAL records. It feeds the WAL records
 //! to WalIngest, which parses them and stores them in the Repository.
 //!
-//! The zenith Repository can store page versions in two formats: as
+//! The neon Repository can store page versions in two formats: as
 //! page images, or a WAL records. WalIngest::ingest_record() extracts
 //! page images out of some WAL records, but most it stores as WAL
 //! records. If a WAL record modifies multiple pages, WalIngest
@@ -30,9 +30,9 @@ use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
-use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
+use crate::tenant::Timeline;
 use crate::walrecord::*;
 use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::v14::pg_constants;
@@ -315,7 +315,7 @@ impl<'a> WalIngest<'a> {
             assert_eq!(image.len(), BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
         } else {
-            let rec = ZenithWalRecord::Postgres {
+            let rec = NeonWalRecord::Postgres {
                 will_init: blk.will_init || blk.apply_image,
                 rec: decoded.record.clone(),
             };
@@ -428,7 +428,7 @@ impl<'a> WalIngest<'a> {
                         modification,
                         vm_rel,
                         new_vm_blk.unwrap(),
-                        ZenithWalRecord::ClearVisibilityMapFlags {
+                        NeonWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
                             old_heap_blkno,
                             flags: pg_constants::VISIBILITYMAP_VALID_BITS,
@@ -442,7 +442,7 @@ impl<'a> WalIngest<'a> {
                             modification,
                             vm_rel,
                             new_vm_blk,
-                            ZenithWalRecord::ClearVisibilityMapFlags {
+                            NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno,
                                 old_heap_blkno: None,
                                 flags: pg_constants::VISIBILITYMAP_VALID_BITS,
@@ -454,7 +454,7 @@ impl<'a> WalIngest<'a> {
                             modification,
                             vm_rel,
                             old_vm_blk,
-                            ZenithWalRecord::ClearVisibilityMapFlags {
+                            NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno: None,
                                 old_heap_blkno,
                                 flags: pg_constants::VISIBILITYMAP_VALID_BITS,
@@ -642,12 +642,12 @@ impl<'a> WalIngest<'a> {
                     segno,
                     rpageno,
                     if is_commit {
-                        ZenithWalRecord::ClogSetCommitted {
+                        NeonWalRecord::ClogSetCommitted {
                             xids: page_xids,
                             timestamp: parsed.xact_time,
                         }
                     } else {
-                        ZenithWalRecord::ClogSetAborted { xids: page_xids }
+                        NeonWalRecord::ClogSetAborted { xids: page_xids }
                     },
                 )?;
                 page_xids = Vec::new();
@@ -662,12 +662,12 @@ impl<'a> WalIngest<'a> {
             segno,
             rpageno,
             if is_commit {
-                ZenithWalRecord::ClogSetCommitted {
+                NeonWalRecord::ClogSetCommitted {
                     xids: page_xids,
                     timestamp: parsed.xact_time,
                 }
             } else {
-                ZenithWalRecord::ClogSetAborted { xids: page_xids }
+                NeonWalRecord::ClogSetAborted { xids: page_xids }
             },
         )?;
 
@@ -760,7 +760,7 @@ impl<'a> WalIngest<'a> {
             SlruKind::MultiXactOffsets,
             segno,
             rpageno,
-            ZenithWalRecord::MultixactOffsetCreate {
+            NeonWalRecord::MultixactOffsetCreate {
                 mid: xlrec.mid,
                 moff: xlrec.moff,
             },
@@ -794,7 +794,7 @@ impl<'a> WalIngest<'a> {
                 SlruKind::MultiXactMembers,
                 pageno / pg_constants::SLRU_PAGES_PER_SEGMENT,
                 pageno % pg_constants::SLRU_PAGES_PER_SEGMENT,
-                ZenithWalRecord::MultixactMembersCreate {
+                NeonWalRecord::MultixactMembersCreate {
                     moff: offset,
                     members: this_page_members,
                 },
@@ -901,7 +901,7 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification,
         rel: RelTag,
         blknum: BlockNumber,
-        rec: ZenithWalRecord,
+        rec: NeonWalRecord,
     ) -> Result<()> {
         self.handle_rel_extend(modification, rel, blknum)?;
         modification.put_rel_wal_record(rel, blknum, rec)?;
@@ -1022,16 +1022,13 @@ impl<'a> WalIngest<'a> {
     }
 }
 
-///
-/// Tests that should work the same with any Repository/Timeline implementation.
-///
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::repo_harness::*;
-    use crate::layered_repository::Timeline;
     use crate::pgdatadir_mapping::create_test_timeline;
+    use crate::tenant::harness::*;
+    use crate::tenant::Timeline;
     use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
 
@@ -1061,8 +1058,8 @@ mod tests {
 
     #[test]
     fn test_relsize() -> Result<()> {
-        let repo = RepoHarness::create("test_relsize")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_relsize")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1189,8 +1186,8 @@ mod tests {
     // and then created it again within the same layer.
     #[test]
     fn test_drop_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_drop_extend")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_drop_extend")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1229,8 +1226,8 @@ mod tests {
     // and then extended it again within the same layer.
     #[test]
     fn test_truncate_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_truncate_extend")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_truncate_extend")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1317,8 +1314,8 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[test]
     fn test_large_rel() -> Result<()> {
-        let repo = RepoHarness::create("test_large_rel")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_large_rel")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;

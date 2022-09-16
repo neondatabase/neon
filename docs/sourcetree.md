@@ -10,7 +10,7 @@ Intended to be used in integration tests and in CLI tools for local installation
 
 `/docs`:
 
-Documentation of the Zenith features and concepts.
+Documentation of the Neon features and concepts.
 Now it is mostly dev documentation.
 
 `/monitoring`:
@@ -19,7 +19,7 @@ TODO
 
 `/pageserver`:
 
-Zenith storage service.
+Neon storage service.
 The pageserver has a few different duties:
 
 - Store and manage the data.
@@ -54,7 +54,7 @@ PostgreSQL extension that contains functions needed for testing and debugging.
 
 `/safekeeper`:
 
-The zenith WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
+The neon WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
 It acts as a holding area and redistribution center for recently generated WAL.
 
 For more detailed info, see [walservice.md](./walservice.md)
@@ -63,11 +63,6 @@ For more detailed info, see [walservice.md](./walservice.md)
 The workspace_hack crate exists only to pin down some dependencies.
 
 We use [cargo-hakari](https://crates.io/crates/cargo-hakari) for automation.
-
-`/zenith`
-
-Main entry point for the 'zenith' CLI utility.
-TODO: Doesn't it belong to control_plane?
 
 `/libs`:
 Unites granular neon helper crates under the hood.
@@ -134,3 +129,52 @@ Also consider:
 To add new package or change an existing one you can use `poetry add` or `poetry update` or edit `pyproject.toml` manually. Do not forget to run `poetry lock` in the latter case.
 
 More details are available in poetry's [documentation](https://python-poetry.org/docs/).
+
+## Configuring IDEs
+Neon consists of three projects in different languages which use different project models.
+
+* A bunch of Rust crates, all available from the root `Cargo.toml`.
+* Integration tests in Python in the `test_runner` directory. Some stand-alone Python scripts exist as well.
+* Postgres and our Postgres extensions in C built with Makefiles under `vendor/postgres` and `pgxn`.
+
+### CLion
+You can use CLion with the [Rust plugin](https://plugins.jetbrains.com/plugin/8182-rust) to develop Neon. It should pick up Rust and Python projects whenever you open Neon's repository as a project. We have not tried setting up a debugger, though.
+
+C code requires some extra care, as it's built via Make, not CMake. Some of our developers have successfully used [compilation database](https://www.jetbrains.com/help/clion/compilation-database.html#compdb_generate) for CLion. It is a JSON file which lists all C source files and corresponding compilation keys. CLion can use it instead of `CMakeLists.txt`. To set up a project with a compilation database:
+
+1. Clone the Neon repository and install all dependencies, including Python. Do not open it with CLion just yet.
+2. Run the following commands in the repository's root:
+   ```bash
+   # Install a `compiledb` tool which can parse make's output and generate the compilation database.
+   poetry add -D compiledb
+   # Clean the build tree so we can rebuild from scratch.
+   # Unfortunately, our and Postgres Makefiles do not work well with either --dry-run or --assume-new,
+   # so we don't know a way to generate the compilation database without recompiling everything,
+   # see https://github.com/neondatabase/neon/issues/2378#issuecomment-1241421325
+   make distclean
+   # Rebuild the Postgres parts from scratch and save the compilation commands to the compilation database.
+   # You can alter the -j parameter to your liking.
+   # Note that we only build for a specific version of Postgres. The extension code is shared, but headers are
+   # different, so we set up CLion to only use a specific version of the headers.
+   make -j$(nproc) --print-directory postgres-v15 neon-pg-ext-v15 | poetry run compiledb --verbose --no-build
+   # Uninstall the tool
+   poetry remove -D compiledb
+   # Make sure the compile_commands.json file is not committed.
+   echo /compile_commands.json >>.git/info/exclude
+   ```
+3. Open CLion, click "Open File or Project" and choose the generated `compile_commands.json` file to be opened "as a project". You cannot add a compilation database into an existing CLion project, you have to create a new one. _Do not_ open the directory as a project, open the file.
+4. The newly created project should start indexing Postgres source code in C, as well as the C standard library. You may have to [configure the C compiler for the compilation database](https://www.jetbrains.com/help/clion/compilation-database.html#compdb_toolchain).
+5. Open the `Cargo.toml` file in an editor in the same project. CLion should pick up the hint and start indexing Rust code.
+6. Now you have a CLion project which knows about C files, Rust files. It should pick up Python files automatically as well.
+7. Set up correct code indentation in CLion's settings: Editor > Code Style > C/C++, choose the "Project" scheme on the top, and tick the "Use tab character" on the "Tabs and Indents" tab. Ensure that "Tab size" is 4.
+
+You can also enable Cargo Clippy diagnostics and enable Rustfmt instead of built-in code formatter.
+
+Whenever you change layout of C files, you may need to regenerate the compilation database. No need to re-create the CLion project, changes should be picked up automatically.
+
+Known issues (fixes and suggestions are welcome):
+
+* Test results may be hard to read in CLion, both for unit tests in Rust and integration tests in Python. Use command line to run them instead.
+* CLion does not support non-local Python interpreters, unlike PyCharm. E.g. if you use WSL, CLion does not see `poetry` and installed dependencies. Python support is limited.
+* Cargo Clippy diagnostics in CLion may take a lot of resources.
+* `poetry add -D` updates some packages and changes `poetry.lock` drastically even when followed by `poetry remove -D`. Feel free to `git checkout poetry.lock` and `./scripts/pysync` to revert these changes.

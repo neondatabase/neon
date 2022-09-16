@@ -1,6 +1,6 @@
 //!
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
-//! a zenith Timeline.
+//! a neon Timeline.
 //!
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -11,9 +11,9 @@ use bytes::Bytes;
 use tracing::*;
 use walkdir::WalkDir;
 
-use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
+use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
 use postgres_ffi::v14::relfile_utils::*;

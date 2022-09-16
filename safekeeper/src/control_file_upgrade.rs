@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::{
     bin_ser::LeSer,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
     pq_proto::SystemId,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 /// Persistent consensus state of the acceptor.
@@ -45,9 +45,8 @@ pub struct ServerInfoV2 {
     /// Postgres server version
     pub pg_version: u32,
     pub system_id: SystemId,
-    pub tenant_id: ZTenantId,
-    /// Zenith timelineid
-    pub ztli: ZTimelineId,
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
     pub wal_seg_size: u32,
 }
 
@@ -76,10 +75,9 @@ pub struct ServerInfoV3 {
     pub pg_version: u32,
     pub system_id: SystemId,
     #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
-    /// Zenith timelineid
+    pub tenant_id: TenantId,
     #[serde(with = "hex")]
-    pub timeline_id: ZTimelineId,
+    pub timeline_id: TimelineId,
     pub wal_seg_size: u32,
 }
 
@@ -106,10 +104,9 @@ pub struct SafeKeeperStateV3 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperStateV4 {
     #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
-    /// Zenith timelineid
+    pub tenant_id: TenantId,
     #[serde(with = "hex")]
-    pub timeline_id: ZTimelineId,
+    pub timeline_id: TimelineId,
     /// persistent acceptor state
     pub acceptor_state: AcceptorState,
     /// information about server
@@ -154,7 +151,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
         };
         return Ok(SafeKeeperState {
             tenant_id: oldstate.server.tenant_id,
-            timeline_id: oldstate.server.ztli,
+            timeline_id: oldstate.server.timeline_id,
             acceptor_state: ac,
             server: ServerInfo {
                 pg_version: oldstate.server.pg_version,
@@ -181,7 +178,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
         };
         return Ok(SafeKeeperState {
             tenant_id: oldstate.server.tenant_id,
-            timeline_id: oldstate.server.ztli,
+            timeline_id: oldstate.server.timeline_id,
             acceptor_state: oldstate.acceptor_state,
             server,
             proposer_uuid: oldstate.proposer_uuid,
@@ -193,9 +190,9 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
         });
-    // migrate to moving ztenantid/ztli to the top and adding some lsns
+    // migrate to moving tenant_id/timeline_id to the top and adding some lsns
     } else if version == 3 {
-        info!("reading safekeeper control file version {}", version);
+        info!("reading safekeeper control file version {version}");
         let oldstate = SafeKeeperStateV3::des(&buf[..buf.len()])?;
         let server = ServerInfo {
             pg_version: oldstate.server.pg_version,

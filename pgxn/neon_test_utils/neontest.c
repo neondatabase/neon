@@ -36,13 +36,13 @@ PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
 PG_FUNCTION_INFO_V1(neon_xlogflush);
 
 /*
- * Linkage to functions in zenith module.
+ * Linkage to functions in neon module.
  * The signature here would need to be updated whenever function parameters change in pagestore_smgr.c
  */
-typedef void (*zenith_read_at_lsn_type)(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
-			XLogRecPtr request_lsn, bool request_latest, char *buffer);
+typedef void (*neon_read_at_lsn_type) (RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+									   XLogRecPtr request_lsn, bool request_latest, char *buffer);
 
-static zenith_read_at_lsn_type zenith_read_at_lsn_ptr;
+static neon_read_at_lsn_type neon_read_at_lsn_ptr;
 
 /*
  * Module initialize function: fetch function pointers for cross-module calls.
@@ -51,13 +51,13 @@ void
 _PG_init(void)
 {
 	/* Asserts verify that typedefs above match original declarations */
-	AssertVariableIsOfType(&zenith_read_at_lsn, zenith_read_at_lsn_type);
-	zenith_read_at_lsn_ptr = (zenith_read_at_lsn_type)
-		load_external_function("$libdir/neon", "zenith_read_at_lsn",
+	AssertVariableIsOfType(&neon_read_at_lsn, neon_read_at_lsn_type);
+	neon_read_at_lsn_ptr = (neon_read_at_lsn_type)
+		load_external_function("$libdir/neon", "neon_read_at_lsn",
 							   true, NULL);
 }
 
-#define zenith_read_at_lsn zenith_read_at_lsn_ptr
+#define neon_read_at_lsn neon_read_at_lsn_ptr
 
 /*
  * test_consume_xids(int4), for rapidly consuming XIDs, to test wraparound.
@@ -96,7 +96,7 @@ test_consume_xids(PG_FUNCTION_ARGS)
 Datum
 clear_buffer_cache(PG_FUNCTION_ARGS)
 {
-	bool		save_zenith_test_evict;
+	bool		save_neon_test_evict;
 
 	/*
 	 * Temporarily set the zenith_test_evict GUC, so that when we pin and
@@ -104,7 +104,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 	 * buffers, as there is no explicit "evict this buffer" function in the
 	 * buffer manager.
 	 */
-	save_zenith_test_evict = zenith_test_evict;
+	save_neon_test_evict = zenith_test_evict;
 	zenith_test_evict = true;
 	PG_TRY();
 	{
@@ -136,8 +136,8 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 
 			/*
 			 * Pin the buffer, and release it again. Because we have
-			 * zenith_test_evict==true, this will evict the page from
-			 * the buffer cache if no one else is holding a pin on it.
+			 * zenith_test_evict==true, this will evict the page from the
+			 * buffer cache if no one else is holding a pin on it.
 			 */
 			if (isvalid)
 			{
@@ -149,13 +149,12 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 	PG_FINALLY();
 	{
 		/* restore the GUC */
-		zenith_test_evict = save_zenith_test_evict;
+		zenith_test_evict = save_neon_test_evict;
 	}
 	PG_END_TRY();
 
 	PG_RETURN_VOID();
 }
-
 
 /*
  * Reads the page from page server without buffer cache
@@ -177,8 +176,8 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	text	   *forkname;
 	uint32		blkno;
 
-	bool request_latest = PG_ARGISNULL(3);
-	uint64 read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(3);
+	bool		request_latest = PG_ARGISNULL(3);
+	uint64		read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(3);
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
@@ -232,7 +231,6 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
 
-
 	forknum = forkname_to_number(text_to_cstring(forkname));
 
 	/* Initialize buffer to copy to */
@@ -240,7 +238,7 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 	raw_page_data = VARDATA(raw_page);
 
-	zenith_read_at_lsn(rel->rd_node, forknum, blkno, read_lsn, request_latest, raw_page_data);
+	neon_read_at_lsn(rel->rd_node, forknum, blkno, read_lsn, request_latest, raw_page_data);
 
 	relation_close(rel, AccessShareLock);
 
@@ -262,7 +260,7 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				errmsg("must be superuser to use raw page functions")));
+				 errmsg("must be superuser to use raw page functions")));
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
 		PG_ARGISNULL(3) || PG_ARGISNULL(4))
@@ -271,23 +269,22 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 	{
 		RelFileNode rnode = {
 			.spcNode = PG_GETARG_OID(0),
-			.dbNode  = PG_GETARG_OID(1),
-			.relNode = PG_GETARG_OID(2)
-		};
+			.dbNode = PG_GETARG_OID(1),
+		.relNode = PG_GETARG_OID(2)};
 
-		ForkNumber forknum = PG_GETARG_UINT32(3);
+		ForkNumber	forknum = PG_GETARG_UINT32(3);
 
-		uint32 blkno = PG_GETARG_UINT32(4);
-		bool request_latest = PG_ARGISNULL(5);
-		uint64 read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(5);
-
+		uint32		blkno = PG_GETARG_UINT32(4);
+		bool		request_latest = PG_ARGISNULL(5);
+		uint64		read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(5);
 
 		/* Initialize buffer to copy to */
-		bytea *raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
+		bytea	   *raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
+
 		SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 		raw_page_data = VARDATA(raw_page);
 
-		zenith_read_at_lsn(rnode, forknum, blkno, read_lsn, request_latest, raw_page_data);
+		neon_read_at_lsn(rnode, forknum, blkno, read_lsn, request_latest, raw_page_data);
 		PG_RETURN_BYTEA_P(raw_page);
 	}
 }
@@ -298,7 +295,8 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 Datum
 neon_xlogflush(PG_FUNCTION_ARGS)
 {
-	XLogRecPtr lsn = PG_GETARG_LSN(0);
+	XLogRecPtr	lsn = PG_GETARG_LSN(0);
+
 	XLogFlush(lsn);
 	PG_RETURN_VOID();
 }

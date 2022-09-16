@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::bin_ser::DeserializeError;
 
-/// Each update to a page is represented by a ZenithWalRecord. It can be a wrapper
-/// around a PostgreSQL WAL record, or a custom zenith-specific "record".
+/// Each update to a page is represented by a NeonWalRecord. It can be a wrapper
+/// around a PostgreSQL WAL record, or a custom neon-specific "record".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ZenithWalRecord {
+pub enum NeonWalRecord {
     /// Native PostgreSQL WAL record
     Postgres { will_init: bool, rec: Bytes },
 
@@ -45,14 +45,14 @@ pub enum ZenithWalRecord {
     },
 }
 
-impl ZenithWalRecord {
+impl NeonWalRecord {
     /// Does replaying this WAL record initialize the page from scratch, or does
     /// it need to be applied over the previous image of the page?
     pub fn will_init(&self) -> bool {
         match self {
-            ZenithWalRecord::Postgres { will_init, rec: _ } => *will_init,
+            NeonWalRecord::Postgres { will_init, rec: _ } => *will_init,
 
-            // None of the special zenith record types currently initialize the page
+            // None of the special neon record types currently initialize the page
             _ => false,
         }
     }
@@ -767,9 +767,9 @@ pub fn decode_wal_record(
 /// Build a human-readable string to describe a WAL record
 ///
 /// For debugging purposes
-pub fn describe_wal_record(rec: &ZenithWalRecord) -> Result<String, DeserializeError> {
+pub fn describe_wal_record(rec: &NeonWalRecord) -> Result<String, DeserializeError> {
     match rec {
-        ZenithWalRecord::Postgres { will_init, rec } => Ok(format!(
+        NeonWalRecord::Postgres { will_init, rec } => Ok(format!(
             "will_init: {}, {}",
             will_init,
             describe_postgres_wal_record(rec)?

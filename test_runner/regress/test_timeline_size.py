@@ -15,7 +15,7 @@ from fixtures.neon_fixtures import (
     assert_timeline_local,
     wait_for_last_flush_lsn,
 )
-from fixtures.types import ZTenantId, ZTimelineId
+from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size
 
 
@@ -386,7 +386,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
 
     tenant, timeline = env.neon_cli.create_tenant()
 
-    def get_timeline_physical_size(timeline: ZTimelineId):
+    def get_timeline_physical_size(timeline: TimelineId):
         res = client.timeline_detail(tenant, timeline, include_non_incremental_physical_size=True)
         return res["local"]["current_physical_size_non_incremental"]
 
@@ -415,7 +415,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
     assert tenant_physical_size == timeline_total_size
 
 
-def assert_physical_size(env: NeonEnv, tenant_id: ZTenantId, timeline_id: ZTimelineId):
+def assert_physical_size(env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId):
     """Check the current physical size returned from timeline API
     matches the total physical size of the timeline on disk"""
     client = env.pageserver.http_client()
@@ -431,7 +431,7 @@ def assert_physical_size(env: NeonEnv, tenant_id: ZTenantId, timeline_id: ZTimel
 # Timeline logical size initialization is an asynchronous background task that runs once,
 # try a few times to ensure it's activated properly
 def wait_for_timeline_size_init(
-    client: NeonPageserverHttpClient, tenant: ZTenantId, timeline: ZTimelineId
+    client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
 ):
     for i in range(10):
         timeline_details = assert_timeline_local(client, tenant, timeline)

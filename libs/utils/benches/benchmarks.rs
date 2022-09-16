@@ -1,11 +1,11 @@
 #![allow(unused)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use utils::zid;
+use utils::id;
 
 pub fn bench_zid_stringify(c: &mut Criterion) {
     // Can only use public methods.
-    let ztl = zid::ZTenantTimelineId::generate();
+    let ztl = id::TenantTimelineId::generate();
 
     c.bench_function("zid.to_string", |b| {
         b.iter(|| {

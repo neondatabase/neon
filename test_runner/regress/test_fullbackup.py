@@ -8,7 +8,7 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
     pg_distrib_dir,
 )
-from fixtures.types import Lsn, ZTimelineId
+from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar, subprocess_capture
 
 num_rows = 1000
@@ -18,8 +18,6 @@ num_rows = 1000
 def test_fullbackup(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, port_distributor: PortDistributor
 ):
-
-    neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_fullbackup")
@@ -27,7 +25,7 @@ def test_fullbackup(
     log.info("postgres is running on 'test_fullbackup' branch")
 
     with pgmain.cursor() as cur:
-        timeline = ZTimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
+        timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
         # data loading may take a while, so increase statement timeout
         cur.execute("SET statement_timeout='300s'")

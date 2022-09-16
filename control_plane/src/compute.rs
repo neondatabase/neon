@@ -13,9 +13,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use utils::{
     connstring::connection_host_port,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::local_env::LocalEnv;
@@ -28,7 +28,7 @@ use crate::storage::PageServerNode;
 pub struct ComputeControlPlane {
     base_port: u16,
     pageserver: Arc<PageServerNode>,
-    pub nodes: BTreeMap<(ZTenantId, String), Arc<PostgresNode>>,
+    pub nodes: BTreeMap<(TenantId, String), Arc<PostgresNode>>,
     env: LocalEnv,
 }
 
@@ -76,9 +76,9 @@ impl ComputeControlPlane {
 
     pub fn new_node(
         &mut self,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         name: &str,
-        timeline_id: ZTimelineId,
+        timeline_id: TimelineId,
         lsn: Option<Lsn>,
         port: Option<u16>,
     ) -> Result<Arc<PostgresNode>> {
@@ -114,9 +114,9 @@ pub struct PostgresNode {
     pub env: LocalEnv,
     pageserver: Arc<PageServerNode>,
     is_test: bool,
-    pub timeline_id: ZTimelineId,
+    pub timeline_id: TimelineId,
     pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     uses_wal_proposer: bool,
 }
 
@@ -148,8 +148,8 @@ impl PostgresNode {
         // Read a few options from the config file
         let context = format!("in config file {}", cfg_path_str);
         let port: u16 = conf.parse_field("port", &context)?;
-        let timeline_id: ZTimelineId = conf.parse_field("neon.timeline_id", &context)?;
-        let tenant_id: ZTenantId = conf.parse_field("neon.tenant_id", &context)?;
+        let timeline_id: TimelineId = conf.parse_field("neon.timeline_id", &context)?;
+        let tenant_id: TenantId = conf.parse_field("neon.tenant_id", &context)?;
         let uses_wal_proposer = conf.get("neon.safekeepers").is_some();
 
         // parse recovery_target_lsn, if any
@@ -292,7 +292,7 @@ impl PostgresNode {
             // variable during compute pg startup. It is done this way because
             // otherwise user will be able to retrieve the value using SHOW
             // command or pg_settings
-            let password = if let AuthType::ZenithJWT = auth_type {
+            let password = if let AuthType::NeonJWT = auth_type {
                 "$ZENITH_AUTH_TOKEN"
             } else {
                 ""
@@ -301,7 +301,7 @@ impl PostgresNode {
             // Also note that not all parameters are supported here. Because in compute we substitute $ZENITH_AUTH_TOKEN
             // We parse this string and build it back with token from env var, and for simplicity rebuild
             // uses only needed variables namely host, port, user, password.
-            format!("postgresql://no_user:{}@{}:{}", password, host, port)
+            format!("postgresql://no_user:{password}@{host}:{port}")
         };
         conf.append("shared_preload_libraries", "neon");
         conf.append_line("");

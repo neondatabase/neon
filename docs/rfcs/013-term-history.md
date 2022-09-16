@@ -70,7 +70,7 @@ two options.
 
 ...start sending WAL conservatively since the horizon (1.1), and truncate
 obsolete part of WAL only when recovery is finished, i.e. epochStartLsn (4) is
-reached, i.e. 2.3 transferred -- that's what https://github.com/zenithdb/zenith/pull/505 proposes.
+reached, i.e. 2.3 transferred -- that's what https://github.com/neondatabase/neon/pull/505 proposes.
 
 Then the following is possible:
 

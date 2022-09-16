@@ -2,7 +2,7 @@
 //! The layer map tracks what layers exist in a timeline.
 //!
 //! When the timeline is first accessed, the server lists of all layer files
-//! in the timelines/<timelineid> directory, and populates this map with
+//! in the timelines/<timeline_id> directory, and populates this map with
 //! ImageLayer and DeltaLayer structs corresponding to each file. When the first
 //! new WAL record is received, we create an InMemoryLayer to hold the incoming
 //! records. Now and then, in the checkpoint() function, the in-memory layer is
@@ -10,11 +10,11 @@
 //! corresponding files are written to disk.
 //!
 
-use crate::layered_repository::inmemory_layer::InMemoryLayer;
-use crate::layered_repository::storage_layer::Layer;
-use crate::layered_repository::storage_layer::{range_eq, range_overlaps};
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
+use crate::tenant::inmemory_layer::InMemoryLayer;
+use crate::tenant::storage_layer::Layer;
+use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::ops::Range;

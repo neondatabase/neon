@@ -3,22 +3,21 @@ use std::num::NonZeroU64;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::{
+    id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
-    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
-// These enums are used in the API response fields.
-use crate::tenant_mgr::TenantState;
+use crate::tenant::TenantState;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_timeline_id: Option<ZTimelineId>,
+    pub new_timeline_id: Option<TimelineId>,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
-    pub ancestor_timeline_id: Option<ZTimelineId>,
+    pub ancestor_timeline_id: Option<TimelineId>,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_start_lsn: Option<Lsn>,
@@ -29,7 +28,7 @@ pub struct TimelineCreateRequest {
 pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_tenant_id: Option<ZTenantId>,
+    pub new_tenant_id: Option<TenantId>,
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
@@ -48,7 +47,7 @@ pub struct TenantCreateRequest {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub ZTenantId);
+pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub TenantId);
 
 #[derive(Serialize)]
 pub struct StatusResponse {
@@ -56,7 +55,7 @@ pub struct StatusResponse {
 }
 
 impl TenantCreateRequest {
-    pub fn new(new_tenant_id: Option<ZTenantId>) -> TenantCreateRequest {
+    pub fn new(new_tenant_id: Option<TenantId>) -> TenantCreateRequest {
         TenantCreateRequest {
             new_tenant_id,
             ..Default::default()
@@ -67,7 +66,7 @@ impl TenantCreateRequest {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TenantConfigRequest {
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub checkpoint_distance: Option<u64>,
@@ -85,7 +84,7 @@ pub struct TenantConfigRequest {
 }
 
 impl TenantConfigRequest {
-    pub fn new(tenant_id: ZTenantId) -> TenantConfigRequest {
+    pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
         TenantConfigRequest {
             tenant_id,
             checkpoint_distance: None,
@@ -108,8 +107,8 @@ impl TenantConfigRequest {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
-    pub id: ZTenantId,
-    pub state: Option<TenantState>,
+    pub id: TenantId,
+    pub state: TenantState,
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub has_in_progress_downloads: Option<bool>,
 }
@@ -118,7 +117,7 @@ pub struct TenantInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LocalTimelineInfo {
     #[serde_as(as = "Option<DisplayFromStr>")]
-    pub ancestor_timeline_id: Option<ZTimelineId>,
+    pub ancestor_timeline_id: Option<TimelineId>,
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_lsn: Option<Lsn>,
     #[serde_as(as = "DisplayFromStr")]
@@ -156,9 +155,9 @@ pub struct RemoteTimelineInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
     #[serde_as(as = "DisplayFromStr")]
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     #[serde_as(as = "DisplayFromStr")]
-    pub timeline_id: ZTimelineId,
+    pub timeline_id: TimelineId,
     pub local: Option<LocalTimelineInfo>,
     pub remote: Option<RemoteTimelineInfo>,
 }

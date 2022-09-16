@@ -123,7 +123,7 @@ The files are called "layer files". Each layer file covers a range of keys, and
 a range of LSNs (or a single LSN, in case of image layers). You can think of it
 as a rectangle in the two-dimensional key-LSN space. The layer files for each
 timeline are stored in the timeline's subdirectory under
-`.neon/tenants/<tenantid>/timelines`.
+`.neon/tenants/<tenant_id>/timelines`.
 
 There are two kind of layer files: images, and delta layers. An image file
 contains a snapshot of all keys at a particular LSN, whereas a delta file
@@ -351,7 +351,7 @@ branch.
 Note: It doesn't make any difference if the child branch is created
 when the end of the main branch was at LSN 250, or later when the tip of
 the main branch had already moved on. The latter case, creating a
-branch at a historic LSN, is how we support PITR in Zenith.
+branch at a historic LSN, is how we support PITR in Neon.
 
 
 # Garbage collection
@@ -396,9 +396,9 @@ table:
 	main/orders_200_300   DELETE
 	main/orders_300       STILL NEEDED BY orders_300_400
 	main/orders_300_400   KEEP, NEWER THAN GC HORIZON
-	main/orders_400       .. 
-	main/orders_400_500   .. 
-	main/orders_500       .. 
+	main/orders_400       ..
+	main/orders_400_500   ..
+	main/orders_500       ..
 	main/customers_100      DELETE
 	main/customers_100_200  DELETE
 	main/customers_200      KEEP, NO NEWER VERSION

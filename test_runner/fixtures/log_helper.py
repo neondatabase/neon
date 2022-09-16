@@ -1,5 +1,6 @@
 import logging
 import logging.config
+import re
 
 """
 This file configures logging to use in python tests.
@@ -29,6 +30,17 @@ LOGGING = {
 }
 
 
+class PasswordFilter(logging.Filter):
+    """Filter out password from logs."""
+
+    # Good enough to filter our passwords produced by PgProtocol.connstr
+    FILTER = re.compile(r"(\s*)password=[^\s]+(\s*)")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self.FILTER.sub(r"\1password=<hidden>\2", str(record.msg))
+        return True
+
+
 def getLogger(name="root") -> logging.Logger:
     """Method to get logger for tests.
 
@@ -38,5 +50,6 @@ def getLogger(name="root") -> logging.Logger:
 
 # default logger for tests
 log = getLogger()
+log.addFilter(PasswordFilter())
 
 logging.config.dictConfig(LOGGING)

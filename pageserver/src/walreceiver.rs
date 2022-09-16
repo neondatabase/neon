@@ -23,131 +23,61 @@
 mod connection_manager;
 mod walreceiver_connection;
 
+use crate::config::PageServerConf;
+use crate::task_mgr::WALRECEIVER_RUNTIME;
+
 use anyhow::{ensure, Context};
 use etcd_broker::Client;
 use itertools::Itertools;
-use std::cell::Cell;
-use std::collections::{hash_map, HashMap, HashSet};
+use once_cell::sync::OnceCell;
 use std::future::Future;
-use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::thread_local;
-use std::time::Duration;
-use tokio::{
-    select,
-    sync::{mpsc, watch},
-    task::JoinHandle,
-};
+use tokio::sync::watch;
 use tracing::*;
 use url::Url;
 
-use crate::config::PageServerConf;
-use crate::tenant_mgr::{self, LocalTimelineUpdate, TenantState};
-use crate::thread_mgr::{self, ThreadKind};
-use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+pub use connection_manager::spawn_connection_manager_task;
 
-thread_local! {
-    // Boolean that is true only for WAL receiver threads
-    //
-    // This is used in `wait_lsn` to guard against usage that might lead to a deadlock.
-    pub(crate) static IS_WAL_RECEIVER: Cell<bool> = Cell::new(false);
-}
+static ETCD_CLIENT: OnceCell<Client> = OnceCell::new();
 
-/// Sets up the main WAL receiver thread that manages the rest of the subtasks inside of it, per timeline.
-/// See comments in [`wal_receiver_main_thread_loop_step`] for more details on per timeline activities.
-pub fn init_wal_receiver_main_thread(
-    conf: &'static PageServerConf,
-    mut timeline_updates_receiver: mpsc::UnboundedReceiver<LocalTimelineUpdate>,
-) -> anyhow::Result<()> {
+///
+/// Initialize the etcd client. This must be called once at page server startup.
+///
+pub async fn init_etcd_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
     let etcd_endpoints = conf.broker_endpoints.clone();
     ensure!(
         !etcd_endpoints.is_empty(),
         "Cannot start wal receiver: etcd endpoints are empty"
     );
-    let broker_prefix = &conf.broker_etcd_prefix;
-    info!(
-        "Starting wal receiver main thread, etcd endpoints: {}",
-        etcd_endpoints.iter().map(Url::to_string).join(", ")
-    );
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .thread_name("wal-receiver-runtime-thread")
-        .enable_all()
-        .on_thread_start(|| IS_WAL_RECEIVER.with(|c| c.set(true)))
-        .build()
-        .context("Failed to create storage sync runtime")?;
-    let etcd_client = runtime
-        .block_on(Client::connect(etcd_endpoints, None))
+    let etcd_client = Client::connect(etcd_endpoints.clone(), None)
+        .await
         .context("Failed to connect to etcd")?;
 
-    thread_mgr::spawn(
-        ThreadKind::WalReceiverManager,
-        None,
-        None,
-        "WAL receiver manager main thread",
-        true,
-        move || {
-            runtime.block_on(async move {
-                let mut local_timeline_wal_receivers = HashMap::new();
-                loop {
-                    select! {
-                        _ = thread_mgr::shutdown_watcher() => {
-                            info!("Shutdown signal received");
-                            shutdown_all_wal_connections(&mut local_timeline_wal_receivers).await;
-                            break;
-                        },
-                        _ = wal_receiver_main_thread_loop_step(
-                            broker_prefix,
-                            &etcd_client,
-                            &mut timeline_updates_receiver,
-                            &mut local_timeline_wal_receivers,
-                        ) => {},
-                    }
-                }
-            }.instrument(info_span!("wal_receiver_main")));
+    // FIXME: Should we still allow the pageserver to start, if etcd
+    // doesn't work? It could still serve GetPage requests, with the
+    // data it has locally and from what it can download from remote
+    // storage
+    if ETCD_CLIENT.set(etcd_client).is_err() {
+        panic!("etcd already initialized");
+    }
 
-            info!("Wal receiver main thread stopped");
-            Ok(())
-        },
-    )
-    .map(|_thread_id| ())
-    .context("Failed to spawn wal receiver main thread")
+    info!(
+        "Initialized etcd client with endpoints: {}",
+        etcd_endpoints.iter().map(Url::to_string).join(", ")
+    );
+    Ok(())
 }
 
-async fn shutdown_all_wal_connections(
-    local_timeline_wal_receivers: &mut HashMap<ZTenantId, HashMap<ZTimelineId, TaskHandle<()>>>,
-) {
-    info!("Shutting down all WAL connections");
-    let mut broker_join_handles = Vec::new();
-    for (tenant_id, timelines) in local_timeline_wal_receivers.drain() {
-        for (timeline_id, handles) in timelines {
-            handles.cancellation.send(()).ok();
-            broker_join_handles.push((
-                ZTenantTimelineId::new(tenant_id, timeline_id),
-                handles.handle,
-            ));
-        }
-    }
+///
+/// Get a handle to the etcd client
+///
+pub fn get_etcd_client() -> &'static etcd_broker::Client {
+    ETCD_CLIENT.get().expect("etcd client not initialized")
+}
 
-    let mut tenants = HashSet::with_capacity(broker_join_handles.len());
-    for (id, broker_join_handle) in broker_join_handles {
-        tenants.insert(id.tenant_id);
-        debug!("Waiting for wal broker for timeline {id} to finish");
-        if let Err(e) = broker_join_handle.await {
-            error!("Failed to join on wal broker for timeline {id}: {e}");
-        }
-    }
-    if let Err(e) = tokio::task::spawn_blocking(move || {
-        for tenant_id in tenants {
-            if let Err(e) = tenant_mgr::set_tenant_state(tenant_id, TenantState::Idle) {
-                error!("Failed to make tenant {tenant_id} idle: {e:?}");
-            }
-        }
-    })
-    .await
-    {
-        error!("Failed to await a task to make all tenants idle: {e:?}");
-    }
+pub fn is_etcd_client_initialized() -> bool {
+    ETCD_CLIENT.get().is_some()
 }
 
 /// A handle of an asynchronous task.
@@ -157,8 +87,7 @@ async fn shutdown_all_wal_connections(
 /// Note that the communication happens via the `watch` channel, that does not accumulate the events, replacing the old one with the never one on submission.
 /// That may lead to certain events not being observed by the listener.
 #[derive(Debug)]
-struct TaskHandle<E> {
-    handle: JoinHandle<Result<(), String>>,
+pub struct TaskHandle<E> {
     events_receiver: watch::Receiver<TaskEvent<E>>,
     cancellation: watch::Sender<()>,
 }
@@ -167,7 +96,7 @@ struct TaskHandle<E> {
 pub enum TaskEvent<E> {
     Started,
     NewEvent(E),
-    End(Result<(), String>),
+    End,
 }
 
 impl<E: Clone> TaskHandle<E> {
@@ -184,164 +113,28 @@ impl<E: Clone> TaskHandle<E> {
         let events_sender = Arc::new(events_sender);
 
         let sender = Arc::clone(&events_sender);
-        let handle = tokio::task::spawn(async move {
+        let _ = WALRECEIVER_RUNTIME.spawn(async move {
             events_sender.send(TaskEvent::Started).ok();
             task(sender, cancellation_receiver).await
         });
 
         TaskHandle {
-            handle,
             events_receiver,
             cancellation,
         }
     }
 
     async fn next_task_event(&mut self) -> TaskEvent<E> {
-        select! {
-            next_task_event = self.events_receiver.changed() => match next_task_event {
-                Ok(()) => self.events_receiver.borrow().clone(),
-                Err(_task_channel_part_dropped) => join_on_handle(&mut self.handle).await,
-            },
-            task_completion_result = join_on_handle(&mut self.handle) => task_completion_result,
+        match self.events_receiver.changed().await {
+            Ok(()) => self.events_receiver.borrow().clone(),
+            Err(_task_channel_part_dropped) => TaskEvent::End,
         }
     }
 
     /// Aborts current task, waiting for it to finish.
-    async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         self.cancellation.send(()).ok();
-        if let Err(e) = self.handle.await {
-            error!("Task failed to shut down: {e}")
-        }
+        // wait until the sender is dropped
+        while self.events_receiver.changed().await.is_ok() {}
     }
-}
-
-async fn join_on_handle<E>(handle: &mut JoinHandle<Result<(), String>>) -> TaskEvent<E> {
-    match handle.await {
-        Ok(task_result) => TaskEvent::End(task_result),
-        Err(e) => {
-            if e.is_cancelled() {
-                TaskEvent::End(Ok(()))
-            } else {
-                TaskEvent::End(Err(format!("WAL receiver task panicked: {e}")))
-            }
-        }
-    }
-}
-
-/// A step to process timeline attach/detach events to enable/disable the corresponding WAL receiver machinery.
-/// In addition to WAL streaming management, the step ensures that corresponding tenant has its service threads enabled or disabled.
-/// This is done here, since only walreceiver knows when a certain tenant has no streaming enabled.
-///
-/// Cannot fail, should always try to process the next timeline event even if the other one was not processed properly.
-async fn wal_receiver_main_thread_loop_step<'a>(
-    broker_prefix: &'a str,
-    etcd_client: &'a Client,
-    timeline_updates_receiver: &'a mut mpsc::UnboundedReceiver<LocalTimelineUpdate>,
-    local_timeline_wal_receivers: &'a mut HashMap<ZTenantId, HashMap<ZTimelineId, TaskHandle<()>>>,
-) {
-    // Only react on updates from [`tenant_mgr`] on local timeline attach/detach.
-    match timeline_updates_receiver.recv().await {
-        Some(update) => {
-            info!("Processing timeline update: {update:?}");
-            match update {
-                // Timeline got detached, stop all related tasks and remove public timeline data.
-                LocalTimelineUpdate::Detach {
-                    id,
-                    join_confirmation_sender,
-                } => {
-                    match local_timeline_wal_receivers.get_mut(&id.tenant_id) {
-                        Some(wal_receivers) => {
-                            if let hash_map::Entry::Occupied(o) = wal_receivers.entry(id.timeline_id) {
-                                o.remove().shutdown().await
-                            }
-                            if wal_receivers.is_empty() {
-                                if let Err(e) = change_tenant_state(id.tenant_id, TenantState::Idle).await {
-                                    error!("Failed to make tenant idle for id {id}: {e:#}");
-                                }
-                            }
-                        }
-                        None => warn!("Timeline {id} does not have a tenant entry in wal receiver main thread"),
-                    };
-                    if let Err(e) = join_confirmation_sender.send(()) {
-                        warn!("cannot send wal_receiver shutdown confirmation {e}")
-                    } else {
-                        info!("confirm walreceiver shutdown for {id}");
-                    }
-                }
-                // Timeline got attached, retrieve all necessary information to start its broker loop and maintain this loop endlessly.
-                LocalTimelineUpdate::Attach { id, timeline } => {
-                    let timeline_connection_managers = local_timeline_wal_receivers
-                        .entry(id.tenant_id)
-                        .or_default();
-
-                    if timeline_connection_managers.is_empty() {
-                        if let Err(e) = change_tenant_state(id.tenant_id, TenantState::Active).await
-                        {
-                            error!("Failed to make tenant active for id {id}: {e:#}");
-                            return;
-                        }
-                    }
-
-                    let vacant_connection_manager_entry =
-                        match timeline_connection_managers.entry(id.timeline_id) {
-                            hash_map::Entry::Occupied(_) => {
-                                debug!("Attepted to readd an existing timeline {id}, ignoring");
-                                return;
-                            }
-                            hash_map::Entry::Vacant(v) => v,
-                        };
-
-                    let (wal_connect_timeout, lagging_wal_timeout, max_lsn_wal_lag) =
-                        match fetch_tenant_settings(id.tenant_id).await {
-                            Ok(settings) => settings,
-                            Err(e) => {
-                                error!("Failed to fetch tenant settings for id {id}: {e:#}");
-                                return;
-                            }
-                        };
-
-                    vacant_connection_manager_entry.insert(
-                        connection_manager::spawn_connection_manager_task(
-                            id,
-                            broker_prefix.to_owned(),
-                            etcd_client.clone(),
-                            timeline,
-                            wal_connect_timeout,
-                            lagging_wal_timeout,
-                            max_lsn_wal_lag,
-                        ),
-                    );
-                }
-            }
-        }
-        None => {
-            info!("Local timeline update channel closed");
-            shutdown_all_wal_connections(local_timeline_wal_receivers).await;
-        }
-    }
-}
-
-async fn fetch_tenant_settings(
-    tenant_id: ZTenantId,
-) -> anyhow::Result<(Duration, Duration, NonZeroU64)> {
-    tokio::task::spawn_blocking(move || {
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
-            .with_context(|| format!("no repository found for tenant {tenant_id}"))?;
-        Ok::<_, anyhow::Error>((
-            repo.get_wal_receiver_connect_timeout(),
-            repo.get_lagging_wal_timeout(),
-            repo.get_max_lsn_wal_lag(),
-        ))
-    })
-    .await
-    .with_context(|| format!("Failed to join on tenant {tenant_id} settings fetch task"))?
-}
-
-async fn change_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(move || {
-        tenant_mgr::set_tenant_state(tenant_id, new_state)
-            .with_context(|| format!("Failed to activate tenant {tenant_id}"))
-    })
-    .await
-    .with_context(|| format!("Failed to spawn activation task for tenant {tenant_id}"))?
 }

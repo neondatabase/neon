@@ -127,10 +127,10 @@ CompareLsn(const void *a, const void *b)
  *
  *   elog(LOG, "currently in state [%s]", FormatSafekeeperState(sk->state));
  */
-char*
+char *
 FormatSafekeeperState(SafekeeperState state)
 {
-	char* return_val = NULL;
+	char	   *return_val = NULL;
 
 	switch (state)
 	{
@@ -171,27 +171,30 @@ FormatSafekeeperState(SafekeeperState state)
 
 /* Asserts that the provided events are expected for given safekeeper's state */
 void
-AssertEventsOkForState(uint32 events, Safekeeper* sk)
+AssertEventsOkForState(uint32 events, Safekeeper *sk)
 {
-	uint32 expected = SafekeeperStateDesiredEvents(sk->state);
+	uint32		expected = SafekeeperStateDesiredEvents(sk->state);
 
-	/* The events are in-line with what we're expecting, under two conditions:
-	 *   (a) if we aren't expecting anything, `events` has no read- or
-	 *       write-ready component.
-	 *   (b) if we are expecting something, there's overlap
-	 *       (i.e. `events & expected != 0`)
+	/*
+	 * The events are in-line with what we're expecting, under two conditions:
+	 * (a) if we aren't expecting anything, `events` has no read- or
+	 * write-ready component. (b) if we are expecting something, there's
+	 * overlap (i.e. `events & expected != 0`)
 	 */
-	bool events_ok_for_state; /* long name so the `Assert` is more clear later */
+	bool		events_ok_for_state;	/* long name so the `Assert` is more
+										 * clear later */
 
 	if (expected == WL_NO_EVENTS)
-		events_ok_for_state = ((events & (WL_SOCKET_READABLE|WL_SOCKET_WRITEABLE)) == 0);
+		events_ok_for_state = ((events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE)) == 0);
 	else
 		events_ok_for_state = ((events & expected) != 0);
 
 	if (!events_ok_for_state)
 	{
-		/* To give a descriptive message in the case of failure, we use elog and
-		 * then an assertion that's guaranteed to fail. */
+		/*
+		 * To give a descriptive message in the case of failure, we use elog
+		 * and then an assertion that's guaranteed to fail.
+		 */
 		elog(WARNING, "events %s mismatched for safekeeper %s:%s in state [%s]",
 			 FormatEvents(events), sk->host, sk->port, FormatSafekeeperState(sk->state));
 		Assert(events_ok_for_state);
@@ -204,12 +207,12 @@ AssertEventsOkForState(uint32 events, Safekeeper* sk)
 uint32
 SafekeeperStateDesiredEvents(SafekeeperState state)
 {
-	uint32 result = WL_NO_EVENTS;
+	uint32		result = WL_NO_EVENTS;
 
 	/* If the state doesn't have a modifier, we can check the base state */
 	switch (state)
 	{
-		/* Connecting states say what they want in the name */
+			/* Connecting states say what they want in the name */
 		case SS_CONNECTING_READ:
 			result = WL_SOCKET_READABLE;
 			break;
@@ -217,33 +220,35 @@ SafekeeperStateDesiredEvents(SafekeeperState state)
 			result = WL_SOCKET_WRITEABLE;
 			break;
 
-		/* Reading states need the socket to be read-ready to continue */
+			/* Reading states need the socket to be read-ready to continue */
 		case SS_WAIT_EXEC_RESULT:
 		case SS_HANDSHAKE_RECV:
 		case SS_WAIT_VERDICT:
 			result = WL_SOCKET_READABLE;
 			break;
 
-		/* Idle states use read-readiness as a sign that the connection has been
-		 * disconnected. */
+			/*
+			 * Idle states use read-readiness as a sign that the connection
+			 * has been disconnected.
+			 */
 		case SS_VOTING:
 		case SS_IDLE:
 			result = WL_SOCKET_READABLE;
 			break;
 
-		/*
-		 * Flush states require write-ready for flushing.
-		 * Active state does both reading and writing.
-		 *
-		 * TODO: SS_ACTIVE sometimes doesn't need to be write-ready. We should
-		 * 	check sk->flushWrite here to set WL_SOCKET_WRITEABLE.
-		 */
+			/*
+			 * Flush states require write-ready for flushing. Active state
+			 * does both reading and writing.
+			 *
+			 * TODO: SS_ACTIVE sometimes doesn't need to be write-ready. We
+			 * should check sk->flushWrite here to set WL_SOCKET_WRITEABLE.
+			 */
 		case SS_SEND_ELECTED_FLUSH:
 		case SS_ACTIVE:
 			result = WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE;
 			break;
 
-		/* The offline state expects no events. */
+			/* The offline state expects no events. */
 		case SS_OFFLINE:
 			result = WL_NO_EVENTS;
 			break;
@@ -263,27 +268,30 @@ SafekeeperStateDesiredEvents(SafekeeperState state)
  *
  * The string should not be freed. It should also not be expected to remain the same between
  * function calls. */
-char*
+char *
 FormatEvents(uint32 events)
 {
 	static char return_str[8];
 
 	/* Helper variable to check if there's extra bits */
-	uint32 all_flags = WL_LATCH_SET
-		| WL_SOCKET_READABLE
-		| WL_SOCKET_WRITEABLE
-		| WL_TIMEOUT
-		| WL_POSTMASTER_DEATH
-		| WL_EXIT_ON_PM_DEATH
-		| WL_SOCKET_CONNECTED;
+	uint32		all_flags = WL_LATCH_SET
+	| WL_SOCKET_READABLE
+	| WL_SOCKET_WRITEABLE
+	| WL_TIMEOUT
+	| WL_POSTMASTER_DEATH
+	| WL_EXIT_ON_PM_DEATH
+	| WL_SOCKET_CONNECTED;
 
-	/* The formatting here isn't supposed to be *particularly* useful -- it's just to give an
-	 * sense of what events have been triggered without needing to remember your powers of two. */
+	/*
+	 * The formatting here isn't supposed to be *particularly* useful -- it's
+	 * just to give an sense of what events have been triggered without
+	 * needing to remember your powers of two.
+	 */
 
-	return_str[0] = (events & WL_LATCH_SET       ) ? 'L' : '_';
-	return_str[1] = (events & WL_SOCKET_READABLE ) ? 'R' : '_';
+	return_str[0] = (events & WL_LATCH_SET) ? 'L' : '_';
+	return_str[1] = (events & WL_SOCKET_READABLE) ? 'R' : '_';
 	return_str[2] = (events & WL_SOCKET_WRITEABLE) ? 'W' : '_';
-	return_str[3] = (events & WL_TIMEOUT         ) ? 'T' : '_';
+	return_str[3] = (events & WL_TIMEOUT) ? 'T' : '_';
 	return_str[4] = (events & WL_POSTMASTER_DEATH) ? 'D' : '_';
 	return_str[5] = (events & WL_EXIT_ON_PM_DEATH) ? 'E' : '_';
 	return_str[5] = (events & WL_SOCKET_CONNECTED) ? 'C' : '_';
@@ -291,7 +299,7 @@ FormatEvents(uint32 events)
 	if (events & (~all_flags))
 	{
 		elog(WARNING, "Event formatting found unexpected component %d",
-				events & (~all_flags));
+			 events & (~all_flags));
 		return_str[6] = '*';
 		return_str[7] = '\0';
 	}
@@ -407,21 +415,21 @@ XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 
 		if (walpropFile < 0)
 		{
-			#if PG_VERSION_NUM >= 150000
-			// FIXME Is it ok to use hardcoded value here?
-			TimeLineID tli = 1;
-			#else
+#if PG_VERSION_NUM >= 150000
+			/* FIXME Is it ok to use hardcoded value here? */
+			TimeLineID	tli = 1;
+#else
 			bool		use_existent = true;
-			#endif
+#endif
 			/* Create/use new log file */
 			XLByteToSeg(recptr, walpropSegNo, wal_segment_size);
-			#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 150000
 			walpropFile = XLogFileInit(walpropSegNo, tli);
 			walpropFileTLI = tli;
-			#else
+#else
 			walpropFile = XLogFileInit(walpropSegNo, &use_existent, false);
 			walpropFileTLI = ThisTimeLineID;
-			#endif
+#endif
 		}
 
 		/* Calculate the start offset of the received logs */
@@ -483,6 +491,7 @@ XLogWalPropClose(XLogRecPtr recptr)
 	if (close(walpropFile) != 0)
 	{
 		char		xlogfname[MAXFNAMELEN];
+
 		XLogFileName(xlogfname, walpropFileTLI, walpropSegNo, wal_segment_size);
 
 		ereport(PANIC,
@@ -508,12 +517,12 @@ StartProposerReplication(StartReplicationCmd *cmd)
 	XLogRecPtr	FlushPtr;
 	TimeLineID	currTLI;
 
-	#if PG_VERSION_NUM < 150000
+#if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					errmsg("IDENTIFY_SYSTEM has not been run before START_REPLICATION")));
-	#endif
+				 errmsg("IDENTIFY_SYSTEM has not been run before START_REPLICATION")));
+#endif
 
 	/* create xlogreader for physical replication */
 	xlogreader =
@@ -525,7 +534,7 @@ StartProposerReplication(StartReplicationCmd *cmd)
 	if (!xlogreader)
 		ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
-					errmsg("out of memory")));
+				 errmsg("out of memory")));
 
 	/*
 	 * We assume here that we're logging enough information in the WAL for
@@ -542,7 +551,7 @@ StartProposerReplication(StartReplicationCmd *cmd)
 		if (SlotIsLogical(MyReplicationSlot))
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						errmsg("cannot use a logical replication slot for physical replication")));
+					 errmsg("cannot use a logical replication slot for physical replication")));
 
 		/*
 		 * We don't need to verify the slot's restart_lsn here; instead we
@@ -630,9 +639,9 @@ StartProposerReplication(StartReplicationCmd *cmd)
 						(errmsg("requested starting point %X/%X on timeline %u is not in this server's history",
 								LSN_FORMAT_ARGS(cmd->startpoint),
 								cmd->timeline),
-							errdetail("This server's history forked from timeline %u at %X/%X.",
-									  cmd->timeline,
-									  LSN_FORMAT_ARGS(switchpoint))));
+						 errdetail("This server's history forked from timeline %u at %X/%X.",
+								   cmd->timeline,
+								   LSN_FORMAT_ARGS(switchpoint))));
 			}
 			sendTimeLineValidUpto = switchpoint;
 		}
@@ -869,14 +878,14 @@ WalSndSegmentOpen(XLogReaderState *state, XLogSegNo nextSegNo,
 		errno = save_errno;
 		ereport(ERROR,
 				(errcode_for_file_access(),
-					errmsg("requested WAL segment %s has already been removed",
-						   xlogfname)));
+				 errmsg("requested WAL segment %s has already been removed",
+						xlogfname)));
 	}
 	else
 		ereport(ERROR,
 				(errcode_for_file_access(),
-					errmsg("could not open file \"%s\": %m",
-						   path)));
+				 errmsg("could not open file \"%s\": %m",
+						path)));
 }
 
 
@@ -943,7 +952,7 @@ XLogSendPhysical(void)
 	XLogRecPtr	startptr;
 	XLogRecPtr	endptr;
 	Size		nbytes PG_USED_FOR_ASSERTS_ONLY;
-	TimeLineID currTLI;
+	TimeLineID	currTLI;
 
 	/* If requested switch the WAL sender to the stopping state. */
 	if (got_STOPPING)
@@ -1004,8 +1013,8 @@ XLogSendPhysical(void)
 		{
 			/*
 			 * Still a cascading standby. But is the timeline we're sending
-			 * still the one recovery is recovering from? currTLI was
-			 * updated by the GetStandbyFlushRecPtr() call above.
+			 * still the one recovery is recovering from? currTLI was updated
+			 * by the GetStandbyFlushRecPtr() call above.
 			 */
 			if (sendTimeLine != currTLI)
 				becameHistoric = true;
@@ -1043,11 +1052,11 @@ XLogSendPhysical(void)
 		 * primary: if the primary subsequently crashes and restarts, standbys
 		 * must not have applied any WAL that got lost on the primary.
 		 */
-		#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 150000
 		SendRqstPtr = GetFlushRecPtr(NULL);
-		#else
+#else
 		SendRqstPtr = GetFlushRecPtr();
-		#endif
+#endif
 	}
 
 	/*
@@ -1180,4 +1189,3 @@ XLogSendPhysical(void)
 		set_ps_display(activitymsg);
 	}
 }
-

@@ -5,6 +5,7 @@ image:
   repository: neondatabase/neon
 
 settings:
+  authBackend: "link"
   authEndpoint: "https://console.stage.neon.tech/authenticate_proxy_request/"
   uri: "https://console.stage.neon.tech/psql_session/"
 

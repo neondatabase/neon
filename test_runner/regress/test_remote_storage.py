@@ -1,5 +1,5 @@
 # It's possible to run any regular test with the local fs remote storage via
-# env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
+# env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import os
 import shutil
@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
     wait_for_upload,
     wait_until,
 )
-from fixtures.types import Lsn, ZTenantId, ZTimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
 
 
@@ -61,8 +61,8 @@ def test_remote_storage_backup_and_restore(
 
     client = env.pageserver.http_client()
 
-    tenant_id = ZTenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = ZTimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     checkpoint_numbers = range(1, 3)
 

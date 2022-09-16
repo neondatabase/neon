@@ -1,39 +1,72 @@
 import os
 from contextlib import closing
 from datetime import datetime
+from pathlib import Path
 from typing import List
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import PAGESERVER_PER_TENANT_METRICS, parse_metrics
-from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import Lsn, ZTenantId
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+from fixtures.types import Lsn, TenantId
 from prometheus_client.samples import Sample
 
 
-@pytest.mark.parametrize("with_safekeepers", [False, True])
-def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder, with_safekeepers: bool):
-    if with_safekeepers:
-        neon_env_builder.num_safekeepers = 3
+def test_tenant_creation_fails(neon_simple_env: NeonEnv):
+    tenants_dir = Path(neon_simple_env.repo_dir) / "tenants"
+    initial_tenants = sorted(
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+    )
+    initial_tenant_dirs = set([d for d in tenants_dir.iterdir()])
+
+    neon_simple_env.pageserver.safe_psql("failpoints tenant-creation-before-tmp-rename=return")
+    with pytest.raises(Exception, match="tenant-creation-before-tmp-rename"):
+        _ = neon_simple_env.neon_cli.create_tenant()
+
+    new_tenants = sorted(
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+    )
+    assert initial_tenants == new_tenants, "should not create new tenants"
+
+    new_tenant_dirs = list(set([d for d in tenants_dir.iterdir()]) - initial_tenant_dirs)
+    assert len(new_tenant_dirs) == 1, "should have new tenant directory created"
+    tmp_tenant_dir = new_tenant_dirs[0]
+    assert str(tmp_tenant_dir).endswith(
+        ".___temp"
+    ), "new tenant directory created should be a temporary one"
+
+    neon_simple_env.pageserver.stop()
+    neon_simple_env.pageserver.start()
+
+    tenants_after_restart = sorted(
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+    )
+    dirs_after_restart = set([d for d in tenants_dir.iterdir()])
+    assert (
+        tenants_after_restart == initial_tenants
+    ), "should load all non-corrupt tenants after restart"
+    assert (
+        dirs_after_restart == initial_tenant_dirs
+    ), "pageserver should clean its temp tenant dirs on restart"
+
+
+def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
 
     env = neon_env_builder.init_start()
     """Tests tenants with and without wal acceptors"""
     tenant_1, _ = env.neon_cli.create_tenant()
     tenant_2, _ = env.neon_cli.create_tenant()
 
-    env.neon_cli.create_timeline(
-        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}", tenant_id=tenant_1
-    )
-    env.neon_cli.create_timeline(
-        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}", tenant_id=tenant_2
-    )
+    env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_1)
+    env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_2)
 
     pg_tenant1 = env.postgres.create_start(
-        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}",
+        "test_tenants_normal_work",
         tenant_id=tenant_1,
     )
     pg_tenant2 = env.postgres.create_start(
-        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}",
+        "test_tenants_normal_work",
         tenant_id=tenant_2,
     )
 
@@ -149,7 +182,7 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
                 cur.execute("SELECT sum(key) FROM t")
                 assert cur.fetchone() == (5000050000,)
 
-    def get_ps_metric_samples_for_tenant(tenant_id: ZTenantId) -> List[Sample]:
+    def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
         ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
         samples = []
         for metric_name in ps_metrics.metrics:

@@ -75,8 +75,6 @@ class Cargo:
     def rustlib_dir(self) -> Path:
         if not self._rustlib_dir:
             cmd = [
-                'cargo',
-                '-Zunstable-options',
                 'rustc',
                 '--print=target-libdir',
             ]
@@ -397,7 +395,7 @@ class State:
             # Enable LLVM's source-based coverage
             # see: https://clang.llvm.org/docs/SourceBasedCodeCoverage.html
             # see: https://blog.rust-lang.org/inside-rust/2020/11/12/source-based-code-coverage.html
-            '-Zinstrument-coverage',
+            '-Cinstrument-coverage',
             # Link every bit of code to prevent "holes" in coverage report
             # see: https://doc.rust-lang.org/rustc/codegen-options/index.html#link-dead-code
             '-Clink-dead-code',
@@ -409,10 +407,6 @@ class State:
             # but we won't include them in report by default (but see `--all`).
             f'--remap-path-prefix {self.cwd}=',
         ])
-
-        # XXX: God, have mercy on our souls...
-        # see: https://github.com/rust-lang/rust/pull/90132
-        os.environ['RUSTC_BOOTSTRAP'] = '1'
 
     def _merge_profraw(self) -> bool:
         profdata_path = self.profdata_dir / '-'.join([

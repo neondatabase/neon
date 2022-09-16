@@ -54,7 +54,6 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
-        rust_toolchain: [ 1.58 ]
 
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
@@ -100,11 +99,11 @@ jobs:
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_FEATURES=""
-            CARGO_FLAGS="--locked"
+            CARGO_FLAGS="--locked --timings"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FEATURES="--features profiling"
-            CARGO_FLAGS="--locked --release $CARGO_FEATURES"
+            CARGO_FLAGS="--locked --timings --release $CARGO_FEATURES"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
@@ -126,8 +125,8 @@ jobs:
             target/
           # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
-            v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
-            v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
+            v8-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
+            v8-${{ runner.os }}-${{ matrix.build_type }}-cargo-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -215,8 +214,19 @@ jobs:
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
         with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
+
+      - name: Prepare cargo build timing stats for storing
+        run: |
+          mkdir -p "/tmp/neon/cargo-timings/$BUILD_TYPE/"
+          cp -r ./target/cargo-timings/* "/tmp/neon/cargo-timings/$BUILD_TYPE/"
+        shell: bash -euxo pipefail {0}
+      - name: Upload cargo build stats
+        uses: ./.github/actions/upload
+        with:
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-build-stats
+          path: /tmp/neon/cargo-timings/
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
@@ -233,7 +243,6 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
-        rust_toolchain: [ 1.58 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -245,7 +254,6 @@ jobs:
         uses: ./.github/actions/run-python-test-set
         with:
           build_type: ${{ matrix.build_type }}
-          rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: regress
           needs_postgres_source: true
           run_with_real_s3: true
@@ -269,7 +277,6 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ release ]
-        rust_toolchain: [ 1.58 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -281,7 +288,6 @@ jobs:
         uses: ./.github/actions/run-python-test-set
         with:
           build_type: ${{ matrix.build_type }}
-          rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: performance
           run_in_parallel: false
           save_perf_report: true
@@ -341,7 +347,6 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug ]
-        rust_toolchain: [ 1.58 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -358,12 +363,12 @@ jobs:
             !~/.cargo/registry/src
             ~/.cargo/git/
             target/
-          key: v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+          key: v8-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
         with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
 
       - name: Get coverage artifact
@@ -412,7 +417,7 @@ jobs:
   trigger-e2e-tests:
     runs-on: dev
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
     needs: [ build-neon ]
     steps:

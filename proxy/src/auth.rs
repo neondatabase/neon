@@ -22,10 +22,6 @@ pub type Result<T> = std::result::Result<T, AuthError>;
 /// Common authentication error.
 #[derive(Debug, Error)]
 pub enum AuthErrorImpl {
-    // This will be dropped in the future.
-    #[error(transparent)]
-    Legacy(#[from] backend::LegacyAuthError),
-
     #[error(transparent)]
     Link(#[from] backend::LinkAuthError),
 
@@ -78,7 +74,6 @@ impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
         use AuthErrorImpl::*;
         match self.0.as_ref() {
-            Legacy(e) => e.to_string_client(),
             Link(e) => e.to_string_client(),
             GetAuthInfo(e) => e.to_string_client(),
             WakeCompute(e) => e.to_string_client(),

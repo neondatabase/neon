@@ -16,7 +16,7 @@ from typing import Iterator, Optional
 import pytest
 from _pytest.config import Config
 from _pytest.terminal import TerminalReporter
-from fixtures.types import ZTenantId, ZTimelineId
+from fixtures.types import TenantId, TimelineId
 
 """
 This file contains fixtures for micro-benchmarks.
@@ -365,11 +365,11 @@ class NeonBenchmarker:
         assert matches, f"metric {metric_name} not found"
         return int(round(float(matches.group(1))))
 
-    def get_timeline_size(self, repo_dir: Path, tenantid: ZTenantId, timelineid: ZTimelineId):
+    def get_timeline_size(self, repo_dir: Path, tenant_id: TenantId, timeline_id: TimelineId):
         """
         Calculate the on-disk size of a timeline
         """
-        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid, timelineid)
+        path = f"{repo_dir}/tenants/{tenant_id}/timelines/{timeline_id}"
 
         totalbytes = 0
         for root, dirs, files in os.walk(path):

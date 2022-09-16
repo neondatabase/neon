@@ -109,7 +109,7 @@ Repository
 
 The repository stores all the page versions, or WAL records needed to
 reconstruct them. Each tenant has a separate Repository, which is
-stored in the .neon/tenants/<tenantid> directory.
+stored in the .neon/tenants/<tenant_id> directory.
 
 Repository is an abstract trait, defined in `repository.rs`. It is
 implemented by the LayeredRepository object in

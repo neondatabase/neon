@@ -3,7 +3,7 @@ from contextlib import closing
 import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import ZTimelineId
+from fixtures.types import TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -12,8 +12,6 @@ from fixtures.utils import print_gc_result, query_scalar
 # Insert some data, run GC and create a branch in the past.
 #
 def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
-
-    neon_env_builder.num_safekeepers = 1
     # Set pitr interval such that we need to keep the data
     neon_env_builder.pageserver_config_override = (
         "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"
@@ -25,7 +23,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
-    timeline = ZTimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
+    timeline = TimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
 
     # Create table
     main_cur.execute("CREATE TABLE foo (t text)")

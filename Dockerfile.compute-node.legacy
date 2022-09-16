@@ -22,7 +22,7 @@ FROM $REPOSITORY/$IMAGE:$TAG AS compute-deps
 #
 # Image with Postgres build deps
 #
-FROM debian:buster-slim AS build-deps
+FROM debian:bullseye-slim AS build-deps
 
 RUN apt-get update && apt-get -yq install automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
                                           libcurl4-openssl-dev libossp-uuid-dev
@@ -59,7 +59,7 @@ WORKDIR /pg
 #
 # Final compute node image to be exported
 #
-FROM debian:buster-slim
+FROM debian:bullseye-slim
 
 # libreadline-dev is required to run psql
 RUN apt-get update && apt-get -yq install libreadline-dev libossp-uuid-dev

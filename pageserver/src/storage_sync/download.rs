@@ -17,16 +17,15 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
+    config::PageServerConf, storage_sync::SyncTask, tenant::metadata::metadata_path,
+    TEMP_FILE_SUFFIX,
 };
-use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 use super::{
     index::{IndexPart, RemoteTimeline},
     LayersDownload, SyncData, SyncQueue,
 };
-
-pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
 // We collect timelines remotely available for each tenant
 // in case we failed to gather all index parts (due to an error)
@@ -34,14 +33,14 @@ pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 // When data is received succesfully without errors Present variant is used.
 pub enum TenantIndexParts {
     Poisoned {
-        present: HashMap<ZTimelineId, IndexPart>,
-        missing: HashSet<ZTimelineId>,
+        present: HashMap<TimelineId, IndexPart>,
+        missing: HashSet<TimelineId>,
     },
-    Present(HashMap<ZTimelineId, IndexPart>),
+    Present(HashMap<TimelineId, IndexPart>),
 }
 
 impl TenantIndexParts {
-    fn add_poisoned(&mut self, timeline_id: ZTimelineId) {
+    fn add_poisoned(&mut self, timeline_id: TimelineId) {
         match self {
             TenantIndexParts::Poisoned { missing, .. } => {
                 missing.insert(timeline_id);
@@ -65,9 +64,9 @@ impl Default for TenantIndexParts {
 pub async fn download_index_parts(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    keys: HashSet<ZTenantTimelineId>,
-) -> HashMap<ZTenantId, TenantIndexParts> {
-    let mut index_parts: HashMap<ZTenantId, TenantIndexParts> = HashMap::new();
+    keys: HashSet<TenantTimelineId>,
+) -> HashMap<TenantId, TenantIndexParts> {
+    let mut index_parts: HashMap<TenantId, TenantIndexParts> = HashMap::new();
 
     let mut part_downloads = keys
         .into_iter()
@@ -113,8 +112,8 @@ pub async fn download_index_parts(
 pub async fn gather_tenant_timelines_index_parts(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<HashMap<ZTimelineId, IndexPart>> {
+    tenant_id: TenantId,
+) -> anyhow::Result<HashMap<TimelineId, IndexPart>> {
     let tenant_path = conf.timelines_path(&tenant_id);
     let timeline_sync_ids = get_timeline_sync_ids(storage, &tenant_path, tenant_id)
         .await
@@ -136,7 +135,7 @@ pub async fn gather_tenant_timelines_index_parts(
 async fn download_index_part(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
 ) -> Result<IndexPart, DownloadError> {
     let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
@@ -198,7 +197,7 @@ pub(super) async fn download_timeline_layers<'a>(
     storage: &'a GenericRemoteStorage,
     sync_queue: &'a SyncQueue,
     remote_timeline: Option<&'a RemoteTimeline>,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     mut download_data: SyncData<LayersDownload>,
 ) -> DownloadedTimeline {
     let remote_timeline = match remote_timeline {
@@ -251,7 +250,7 @@ pub(super) async fn download_timeline_layers<'a>(
                 // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
                 // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
                 let temp_file_path =
-                    path_with_suffix_extension(&layer_destination_path, TEMP_DOWNLOAD_EXTENSION);
+                    path_with_suffix_extension(&layer_destination_path, TEMP_FILE_SUFFIX);
 
                 let mut destination_file =
                     fs::File::create(&temp_file_path).await.with_context(|| {
@@ -336,7 +335,7 @@ pub(super) async fn download_timeline_layers<'a>(
     }
 
     // fsync timeline directory which is a parent directory for downloaded files
-    let ZTenantTimelineId {
+    let TenantTimelineId {
         tenant_id,
         timeline_id,
     } = &sync_id;
@@ -367,8 +366,8 @@ pub(super) async fn download_timeline_layers<'a>(
 async fn get_timeline_sync_ids(
     storage: &GenericRemoteStorage,
     tenant_path: &Path,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<HashSet<ZTenantTimelineId>> {
+    tenant_id: TenantId,
+) -> anyhow::Result<HashSet<TenantTimelineId>> {
     let tenant_storage_path = storage.remote_object_id(tenant_path).with_context(|| {
         format!(
             "Failed to get tenant storage path for local path '{}'",
@@ -396,11 +395,11 @@ async fn get_timeline_sync_ids(
             anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
         })?;
 
-        let timeline_id: ZTimelineId = object_name.parse().with_context(|| {
+        let timeline_id: TimelineId = object_name.parse().with_context(|| {
             format!("failed to parse object name into timeline id '{object_name}'")
         })?;
 
-        sync_ids.insert(ZTenantTimelineId {
+        sync_ids.insert(TenantTimelineId {
             tenant_id,
             timeline_id,
         });
@@ -426,21 +425,21 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
-        layered_repository::repo_harness::{RepoHarness, TIMELINE_ID},
         storage_sync::{
             index::RelativePath,
             test_utils::{create_local_timeline, dummy_metadata},
         },
+        tenant::harness::{TenantHarness, TIMELINE_ID},
     };
 
     use super::*;
 
     #[tokio::test]
     async fn download_timeline() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("download_timeline")?;
+        let harness = TenantHarness::create("download_timeline")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
 
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "layer_to_skip", "layer_to_keep_locally"];
         let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
@@ -538,9 +537,9 @@ mod tests {
 
     #[tokio::test]
     async fn download_timeline_negatives() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("download_timeline_negatives")?;
+        let harness = TenantHarness::create("download_timeline_negatives")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
@@ -597,8 +596,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_index_part() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("test_download_index_part")?;
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let harness = TenantHarness::create("test_download_index_part")?;
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),

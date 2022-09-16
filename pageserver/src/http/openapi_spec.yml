@@ -489,11 +489,18 @@ components:
       type: object
       required:
         - id
+        - state
       properties:
         id:
           type: string
         state:
-          type: string
+            oneOf:
+              - type: string
+              - type: object
+                properties:
+                  background_jobs_running:
+                    type: boolean
+
         current_physical_size:
           type: integer
         has_in_progress_downloads:
@@ -573,7 +580,6 @@ components:
       required:
         - last_record_lsn
         - disk_consistent_lsn
-        - timeline_state
       properties:
         last_record_lsn:
           type: string
@@ -581,8 +587,6 @@ components:
         disk_consistent_lsn:
           type: string
           format: hex
-        timeline_state:
-          type: string
         ancestor_timeline_id:
           type: string
           format: hex

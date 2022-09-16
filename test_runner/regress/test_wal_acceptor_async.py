@@ -7,7 +7,7 @@ from typing import List, Optional
 import asyncpg
 from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, Safekeeper
-from fixtures.types import Lsn, ZTenantId, ZTimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 
 log = getLogger("root.safekeeper_async")
 
@@ -103,8 +103,8 @@ async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accou
 
 async def wait_for_lsn(
     safekeeper: Safekeeper,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     wait_lsn: Lsn,
     polling_interval=1,
     timeout=60,
@@ -155,8 +155,8 @@ async def run_restarts_under_load(
     test_timeout_at = time.monotonic() + 5 * 60
 
     pg_conn = await pg.connect_async()
-    tenant_id = ZTenantId(await pg_conn.fetchval("show neon.tenant_id"))
-    timeline_id = ZTimelineId(await pg_conn.fetchval("show neon.timeline_id"))
+    tenant_id = TenantId(await pg_conn.fetchval("show neon.tenant_id"))
+    timeline_id = TimelineId(await pg_conn.fetchval("show neon.timeline_id"))
 
     bank = BankClient(pg_conn, n_accounts=n_accounts, init_amount=init_amount)
     # create tables and initial balances

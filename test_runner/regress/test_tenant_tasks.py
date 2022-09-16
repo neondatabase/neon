@@ -1,5 +1,6 @@
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_until
-from fixtures.types import ZTenantId, ZTimelineId
+from fixtures.types import TenantId, TimelineId
 
 
 def get_only_element(l):  # noqa: E741
@@ -22,7 +23,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
 
     def get_state(tenant):
         all_states = client.tenant_list()
-        matching = [t for t in all_states if ZTenantId(t["id"]) == tenant]
+        matching = [t for t in all_states if TenantId(t["id"]) == tenant]
         return get_only_element(matching)["state"]
 
     def get_metric_value(name):
@@ -34,35 +35,41 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         value = line.lstrip(name).strip()
         return int(value)
 
-    def delete_all_timelines(tenant: ZTenantId):
-        timelines = [ZTimelineId(t["timeline_id"]) for t in client.timeline_list(tenant)]
+    def delete_all_timelines(tenant: TenantId):
+        timelines = [TimelineId(t["timeline_id"]) for t in client.timeline_list(tenant)]
         for t in timelines:
             client.timeline_delete(tenant, t)
 
-    def assert_idle(tenant):
-        assert get_state(tenant) == "Idle"
+    def assert_active_without_jobs(tenant):
+        assert get_state(tenant) == {"Active": {"background_jobs_running": False}}
 
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline(name, tenant_id=tenant)
     pg = env.postgres.create_start(name, tenant_id=tenant)
-    assert get_state(tenant) == "Active"
+    assert get_state(tenant) == {
+        "Active": {"background_jobs_running": True}
+    }, "Pageserver should activate a tenant and start background jobs if timelines are loaded"
 
     # Stop compute
     pg.stop()
 
-    # Detach all tenants and wait for them to go idle
-    # TODO they should be already idle since there are no active computes
+    # Delete all timelines on all tenants
     for tenant_info in client.tenant_list():
-        tenant_id = ZTenantId(tenant_info["id"])
+        tenant_id = TenantId(tenant_info["id"])
         delete_all_timelines(tenant_id)
-        wait_until(10, 0.2, lambda: assert_idle(tenant_id))
+        wait_until(10, 0.2, lambda: assert_active_without_jobs(tenant_id))
 
-    # Assert that all tasks finish quickly after tenants go idle
+    # Assert that all tasks finish quickly after tenant is detached
+    assert get_metric_value('pageserver_tenant_task_events{event="start"}') > 0
+    client.tenant_detach(tenant)
+    client.tenant_detach(env.initial_tenant)
+
     def assert_tasks_finish():
         tasks_started = get_metric_value('pageserver_tenant_task_events{event="start"}')
         tasks_ended = get_metric_value('pageserver_tenant_task_events{event="stop"}')
         tasks_panicked = get_metric_value('pageserver_tenant_task_events{event="panic"}')
+        log.info(f"started {tasks_started}, ended {tasks_ended}, panicked {tasks_panicked}")
         assert tasks_started == tasks_ended
         assert tasks_panicked == 0
 
