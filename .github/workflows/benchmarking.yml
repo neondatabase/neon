@@ -239,6 +239,7 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: Create Allure report
+      if: always()
       uses: ./.github/actions/allure-report
       with:
         action: generate
