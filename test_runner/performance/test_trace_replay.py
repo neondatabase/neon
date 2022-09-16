@@ -17,6 +17,10 @@ def test_trace_replay(
             "trace_read_requests": "true",
         }
     )
+    # TODO This doesn't work because I haven't updated tenant_config_handler
+    # env.neon_cli.config_tenant(tenant, conf={
+    #     "trace_read_requests": "true",
+    # })
     env.neon_cli.create_timeline("test_trace_replay", tenant_id=tenant)
     pg = env.postgres.create_start("test_trace_replay", "main", tenant)
 
@@ -35,13 +39,17 @@ def test_trace_replay(
     # Stop pg so we drop the connection and flush the traces
     pg.stop()
 
-    # TODO turn off tracing now?
+    # TODO This doesn't work because I haven't updated tenant_config_handler
+    # env.neon_cli.config_tenant(tenant, conf={
+    #     "trace_read_requests": "false",
+    # })
 
     # trace_path = env.repo_dir / "traces" / str(tenant) / str(timeline) / str(timeline)
     # assert trace_path.exists()
 
     print("replaying")
     ps_connstr = env.pageserver.connstr()
+
     # ps_connstr = "host=localhost port=15004 dbname=postgres user=neon_admin"
     with zenbenchmark.record_duration("replay"):
         output = replay_bin.replay_all(ps_connstr)
