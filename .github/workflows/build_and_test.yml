@@ -618,7 +618,7 @@ jobs:
       - name: Push rust image to Docker Hub
         run: crane push rust neondatabase/rust:pinned
 
-      - name: Add latest tag to images in dockerhub
+      - name: Add latest tag to images in Docker Hub
         if: |
           (github.ref_name == 'main' || github.ref_name == 'release') &&
           github.event_name != 'workflow_dispatch'
