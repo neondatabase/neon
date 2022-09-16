@@ -6,16 +6,15 @@ use hyper::{Body, Request, Response, Uri};
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
-use super::models::{
-    ConfigureFailpointsRequest, StatusResponse, TenantConfigRequest, TenantCreateRequest,
-    TenantCreateResponse, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
-};
 use super::models::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
+use super::models::{
+    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
+    TimelineCreateRequest,
+};
 use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant::{TenantState, Timeline};
 use crate::tenant_config::TenantConfOpt;
-use crate::CheckpointConfig;
 use crate::{config::PageServerConf, tenant_mgr, timelines};
 use utils::{
     auth::JwtAuth,
@@ -29,6 +28,12 @@ use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
 };
+
+// Imports only used for testing APIs
+#[cfg(feature = "testing")]
+use super::models::{ConfigureFailpointsRequest, TimelineGcRequest};
+#[cfg(feature = "testing")]
+use crate::CheckpointConfig;
 
 struct State {
     conf: &'static PageServerConf,
@@ -662,6 +667,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     json_response(StatusCode::OK, ())
 }
 
+#[cfg(any(feature = "testing", feature = "failpoints"))]
 async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     if !fail::has_failpoints() {
         return Err(ApiError::BadRequest(
@@ -701,6 +707,7 @@ async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>
 // enable, I don't think we want to or need to allow regular clients to invoke
 // GC.
 //     @hllinnaka in commits ec44f4b29, 3aca717f3
+#[cfg(feature = "testing")]
 async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -724,6 +731,7 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
 // FIXME This is just for tests. Don't expect this to be exposed to
 // the users or the api.
 //     @dhammika in commit a0781f229
+#[cfg(feature = "testing")]
 async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -740,6 +748,7 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
 }
 
 // Run checkpoint immediately on given timeline.
+#[cfg(feature = "testing")]
 async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -781,13 +790,44 @@ pub fn make_router(
         }))
     }
 
+    macro_rules! cfg_disabled {
+        (#[cfg($($cfg:tt)+)] $handler_desc:literal, $feature_desc:literal, $handler:path $(,)?) => {{
+            #[cfg(not($($cfg)+))]
+            async fn cfg_disabled(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+                Err(ApiError::BadRequest(
+                    concat!(
+                        "Cannot ",
+                        $handler_desc,
+                        " because pageserver was compiled without ",
+                        $feature_desc,
+                    )
+                    .to_owned(),
+                ))
+            }
+
+            #[cfg($($cfg)+)]
+            let handler = $handler;
+            #[cfg(not($($cfg)+))]
+            let handler = cfg_disabled;
+            handler
+        }};
+    }
+
     Ok(router
         .data(Arc::new(
             State::new(conf, auth, remote_index, remote_storage)
                 .context("Failed to initialize router state")?,
         ))
         .get("/v1/status", status_handler)
-        .put("/v1/failpoints", failpoints_handler)
+        .put(
+            "/v1/failpoints",
+            cfg_disabled!(
+                #[cfg(any(feature = "testing", feature = "failpoints"))]
+                "manage failpoints",
+                "failpoints support or testing APIs",
+                failpoints_handler,
+            ),
+        )
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
         .get("/v1/tenant/:tenant_id", tenant_status)
@@ -802,15 +842,30 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc",
-            timeline_gc_handler,
+            cfg_disabled!(
+                #[cfg(feature = "testing")]
+                "run timeline GC",
+                "testing APIs",
+                timeline_gc_handler,
+            ),
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/compact",
-            timeline_compact_handler,
+            cfg_disabled!(
+                #[cfg(feature = "testing")]
+                "run timeline compaction",
+                "testing APIs",
+                timeline_compact_handler,
+            ),
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
-            timeline_checkpoint_handler,
+            cfg_disabled!(
+                #[cfg(feature = "testing")]
+                "run timeline checkpoint",
+                "testing APIs",
+                timeline_checkpoint_handler,
+            ),
         )
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
