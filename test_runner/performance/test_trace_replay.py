@@ -47,10 +47,11 @@ def test_trace_replay(
     # trace_path = env.repo_dir / "traces" / str(tenant) / str(timeline) / str(timeline)
     # assert trace_path.exists()
 
+    replay_bin.draw_all()
+    return
+
     print("replaying")
     ps_connstr = env.pageserver.connstr()
-
-    # ps_connstr = "host=localhost port=15004 dbname=postgres user=neon_admin"
     with zenbenchmark.record_duration("replay"):
         output = replay_bin.replay_all(ps_connstr)
     print(output)

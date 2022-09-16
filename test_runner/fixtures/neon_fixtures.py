@@ -1651,6 +1651,14 @@ class ReplayBin:
         # return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
         subprocess.run(args)
 
+    def draw_all(self):
+        draw_binpath = os.path.join(str(neon_binpath), "draw_trace")
+        args = [
+            draw_binpath,
+            self.traces_dir,
+        ]
+        subprocess.run(args)
+
 
 @pytest.fixture(scope="function")
 def replay_bin(test_output_dir):
