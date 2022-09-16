@@ -11,7 +11,8 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{BigEndian, ReadBytesExt};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::Buf;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::{Stream, StreamExt};
 use regex::Regex;
 use std::io;
@@ -473,11 +474,11 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         // Make request tracer if needed
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let mut tracer = if repo.get_trace_read_requests() {
-            let path = repo
+        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+        let mut tracer = if tenant.get_trace_read_requests() {
+            let path = tenant
                 .conf
-                .trace_path(&tenant_id, &timeline_id, &ZTimelineId::generate());
+                .trace_path(&tenant_id, &timeline_id, &TimelineId::generate());
             Some(Tracer::new(path))
         } else {
             None
@@ -507,6 +508,10 @@ impl PageServerHandler {
 
             let copy_data_bytes = match msg? {
                 Some(FeMessage::CopyData(bytes)) => bytes,
+                Some(FeMessage::Sync) => {
+                    // TODO what now?
+                    continue;
+                }
                 Some(m) => {
                     bail!("unexpected message: {m:?} during COPY");
                 }
@@ -520,7 +525,7 @@ impl PageServerHandler {
 
             trace!("query: {copy_data_bytes:?}");
 
-            let neon_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+            let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {

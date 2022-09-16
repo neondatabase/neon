@@ -10,8 +10,8 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use clap::{App, Arg};
 use utils::{
+    id::{TenantId, TimelineId},
     pq_proto::{BeMessage, FeMessage},
-    zid::{ZTenantId, ZTimelineId},
 };
 
 // TODO put this in library, dedup with stuff in control_plane
@@ -23,8 +23,8 @@ struct PagestreamApi {
 impl PagestreamApi {
     async fn connect(
         connstr: &str,
-        tenant: &ZTenantId,
-        timeline: &ZTimelineId,
+        tenant: &TenantId,
+        timeline: &TimelineId,
     ) -> anyhow::Result<PagestreamApi> {
         // Parse connstr
         let config = tokio_postgres::Config::from_str(connstr).expect("bad connstr");
@@ -104,17 +104,17 @@ async fn main() -> anyhow::Result<()> {
     for tenant_dir in read_dir(traces_dir)? {
         let entry = tenant_dir?;
         let path = entry.path();
-        let tenant_id = ZTenantId::from_str(path.file_name().unwrap().to_str().unwrap())?;
+        let tenant_id = TenantId::from_str(path.file_name().unwrap().to_str().unwrap())?;
 
         for timeline_dir in read_dir(path)? {
             let entry = timeline_dir?;
             let path = entry.path();
-            let timeline_id = ZTimelineId::from_str(path.file_name().unwrap().to_str().unwrap())?;
+            let timeline_id = TimelineId::from_str(path.file_name().unwrap().to_str().unwrap())?;
 
             for trace_dir in read_dir(path)? {
                 let entry = trace_dir?;
                 let path = entry.path();
-                let _conn_id = ZTimelineId::from_str(path.file_name().unwrap().to_str().unwrap())?;
+                let _conn_id = TimelineId::from_str(path.file_name().unwrap().to_str().unwrap())?;
 
                 // TODO The pageserver deletes existing traces?
                 // LOL yes because I use tenant ID as trace id

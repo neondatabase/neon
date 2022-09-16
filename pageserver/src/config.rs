@@ -360,9 +360,9 @@ impl PageServerConf {
 
     pub fn trace_path(
         &self,
-        tenant_id: &ZTenantId,
-        timeline_id: &ZTimelineId,
-        connection_id: &ZTimelineId, // TODO make a new type
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
+        connection_id: &TimelineId, // TODO make a new type
     ) -> PathBuf {
         self.traces_path()
             .join(tenant_id.to_string())
