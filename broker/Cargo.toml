@@ -1,0 +1,35 @@
+[package]
+name = "neon_broker"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bench = []
+
+[[bin]]
+name = "neon_broker"
+path = "src/broker.rs"
+
+[[bin]]
+name = "neon_broker_bench"
+path = "src/bench.rs"
+# build benchmarking binary only if explicitly requested with '--feature bench'
+# required-features = ["bench"]
+
+[dependencies]
+async-stream = "0.3"
+futures-core = "0.3"
+futures-util = "0.3"
+tonic = "0.8"
+prost = "0.11"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+# for exploring with tokio-console
+# tokio = { version = "1", features = ["full", "tracing"] }
+# console-subscriber = "0.1.8"
+tokio-stream = "0.1"
+clap = { version = "3.2.17", features = ["derive"] }
+
+utils = { path = "../libs/utils" }
+
+[build-dependencies]
+tonic-build = "0.8"

@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package neon_broker;
+
+service NeonBroker {
+    // Subscribe to safekeeper updates.
+    rpc SubscribeSafekeeperInfo(SubscribeSafekeeperInfoRequest) returns (stream SafekeeperTimelineInfo) {};
+
+    // Publish safekeeper updates.
+    rpc PublishSafekeeperInfo(stream SafekeeperTimelineInfo) returns (Empty) {};
+}
+
+message SubscribeSafekeeperInfoRequest {
+    oneof subscription_key {
+        Empty all = 1; // subscribe to everything
+        TenantTimelineId tenant_timeline_id = 2; // subscribe to specific timeline
+    }
+}
+
+message SafekeeperTimelineInfo {
+    uint64 safekeeper_id = 1;
+    TenantTimelineId tenant_timeline_id = 2;
+    uint64 last_log_term = 3;
+    uint64 flush_lsn = 4;
+    uint64 commit_lsn = 5;
+    uint64 backup_lsn = 6;
+    uint64 remote_consistent_lsn = 7;
+    uint64 peer_horizon_lsn = 8;
+    string safekeeper_connstr = 9;
+}
+
+message TenantTimelineId {
+    bytes tenant_id = 1;
+    bytes timeline_id = 2;
+}
+
+message Empty {
+}

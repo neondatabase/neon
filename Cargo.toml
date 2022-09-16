@@ -11,6 +11,7 @@ cargo-features = ["named-profiles"]
 
 [workspace]
 members = [
+    "broker",
     "compute_tools",
     "control_plane",
     "pageserver",

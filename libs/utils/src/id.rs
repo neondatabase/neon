@@ -3,6 +3,13 @@ use std::{fmt, str::FromStr};
 use hex::FromHex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum IdError {
+    #[error("invalid id length {0}")]
+    VecParseError(usize),
+}
 
 /// Neon ID is a 128-bit random ID.
 /// Used to represent various identifiers. Provides handy utility methods and impls.
@@ -20,6 +27,15 @@ impl Id {
         let mut arr = [0u8; 16];
         buf.copy_to_slice(&mut arr);
         Id::from(arr)
+    }
+
+    pub fn from_vec(src: &Vec<u8>) -> Result<Id, IdError> {
+        if src.len() != 16 {
+            return Err(IdError::VecParseError(src.len()));
+        }
+        let mut zid_slice = [0u8; 16];
+        zid_slice.copy_from_slice(&src);
+        Ok(zid_slice.into())
     }
 
     pub fn as_arr(&self) -> [u8; 16] {
@@ -98,6 +114,10 @@ macro_rules! id_newtype {
         impl $t {
             pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> $t {
                 $t(Id::get_from_buf(buf))
+            }
+
+            pub fn from_vec(src: &Vec<u8>) -> Result<$t, IdError> {
+                Ok($t(Id::from_vec(src)?))
             }
 
             pub fn as_arr(&self) -> [u8; 16] {
