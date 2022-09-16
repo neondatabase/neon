@@ -26,12 +26,12 @@ See developer documentation in [/docs/SUMMARY.md](/docs/SUMMARY.md) for more inf
 * On Ubuntu or Debian, this set of packages should be sufficient to build the code:
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev etcd cmake postgresql-client protobuf-compiler
+libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler
 ```
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
-  libseccomp-devel perl clang cmake etcd postgresql postgresql-contrib protobuf-compiler
+  libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -44,7 +44,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 1. Install XCode and dependencies
 ```
 xcode-select --install
-brew install protobuf etcd openssl flex bison
+brew install protobuf openssl flex bison
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -123,12 +123,12 @@ Stopped pageserver 1 process with pid 2545906
 
 # start pageserver and safekeeper
 > ./target/debug/neon_local start
-Starting etcd broker using "/usr/bin/etcd"
-etcd started, pid: 2545996
+Starting neon broker at 127.0.0.1:50051
+storage_broker started, pid: 2918372
 Starting pageserver at '127.0.0.1:64000' in '.neon'.
-pageserver started, pid: 2546005
+pageserver started, pid: 2918386
 Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'.
-safekeeper 1 started, pid: 2546041
+safekeeper 1 started, pid: 2918437
 
 # start postgres compute node
 > ./target/debug/neon_local pg start main

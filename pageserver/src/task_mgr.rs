@@ -71,7 +71,7 @@ use crate::shutdown_pageserver;
 //
 // WAL receiver runtime:
 //  - used to handle WAL receiver connections.
-//  - and to receiver updates from etcd
+//  - and to receiver updates from storage_broker
 //
 // Background runtime
 //  - layer flushing
@@ -178,7 +178,7 @@ pub enum TaskKind {
     PageRequestHandler,
 
     // Manages the WAL receiver connection for one timeline. It subscribes to
-    // events from etcd, decides which safekeeper to connect to. It spawns a
+    // events from storage_broker, decides which safekeeper to connect to. It spawns a
     // separate WalReceiverConnection task to handle each connection.
     WalReceiverManager,
 

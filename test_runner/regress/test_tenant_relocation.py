@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    Etcd,
+    NeonBroker,
     NeonEnv,
     NeonEnvBuilder,
     PageserverHttpClient,
@@ -32,7 +32,7 @@ def new_pageserver_service(
     remote_storage_mock_path: Path,
     pg_port: int,
     http_port: int,
-    broker: Optional[Etcd],
+    broker: Optional[NeonBroker],
     pg_distrib_dir: Path,
 ):
     """
@@ -53,7 +53,7 @@ def new_pageserver_service(
     ]
     if broker is not None:
         cmd.append(
-            f"-c broker_endpoints=['{broker.client_url()}']",
+            f"-c broker_endpoint='{broker.client_url()}'",
         )
     pageserver_client = PageserverHttpClient(
         port=http_port,

@@ -96,13 +96,8 @@ impl PageServerNode {
         }
     }
 
-    pub fn initialize(
-        &self,
-        create_tenant: Option<TenantId>,
-        initial_timeline_id: Option<TimelineId>,
-        config_overrides: &[&str],
-        pg_version: u32,
-    ) -> anyhow::Result<TimelineId> {
+    // pageserver conf overrides defined by neon_local configuration.
+    fn neon_local_overrides(&self) -> Vec<String> {
         let id = format!("id={}", self.env.pageserver.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
@@ -117,41 +112,32 @@ impl PageServerNode {
         );
         let listen_pg_addr_param =
             format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
-        let broker_endpoints_param = format!(
-            "broker_endpoints=[{}]",
-            self.env
-                .etcd_broker
-                .broker_endpoints
-                .iter()
-                .map(|url| format!("'{url}'"))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let broker_etcd_prefix_param = self
-            .env
-            .etcd_broker
-            .broker_etcd_prefix
-            .as_ref()
-            .map(|prefix| format!("broker_etcd_prefix='{prefix}'"));
+        let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
-        let mut init_config_overrides = config_overrides.to_vec();
-        init_config_overrides.push(&id);
-        init_config_overrides.push(&pg_distrib_dir_param);
-        init_config_overrides.push(&authg_type_param);
-        init_config_overrides.push(&listen_http_addr_param);
-        init_config_overrides.push(&listen_pg_addr_param);
-        init_config_overrides.push(&broker_endpoints_param);
-
-        if let Some(broker_etcd_prefix_param) = broker_etcd_prefix_param.as_deref() {
-            init_config_overrides.push(broker_etcd_prefix_param);
-        }
+        let mut overrides = vec![
+            id,
+            pg_distrib_dir_param,
+            authg_type_param,
+            listen_http_addr_param,
+            listen_pg_addr_param,
+            broker_endpoint_param,
+        ];
 
         if self.env.pageserver.auth_type != AuthType::Trust {
-            init_config_overrides.push("auth_validation_public_key_path='auth_public_key.pem'");
+            overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
         }
+        overrides
+    }
 
+    pub fn initialize(
+        &self,
+        create_tenant: Option<TenantId>,
+        initial_timeline_id: Option<TimelineId>,
+        config_overrides: &[&str],
+        pg_version: u32,
+    ) -> anyhow::Result<TimelineId> {
         let mut pageserver_process = self
-            .start_node(&init_config_overrides, &self.env.base_data_dir, true)
+            .start_node(config_overrides, &self.env.base_data_dir, true)
             .with_context(|| {
                 format!(
                     "Failed to start a process for pageserver {}",
@@ -224,6 +210,9 @@ impl PageServerNode {
         datadir: &Path,
         update_config: bool,
     ) -> anyhow::Result<Child> {
+        let mut overrides = self.neon_local_overrides();
+        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+
         print!(
             "Starting pageserver at '{}' in '{}'",
             self.pg_connection_config.raw_address(),
@@ -242,7 +231,7 @@ impl PageServerNode {
             args.push("--update-config");
         }
 
-        for config_override in config_overrides {
+        for config_override in &overrides {
             args.extend(["-c", config_override]);
         }
 

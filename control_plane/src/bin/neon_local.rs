@@ -8,10 +8,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::compute::ComputeControlPlane;
-use control_plane::local_env::{EtcdBroker, LocalEnv};
+use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
-use control_plane::{etcd, local_env};
+use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
 use pageserver_api::{
     DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
@@ -22,9 +22,10 @@ use safekeeper_api::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
+use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use utils::{
     auth::{Claims, Scope},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -41,13 +42,12 @@ project_git_version!(GIT_VERSION);
 
 const DEFAULT_PG_VERSION: &str = "14";
 
-fn default_conf(etcd_binary_path: &Path) -> String {
+fn default_conf() -> String {
     format!(
         r#"
 # Default built-in configuration, defined in main.rs
-[etcd_broker]
-broker_endpoints = ['http://localhost:2379']
-etcd_binary_path = '{etcd_binary_path}'
+[broker]
+listen_addr = '{DEFAULT_BROKER_ADDR}'
 
 [pageserver]
 id = {DEFAULT_PAGESERVER_ID}
@@ -60,7 +60,6 @@ id = {DEFAULT_SAFEKEEPER_ID}
 pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
 http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
 "#,
-        etcd_binary_path = etcd_binary_path.display(),
         pageserver_auth_type = AuthType::Trust,
     )
 }
@@ -298,7 +297,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         })?
     } else {
         // Built-in default config
-        default_conf(&EtcdBroker::locate_etcd()?)
+        default_conf()
     };
 
     let pg_version = init_match
@@ -807,14 +806,14 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
 }
 
 fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
-    etcd::start_etcd_process(env)?;
+    broker::start_broker_process(env)?;
     let pageserver = PageServerNode::from_env(env);
 
     // Postgres nodes are not started automatically
 
     if let Err(e) = pageserver.start(&pageserver_config_overrides(sub_match)) {
         eprintln!("pageserver start failed: {e}");
-        try_stop_etcd_process(env);
+        try_stop_storage_broker_process(env);
         exit(1);
     }
 
@@ -822,7 +821,7 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
         let safekeeper = SafekeeperNode::from_env(env, node);
         if let Err(e) = safekeeper.start() {
             eprintln!("safekeeper '{}' start failed: {e}", safekeeper.id);
-            try_stop_etcd_process(env);
+            try_stop_storage_broker_process(env);
             exit(1);
         }
     }
@@ -854,14 +853,14 @@ fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<
         }
     }
 
-    try_stop_etcd_process(env);
+    try_stop_storage_broker_process(env);
 
     Ok(())
 }
 
-fn try_stop_etcd_process(env: &local_env::LocalEnv) {
-    if let Err(e) = etcd::stop_etcd_process(env) {
-        eprintln!("etcd stop failed: {e}");
+fn try_stop_storage_broker_process(env: &local_env::LocalEnv) {
+    if let Err(e) = broker::stop_broker_process(env) {
+        eprintln!("neon broker stop failed: {e}");
     }
 }
 

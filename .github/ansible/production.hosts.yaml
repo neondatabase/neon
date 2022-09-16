@@ -4,7 +4,7 @@ storage:
     console_mgmt_base_url: http://console-release.local
     bucket_name: zenith-storage-oregon
     bucket_region: us-west-2
-    etcd_endpoints: zenith-1-etcd.local:2379
+    broker_endpoint: http://storage-broker.prod.local:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
       remote_storage:

@@ -3,7 +3,7 @@ storage:
     bucket_name: zenith-staging-storage-us-east-1
     bucket_region: us-east-1
     console_mgmt_base_url: http://console-staging.local
-    etcd_endpoints: etcd-0.us-east-2.aws.neon.build:2379
+    broker_endpoint: http://storage-broker.staging.local:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
       remote_storage:

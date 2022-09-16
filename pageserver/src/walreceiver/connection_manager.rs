@@ -1,21 +1,15 @@
 //! WAL receiver logic that ensures the pageserver gets connectected to safekeeper,
 //! that contains the latest WAL to stream and this connection does not go stale.
 //!
-//! To achieve that, a etcd broker is used: safekepers propagate their timelines' state in it,
+//! To achieve that, a storage broker is used: safekepers propagate their timelines' state in it,
 //! the manager subscribes for changes and accumulates those to query the one with the biggest Lsn for connection.
 //! Current connection state is tracked too, to ensure it's not getting stale.
 //!
-//! After every connection or etcd update fetched, the state gets updated correspondingly and rechecked for the new conneciton leader,
+//! After every connection or storage broker update fetched, the state gets updated correspondingly and rechecked for the new conneciton leader,
 //! then a [re]connection happens, if necessary.
-//! Only WAL streaming task expects to be finished, other loops (etcd, connection management) never exit unless cancelled explicitly via the dedicated channel.
+//! Only WAL streaming task expects to be finished, other loops (storage broker, connection management) never exit unless cancelled explicitly via the dedicated channel.
 
-use std::{
-    collections::{hash_map, HashMap},
-    num::NonZeroU64,
-    ops::ControlFlow,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
 
 use crate::task_mgr::TaskKind;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
@@ -23,16 +17,18 @@ use crate::tenant::Timeline;
 use crate::{task_mgr, walreceiver::TaskStateUpdate};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
-use etcd_broker::{
-    subscription_key::SubscriptionKey, subscription_value::SkTimelineInfo, BrokerSubscription,
-    BrokerUpdate, Client,
-};
 use pageserver_api::models::TimelineState;
+use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
+use storage_broker::proto::SafekeeperTimelineInfo;
+use storage_broker::proto::SubscribeSafekeeperInfoRequest;
+use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
+use storage_broker::BrokerClientChannel;
+use storage_broker::Streaming;
 use tokio::{select, sync::watch};
 use tracing::*;
 
 use crate::{
-    exponential_backoff, walreceiver::get_etcd_client, DEFAULT_BASE_BACKOFF_SECONDS,
+    exponential_backoff, walreceiver::get_broker_client, DEFAULT_BASE_BACKOFF_SECONDS,
     DEFAULT_MAX_BACKOFF_SECONDS,
 };
 use postgres_connection::{parse_host_port, PgConnectionConfig};
@@ -45,14 +41,13 @@ use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
 
 /// Spawns the loop to take care of the timeline's WAL streaming connection.
 pub fn spawn_connection_manager_task(
-    broker_loop_prefix: String,
     timeline: Arc<Timeline>,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
     auth_token: Option<Arc<String>>,
 ) {
-    let mut etcd_client = get_etcd_client().clone();
+    let mut broker_client = get_broker_client().clone();
 
     let tenant_id = timeline.tenant_id;
     let timeline_id = timeline.timeline_id;
@@ -65,7 +60,7 @@ pub fn spawn_connection_manager_task(
         &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
         false,
         async move {
-            info!("WAL receiver broker started, connecting to etcd");
+            info!("WAL receiver manager started, connecting to broker");
             let mut walreceiver_state = WalreceiverState::new(
                 timeline,
                 wal_connect_timeout,
@@ -81,8 +76,7 @@ pub fn spawn_connection_manager_task(
                         return Ok(());
                     },
                     loop_step_result = connection_manager_loop_step(
-                        &broker_loop_prefix,
-                        &mut etcd_client,
+                        &mut broker_client,
                         &mut walreceiver_state,
                     ) => match loop_step_result {
                         ControlFlow::Continue(()) => continue,
@@ -103,10 +97,9 @@ pub fn spawn_connection_manager_task(
 
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
 /// Based on the updates, desides whether to start, keep or stop a WAL receiver task.
-/// If etcd subscription is cancelled, exits.
+/// If storage broker subscription is cancelled, exits.
 async fn connection_manager_loop_step(
-    broker_prefix: &str,
-    etcd_client: &mut Client,
+    broker_client: &mut BrokerClientChannel,
     walreceiver_state: &mut WalreceiverState,
 ) -> ControlFlow<(), ()> {
     let mut timeline_state_updates = walreceiver_state.timeline.subscribe_for_state_updates();
@@ -124,13 +117,11 @@ async fn connection_manager_loop_step(
         timeline_id: walreceiver_state.timeline.timeline_id,
     };
 
-    // XXX: We never explicitly cancel etcd task, instead establishing one and never letting it go,
-    // running the entire loop step as much as possible to an end.
-    // The task removal happens implicitly on drop, both aborting the etcd subscription task and dropping the receiver channel end,
-    // forcing the etcd subscription to exit either way.
-    let mut broker_subscription =
-        subscribe_for_timeline_updates(etcd_client, broker_prefix, id).await;
-    info!("Subscribed for etcd timeline changes, waiting for new etcd data");
+    // Subscribe to the broker updates. Stream shares underlying TCP connection
+    // with other streams on this client (other connection managers). When
+    // object goes out of scope, stream finishes in drop() automatically.
+    let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id).await;
+    info!("Subscribed for broker timeline updates");
 
     loop {
         let time_until_next_retry = walreceiver_state.time_until_next_retry();
@@ -145,12 +136,6 @@ async fn connection_manager_loop_step(
         //      - this might change the current desired connection
         //  - timeline state changes to something that does not allow walreceiver to run concurrently
         select! {
-            broker_connection_result = &mut broker_subscription.watcher_handle => {
-                info!("Broker connection was closed from the other side, ending current broker loop step");
-                cleanup_broker_connection(broker_connection_result, walreceiver_state);
-                return ControlFlow::Continue(());
-            },
-
             Some(wal_connection_update) = async {
                 match walreceiver_state.wal_connection.as_mut() {
                     Some(wal_connection) => Some(wal_connection.connection_task.next_task_event().await),
@@ -185,22 +170,16 @@ async fn connection_manager_loop_step(
                 }
             },
 
-            // Got a new update from etcd
-            broker_update = broker_subscription.value_updates.recv() => {
+            // Got a new update from the broker
+            broker_update = broker_subscription.message() => {
                 match broker_update {
-                    Some(broker_update) => walreceiver_state.register_timeline_update(broker_update),
-                    None => {
-                        info!("Broker sender end was dropped, ending current broker loop step");
-                        // Ensure to cancel and wait for the broker subscription task end, to log its result.
-                        // Broker sender end is in the broker subscription task and its drop means abnormal task completion.
-                        // First, ensure that the task is stopped (abort can be done without errors on already stopped tasks and repeated multiple times).
-                        broker_subscription.watcher_handle.abort();
-                        // Then, wait for the task to finish and print its result. If the task was finished before abort (which we assume in this abnormal case),
-                        // a proper error message will be printed, otherwise an abortion message is printed which is ok, since we're signalled to finish anyway.
-                        cleanup_broker_connection(
-                            (&mut broker_subscription.watcher_handle).await,
-                            walreceiver_state,
-                        );
+                    Ok(Some(broker_update)) => walreceiver_state.register_timeline_update(broker_update),
+                    Err(e) => {
+                        error!("broker subscription failed: {e}");
+                        return ControlFlow::Continue(());
+                    }
+                    Ok(None) => {
+                        error!("broker subscription stream ended"); // can't happen
                         return ControlFlow::Continue(());
                     }
                 }
@@ -232,17 +211,6 @@ async fn connection_manager_loop_step(
             },
 
             _ = async { tokio::time::sleep(time_until_next_retry.unwrap()).await }, if time_until_next_retry.is_some() => {}
-        }
-
-        // Fetch more etcd timeline updates, but limit ourselves since they may arrive quickly.
-        let mut max_events_to_poll = 100_u32;
-        while max_events_to_poll > 0 {
-            if let Ok(broker_update) = broker_subscription.value_updates.try_recv() {
-                walreceiver_state.register_timeline_update(broker_update);
-                max_events_to_poll -= 1;
-            } else {
-                break;
-            }
         }
 
         if let Some(new_candidate) = walreceiver_state.next_connection_candidate() {
@@ -285,33 +253,11 @@ async fn wait_for_active_timeline(
     }
 }
 
-fn cleanup_broker_connection(
-    broker_connection_result: Result<Result<(), etcd_broker::BrokerError>, tokio::task::JoinError>,
-    walreceiver_state: &mut WalreceiverState,
-) {
-    match broker_connection_result {
-        Ok(Ok(())) => info!("Broker conneciton task finished, ending current broker loop step"),
-        Ok(Err(broker_error)) => warn!("Broker conneciton ended with error: {broker_error}"),
-        Err(abort_error) => {
-            if abort_error.is_panic() {
-                error!("Broker connection panicked: {abort_error}")
-            } else {
-                debug!("Broker connection aborted: {abort_error}")
-            }
-        }
-    }
-
-    walreceiver_state.wal_stream_candidates.clear();
-}
-
 /// Endlessly try to subscribe for broker updates for a given timeline.
-/// If there are no safekeepers to maintain the lease, the timeline subscription will be unavailable in the broker and the operation will fail constantly.
-/// This is ok, pageservers should anyway try subscribing (with some backoff) since it's the only way they can get the timeline WAL anyway.
 async fn subscribe_for_timeline_updates(
-    etcd_client: &mut Client,
-    broker_prefix: &str,
+    broker_client: &mut BrokerClientChannel,
     id: TenantTimelineId,
-) -> BrokerSubscription<SkTimelineInfo> {
+) -> Streaming<SafekeeperTimelineInfo> {
     let mut attempt = 0;
     loop {
         exponential_backoff(
@@ -322,18 +268,21 @@ async fn subscribe_for_timeline_updates(
         .await;
         attempt += 1;
 
-        match etcd_broker::subscribe_for_json_values(
-            etcd_client,
-            SubscriptionKey::sk_timeline_info(broker_prefix.to_owned(), id),
-        )
-        .instrument(info_span!("etcd_subscription"))
-        .await
-        {
-            Ok(new_subscription) => {
-                return new_subscription;
+        // subscribe to the specific timeline
+        let key = SubscriptionKey::TenantTimelineId(ProtoTenantTimelineId {
+            tenant_id: id.tenant_id.as_ref().to_owned(),
+            timeline_id: id.timeline_id.as_ref().to_owned(),
+        });
+        let request = SubscribeSafekeeperInfoRequest {
+            subscription_key: Some(key),
+        };
+
+        match broker_client.subscribe_safekeeper_info(request).await {
+            Ok(resp) => {
+                return resp.into_inner();
             }
             Err(e) => {
-                warn!("Attempt #{attempt}, failed to subscribe for timeline {id} updates in etcd: {e:#}");
+                warn!("Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}");
                 continue;
             }
         }
@@ -360,8 +309,8 @@ struct WalreceiverState {
     wal_connection: Option<WalConnection>,
     /// Info about retries and unsuccessful attempts to connect to safekeepers.
     wal_connection_retries: HashMap<NodeId, RetryInfo>,
-    /// Data about all timelines, available for connection, fetched from etcd, grouped by their corresponding safekeeper node id.
-    wal_stream_candidates: HashMap<NodeId, EtcdSkTimeline>,
+    /// Data about all timelines, available for connection, fetched from storage broker, grouped by their corresponding safekeeper node id.
+    wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
     auth_token: Option<Arc<String>>,
 }
 
@@ -395,13 +344,11 @@ struct RetryInfo {
     retry_duration_seconds: f64,
 }
 
-/// Data about the timeline to connect to, received from etcd.
+/// Data about the timeline to connect to, received from the broker.
 #[derive(Debug)]
-struct EtcdSkTimeline {
-    timeline: SkTimelineInfo,
-    /// Etcd generation, the bigger it is, the more up to date the timeline data is.
-    etcd_version: i64,
-    /// Time at which the data was fetched from etcd last time, to track the stale data.
+struct BrokerSkTimeline {
+    timeline: SafekeeperTimelineInfo,
+    /// Time at which the data was fetched from the broker last time, to track the stale data.
     latest_update: NaiveDateTime,
 }
 
@@ -538,31 +485,18 @@ impl WalreceiverState {
         next_retry_at.and_then(|next_retry_at| (next_retry_at - now).to_std().ok())
     }
 
-    /// Adds another etcd timeline into the state, if its more recent than the one already added there for the same key.
-    fn register_timeline_update(&mut self, timeline_update: BrokerUpdate<SkTimelineInfo>) {
-        match self
-            .wal_stream_candidates
-            .entry(timeline_update.key.node_id)
-        {
-            hash_map::Entry::Occupied(mut o) => {
-                let existing_value = o.get_mut();
-                if existing_value.etcd_version < timeline_update.etcd_version {
-                    existing_value.etcd_version = timeline_update.etcd_version;
-                    existing_value.timeline = timeline_update.value;
-                    existing_value.latest_update = Utc::now().naive_utc();
-                }
-            }
-            hash_map::Entry::Vacant(v) => {
-                v.insert(EtcdSkTimeline {
-                    timeline: timeline_update.value,
-                    etcd_version: timeline_update.etcd_version,
-                    latest_update: Utc::now().naive_utc(),
-                });
-            }
-        }
+    /// Adds another broker timeline into the state, if its more recent than the one already added there for the same key.
+    fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
+        self.wal_stream_candidates.insert(
+            NodeId(timeline_update.safekeeper_id),
+            BrokerSkTimeline {
+                timeline: timeline_update,
+                latest_update: Utc::now().naive_utc(),
+            },
+        );
     }
 
-    /// Cleans up stale etcd records and checks the rest for the new connection candidate.
+    /// Cleans up stale broker records and checks the rest for the new connection candidate.
     /// Returns a new candidate, if the current state is absent or somewhat lagging, `None` otherwise.
     /// The current rules for approving new candidates:
     /// * pick a candidate different from the connected safekeeper with biggest `commit_lsn` and lowest failed connection attemps
@@ -585,7 +519,7 @@ impl WalreceiverState {
             Some(existing_wal_connection) => {
                 let connected_sk_node = existing_wal_connection.sk_id;
 
-                let (new_sk_id, new_safekeeper_etcd_data, new_wal_source_connconf) =
+                let (new_sk_id, new_safekeeper_broker_data, new_wal_source_connconf) =
                     self.select_connection_candidate(Some(connected_sk_node))?;
 
                 let now = Utc::now().naive_utc();
@@ -614,7 +548,7 @@ impl WalreceiverState {
                 }
 
                 if let Some(current_commit_lsn) = existing_wal_connection.status.commit_lsn {
-                    let new_commit_lsn = new_safekeeper_etcd_data.commit_lsn.unwrap_or(Lsn(0));
+                    let new_commit_lsn = Lsn(new_safekeeper_broker_data.commit_lsn);
                     // Check if the new candidate has much more WAL than the current one.
                     match new_commit_lsn.0.checked_sub(current_commit_lsn.0) {
                         Some(new_sk_lsn_advantage) => {
@@ -644,7 +578,7 @@ impl WalreceiverState {
                     .status
                     .commit_lsn
                     .unwrap_or(current_lsn);
-                let candidate_commit_lsn = new_safekeeper_etcd_data.commit_lsn.unwrap_or(Lsn(0));
+                let candidate_commit_lsn = Lsn(new_safekeeper_broker_data.commit_lsn);
 
                 // Keep discovered_new_wal only if connected safekeeper has not caught up yet.
                 let mut discovered_new_wal = existing_wal_connection
@@ -727,7 +661,7 @@ impl WalreceiverState {
         None
     }
 
-    /// Selects the best possible candidate, based on the data collected from etcd updates about the safekeepers.
+    /// Selects the best possible candidate, based on the data collected from the broker updates about the safekeepers.
     /// Optionally, omits the given node, to support gracefully switching from a healthy safekeeper to another.
     ///
     /// The candidate that is chosen:
@@ -736,7 +670,7 @@ impl WalreceiverState {
     fn select_connection_candidate(
         &self,
         node_to_omit: Option<NodeId>,
-    ) -> Option<(NodeId, &SkTimelineInfo, PgConnectionConfig)> {
+    ) -> Option<(NodeId, &SafekeeperTimelineInfo, PgConnectionConfig)> {
         self.applicable_connection_candidates()
             .filter(|&(sk_id, _, _)| Some(sk_id) != node_to_omit)
             .max_by_key(|(_, info, _)| info.commit_lsn)
@@ -746,12 +680,12 @@ impl WalreceiverState {
     /// Some safekeepers are filtered by the retry cooldown.
     fn applicable_connection_candidates(
         &self,
-    ) -> impl Iterator<Item = (NodeId, &SkTimelineInfo, PgConnectionConfig)> {
+    ) -> impl Iterator<Item = (NodeId, &SafekeeperTimelineInfo, PgConnectionConfig)> {
         let now = Utc::now().naive_utc();
 
         self.wal_stream_candidates
             .iter()
-            .filter(|(_, info)| info.timeline.commit_lsn.is_some())
+            .filter(|(_, info)| Lsn(info.timeline.commit_lsn) != Lsn::INVALID)
             .filter(move |(sk_id, _)| {
                 let next_retry_at = self
                     .wal_connection_retries
@@ -761,12 +695,14 @@ impl WalreceiverState {
                     });
 
                 next_retry_at.is_none() || next_retry_at.unwrap() <= now
-            })
-            .filter_map(|(sk_id, etcd_info)| {
-                let info = &etcd_info.timeline;
+            }).filter_map(|(sk_id, broker_info)| {
+                let info = &broker_info.timeline;
+                if info.safekeeper_connstr.is_empty() {
+                    return None; // no connection string, ignore sk
+                }
                 match wal_stream_connection_config(
                     self.id,
-                    info.safekeeper_connstr.as_deref()?,
+                    info.safekeeper_connstr.as_ref(),
                     match &self.auth_token {
                         None => None,
                         Some(x) => Some(x),
@@ -781,15 +717,15 @@ impl WalreceiverState {
             })
     }
 
-    /// Remove candidates which haven't sent etcd updates for a while.
+    /// Remove candidates which haven't sent broker updates for a while.
     fn cleanup_old_candidates(&mut self) {
         let mut node_ids_to_remove = Vec::with_capacity(self.wal_stream_candidates.len());
 
-        self.wal_stream_candidates.retain(|node_id, etcd_info| {
-            if let Ok(time_since_latest_etcd_update) =
-                (Utc::now().naive_utc() - etcd_info.latest_update).to_std()
+        self.wal_stream_candidates.retain(|node_id, broker_info| {
+            if let Ok(time_since_latest_broker_update) =
+                (Utc::now().naive_utc() - broker_info.latest_update).to_std()
             {
-                let should_retain = time_since_latest_etcd_update < self.lagging_wal_timeout;
+                let should_retain = time_since_latest_broker_update < self.lagging_wal_timeout;
                 if !should_retain {
                     node_ids_to_remove.push(*node_id);
                 }
@@ -870,6 +806,28 @@ mod tests {
     use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
     use url::Host;
 
+    fn dummy_broker_sk_timeline(
+        commit_lsn: u64,
+        safekeeper_connstr: &str,
+        latest_update: NaiveDateTime,
+    ) -> BrokerSkTimeline {
+        BrokerSkTimeline {
+            timeline: SafekeeperTimelineInfo {
+                safekeeper_id: 0,
+                tenant_timeline_id: None,
+                last_log_term: 0,
+                flush_lsn: 0,
+                commit_lsn,
+                backup_lsn: 0,
+                remote_consistent_lsn: 0,
+                peer_horizon_lsn: 0,
+                local_start_lsn: 0,
+                safekeeper_connstr: safekeeper_connstr.to_owned(),
+            },
+            latest_update,
+        }
+    }
+
     #[tokio::test]
     async fn no_connection_no_candidate() -> anyhow::Result<()> {
         let harness = TenantHarness::create("no_connection_no_candidate")?;
@@ -881,74 +839,16 @@ mod tests {
 
         state.wal_connection = None;
         state.wal_stream_candidates = HashMap::from([
-            (
-                NodeId(0),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(1)),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-                        safekeeper_connstr: None,
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
-            ),
-            (
-                NodeId(1),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: None,
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some("no_commit_lsn".to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
-            ),
-            (
-                NodeId(2),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: None,
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-                        safekeeper_connstr: Some("no_commit_lsn".to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
-            ),
+            (NodeId(0), dummy_broker_sk_timeline(1, "", now)),
+            (NodeId(1), dummy_broker_sk_timeline(0, "no_commit_lsn", now)),
+            (NodeId(2), dummy_broker_sk_timeline(0, "no_commit_lsn", now)),
             (
                 NodeId(3),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(1 + state.max_lsn_wal_lag.get())),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-                        safekeeper_connstr: None,
-                    },
-                    etcd_version: 0,
-                    latest_update: delay_over_threshold,
-                },
+                dummy_broker_sk_timeline(
+                    1 + state.max_lsn_wal_lag.get(),
+                    "delay_over_threshold",
+                    delay_over_threshold,
+                ),
             ),
         ]);
 
@@ -995,57 +895,23 @@ mod tests {
         state.wal_stream_candidates = HashMap::from([
             (
                 connected_sk_id,
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(current_lsn + state.max_lsn_wal_lag.get() * 2)),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_HOST.to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(
+                    current_lsn + state.max_lsn_wal_lag.get() * 2,
+                    DUMMY_SAFEKEEPER_HOST,
+                    now,
+                ),
             ),
             (
                 NodeId(1),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(current_lsn)),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some("not_advanced_lsn".to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(current_lsn, "not_advanced_lsn", now),
             ),
             (
                 NodeId(2),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(current_lsn + state.max_lsn_wal_lag.get() / 2)),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some("not_enough_advanced_lsn".to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(
+                    current_lsn + state.max_lsn_wal_lag.get() / 2,
+                    "not_enough_advanced_lsn",
+                    now,
+                ),
             ),
         ]);
 
@@ -1067,21 +933,7 @@ mod tests {
         state.wal_connection = None;
         state.wal_stream_candidates = HashMap::from([(
             NodeId(0),
-            EtcdSkTimeline {
-                timeline: SkTimelineInfo {
-                    last_log_term: None,
-                    flush_lsn: None,
-                    commit_lsn: Some(Lsn(1 + state.max_lsn_wal_lag.get())),
-                    backup_lsn: None,
-                    remote_consistent_lsn: None,
-                    peer_horizon_lsn: None,
-                    local_start_lsn: None,
-
-                    safekeeper_connstr: Some(DUMMY_SAFEKEEPER_HOST.to_string()),
-                },
-                etcd_version: 0,
-                latest_update: now,
-            },
+            dummy_broker_sk_timeline(1 + state.max_lsn_wal_lag.get(), DUMMY_SAFEKEEPER_HOST, now),
         )]);
 
         let only_candidate = state
@@ -1102,57 +954,15 @@ mod tests {
         state.wal_stream_candidates = HashMap::from([
             (
                 NodeId(0),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(selected_lsn - 100)),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some("smaller_commit_lsn".to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(selected_lsn - 100, "smaller_commit_lsn", now),
             ),
             (
                 NodeId(1),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(selected_lsn)),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_HOST.to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(selected_lsn, DUMMY_SAFEKEEPER_HOST, now),
             ),
             (
                 NodeId(2),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(selected_lsn + 100)),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: None,
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(selected_lsn + 100, "", now),
             ),
         ]);
         let biggest_wal_candidate = state.next_connection_candidate().expect(
@@ -1186,39 +996,11 @@ mod tests {
         state.wal_stream_candidates = HashMap::from([
             (
                 NodeId(0),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(bigger_lsn),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_HOST.to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(bigger_lsn.0, DUMMY_SAFEKEEPER_HOST, now),
             ),
             (
                 NodeId(1),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(current_lsn),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_HOST.to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(current_lsn.0, DUMMY_SAFEKEEPER_HOST, now),
             ),
         ]);
         state.wal_connection_retries = HashMap::from([(
@@ -1275,39 +1057,11 @@ mod tests {
         state.wal_stream_candidates = HashMap::from([
             (
                 connected_sk_id,
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(current_lsn),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_HOST.to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(current_lsn.0, DUMMY_SAFEKEEPER_HOST, now),
             ),
             (
                 NodeId(1),
-                EtcdSkTimeline {
-                    timeline: SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(new_lsn),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        local_start_lsn: None,
-
-                        safekeeper_connstr: Some("advanced_by_lsn_safekeeper".to_string()),
-                    },
-                    etcd_version: 0,
-                    latest_update: now,
-                },
+                dummy_broker_sk_timeline(new_lsn.0, "advanced_by_lsn_safekeeper", now),
             ),
         ]);
 
@@ -1367,21 +1121,7 @@ mod tests {
         });
         state.wal_stream_candidates = HashMap::from([(
             NodeId(0),
-            EtcdSkTimeline {
-                timeline: SkTimelineInfo {
-                    last_log_term: None,
-                    flush_lsn: None,
-                    commit_lsn: Some(current_lsn),
-                    backup_lsn: None,
-                    remote_consistent_lsn: None,
-                    peer_horizon_lsn: None,
-                    local_start_lsn: None,
-
-                    safekeeper_connstr: Some(DUMMY_SAFEKEEPER_HOST.to_string()),
-                },
-                etcd_version: 0,
-                latest_update: now,
-            },
+            dummy_broker_sk_timeline(current_lsn.0, DUMMY_SAFEKEEPER_HOST, now),
         )]);
 
         let over_threshcurrent_candidate = state.next_connection_candidate().expect(
@@ -1441,21 +1181,7 @@ mod tests {
         });
         state.wal_stream_candidates = HashMap::from([(
             NodeId(0),
-            EtcdSkTimeline {
-                timeline: SkTimelineInfo {
-                    last_log_term: None,
-                    flush_lsn: None,
-                    commit_lsn: Some(new_lsn),
-                    backup_lsn: None,
-                    remote_consistent_lsn: None,
-                    peer_horizon_lsn: None,
-                    local_start_lsn: None,
-
-                    safekeeper_connstr: Some(DUMMY_SAFEKEEPER_HOST.to_string()),
-                },
-                etcd_version: 0,
-                latest_update: now,
-            },
+            dummy_broker_sk_timeline(new_lsn.0, DUMMY_SAFEKEEPER_HOST, now),
         )]);
 
         let over_threshcurrent_candidate = state.next_connection_candidate().expect(
