@@ -601,6 +601,7 @@ pub fn spawn_storage_sync_task(
 
     for (tenant_id, timeline_data) in local_timeline_files.0 {
         if timeline_data.is_empty() {
+            info!("got empty tenant {}", tenant_id);
             let _ = empty_tenants.0.entry(tenant_id).or_default();
         } else {
             for (timeline_id, timeline_data) in timeline_data {
@@ -1303,6 +1304,10 @@ fn schedule_first_sync_tasks(
             None => {
                 // TODO (rodionov) does this mean that we've crashed during tenant creation?
                 //  is it safe to upload this checkpoint? could it be half broken?
+                warn!(
+                    "marking {} as locally complete, while it doesnt exist in remote index",
+                    sync_id
+                );
                 new_sync_tasks.push_back((
                     sync_id,
                     SyncTask::upload(LayersUpload {
@@ -1337,6 +1342,8 @@ fn compare_local_and_remote_timeline(
     local_files: HashSet<PathBuf>,
     remote_entry: &RemoteTimeline,
 ) -> (LocalTimelineInitStatus, bool) {
+    let _entered = info_span!("compare_local_and_remote_timeline", sync_id = %sync_id).entered();
+
     let remote_files = remote_entry.stored_files();
 
     let number_of_layers_to_download = remote_files.difference(&local_files).count();
@@ -1347,10 +1354,12 @@ fn compare_local_and_remote_timeline(
                 layers_to_skip: local_files.clone(),
             }),
         ));
+        info!("NeedsSync");
         (LocalTimelineInitStatus::NeedsSync, true)
         // we do not need to manipulate with remote consistent lsn here
         // because it will be updated when sync will be completed
     } else {
+        info!("LocallyComplete");
         (
             LocalTimelineInitStatus::LocallyComplete(local_metadata.clone()),
             false,
