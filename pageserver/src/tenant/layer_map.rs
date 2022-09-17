@@ -16,7 +16,6 @@ use crate::tenant::inmemory_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use anyhow::Result;
-use metrics::{register_int_gauge, IntGauge};
 use num_bigint::BigInt;
 use num_traits::identities::{One, Zero};
 use num_traits::ToPrimitive;
