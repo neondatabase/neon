@@ -59,8 +59,8 @@ Env = Dict[str, str]
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 DEFAULT_OUTPUT_DIR = "test_output"
-DEFAULT_PG_VERSION_DEFAULT = "14"
 DEFAULT_BRANCH_NAME = "main"
+DEFAULT_PG_VERSION_DEFAULT = "14"
 
 BASE_PORT = 15000
 WORKER_PORT_NUM = 1000
@@ -71,7 +71,7 @@ base_dir = ""
 neon_binpath = ""
 pg_distrib_dir = ""
 top_output_dir = ""
-pg_version = ""
+default_pg_version = ""
 
 
 def pytest_configure(config):
@@ -101,29 +101,36 @@ def pytest_configure(config):
     Path(top_output_dir).mkdir(exist_ok=True)
 
     # Find the postgres installation.
-    global pg_version
-    pg_version = os.environ.get("DEFAULT_PG_VERSION", DEFAULT_PG_VERSION_DEFAULT)
+    global default_pg_version
+    log.info(f"default_pg_version is {default_pg_version}")
+    env_default_pg_version = os.environ.get("DEFAULT_PG_VERSION")
+    if env_default_pg_version:
+        default_pg_version = env_default_pg_version
+        log.info(f"default_pg_version is set to {default_pg_version}")
+    else:
+        default_pg_version = DEFAULT_PG_VERSION_DEFAULT
 
     global pg_distrib_dir
 
-    # TODO get rid of the POSTGRES_DISTRIB_DIR env var ?
-    # use DEFAULT_PG_VERSION instead to generate the path
     env_postgres_bin = os.environ.get("POSTGRES_DISTRIB_DIR")
     if env_postgres_bin:
         pg_distrib_dir = env_postgres_bin
     else:
-        pg_distrib_dir = os.path.normpath(
-            os.path.join(base_dir, "pg_install/v{}".format(pg_version))
-        )
+        pg_distrib_dir = os.path.normpath(os.path.join(base_dir, "pg_install"))
 
     log.info(f"pg_distrib_dir is {pg_distrib_dir}")
+    psql_bin_path = os.path.join(pg_distrib_dir, "v{}".format(default_pg_version), "bin/psql")
+    postgres_bin_path = os.path.join(
+        pg_distrib_dir, "v{}".format(default_pg_version), "bin/postgres"
+    )
+
     if os.getenv("REMOTE_ENV"):
         # When testing against a remote server, we only need the client binary.
-        if not os.path.exists(os.path.join(pg_distrib_dir, "bin/psql")):
-            raise Exception('psql not found at "{}"'.format(pg_distrib_dir))
+        if not os.path.exists(psql_bin_path):
+            raise Exception('psql not found at "{}"'.format(psql_bin_path))
     else:
-        if not os.path.exists(os.path.join(pg_distrib_dir, "bin/postgres")):
-            raise Exception('postgres not found at "{}"'.format(pg_distrib_dir))
+        if not os.path.exists(postgres_bin_path):
+            raise Exception('postgres not found at "{}"'.format(postgres_bin_path))
 
     if os.getenv("REMOTE_ENV"):
         # we are in remote env and do not have neon binaries locally
@@ -549,6 +556,7 @@ class NeonEnvBuilder:
         self.env: Optional[NeonEnv] = None
         self.remote_storage_prefix: Optional[str] = None
         self.keep_remote_storage_contents: bool = True
+        self.pg_version = default_pg_version
 
     def init(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -761,6 +769,7 @@ class NeonEnv:
         self.broker = config.broker
         self.remote_storage = config.remote_storage
         self.remote_storage_users = config.remote_storage_users
+        self.pg_version = config.pg_version
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -1195,7 +1204,6 @@ class AbstractNeonCli(abc.ABC):
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
         env_vars["POSTGRES_DISTRIB_DIR"] = str(pg_distrib_dir)
-        env_vars["DEFAULT_PG_VERSION"] = str(pg_version)
         if self.env.rust_log_override is not None:
             env_vars["RUST_LOG"] = self.env.rust_log_override
         for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
@@ -1263,7 +1271,7 @@ class NeonCli(AbstractNeonCli):
                     "--timeline-id",
                     str(timeline_id),
                     "--pg-version",
-                    pg_version,
+                    self.env.pg_version,
                 ]
             )
         else:
@@ -1276,7 +1284,7 @@ class NeonCli(AbstractNeonCli):
                     "--timeline-id",
                     str(timeline_id),
                     "--pg-version",
-                    pg_version,
+                    self.env.pg_version,
                 ]
                 + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
             )
@@ -1302,7 +1310,9 @@ class NeonCli(AbstractNeonCli):
         return res
 
     def create_timeline(
-        self, new_branch_name: str, tenant_id: Optional[TenantId] = None
+        self,
+        new_branch_name: str,
+        tenant_id: Optional[TenantId] = None,
     ) -> TimelineId:
         cmd = [
             "timeline",
@@ -1312,7 +1322,7 @@ class NeonCli(AbstractNeonCli):
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
             "--pg-version",
-            pg_version,
+            self.env.pg_version,
         ]
 
         res = self.raw_cli(cmd)
@@ -1326,7 +1336,11 @@ class NeonCli(AbstractNeonCli):
 
         return TimelineId(str(created_timeline_id))
 
-    def create_root_branch(self, branch_name: str, tenant_id: Optional[TenantId] = None):
+    def create_root_branch(
+        self,
+        branch_name: str,
+        tenant_id: Optional[TenantId] = None,
+    ):
         cmd = [
             "timeline",
             "create",
@@ -1335,7 +1349,7 @@ class NeonCli(AbstractNeonCli):
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
             "--pg-version",
-            pg_version,
+            self.env.pg_version,
         ]
 
         res = self.raw_cli(cmd)
@@ -1405,7 +1419,9 @@ class NeonCli(AbstractNeonCli):
         return timelines_cli
 
     def init(
-        self, config_toml: str, initial_timeline_id: Optional[TimelineId] = None
+        self,
+        config_toml: str,
+        initial_timeline_id: Optional[TimelineId] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(config_toml)
@@ -1415,7 +1431,7 @@ class NeonCli(AbstractNeonCli):
             if initial_timeline_id:
                 cmd.extend(["--timeline-id", str(initial_timeline_id)])
 
-            cmd.extend(["--pg-version", pg_version])
+            cmd.extend(["--pg-version", self.env.pg_version])
 
             append_pageserver_param_overrides(
                 params_to_update=cmd,
@@ -1443,7 +1459,10 @@ class NeonCli(AbstractNeonCli):
         log.info(f"pageserver_enabled_features success: {res.stdout}")
         return json.loads(res.stdout)
 
-    def pageserver_start(self, overrides=()) -> "subprocess.CompletedProcess[str]":
+    def pageserver_start(
+        self,
+        overrides=(),
+    ) -> "subprocess.CompletedProcess[str]":
         start_args = ["pageserver", "start", *overrides]
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -1499,7 +1518,7 @@ class NeonCli(AbstractNeonCli):
             "--branch-name",
             branch_name,
             "--pg-version",
-            pg_version,
+            self.env.pg_version,
         ]
         if lsn is not None:
             args.extend(["--lsn", str(lsn)])
@@ -1525,7 +1544,7 @@ class NeonCli(AbstractNeonCli):
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
             "--pg-version",
-            pg_version,
+            self.env.pg_version,
         ]
         if lsn is not None:
             args.append(f"--lsn={lsn}")
@@ -1655,11 +1674,13 @@ def append_pageserver_param_overrides(
 class PgBin:
     """A helper class for executing postgres binaries"""
 
-    def __init__(self, log_dir: Path):
+    def __init__(self, log_dir: Path, pg_version: str):
         self.log_dir = log_dir
-        self.pg_bin_path = os.path.join(str(pg_distrib_dir), "bin")
+        self.pg_version = pg_version
+        self.pg_bin_path = os.path.join(str(pg_distrib_dir), "v{}".format(pg_version), "bin")
+        self.pg_lib_dir = os.path.join(str(pg_distrib_dir), "v{}".format(pg_version), "lib")
         self.env = os.environ.copy()
-        self.env["LD_LIBRARY_PATH"] = os.path.join(str(pg_distrib_dir), "lib")
+        self.env["LD_LIBRARY_PATH"] = self.pg_lib_dir
 
     def _fixpath(self, command: List[str]):
         if "/" not in command[0]:
@@ -1714,8 +1735,8 @@ class PgBin:
 
 
 @pytest.fixture(scope="function")
-def pg_bin(test_output_dir: Path) -> PgBin:
-    return PgBin(test_output_dir)
+def pg_bin(test_output_dir: Path, pg_version: str) -> PgBin:
+    return PgBin(test_output_dir, pg_version)
 
 
 class VanillaPostgres(PgProtocol):
@@ -1762,12 +1783,19 @@ class VanillaPostgres(PgProtocol):
             self.stop()
 
 
+@pytest.fixture(scope="session")
+def pg_version() -> str:
+    return default_pg_version
+
+
 @pytest.fixture(scope="function")
 def vanilla_pg(
-    test_output_dir: Path, port_distributor: PortDistributor
+    test_output_dir: Path,
+    port_distributor: PortDistributor,
+    pg_version: str,
 ) -> Iterator[VanillaPostgres]:
     pgdatadir = test_output_dir / "pgdata-vanilla"
-    pg_bin = PgBin(test_output_dir)
+    pg_bin = PgBin(test_output_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
         yield vanilla_pg
@@ -1803,8 +1831,8 @@ class RemotePostgres(PgProtocol):
 
 
 @pytest.fixture(scope="function")
-def remote_pg(test_output_dir: Path) -> Iterator[RemotePostgres]:
-    pg_bin = PgBin(test_output_dir)
+def remote_pg(test_output_dir: Path, pg_version: str) -> Iterator[RemotePostgres]:
+    pg_bin = PgBin(test_output_dir, pg_version)
 
     connstr = os.getenv("BENCHMARK_CONNSTR")
     if connstr is None:
@@ -2533,7 +2561,11 @@ def list_files_to_compare(pgdata_dir: Path):
 
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
-def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Postgres):
+def check_restored_datadir_content(
+    test_output_dir: Path,
+    env: NeonEnv,
+    pg: Postgres,
+):
     # Get the timeline ID. We need it for the 'basebackup' command
     timeline = TimelineId(pg.safe_psql("SHOW neon.timeline_id")[0][0])
 
@@ -2544,7 +2576,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Post
     restored_dir_path = env.repo_dir / f"{pg.node_name}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
 
-    pg_bin = PgBin(test_output_dir)
+    pg_bin = PgBin(test_output_dir, env.pg_version)
     psql_path = os.path.join(pg_bin.pg_bin_path, "psql")
 
     cmd = rf"""
@@ -2557,7 +2589,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Post
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": os.path.join(str(pg_distrib_dir), "lib")}
+    psql_env = {"LD_LIBRARY_PATH": pg_bin.pg_lib_dir}
     result = subprocess.run(cmd, env=psql_env, capture_output=True, text=True, shell=True)
 
     # Print captured stdout/stderr if basebackup cmd failed.

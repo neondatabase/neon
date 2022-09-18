@@ -29,7 +29,6 @@ from fixtures.neon_fixtures import (
     SafekeeperPort,
     available_remote_storages,
     neon_binpath,
-    pg_version,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -705,7 +704,7 @@ def test_sync_safekeepers(
                 "begin_lsn": int(begin_lsn),
                 "epoch_start_lsn": int(epoch_start_lsn),
                 "truncate_lsn": int(epoch_start_lsn),
-                "pg_version": int(pg_version) * 10000,
+                "pg_version": int(env.pg_version) * 10000,
             },
         )
         lsn = Lsn(res["inserted_wal"]["end_lsn"])
