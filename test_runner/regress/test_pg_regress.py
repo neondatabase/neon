@@ -5,13 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    base_dir,
-    check_restored_datadir_content,
-    pg_distrib_dir,
-    pg_version,
-)
+from fixtures.neon_fixtures import NeonEnv, base_dir, check_restored_datadir_content, pg_distrib_dir
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -32,9 +26,9 @@ def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, cap
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
-    build_path = os.path.join(pg_distrib_dir, "../build/v{}/src/test/regress").format(pg_version)
-    src_path = os.path.join(base_dir, "vendor/postgres-v{}/src/test/regress").format(pg_version)
-    bindir = os.path.join(pg_distrib_dir, "bin")
+    build_path = os.path.join(pg_distrib_dir, "build/v{}/src/test/regress").format(env.pg_version)
+    src_path = os.path.join(base_dir, "vendor/postgres-v{}/src/test/regress").format(env.pg_version)
+    bindir = os.path.join(pg_distrib_dir, "v{}".format(env.pg_version), "bin")
     schedule = os.path.join(src_path, "parallel_schedule")
     pg_regress = os.path.join(build_path, "pg_regress")
 
@@ -86,9 +80,11 @@ def test_isolation(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, caps
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_isolation_regress will need.
-    build_path = os.path.join(pg_distrib_dir, "../build/v{}/src/test/isolation".format(pg_version))
-    src_path = os.path.join(base_dir, "vendor/postgres-v{}/src/test/isolation".format(pg_version))
-    bindir = os.path.join(pg_distrib_dir, "bin")
+    build_path = os.path.join(pg_distrib_dir, "build/v{}/src/test/isolation".format(env.pg_version))
+    src_path = os.path.join(
+        base_dir, "vendor/postgres-v{}/src/test/isolation".format(env.pg_version)
+    )
+    bindir = os.path.join(pg_distrib_dir, "v{}".format(env.pg_version), "bin")
     schedule = os.path.join(src_path, "isolation_schedule")
     pg_isolation_regress = os.path.join(build_path, "pg_isolation_regress")
 
@@ -130,9 +126,9 @@ def test_sql_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, ca
 
     # Compute all the file locations that pg_regress will need.
     # This test runs neon specific tests
-    build_path = os.path.join(pg_distrib_dir, "../build/v{}/src/test/regress").format(pg_version)
+    build_path = os.path.join(pg_distrib_dir, "build/v{}/src/test/regress").format(env.pg_version)
     src_path = os.path.join(base_dir, "test_runner/sql_regress")
-    bindir = os.path.join(pg_distrib_dir, "bin")
+    bindir = os.path.join(pg_distrib_dir, "v{}".format(env.pg_version), "bin")
     schedule = os.path.join(src_path, "parallel_schedule")
     pg_regress = os.path.join(build_path, "pg_regress")
 

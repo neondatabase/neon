@@ -14,7 +14,6 @@ from fixtures.neon_fixtures import (
     PgBin,
     Postgres,
     pg_distrib_dir,
-    pg_version,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -98,7 +97,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
                 "--wal-tarfile",
                 wal,
                 "--pg-version",
-                pg_version,
+                env.pg_version,
             ]
         )
 
@@ -252,7 +251,7 @@ def _import(
             "--base-tarfile",
             os.path.join(tar_output_file),
             "--pg-version",
-            pg_version,
+            env.pg_version,
         ]
     )
 
