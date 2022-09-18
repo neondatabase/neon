@@ -471,7 +471,8 @@ mod tests {
             .join("..")
             .join("..");
         let cfg = Conf {
-            pg_distrib_dir: top_path.join(format!("pg_install/{PG_MAJORVERSION}")),
+            pg_version: PG_MAJORVERSION,
+            pg_distrib_dir: top_path.join(format!("pg_install")),
             datadir: top_path.join(format!("test_output/{}-{PG_MAJORVERSION}", test_name)),
         };
         if cfg.datadir.exists() {

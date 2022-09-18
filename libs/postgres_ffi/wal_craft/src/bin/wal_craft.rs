@@ -37,8 +37,15 @@ fn main() -> Result<()> {
                     Arg::new("pg-distrib-dir")
                         .long("pg-distrib-dir")
                         .takes_value(true)
-                        .help("Directory with Postgres distribution (bin and lib directories, e.g. pg_install/v14)")
+                        .help("Directory with Postgres distribution (bin and lib directories, e.g. pg_install)")
                         .default_value("/usr/local")
+                )
+                .arg(
+                    Arg::new("pg-version")
+                    .long("pg-version")
+                    .help("Postgres version to use for the initial tenant")
+                    .required(true)
+                    .takes_value(true)
                 )
         )
         .subcommand(
@@ -82,8 +89,14 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+
         Some(("with-initdb", arg_matches)) => {
             let cfg = Conf {
+                pg_version: arg_matches
+                    .value_of("pg-version")
+                    .unwrap()
+                    .parse::<u32>()
+                    .context("Failed to parse postgres version from the argument string")?,
                 pg_distrib_dir: arg_matches.value_of("pg-distrib-dir").unwrap().into(),
                 datadir: arg_matches.value_of("datadir").unwrap().into(),
             };
