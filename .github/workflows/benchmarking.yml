@@ -144,9 +144,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # neon-captest: Run pgbench, reusing existing project
-        # neon-captest-new: Same, but on a freshly created project
-        platform: [ neon-captest, neon-captest-new, rds-aurora ]
+        # neon-captest-new: Run pgbench in a freshly created project
+        # neon-captest-reuse: Same, but reusing existing project
+        # neon-captest-prefetch: Same, with prefetching enabled (new project)
+        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch, rds-aurora ]
 
     runs-on: dev
     container:
@@ -164,7 +165,7 @@ jobs:
         sudo apt install -y postgresql-14
 
     - name: Create Neon Project
-      if: matrix.platform == 'neon-captest-new'
+      if: matrix.platform != 'neon-captest-reuse'
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -175,17 +176,20 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest)
+          neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
           neon-captest-new)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
+         neon-captest-prefetch)
+            CONNSTR=${{ steps.create-neon-project.outputs.dsn }}?options=-cenable_seqscan_prefetch%3Don%20-cseqscan_prefetch_buffers%3D10
+            ;;
           rds-aurora)
             CONNSTR=${{ secrets.BENCHMARK_RDS_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest', 'neon-captest-new' or 'rds-aurora'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-prefetch' or 'rds-aurora'"
             exit 1
             ;;
         esac
@@ -246,7 +250,7 @@ jobs:
         build_type: ${{ env.BUILD_TYPE }}
 
     - name: Delete Neon Project
-      if: ${{ matrix.platform == 'neon-captest-new' && always() }}
+      if: ${{ matrix.platform != 'neon-captest-reuse' && always() }}
       uses: ./.github/actions/neon-project-delete
       with:
         environment: dev
