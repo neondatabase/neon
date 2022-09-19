@@ -504,7 +504,8 @@ impl PageServerHandler {
         // Create empty timeline
         info!("creating new timeline");
         let timeline = tenant_mgr::get_tenant(tenant_id, true)?
-            .create_empty_timeline(timeline_id, TimelineMetadata::empty(base_lsn))?;
+            .create_empty_timeline(timeline_id, TimelineMetadata::empty(base_lsn))
+            .await?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute

@@ -1056,10 +1056,10 @@ mod tests {
         Ok(walingest)
     }
 
-    #[test]
-    fn test_relsize() -> Result<()> {
+    #[tokio::test]
+    async fn test_relsize() -> Result<()> {
         let tenant = TenantHarness::create("test_relsize")?.load();
-        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
+        let tline = create_test_timeline(&tenant, TIMELINE_ID).await?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1184,10 +1184,10 @@ mod tests {
 
     // Test what happens if we dropped a relation
     // and then created it again within the same layer.
-    #[test]
-    fn test_drop_extend() -> Result<()> {
+    #[tokio::test]
+    async fn test_drop_extend() -> Result<()> {
         let tenant = TenantHarness::create("test_drop_extend")?.load();
-        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
+        let tline = create_test_timeline(&tenant, TIMELINE_ID).await?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1224,10 +1224,10 @@ mod tests {
     // Test what happens if we truncated a relation
     // so that one of its segments was dropped
     // and then extended it again within the same layer.
-    #[test]
-    fn test_truncate_extend() -> Result<()> {
+    #[tokio::test]
+    async fn test_truncate_extend() -> Result<()> {
         let tenant = TenantHarness::create("test_truncate_extend")?.load();
-        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
+        let tline = create_test_timeline(&tenant, TIMELINE_ID).await?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1312,10 +1312,10 @@ mod tests {
 
     /// Test get_relsize() and truncation with a file larger than 1 GB, so that it's
     /// split into multiple 1 GB segments in Postgres.
-    #[test]
-    fn test_large_rel() -> Result<()> {
+    #[tokio::test]
+    async fn test_large_rel() -> Result<()> {
         let tenant = TenantHarness::create("test_large_rel")?.load();
-        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
+        let tline = create_test_timeline(&tenant, TIMELINE_ID).await?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;

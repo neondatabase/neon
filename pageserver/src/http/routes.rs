@@ -592,14 +592,12 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         .map(TenantId::from)
         .unwrap_or_else(TenantId::generate);
 
-    let new_tenant_id = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
+    let new_tenant_id = async {
         let conf = get_config(&request);
-
-        tenant_mgr::create_tenant(conf, tenant_conf, target_tenant_id, remote_index)
-    })
-    .await
-    .map_err(ApiError::from_err)??;
+        tenant_mgr::create_tenant(conf, tenant_conf, target_tenant_id, remote_index).await
+    }
+    .instrument(info_span!("tenant_create", tenant = ?target_tenant_id))
+    .await?;
 
     Ok(match new_tenant_id {
         Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,

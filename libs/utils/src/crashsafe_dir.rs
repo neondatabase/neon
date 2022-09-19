@@ -2,11 +2,75 @@ use std::{
     borrow::Cow,
     ffi::OsStr,
     fs::{self, File},
+    future::Future,
     io,
     path::{Path, PathBuf},
 };
 
 use anyhow::Context;
+
+pub async fn init_via_temporary_directory<C, I, F, O>(
+    target_directory: &Path,
+    create_tmp_directory: C,
+    init_in_directory: I,
+) -> anyhow::Result<O>
+where
+    C: Future<Output = anyhow::Result<PathBuf>>,
+    I: FnOnce(PathBuf) -> F,
+    F: Future<Output = anyhow::Result<O>>,
+{
+    let tmp_directory = create_tmp_directory
+        .await
+        .context("Failed to create temporary directory")?;
+    let init_result = init_in_directory(tmp_directory.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to fill temporary directory {} with data",
+                tmp_directory.display()
+            )
+        })
+        .and_then(|init_result| {
+            fs::rename(&tmp_directory, &target_directory).with_context(|| {
+                format!(
+                    "failed to move temporary directory {} into the permanent one {}",
+                    tmp_directory.display(),
+                    target_directory.display()
+                )
+            })?;
+            Ok(init_result)
+        });
+
+    let init_result = match init_result {
+        Ok(init_result) => init_result,
+        Err(init_error) => {
+            match fs::remove_dir_all(&tmp_directory) {
+                Ok(()) => anyhow::bail!(
+                    "Failed to initialize directory {}: {:?}",
+                    target_directory.display(),
+                    init_error
+                ),
+                Err(removal_error) => anyhow::bail!(
+                    "Failed to initialize directory {} and remove its temporary directory {}: {:?} and {:?}",
+                    target_directory.display(),
+                    tmp_directory.display(),
+                    init_error,
+                    removal_error,
+                ),
+            }
+        }
+    };
+
+    let target_dir_parent = target_directory.parent().with_context(|| {
+        format!(
+            "Failed to get directory parent for {}",
+            target_directory.display()
+        )
+    })?;
+    fsync(target_dir_parent).context("Failed to synchronize target directory updates")?;
+
+    Ok(init_result)
+}
 
 /// Adds a suffix to the file(directory) name, either appending the suffux to the end of its extension,
 /// or if there's no extension, creates one and puts a suffix there.

@@ -1399,14 +1399,16 @@ fn is_slru_block_key(key: Key) -> bool {
 }
 
 #[cfg(test)]
-pub fn create_test_timeline(
+pub async fn create_test_timeline(
     tenant: &crate::tenant::Tenant,
     timeline_id: utils::id::TimelineId,
 ) -> Result<std::sync::Arc<Timeline>> {
-    let tline = tenant.create_empty_timeline(
-        timeline_id,
-        crate::tenant::metadata::TimelineMetadata::empty(Lsn(8)),
-    )?;
+    let tline = tenant
+        .create_empty_timeline(
+            timeline_id,
+            crate::tenant::metadata::TimelineMetadata::empty(Lsn(8)),
+        )
+        .await?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;

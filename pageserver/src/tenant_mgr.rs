@@ -220,7 +220,7 @@ pub async fn shutdown_all_tenants() {
     }
 }
 
-pub fn create_tenant(
+pub async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
@@ -230,67 +230,59 @@ pub fn create_tenant(
     let temporary_tenant_dir =
         path_with_suffix_extension(&target_tenant_directory, TEMP_FILE_SUFFIX);
 
-    let tenants = tenants_state::write_tenants();
-    if tenants.get(&tenant_id).is_some() {
+    if get_tenant(tenant_id, false).is_ok() {
         info!("tenant {tenant_id} already exists in pageserver's memory");
         return Ok(None);
     }
-    anyhow::ensure!(
-        !target_tenant_directory.exists(),
-        "tenant {tenant_id} already exists in pageserver's FS, but is not present in its memory"
-    );
-    anyhow::ensure!(
-        !temporary_tenant_dir.exists(),
-        "tenant {tenant_id} is being initialised"
-    );
-    crashsafe_dir::create_dir_all(&temporary_tenant_dir).with_context(|| {
-        format!(
-            "Failed to start initializing tenant {tenant_id} by creating a temp dir at {}",
-            temporary_tenant_dir.display()
-        )
-    })?;
-    drop(tenants);
-    // by now we've ensured that the tenant is absent both in memory and local fs,
-    // and put a "tombstone": temporary directory for the tenant, fsynced.
-    // Now all further create_tenant will bail before.
-    // Tmp directory will be removed on pageserver restart, so we will leave no corrupt files on crash.
 
     debug!(
         "Creating temporary directory structure in {}",
         temporary_tenant_dir.display()
     );
 
-    // TODO kb this block should remove `temporary_tenant_dir` if errors + latter rename also
-    {
-        // TODO kb refactor: extract creation parts into methods, deduplicate with timeline creation
-        let temporary_tenant_config_path = conf.construct_tenant_config_path(&temporary_tenant_dir);
-        let temporary_tenant_timelines_dir = conf.construct_timelines_path(&temporary_tenant_dir);
-        // first, create a config in the top-level temp directory, fsync the file
-        Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf)?;
-        crashsafe_dir::fsync_file_and_parent(&temporary_tenant_config_path)?;
-        // then, create a subdirectory in the top-level temp directory, fsynced
-        crashsafe_dir::create_dir(&temporary_tenant_timelines_dir)
-            .context("failed to create temporary tenant timelines directory")?;
-        fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
-            anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
-        });
-    }
+    crashsafe_dir::init_via_temporary_directory(
+        &target_tenant_directory,
+        async {
+            let tenants_lock = tenants_state::write_tenants();
+            anyhow::ensure!(
+                !target_tenant_directory.exists(),
+                "tenant {tenant_id} already exists in pageserver's FS, but is not present in its memory"
+            );
+            anyhow::ensure!(
+                !temporary_tenant_dir.exists(),
+                "tenant {tenant_id} is being initialised"
+            );
+            crashsafe_dir::create_dir_all(&temporary_tenant_dir).with_context(|| {
+                format!(
+                    "Failed to start initializing tenant {tenant_id} by creating a temp dir at {}",
+                    temporary_tenant_dir.display()
+                )
+            })?;
+            drop(tenants_lock);
+            // by now we've ensured that the tenant is absent both in memory and local fs,
+            // and put a "tombstone": temporary directory for the tenant, fsynced.
+            // Now all further create_tenant will bail before.
+            // Tmp directory will be removed on pageserver restart, so we will leave no corrupt files on crash.
 
-    // move-rename tmp directory with all files synced into a permanent directory, fsync its parent
-    fs::rename(&temporary_tenant_dir, &target_tenant_directory).with_context(|| {
-        format!(
-            "failed to move temporary tenant directory {} into the permanent one {}",
-            temporary_tenant_dir.display(),
-            target_tenant_directory.display()
-        )
-    })?;
-    let target_dir_parent = target_tenant_directory.parent().with_context(|| {
-        format!(
-            "Failed to get tenant dir parent for {}",
-            target_tenant_directory.display()
-        )
-    })?;
-    crashsafe_dir::fsync(target_dir_parent)?;
+            Ok(temporary_tenant_dir)
+        },
+        |tmp_dir| async move {
+            let temporary_tenant_config_path = conf.construct_tenant_config_path(&tmp_dir);
+            let temporary_tenant_timelines_dir = conf.construct_timelines_path(&tmp_dir);
+            // first, create a config in the top-level temp directory, fsync the file
+            Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf)?;
+            crashsafe_dir::fsync_file_and_parent(&temporary_tenant_config_path)?;
+            // then, create a subdirectory in the top-level temp directory, fsynced
+            crashsafe_dir::create_dir(&temporary_tenant_timelines_dir)
+                .context("failed to create temporary tenant timelines directory")?;
+            fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
+                anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
+            });
+
+            Ok(())
+        },
+    ).await.with_context(|| format!("Failed to initialize tenant {} in directory {}", tenant_id, target_tenant_directory.display()))?;
+
     info!(
         "created tenant directory structure in {}",
         target_tenant_directory.display()
