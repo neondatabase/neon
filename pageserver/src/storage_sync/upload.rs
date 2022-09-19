@@ -15,7 +15,7 @@ use super::{
     LayersUpload, SyncData, SyncQueue,
 };
 use crate::metrics::NO_LAYERS_UPLOAD;
-use crate::{config::PageServerConf, storage_sync::SyncTask, tenant::metadata::metadata_path};
+use crate::{config::PageServerConf, storage_sync::SyncTask};
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part(
@@ -29,7 +29,8 @@ pub(super) async fn upload_index_part(
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-    let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
+    let index_part_path = conf
+        .metadata_path(sync_id.timeline_id, sync_id.tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
     storage
         .upload_storage_object(

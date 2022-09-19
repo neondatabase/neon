@@ -12,15 +12,13 @@ use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
 
-use crate::config::PageServerConf;
+use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::http::models::TenantInfo;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::{
-    ephemeral_file::is_ephemeral_file,
-    metadata::{TimelineMetadata, METADATA_FILE_NAME},
-    Tenant, TenantState,
+    ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
 };
 use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;

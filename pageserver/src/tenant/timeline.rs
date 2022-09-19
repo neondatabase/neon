@@ -24,12 +24,12 @@ use crate::tenant::{
     image_layer::{ImageLayer, ImageLayerWriter},
     inmemory_layer::InMemoryLayer,
     layer_map::{LayerMap, SearchResult},
-    metadata::{save_metadata, TimelineMetadata, METADATA_FILE_NAME},
+    metadata::{save_metadata, TimelineMetadata},
     par_fsync,
     storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
 };
 
-use crate::config::PageServerConf;
+use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::BlockNumber;
@@ -1268,9 +1268,7 @@ impl Timeline {
             ));
 
             save_metadata(
-                self.conf,
-                self.timeline_id,
-                self.tenant_id,
+                &self.conf.metadata_path(self.timeline_id, self.tenant_id),
                 &metadata,
                 false,
             )?;

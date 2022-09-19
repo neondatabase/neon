@@ -168,40 +168,6 @@ impl Tenant {
             .collect()
     }
 
-    /// Create a new, empty timeline. The caller is responsible for loading data into it
-    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
-    pub fn create_empty_timeline(
-        &self,
-        new_timeline_id: TimelineId,
-        initdb_lsn: Lsn,
-    ) -> Result<Arc<Timeline>> {
-        // TODO kb all wrong, has to use the tmp direcotry and then rename it
-        let timeline_path = self.conf.timeline_path(&new_timeline_id, &self.tenant_id);
-        if timeline_path.exists() {
-            bail!("Timeline directory already exists, but timeline is missing in repository map. This is a bug.")
-        }
-
-        // Create the timeline directory, and write initial metadata to file.
-        crashsafe_dir::create_dir_all(timeline_path)?;
-
-        let new_metadata =
-            TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
-        save_metadata(
-            self.conf,
-            new_timeline_id,
-            self.tenant_id,
-            &new_metadata,
-            true,
-        )?;
-
-        let mut timelines = self.timelines.lock().unwrap();
-        let new_timeline =
-            self.initialize_new_timeline(new_timeline_id, new_metadata, &mut timelines)?;
-        new_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
-
-        Ok(new_timeline)
-    }
-
     /// perform one garbage collection iteration, removing old data files from disk.
     /// this function is periodically called by gc task.
     /// also it can be explicitly requested through page server api 'do_gc' command.
@@ -391,6 +357,82 @@ impl Tenant {
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TenantState> {
         self.state.subscribe()
+    }
+
+    /// Create a new, empty timeline. The caller is responsible for loading data into it
+    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
+    pub fn create_empty_timeline(
+        &self,
+        new_timeline_id: TimelineId,
+        new_metadata: TimelineMetadata,
+    ) -> Result<Arc<Timeline>> {
+        let target_timeline_directory = self.conf.timeline_path(&new_timeline_id, &self.tenant_id);
+        let temporary_timeline_dir =
+            path_with_suffix_extension(&target_timeline_directory, TEMP_FILE_SUFFIX);
+
+        {
+            let timelines = self.timelines.lock().unwrap();
+
+            if timelines.get(&new_timeline_id).is_some() {
+                anyhow::bail!(
+                    "timeline {}/{} already exists in pageserver's memory",
+                    self.tenant_id,
+                    new_timeline_id
+                );
+            }
+            anyhow::ensure!(
+                !target_timeline_directory.exists(),
+                "timeline {}/{} already exists in pageserver's FS, but is not present in its memory",
+                self.tenant_id, new_timeline_id
+            );
+            anyhow::ensure!(
+                !temporary_timeline_dir.exists(),
+                "timeline {}/{} is being initialised",
+                self.tenant_id,
+                new_timeline_id
+            );
+            crashsafe_dir::create_dir_all(&temporary_timeline_dir).with_context(|| {
+                format!(
+                    "Failed to start initializing timeline {}/{} by creating a temp dir at {}",
+                    self.tenant_id,
+                    new_timeline_id,
+                    temporary_timeline_dir.display()
+                )
+            })?;
+        }
+        // by now we've ensured that the timeline is absent both in memory and local fs,
+        // and put a "tombstone": temporary directory for the tenant, fsynced.
+        // Now all further create_timeline will bail before.
+        // Tmp directory will be removed on pageserver restart, so we will leave no corrupt files on crash.
+
+        let empty_timeline = self.create_initial_timeline_files(
+            new_timeline_id,
+            new_metadata,
+            &temporary_timeline_dir,
+        )?;
+
+        // TODO kb deduplicate the tmp dir renames
+        // move-rename tmp directory with all files synced into a permanent directory, fsync its parent
+        fs::rename(&temporary_timeline_dir, &target_timeline_directory).with_context(|| {
+            format!(
+                "failed to move temporary timeline directory {} into the permanent one {}",
+                temporary_timeline_dir.display(),
+                target_timeline_directory.display()
+            )
+        })?;
+        let target_dir_parent = target_timeline_directory.parent().with_context(|| {
+            format!(
+                "Failed to get timeline dir parent for {}",
+                target_timeline_directory.display()
+            )
+        })?;
+        crashsafe_dir::fsync(target_dir_parent)?;
+        info!(
+            "created timeline directory structure in {}",
+            target_timeline_directory.display()
+        );
+
+        Ok(empty_timeline)
     }
 
     /// Create a new timeline.
@@ -1011,10 +1053,6 @@ impl Tenant {
             None
         };
 
-        // create a new timeline directory
-        let timelinedir = self.conf.timeline_path(&dst, &self.tenant_id);
-        crashsafe_dir::create_dir(&timelinedir)?;
-
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look
         // into the ancestor.
@@ -1026,12 +1064,8 @@ impl Tenant {
             *src_timeline.latest_gc_cutoff_lsn.read(),
             src_timeline.initdb_lsn,
         );
-        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
-        // TODO kb deduplicate + do fsyncs properly
-        save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
-
-        let mut timelines = self.timelines.lock().unwrap();
-        let new_timeline = self.initialize_new_timeline(dst, metadata, &mut timelines)?;
+        let new_timeline =
+            self.create_initial_timeline_files(dst, metadata, target_timeline_dir)?;
         info!("branched timeline {dst} from {src} at {start_lsn}");
         Ok(new_timeline)
     }
@@ -1072,14 +1106,16 @@ impl Tenant {
 
         let pgdata_path = &initdb_path;
 
-        let lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
+        let initdb_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
 
-        // Import the contents of the data directory at the initial checkpoint
-        // LSN, and any WAL after that.
+        // Import the contents of the data directory at the initial checkpoint LSN, and any WAL after that.
         // Initdb lsn will be equal to last_record_lsn which will be set after import.
         // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
-        let timeline = self.create_empty_timeline(timeline_id, lsn)?;
-        import_datadir::import_timeline_from_postgres_datadir(pgdata_path, &*timeline, lsn)?;
+        let new_metadata =
+            TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
+        let timeline =
+            self.create_initial_timeline_files(timeline_id, new_metadata, target_timeline_dir)?;
+        import_datadir::import_timeline_from_postgres_datadir(pgdata_path, &*timeline, initdb_lsn)?;
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
             bail!("failpoint before-checkpoint-new-timeline");
@@ -1094,6 +1130,27 @@ impl Tenant {
         );
 
         Ok(timeline)
+    }
+
+    fn create_initial_timeline_files(
+        &self,
+        new_timeline_id: TimelineId,
+        new_metadata: TimelineMetadata,
+        target_dir: &Path,
+    ) -> Result<Arc<Timeline>> {
+        save_metadata(
+            &self.conf.construct_timeline_metadata_path(target_dir),
+            &new_metadata,
+            true,
+        )?;
+
+        let initdb_lsn = new_metadata.initdb_lsn();
+        let mut timelines = self.timelines.lock().unwrap();
+        let new_timeline =
+            self.initialize_new_timeline(new_timeline_id, new_metadata, &mut timelines)?;
+        new_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
+
+        Ok(new_timeline)
     }
 }
 
@@ -1173,7 +1230,6 @@ pub mod harness {
         walredo::{WalRedoError, WalRedoManager},
     };
 
-    use super::metadata::metadata_path;
     use super::*;
     use crate::tenant_config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
@@ -1309,7 +1365,7 @@ pub mod harness {
         timeline_id: TimelineId,
         tenant_id: TenantId,
     ) -> anyhow::Result<TimelineMetadata> {
-        let metadata_path = metadata_path(conf, timeline_id, tenant_id);
+        let metadata_path = conf.metadata_path(timeline_id, tenant_id);
         let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
             format!(
                 "Failed to read metadata bytes from path {}",
@@ -1355,8 +1411,8 @@ pub mod harness {
 
 #[cfg(test)]
 mod tests {
-    use super::metadata::METADATA_FILE_NAME;
     use super::*;
+    use crate::config::METADATA_FILE_NAME;
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
@@ -1371,7 +1427,7 @@ mod tests {
     #[test]
     fn test_basic() -> Result<()> {
         let tenant = TenantHarness::create("test_basic")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -1393,9 +1449,9 @@ mod tests {
     #[test]
     fn no_duplicate_timelines() -> Result<()> {
         let tenant = TenantHarness::create("no_duplicate_timelines")?.load();
-        let _ = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let _ = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
 
-        match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0)) {
+        match tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0))) {
             Ok(_) => panic!("duplicate timeline creation should fail"),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -1419,7 +1475,7 @@ mod tests {
     #[test]
     fn test_branch() -> Result<()> {
         let tenant = TenantHarness::create("test_branch")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
         let writer = tline.writer();
         use std::str::from_utf8;
 
@@ -1521,7 +1577,7 @@ mod tests {
         let tenant =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
                 .load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
@@ -1558,7 +1614,7 @@ mod tests {
         let tenant =
             TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load();
 
-        tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
+        tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0x50)))?;
         // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
         match tenant.branch_timeline(
             TIMELINE_ID,
@@ -1607,7 +1663,7 @@ mod tests {
     fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
         let tenant =
             TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         tenant.branch_timeline(
@@ -1631,7 +1687,7 @@ mod tests {
     fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
         let tenant =
             TenantHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         tenant.branch_timeline(
@@ -1666,7 +1722,8 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
         {
             let tenant = harness.load();
-            let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x8000))?;
+            let tline =
+                tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0x8000)))?;
             make_some_layers(tline.as_ref(), Lsn(0x8000))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
         }
@@ -1686,7 +1743,8 @@ mod tests {
         // create two timelines
         {
             let tenant = harness.load();
-            let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+            let tline =
+                tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
@@ -1729,7 +1787,7 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
         let tenant = harness.load();
 
-        tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
         drop(tenant);
 
         let metadata_path = harness.timeline_path(&TIMELINE_ID).join(METADATA_FILE_NAME);
@@ -1766,7 +1824,7 @@ mod tests {
     #[test]
     fn test_images() -> Result<()> {
         let tenant = TenantHarness::create("test_images")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -1816,7 +1874,7 @@ mod tests {
     #[test]
     fn test_bulk_insert() -> Result<()> {
         let tenant = TenantHarness::create("test_bulk_insert")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
 
         let mut lsn = Lsn(0x10);
 
@@ -1856,7 +1914,7 @@ mod tests {
     #[test]
     fn test_random_updates() -> Result<()> {
         let tenant = TenantHarness::create("test_random_updates")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let tline = tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -1926,7 +1984,8 @@ mod tests {
     #[test]
     fn test_traverse_branches() -> Result<()> {
         let tenant = TenantHarness::create("test_traverse_branches")?.load();
-        let mut tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let mut tline =
+            tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -2012,7 +2071,8 @@ mod tests {
     #[test]
     fn test_traverse_ancestors() -> Result<()> {
         let tenant = TenantHarness::create("test_traverse_ancestors")?.load();
-        let mut tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        let mut tline =
+            tenant.create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))?;
 
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;

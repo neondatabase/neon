@@ -6,20 +6,15 @@
 //!
 //! The module contains all structs and related helper methods related to timeline metadata.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 use tracing::info_span;
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn};
 
-use crate::config::PageServerConf;
 use crate::virtual_file::VirtualFile;
 use crate::STORAGE_FORMAT_VERSION;
 
@@ -28,9 +23,6 @@ use crate::STORAGE_FORMAT_VERSION;
 /// This is the same assumption that PostgreSQL makes with the control file,
 /// see PG_CONTROL_MAX_SAFE_SIZE
 const METADATA_MAX_SIZE: usize = 512;
-
-/// The name of the metadata file pageserver creates per timeline.
-pub const METADATA_FILE_NAME: &str = "metadata";
 
 /// Metadata stored on disk for each timeline
 ///
@@ -93,6 +85,10 @@ impl TimelineMetadata {
                 initdb_lsn,
             },
         }
+    }
+
+    pub fn empty(initdb_lsn: Lsn) -> Self {
+        Self::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn)
     }
 
     pub fn from_bytes(metadata_bytes: &[u8]) -> anyhow::Result<Self> {
@@ -166,30 +162,16 @@ impl TimelineMetadata {
     }
 }
 
-/// Points to a place in pageserver's local directory,
-/// where certain timeline's metadata file should be located.
-pub fn metadata_path(
-    conf: &'static PageServerConf,
-    timeline_id: TimelineId,
-    tenant_id: TenantId,
-) -> PathBuf {
-    conf.timeline_path(&timeline_id, &tenant_id)
-        .join(METADATA_FILE_NAME)
-}
-
 /// Save timeline metadata to file
 pub fn save_metadata(
-    conf: &'static PageServerConf,
-    timeline_id: TimelineId,
-    tenant_id: TenantId,
+    destination: &Path,
     data: &TimelineMetadata,
     first_save: bool,
 ) -> anyhow::Result<()> {
     let _enter = info_span!("saving metadata").entered();
-    let path = metadata_path(conf, timeline_id, tenant_id);
     // use OpenOptions to ensure file presence is consistent with first_save
     let mut file = VirtualFile::open_with_options(
-        &path,
+        destination,
         OpenOptions::new().write(true).create_new(first_save),
     )?;
 
@@ -199,16 +181,6 @@ pub fn save_metadata(
         bail!("Could not write all the metadata bytes in a single call");
     }
     file.sync_all()?;
-
-    // fsync the parent directory to ensure the directory entry is durable
-    if first_save {
-        let timeline_dir = File::open(
-            &path
-                .parent()
-                .expect("Metadata should always have a parent dir"),
-        )?;
-        timeline_dir.sync_all()?;
-    }
 
     Ok(())
 }

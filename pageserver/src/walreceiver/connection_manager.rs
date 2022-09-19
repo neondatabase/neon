@@ -767,7 +767,10 @@ fn wal_stream_connection_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
+    use crate::tenant::{
+        harness::{TenantHarness, TIMELINE_ID},
+        metadata::TimelineMetadata,
+    };
 
     #[test]
     fn no_connection_no_candidate() -> anyhow::Result<()> {
@@ -1361,7 +1364,7 @@ mod tests {
             },
             timeline: harness
                 .load()
-                .create_empty_timeline(TIMELINE_ID, Lsn(0))
+                .create_empty_timeline(TIMELINE_ID, TimelineMetadata::empty(Lsn(0)))
                 .expect("Failed to create an empty timeline for dummy wal connection manager"),
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),

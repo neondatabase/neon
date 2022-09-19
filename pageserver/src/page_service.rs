@@ -40,6 +40,7 @@ use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::Timeline;
 use crate::tenant_mgr;
 use crate::CheckpointConfig;
@@ -502,9 +503,8 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        // TODO kb has to do the fsyncs here too
         let timeline = tenant_mgr::get_tenant(tenant_id, true)?
-            .create_empty_timeline(timeline_id, base_lsn)?;
+            .create_empty_timeline(timeline_id, TimelineMetadata::empty(base_lsn))?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute

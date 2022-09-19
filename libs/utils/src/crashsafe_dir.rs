@@ -29,8 +29,8 @@ pub fn fsync_file_and_parent(file_path: &Path) -> anyhow::Result<()> {
         .parent()
         .with_context(|| format!("File {} has no parent", file_path.display()))?;
 
-    fsync(&file_path)?;
-    fsync(&parent)?;
+    fsync(file_path)?;
+    fsync(parent)?;
     Ok(())
 }
 
@@ -48,7 +48,7 @@ pub fn create_dir(path: impl AsRef<Path>) -> anyhow::Result<()> {
 
     fs::create_dir(directory_path)
         .with_context(|| format!("Failed to create directory {}", directory_path.display()))?;
-    fsync_file_and_parent(&directory_path).context("failed to fsync created directory")?;
+    fsync_file_and_parent(directory_path).context("failed to fsync created directory")?;
     Ok(())
 }
 
