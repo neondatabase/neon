@@ -262,18 +262,21 @@ pub fn create_tenant(
         temporary_tenant_dir.display()
     );
 
-    // TODO kb refactor: extract creation parts into methods, deduplicate with timeline creation
-    let temporary_tenant_config_path = conf.construct_tenant_config_path(&temporary_tenant_dir);
-    let temporary_tenant_timelines_dir = conf.construct_timelines_path(&temporary_tenant_dir);
-    // first, create a config in the top-level temp directory, fsync the file
-    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf)?;
-    crashsafe_dir::fsync_file_and_parent(&temporary_tenant_config_path)?;
-    // then, create a subdirectory in the top-level temp directory, fsynced
-    crashsafe_dir::create_dir(&temporary_tenant_timelines_dir)
-        .context("failed to create temporary tenant timelines directory")?;
-    fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
-        anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
-    });
+    // TODO kb this block should remove `temporary_tenant_dir` if errors + latter rename also
+    {
+        // TODO kb refactor: extract creation parts into methods, deduplicate with timeline creation
+        let temporary_tenant_config_path = conf.construct_tenant_config_path(&temporary_tenant_dir);
+        let temporary_tenant_timelines_dir = conf.construct_timelines_path(&temporary_tenant_dir);
+        // first, create a config in the top-level temp directory, fsync the file
+        Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf)?;
+        crashsafe_dir::fsync_file_and_parent(&temporary_tenant_config_path)?;
+        // then, create a subdirectory in the top-level temp directory, fsynced
+        crashsafe_dir::create_dir(&temporary_tenant_timelines_dir)
+            .context("failed to create temporary tenant timelines directory")?;
+        fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
+            anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
+        });
+    }
 
     // move-rename tmp directory with all files synced into a permanent directory, fsync its parent
     fs::rename(&temporary_tenant_dir, &target_tenant_directory).with_context(|| {
@@ -292,7 +295,7 @@ pub fn create_tenant(
     crashsafe_dir::fsync(target_dir_parent)?;
     info!(
         "created tenant directory structure in {}",
-        target_dir_parent.display()
+        target_tenant_directory.display()
     );
 
     // now we have created all local files in tenant directory, time to load it into memory

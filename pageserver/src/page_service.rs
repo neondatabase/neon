@@ -502,6 +502,7 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
+        // TODO kb has to do the fsyncs here too
         let timeline = tenant_mgr::get_tenant(tenant_id, true)?
             .create_empty_timeline(timeline_id, base_lsn)?;
 
