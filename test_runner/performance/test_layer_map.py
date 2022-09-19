@@ -4,7 +4,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
-# Create ancestor branches off the main branch.
+# Benchmark searching the layer map, when there are a lot of small layer files.
 #
 def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
 
