@@ -60,6 +60,12 @@ Useful environment variables:
 
 `NEON_BIN`: The directory where neon binaries can be found.
 `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
+Since pageserver supports several postgres versions, `POSTGRES_DISTRIB_DIR` must contain
+a subdirectory for each version with naming convention `v{PG_VERSION}/`.
+Inside that dir, a `bin/postgres` binary should be present.
+`DEFAULT_PG_VERSION`: The version of Postgres to use,
+This is used to construct full path to the postgres binaries.
+Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION="14"`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
