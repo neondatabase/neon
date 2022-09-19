@@ -1090,6 +1090,9 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
+            let _span_guard =
+                info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id).entered();
+
             let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
             let gc_horizon: u64 = caps
