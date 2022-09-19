@@ -209,7 +209,7 @@ impl Default for PageServerConfigBuilder {
             workdir: Set(PathBuf::new()),
             pg_distrib_dir: Set(env::current_dir()
                 .expect("cannot access current directory")
-                .join(format!("pg_install",))),
+                .join("pg_install")),
             auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
