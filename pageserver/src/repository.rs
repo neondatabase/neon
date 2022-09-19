@@ -25,7 +25,7 @@ pub const KEY_SIZE: usize = 18;
 
 impl Key {
     /// 'field2' is used to store tablespaceid for relations and small enum numbers for other relish.
-    /// As far as Zenith is not supporting tablespace (because of lack of access to local file system),
+    /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
         assert!(self.field2 < 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
