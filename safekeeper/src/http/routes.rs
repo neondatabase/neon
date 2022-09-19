@@ -8,6 +8,7 @@ use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
+use tokio::task::JoinError;
 
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
@@ -105,7 +106,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         // because the provided timeline isn't there. However, the method can in theory change and
         // fail from internal errors later. Remove this comment once it the method returns
         // something other than `anyhow::Result`.
-        .map_err(ApiError::from_internal_err)?;
+        .map_err(ApiError::InternalServerError)?;
     let (inmem, state) = tli.get_state();
     let flush_lsn = tli.get_flush_lsn();
 
@@ -140,7 +141,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     };
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    Err(ApiError::from_internal_err(anyhow!("not implemented")))
+    Err(ApiError::BadRequest(anyhow!("not implemented")))
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -156,10 +157,10 @@ async fn timeline_delete_force_handler(
     let resp = tokio::task::spawn_blocking(move || {
         // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
         // error handling here when we're able to.
-        GlobalTimelines::delete_force(&ttid).map_err(ApiError::from_internal_err)
+        GlobalTimelines::delete_force(&ttid).map_err(ApiError::InternalServerError)
     })
     .await
-    .map_err(ApiError::from_internal_err)??;
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
     json_response(StatusCode::OK, resp)
 }
 
@@ -175,10 +176,10 @@ async fn tenant_delete_force_handler(
         // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
         // Using an `InternalServerError` should be fixed when the types support it
         GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
-            .map_err(ApiError::from_internal_err)
+            .map_err(ApiError::InternalServerError)
     })
     .await
-    .map_err(ApiError::from_internal_err)??;
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
     json_response(
         StatusCode::OK,
         delete_info

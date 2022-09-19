@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use hyper::{header, Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -25,18 +24,6 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    pub fn from_internal_err<E: Into<anyhow::Error>>(err: E) -> Self {
-        Self::InternalServerError(anyhow!(err))
-    }
-
-    /// Creates an `ApiError::BadRequest` by converting it into an `anyhow::Error`
-    ///
-    /// If the type is already an `anyhow::Error`, directly using `BadRequest` enum variant should
-    /// be preferred.
-    pub fn from_bad_request<E: Into<anyhow::Error>>(err: E) -> Self {
-        Self::BadRequest(err.into())
-    }
-
     pub fn into_response(self) -> Response<Body> {
         match self {
             ApiError::BadRequest(err) => HttpErrorBody::response_from_msg_and_status(

@@ -23,11 +23,11 @@ pub fn json_response<T: Serialize>(
 ) -> Result<Response<Body>, ApiError> {
     let json = serde_json::to_string(&data)
         .context("Failed to serialize JSON response")
-        .map_err(ApiError::from_internal_err)?;
+        .map_err(ApiError::InternalServerError)?;
     let response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(json))
-        .map_err(ApiError::from_internal_err)?;
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
 }

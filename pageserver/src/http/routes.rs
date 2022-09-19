@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use remote_storage::GenericRemoteStorage;
+use tokio::task::JoinError;
 use tracing::*;
 
 use super::models::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
@@ -175,7 +176,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         ).await {
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
-                let local_info = local_timeline_info_from_timeline(&new_timeline, false, false)?;
+                let local_info = local_timeline_info_from_timeline(&new_timeline, false, false)
+                    .map_err(ApiError::InternalServerError)?;
                 Ok(Some(TimelineInfo {
                     tenant_id,
                     timeline_id: new_timeline.timeline_id,
@@ -184,13 +186,11 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
                 }))
             }
             Ok(None) => Ok(None), // timeline already exists
-            Err(err) => Err(err),
+            Err(err) => Err(ApiError::InternalServerError(err)),
         }
     }
     .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn))
-        .await
-        // `await`-ing the task failed
-        .map_err(ApiError::from_internal_err)?;
+        .await?;
 
     Ok(match new_timeline_info {
         Some(info) => json_response(StatusCode::CREATED, info)?,
@@ -208,13 +208,11 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
     let timelines = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
-        Ok::<_, anyhow::Error>(tenant_mgr::get_tenant(tenant_id, true)?.list_timelines())
+        let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
+        Ok(tenant.list_timelines())
     })
     .await
-    // `await`-ing the task failed
-    .map_err(ApiError::from_internal_err)?
-    // `get_tenant` failed, which only happens when there's no tenant with that id
-    .map_err(ApiError::NotFound)?;
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
 
     let mut response_data = Vec::with_capacity(timelines.len());
     for (timeline_id, timeline) in timelines {
@@ -279,8 +277,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             tenant_mgr::get_tenant(tenant_id, true)?.get_timeline(timeline_id)
         })
         .await
-        // `await`-ing the task failed
-        .map_err(ApiError::from_internal_err)?;
+        .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
 
         let local_timeline_info = match timeline.and_then(|timeline| {
             local_timeline_info_from_timeline(
@@ -337,17 +334,14 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
 
     info!("Handling tenant attach {tenant_id}");
 
-    tokio::task::spawn_blocking(move || {
-        if tenant_mgr::get_tenant(tenant_id, false).is_ok() {
-            anyhow::bail!("Tenant is already present locally")
-        };
-        Ok(())
+    tokio::task::spawn_blocking(move || match tenant_mgr::get_tenant(tenant_id, false) {
+        Ok(_) => Err(ApiError::Conflict(
+            "Tenant is already present locally".to_owned(),
+        )),
+        Err(_) => Ok(()),
     })
     .await
-    // `await`-ing the task failed
-    .map_err(ApiError::from_internal_err)?
-    // closure returned `Err` because the tenant is already present; user error
-    .map_err(|e: anyhow::Error| ApiError::Conflict(e.to_string()))?;
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
 
     let state = get_state(&request);
     let remote_index = &state.remote_index;
@@ -492,8 +486,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
         crate::tenant_mgr::list_tenant_info(&remote_index)
     })
     .await
-    // `await`-ing the task failed
-    .map_err(ApiError::from_internal_err)?;
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
 
     json_response(StatusCode::OK, response_data)
 }
@@ -505,8 +498,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     // if tenant is in progress of downloading it can be absent in global tenant map
     let tenant = tokio::task::spawn_blocking(move || tenant_mgr::get_tenant(tenant_id, false))
         .await
-        // `await`-ing the task failed
-        .map_err(ApiError::from_internal_err)?;
+        .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
 
     let state = get_state(&request);
     let remote_index = &state.remote_index;
@@ -535,8 +527,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     let current_physical_size =
         match tokio::task::spawn_blocking(move || list_local_timelines(tenant_id, false, false))
             .await
-            // `await`-ing the task failed
-            .map_err(ApiError::from_internal_err)?
+            .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?
         {
             Err(err) => {
                 // Getting local timelines can fail when no local tenant directory is on disk (e.g, when tenant data is being downloaded).
@@ -648,13 +639,12 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         let conf = get_config(&request);
 
         tenant_mgr::create_tenant(conf, tenant_conf, target_tenant_id, remote_index)
+            // FIXME: `create_tenant` can fail from both user and internal errors. Replace this
+            // with better error handling once the type permits it
+            .map_err(ApiError::InternalServerError)
     })
     .await
-    // `await`-ing the task failed
-    .map_err(ApiError::from_internal_err)?
-    // FIXME: `create_tenant` failed, which can occur from both user and internal errors. Replace
-    // this with better error handling once the type permits it
-    .map_err(ApiError::InternalServerError)?;
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
 
     Ok(match new_tenant_id {
         Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,
@@ -730,13 +720,12 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
 
         let state = get_state(&request);
         tenant_mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
+            // FIXME: `update_tenant_config` can fail because of both user and internal errors.
+            // Replace this `map_err` with better error handling once the type permits it
+            .map_err(ApiError::InternalServerError)
     })
     .await
-    // `await`-ing the task failed
-    .map_err(ApiError::from_internal_err)?
-    // FIXME: `update_tenant_config` failed, which can happen because of both user and internal
-    // errors. Replace this one with better error handling once the type permits it
-    .map_err(ApiError::InternalServerError)?;
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
 
     json_response(StatusCode::OK, ())
 }
