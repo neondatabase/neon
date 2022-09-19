@@ -23,7 +23,7 @@ on:
         required: false
       save_perf_report:
         type: boolean
-        description: 'Publish perf report or not. If not set the report will be publish only for the main branch'
+        description: 'Publish perf report or not. If not set, the report is published only for the main branch'
         required: false
 
 defaults:
