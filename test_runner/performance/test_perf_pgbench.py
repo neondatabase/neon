@@ -84,9 +84,8 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
 
     if workload_type == PgBenchLoadType.INIT:
         # Run initialize
-        init_pgbench(
-            env, ["pgbench", f"-s{scale}", "-i", env.pg.connstr(options="-cstatement_timeout=1h")]
-        )
+        options = "-cstatement_timeout=1h " + env.pg.default_options["options"]
+        init_pgbench(env, ["pgbench", f"-s{scale}", "-i", env.pg.connstr(options=options)])
 
     if workload_type == PgBenchLoadType.SIMPLE_UPDATE:
         # Run simple-update workload
