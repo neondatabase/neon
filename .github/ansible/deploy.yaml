@@ -63,18 +63,18 @@
       tags:
       - pageserver
 
-    - name: update remote storage (s3) config
-      lineinfile:
-        path: /storage/pageserver/data/pageserver.toml
-        line: "{{ item }}"
-      loop:
-        - "[remote_storage]"
-        - "bucket_name = '{{ bucket_name }}'"
-        - "bucket_region = '{{ bucket_region }}'"
-        - "prefix_in_bucket = '{{ inventory_hostname }}'"
-      become: true
-      tags:
-      - pageserver
+    # - name: update remote storage (s3) config
+    #   lineinfile:
+    #     path: /storage/pageserver/data/pageserver.toml
+    #     line: "{{ item }}"
+    #   loop:
+    #     - "[remote_storage]"
+    #     - "bucket_name = '{{ bucket_name }}'"
+    #     - "bucket_region = '{{ bucket_region }}'"
+    #     - "prefix_in_bucket = '{{ inventory_hostname }}'"
+    #   become: true
+    #   tags:
+    #   - pageserver
 
     - name: upload systemd service definition
       ansible.builtin.template:
@@ -87,15 +87,15 @@
       tags:
       - pageserver
 
-    - name: start systemd service
-      ansible.builtin.systemd:
-        daemon_reload: yes
-        name: pageserver
-        enabled: yes
-        state: restarted
-      become: true
-      tags:
-      - pageserver
+    # - name: start systemd service
+    #   ansible.builtin.systemd:
+    #     daemon_reload: yes
+    #     name: pageserver
+    #     enabled: yes
+    #     state: restarted
+    #   become: true
+    #   tags:
+    #   - pageserver
 
     - name: post version to console
       when: console_mgmt_base_url is defined
