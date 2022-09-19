@@ -71,7 +71,7 @@
         - "[remote_storage]"
         - "bucket_name = '{{ bucket_name }}'"
         - "bucket_region = '{{ bucket_region }}'"
-        - "prefix_in_bucket = 'pageserver/v1'"
+        - "prefix_in_bucket = '{{ inventory_hostname }}'"
       become: true
       tags:
       - pageserver
