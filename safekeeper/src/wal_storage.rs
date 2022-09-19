@@ -14,7 +14,7 @@ use std::pin::Pin;
 use tokio::io::AsyncRead;
 
 use postgres_ffi::v14::xlog_utils::{
-    find_end_of_wal, IsPartialXLogFileName, IsXLogFileName, XLogFromFileName,
+    IsPartialXLogFileName, IsXLogFileName, XLogFromFileName,
 };
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use std::cmp::{max, min};
