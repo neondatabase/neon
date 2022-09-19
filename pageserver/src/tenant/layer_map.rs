@@ -55,8 +55,8 @@ pub struct LayerMap {
     /// All the historic layers are kept here
     historic_layers: RTree<LayerEnvelope>,
 
-    /// L0 layers has key range: (Key::MIN..Key::MAX) and locating them using R-Tree search is very inefficient.
-    /// So l) layers are also pushed in l0_layers vector.
+    /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
+    /// So L0 layers held in l0_layers vector, in addition to the R-tree.
     l0_layers: Vec<Arc<dyn Layer>>,
 }
 
