@@ -191,7 +191,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             Err(err) => Err(ApiError::InternalServerError(err)),
         }
     }
-    .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn))
+    .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
         .await?;
 
     Ok(match new_timeline_info {
