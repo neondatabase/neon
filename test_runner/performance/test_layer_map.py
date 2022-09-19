@@ -8,12 +8,6 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 #
 def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
 
-    # Use safekeeper in this test to avoid a subtle race condition.
-    # Without safekeeper, walreceiver reconnection can stuck
-    # because of IO deadlock.
-    #
-    # See https://github.com/neondb/neon/issues/1068
-    neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
     n_iters = 10
     n_records = 100000
