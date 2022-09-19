@@ -112,10 +112,8 @@ runs:
         fi
 
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
-          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
-            mkdir -p "$PERF_REPORT_DIR"
-            EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
-          fi
+          mkdir -p "$PERF_REPORT_DIR"
+          EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
         fi
 
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then
@@ -150,11 +148,9 @@ runs:
           -rA $TEST_SELECTION $EXTRA_PARAMS
 
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
-          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
-            export REPORT_FROM="$PERF_REPORT_DIR"
-            export REPORT_TO="$PLATFORM"
-            scripts/generate_and_push_perf_report.sh
-          fi
+          export REPORT_FROM="$PERF_REPORT_DIR"
+          export REPORT_TO="$PLATFORM"
+          scripts/generate_and_push_perf_report.sh
         fi
 
     - name: Create Allure report

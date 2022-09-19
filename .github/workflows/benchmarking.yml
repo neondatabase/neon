@@ -19,8 +19,12 @@ on:
         description: 'Environment to run remote tests on (dev or staging)'
         required: false
       region_id:
-        description: 'Use a particular region. If empty the default one will be used'
-        false: true
+        description: 'Use a particular region. If not set the default region will be used'
+        required: false
+      save_perf_report:
+        type: boolean
+        description: 'Publish perf report or not. If not set, the report is published only for the main branch'
+        required: false
 
 defaults:
   run:
@@ -139,7 +143,7 @@ jobs:
       POSTGRES_DISTRIB_DIR: /usr
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: true
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
 
     strategy:
       fail-fast: false

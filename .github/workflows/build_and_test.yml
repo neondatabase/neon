@@ -292,7 +292,7 @@ jobs:
           build_type: ${{ matrix.build_type }}
           test_selection: performance
           run_in_parallel: false
-          save_perf_report: true
+          save_perf_report: ${{ github.ref == 'refs/heads/main' }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
