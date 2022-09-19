@@ -18,8 +18,8 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     f = env.neon_cli.pageserver_enabled_features()
 
     assert (
-        "failpoints" in f["features"]
-    ), "Build pageserver with --features=failpoints option to run this test"
+        "testing" in f["features"]
+    ), "Build pageserver with --features=testing option to run this test"
     neon_env_builder.start()
 
     # Create a branch for us

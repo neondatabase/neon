@@ -790,24 +790,23 @@ pub fn make_router(
         }))
     }
 
-    macro_rules! cfg_disabled {
-        (#[cfg($($cfg:tt)+)] $handler_desc:literal, $feature_desc:literal, $handler:path $(,)?) => {{
-            #[cfg(not($($cfg)+))]
+    macro_rules! testing_api {
+        ($handler_desc:literal, $handler:path $(,)?) => {{
+            #[cfg(not(feature = "testing"))]
             async fn cfg_disabled(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
                 Err(ApiError::BadRequest(
                     concat!(
                         "Cannot ",
                         $handler_desc,
-                        " because pageserver was compiled without ",
-                        $feature_desc,
+                        " because pageserver was compiled without testing APIs",
                     )
                     .to_owned(),
                 ))
             }
 
-            #[cfg($($cfg)+)]
+            #[cfg(feature = "testing")]
             let handler = $handler;
-            #[cfg(not($($cfg)+))]
+            #[cfg(not(feature = "testing"))]
             let handler = cfg_disabled;
             handler
         }};
@@ -821,12 +820,7 @@ pub fn make_router(
         .get("/v1/status", status_handler)
         .put(
             "/v1/failpoints",
-            cfg_disabled!(
-                #[cfg(any(feature = "testing", feature = "failpoints"))]
-                "manage failpoints",
-                "failpoints support or testing APIs",
-                failpoints_handler,
-            ),
+            testing_api!("manage failpoints", failpoints_handler),
         )
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
@@ -842,30 +836,15 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc",
-            cfg_disabled!(
-                #[cfg(feature = "testing")]
-                "run timeline GC",
-                "testing APIs",
-                timeline_gc_handler,
-            ),
+            testing_api!("run timeline GC", timeline_gc_handler),
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/compact",
-            cfg_disabled!(
-                #[cfg(feature = "testing")]
-                "run timeline compaction",
-                "testing APIs",
-                timeline_compact_handler,
-            ),
+            testing_api!("run timeline compaction", timeline_compact_handler),
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
-            cfg_disabled!(
-                #[cfg(feature = "testing")]
-                "run timeline checkpoint",
-                "testing APIs",
-                timeline_checkpoint_handler,
-            ),
+            testing_api!("run timeline checkpoint", timeline_checkpoint_handler),
         )
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
