@@ -959,7 +959,17 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	if (IS_LOCAL_REL(reln))
 		mdextend(reln, forkNum, blkno, buffer, skipFsync);
 #endif
-
+	/*
+	 * smgr_extend is often called with an all-zeroes page, so lsn==InvalidXLogRecPtr.
+	 * An smgr_write() call will come for the buffer later, after it has been initialized
+	 * with the real page contents, and it is eventually evicted from the buffer cache.
+	 * But we need a valid LSN to the relation metadata update now.
+	 */
+	if (lsn == InvalidXLogRecPtr)
+	{
+		lsn = GetXLogInsertRecPtr();
+		SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forkNum, blkno);
+	}
 	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forkNum);
 }
 
