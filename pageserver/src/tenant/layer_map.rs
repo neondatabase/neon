@@ -88,7 +88,7 @@ impl Bounded for IntKey {
 
 impl Signed for IntKey {
     fn is_positive(&self) -> bool {
-        self.0 > 0
+        IntKey(self.0.is_positive())
     }
     fn is_negative(&self) -> bool {
         self.0 < 0
