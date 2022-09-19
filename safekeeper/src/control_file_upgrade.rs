@@ -167,7 +167,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
         });
-    // migrate to hexing some zids
+    // migrate to hexing some ids
     } else if version == 2 {
         info!("reading safekeeper control file version {}", version);
         let oldstate = SafeKeeperStateV2::des(&buf[..buf.len()])?;

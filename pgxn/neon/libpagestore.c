@@ -183,7 +183,7 @@ pageserver_send(NeonRequest * request)
 	if (!connected)
 		pageserver_connect();
 
-	req_buff = zm_pack_request(request);
+	req_buff = nm_pack_request(request);
 
 	/*
 	 * Send request.
@@ -204,7 +204,7 @@ pageserver_send(NeonRequest * request)
 
 	if (message_level_is_interesting(PageStoreTrace))
 	{
-		char	   *msg = zm_to_string((NeonMessage *) request);
+		char	   *msg = nm_to_string((NeonMessage *) request);
 
 		neon_log(PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
@@ -230,12 +230,12 @@ pageserver_receive(void)
 			else if (resp_buff.len == -2)
 				neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
 		}
-		resp = zm_unpack_response(&resp_buff);
+		resp = nm_unpack_response(&resp_buff);
 		PQfreemem(resp_buff.data);
 
 		if (message_level_is_interesting(PageStoreTrace))
 		{
-			char	   *msg = zm_to_string((NeonMessage *) resp);
+			char	   *msg = nm_to_string((NeonMessage *) resp);
 
 			neon_log(PageStoreTrace, "got response: %s", msg);
 			pfree(msg);
@@ -282,9 +282,9 @@ page_server_api api = {
 static bool
 check_neon_id(char **newval, void **extra, GucSource source)
 {
-	uint8		zid[16];
+	uint8		id[16];
 
-	return **newval == '\0' || HexDecodeString(zid, *newval, 16);
+	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
 static char *
