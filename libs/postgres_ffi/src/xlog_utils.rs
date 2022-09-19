@@ -466,13 +466,15 @@ mod tests {
     fn test_end_of_wal<C: wal_craft::Crafter>(test_name: &str) {
         use wal_craft::*;
 
+        let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+
         // Craft some WAL
         let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
         let cfg = Conf {
-            pg_version: PG_MAJORVERSION,
-            pg_distrib_dir: top_path.join(format!("pg_install")),
+            pg_version,
+            pg_distrib_dir: top_path.join("pg_install"),
             datadir: top_path.join(format!("test_output/{}-{PG_MAJORVERSION}", test_name)),
         };
         if cfg.datadir.exists() {
