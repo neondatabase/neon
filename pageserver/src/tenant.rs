@@ -300,8 +300,14 @@ impl Tenant {
 
         let mut timelines_accessor = self.timelines.lock().unwrap();
         for (timeline_id, metadata) in sorted_timelines {
-            self.initialize_new_timeline(timeline_id, metadata, &mut timelines_accessor)
-                .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
+            let timeline_dir = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+            self.initialize_new_timeline(
+                timeline_id,
+                metadata,
+                &timeline_dir,
+                &mut timelines_accessor,
+            )
+            .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
         }
 
         Ok(())
@@ -368,6 +374,7 @@ impl Tenant {
         new_metadata: TimelineMetadata,
     ) -> Result<Arc<Timeline>> {
         let target_timeline_directory = self.conf.timeline_path(&new_timeline_id, &self.tenant_id);
+        let initdb_lsn = new_metadata.initdb_lsn();
 
         let empty_timeline = crashsafe_dir::init_via_temporary_directory(
             &target_timeline_directory,
@@ -387,6 +394,8 @@ impl Tenant {
                 target_timeline_directory.display()
             )
         })?;
+
+        empty_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
 
         info!(
             "created timeline directory structure in {}",
@@ -651,6 +660,7 @@ impl Tenant {
         &self,
         new_timeline_id: TimelineId,
         new_metadata: TimelineMetadata,
+        timeline_dir: &Path,
         timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let ancestor = match new_metadata.ancestor_timeline() {
@@ -681,7 +691,7 @@ impl Tenant {
         ));
 
         new_timeline
-            .load_layer_map(new_disk_consistent_lsn)
+            .load_layer_map(new_disk_consistent_lsn, timeline_dir)
             .context("failed to load layermap")?;
 
         new_timeline.launch_wal_receiver()?;
@@ -768,6 +778,7 @@ impl Tenant {
     pub fn persist_tenant_config(
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
+        first_save: bool,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
         info!("persisting tenantconf to {}", target_config_path.display());
@@ -783,8 +794,10 @@ impl Tenant {
         // Convert the config to a toml file.
         conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
 
-        let mut target_config_file =
-            VirtualFile::open_with_options(target_config_path, OpenOptions::new().write(true))?;
+        let mut target_config_file = VirtualFile::open_with_options(
+            target_config_path,
+            OpenOptions::new().write(true).create_new(first_save),
+        )?;
 
         target_config_file
             .write(conf_content.as_bytes())
@@ -1053,10 +1066,12 @@ impl Tenant {
                 )
             })?;
         }
-        // Init temporarily repo to get bootstrap data
+        // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
         run_initdb(conf, &initdb_path).await?;
+        // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&initdb_path) {
+                // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
                 error!("Failed to remove temporary initdb directory '{}': {}", initdb_path.display(), e);
             }
         }
@@ -1072,7 +1087,7 @@ impl Tenant {
             TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
         let timeline =
             self.create_initial_timeline_files(timeline_id, new_metadata, target_timeline_dir)?;
-        import_datadir::import_timeline_from_postgres_datadir(pgdata_path, &*timeline, initdb_lsn)?;
+        import_datadir::import_timeline_from_postgres_datadir(pgdata_path, &timeline, initdb_lsn)?;
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
             bail!("failpoint before-checkpoint-new-timeline");
@@ -1101,11 +1116,13 @@ impl Tenant {
             true,
         )?;
 
-        let initdb_lsn = new_metadata.initdb_lsn();
         let mut timelines = self.timelines.lock().unwrap();
-        let new_timeline =
-            self.initialize_new_timeline(new_timeline_id, new_metadata, &mut timelines)?;
-        new_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
+        let new_timeline = self.initialize_new_timeline(
+            new_timeline_id,
+            new_metadata,
+            target_dir,
+            &mut timelines,
+        )?;
 
         Ok(new_timeline)
     }
@@ -1417,10 +1434,16 @@ mod tests {
             .await
         {
             Ok(_) => panic!("duplicate timeline creation should fail"),
-            Err(e) => assert_eq!(
-                e.to_string(),
-                format!("Timeline {TIMELINE_ID} already exists")
-            ),
+            Err(e) => {
+                let error_message = format!("{e:#}");
+                assert!(
+                    error_message.contains(&format!(
+                        "timeline {}/{} already exists",
+                        tenant.tenant_id, TIMELINE_ID
+                    )),
+                    "Unexpected error message: {error_message}"
+                )
+            }
         }
 
         Ok(())
@@ -1463,14 +1486,14 @@ mod tests {
         //assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        tenant.branch_timeline(
-            TIMELINE_ID,
-            NEW_TIMELINE_ID,
-            Some(Lsn(0x30)),
-            &tenant
-                .conf
-                .timeline_path(&tline.timeline_id, &tenant.tenant_id),
-        )?;
+        tenant
+            .create_timeline(
+                tenant.conf,
+                Some(NEW_TIMELINE_ID),
+                Some(TIMELINE_ID),
+                Some(Lsn(0x30)),
+            )
+            .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
@@ -1638,14 +1661,14 @@ mod tests {
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        tenant.branch_timeline(
-            TIMELINE_ID,
-            NEW_TIMELINE_ID,
-            Some(Lsn(0x40)),
-            &tenant
-                .conf
-                .timeline_path(&tline.timeline_id, &tenant.tenant_id),
-        )?;
+        tenant
+            .create_timeline(
+                tenant.conf,
+                Some(NEW_TIMELINE_ID),
+                Some(TIMELINE_ID),
+                Some(Lsn(0x40)),
+            )
+            .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
@@ -1665,14 +1688,14 @@ mod tests {
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        tenant.branch_timeline(
-            TIMELINE_ID,
-            NEW_TIMELINE_ID,
-            Some(Lsn(0x40)),
-            &tenant
-                .conf
-                .timeline_path(&tline.timeline_id, &tenant.tenant_id),
-        )?;
+        tenant
+            .create_timeline(
+                tenant.conf,
+                Some(NEW_TIMELINE_ID),
+                Some(TIMELINE_ID),
+                Some(Lsn(0x40)),
+            )
+            .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
@@ -1726,14 +1749,14 @@ mod tests {
             make_some_layers(tline.as_ref(), Lsn(0x20))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
 
-            tenant.branch_timeline(
-                TIMELINE_ID,
-                NEW_TIMELINE_ID,
-                Some(Lsn(0x40)),
-                &tenant
-                    .conf
-                    .timeline_path(&tline.timeline_id, &tenant.tenant_id),
-            )?;
+            tenant
+                .create_timeline(
+                    harness.conf,
+                    Some(NEW_TIMELINE_ID),
+                    Some(TIMELINE_ID),
+                    Some(Lsn(0x40)),
+                )
+                .await?;
 
             let newtline = tenant
                 .get_timeline(NEW_TIMELINE_ID)
@@ -2004,14 +2027,9 @@ mod tests {
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
             let new_tline_id = TimelineId::generate();
-            tenant.branch_timeline(
-                tline_id,
-                new_tline_id,
-                Some(lsn),
-                &tenant
-                    .conf
-                    .timeline_path(&tline.timeline_id, &tenant.tenant_id),
-            )?;
+            tenant
+                .create_timeline(tenant.conf, Some(new_tline_id), Some(tline_id), Some(lsn))
+                .await?;
             tline = tenant
                 .get_timeline(new_tline_id)
                 .expect("Should have the branched timeline");
@@ -2074,14 +2092,9 @@ mod tests {
         #[allow(clippy::needless_range_loop)]
         for idx in 0..NUM_TLINES {
             let new_tline_id = TimelineId::generate();
-            tenant.branch_timeline(
-                tline_id,
-                new_tline_id,
-                Some(lsn),
-                &tenant
-                    .conf
-                    .timeline_path(&tline.timeline_id, &tenant.tenant_id),
-            )?;
+            tenant
+                .create_timeline(tenant.conf, Some(new_tline_id), Some(tline_id), Some(lsn))
+                .await?;
             tline = tenant
                 .get_timeline(new_tline_id)
                 .expect("Should have the branched timeline");

@@ -270,7 +270,7 @@ pub async fn create_tenant(
             let temporary_tenant_config_path = conf.construct_tenant_config_path(&tmp_dir);
             let temporary_tenant_timelines_dir = conf.construct_timelines_path(&tmp_dir);
             // first, create a config in the top-level temp directory, fsync the file
-            Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf)?;
+            Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true)?;
             crashsafe_dir::fsync_file_and_parent(&temporary_tenant_config_path)?;
             // then, create a subdirectory in the top-level temp directory, fsynced
             crashsafe_dir::create_dir(&temporary_tenant_timelines_dir)
@@ -289,7 +289,6 @@ pub async fn create_tenant(
     );
 
     // now we have created all local files in tenant directory, time to load it into memory
-    // wil do similar on crash.
     let tenant = Arc::new(Tenant::new(
         conf,
         tenant_conf,
@@ -316,7 +315,7 @@ pub fn update_tenant_config(
     info!("configuring tenant {tenant_id}");
 
     let tenant_conf_path = conf.tenant_config_path(tenant_id);
-    Tenant::persist_tenant_config(&tenant_conf_path, tenant_conf)?;
+    Tenant::persist_tenant_config(&tenant_conf_path, tenant_conf, false)?;
     crashsafe_dir::fsync(&tenant_conf_path)?;
 
     get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);

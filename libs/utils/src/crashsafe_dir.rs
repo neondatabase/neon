@@ -22,6 +22,12 @@ where
     let tmp_directory = create_tmp_directory
         .await
         .context("Failed to create temporary directory")?;
+    anyhow::ensure!(
+        tmp_directory.exists(),
+        "Tmp directory {} was not created",
+        tmp_directory.display()
+    );
+
     let init_result = init_in_directory(tmp_directory.clone())
         .await
         .with_context(|| {
@@ -44,20 +50,22 @@ where
     let init_result = match init_result {
         Ok(init_result) => init_result,
         Err(init_error) => {
-            match fs::remove_dir_all(&tmp_directory) {
-                Ok(()) => anyhow::bail!(
-                    "Failed to initialize directory {}: {:?}",
-                    target_directory.display(),
-                    init_error
-                ),
-                Err(removal_error) => anyhow::bail!(
+            if tmp_directory.exists() {
+                if let Err(removal_error) = fs::remove_dir_all(&tmp_directory) {
+                    anyhow::bail!(
                     "Failed to initialize directory {} and remove its temporary directory {}: {:?} and {:?}",
                     target_directory.display(),
                     tmp_directory.display(),
                     init_error,
                     removal_error,
-                ),
+                )
+                }
             }
+            anyhow::bail!(
+                "Failed to initialize directory {}: {:?}",
+                target_directory.display(),
+                init_error
+            )
         }
     };
 
@@ -214,7 +222,6 @@ mod tests {
 
         let nested_child_dir = existing_dir_path.join("child1").join("child2");
         let err = create_dir(nested_child_dir).unwrap_err();
-        // TODO kb bad? return types?
         let error_message = format!("{:#}", err);
         assert!(
             error_message.contains("No such file or directory"),
@@ -245,7 +252,7 @@ mod tests {
         let err = create_dir_all(&file_path).unwrap_err();
         let error_message = format!("{:#}", err);
         assert!(
-            error_message.contains("File exists"),
+            error_message.contains("non-directory found in path"),
             "Unexpected error message: {error_message}"
         );
 

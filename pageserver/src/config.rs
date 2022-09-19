@@ -368,7 +368,6 @@ impl PageServerConf {
     /// where certain timeline's metadata file should be located.
     pub fn metadata_path(&self, timeline_id: TimelineId, tenant_id: TenantId) -> PathBuf {
         self.construct_timeline_metadata_path(&self.timeline_path(&timeline_id, &tenant_id))
-            .join(METADATA_FILE_NAME)
     }
 
     pub fn construct_tenant_config_path(&self, tenant_path: &Path) -> PathBuf {

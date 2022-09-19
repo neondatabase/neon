@@ -12,7 +12,7 @@ use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::{Deref, Range};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
@@ -636,15 +636,16 @@ impl Timeline {
     /// Scan the timeline directory to populate the layer map.
     /// Returns all timeline-related files that were found and loaded.
     ///
-    pub fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+    pub fn load_layer_map(
+        &self,
+        disk_consistent_lsn: Lsn,
+        timeline_path: &Path,
+    ) -> anyhow::Result<()> {
         let mut layers = self.layers.write().unwrap();
         let mut num_layers = 0;
 
         let timer = self.metrics.load_layer_map_histo.start_timer();
 
-        // Scan timeline directory and create ImageFileName and DeltaFilename
-        // structs representing all files on disk
-        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         // total size of layer files in the current timeline directory
         let mut total_physical_size = 0;
 
