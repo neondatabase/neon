@@ -15,12 +15,12 @@ use crate::repository::Key;
 use crate::tenant::inmemory_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use crate::tenant::storage_layer::{range_eq, range_overlaps};
+use amplify_num::i256;
 use anyhow::Result;
-use num_bigint::BigInt;
 use num_traits::identities::{One, Zero};
-use num_traits::ToPrimitive;
 use num_traits::{Bounded, Num, Signed};
 use rstar::{RTree, RTreeObject, AABB};
+use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
@@ -70,37 +70,50 @@ struct LayerEnvelope {
 // Overflow will cause panic in debug mode and incorrect area calculation in release mode,
 // which leads to non-optimally balanced R-Tree (but doesn't fit correctness of R-Tree work).
 //
-// To prevent problems with overflow we may use BigInt representation of key. But BigInt
-// doesn't implement copy() method, which doesn't allow to store it in R-Tree.
-//
-// This is why we use BigInt temporary for perform multiplication and then take square and store result as i128.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Debug)]
-struct IntKey(i128);
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Debug)]
+struct IntKey(i256);
+
+impl Copy for IntKey {}
+
+impl IntKey {
+    fn from(i: i128) -> Self {
+        IntKey(i256::from(i))
+    }
+}
 
 impl Bounded for IntKey {
     fn min_value() -> Self {
-        IntKey(i128::MIN)
+        IntKey(i256::MIN)
     }
     fn max_value() -> Self {
-        IntKey(i128::MAX)
+        IntKey(i256::MAX)
     }
 }
 
 impl Signed for IntKey {
     fn is_positive(&self) -> bool {
-        IntKey(self.0.is_positive())
+        self.0 > i256::ZERO
     }
     fn is_negative(&self) -> bool {
-        self.0 < 0
+        self.0 < i256::ZERO
     }
     fn signum(&self) -> Self {
-        IntKey(self.0.signum())
+        match self.0.cmp(&i256::ZERO) {
+            Ordering::Greater => IntKey(i256::ONE),
+            Ordering::Less => IntKey(-i256::ONE),
+            Ordering::Equal => IntKey(i256::ZERO),
+        }
     }
     fn abs(&self) -> Self {
         IntKey(self.0.abs())
     }
     fn abs_sub(&self, other: &Self) -> Self {
-        IntKey(self.0.abs_sub(&other.0))
+        if self.0 <= other.0 {
+            IntKey(i256::ZERO)
+        } else {
+            IntKey(self.0 - other.0)
+        }
     }
 }
 
@@ -125,18 +138,9 @@ impl Div for IntKey {
     }
 }
 
-// Add and mul operations are used by R-Tree to calculate area.
-// Them can cause integer overflow which leads to panic in debug build.
-// LSN range of one layer is now by default 256Mb  (28 bits).
-// And relation node is packed at bits 72..40.
-// 72+28=100 and we have 27 bits available.
-// It means that such overflow is not expected to happen frequently,
-// so we can use saturating mul/add to handle it without risk to get very non-optimal tree.
 impl Add for IntKey {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
-        //        IntKey(self.0.saturating_add(rhs.0))
-        //        IntKey(self.0.wrapping_add(rhs.0))
         IntKey(self.0 + rhs.0)
     }
 }
@@ -144,8 +148,6 @@ impl Add for IntKey {
 impl Sub for IntKey {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self::Output {
-        //        IntKey(self.0.saturating_sub(rhs.0))
-        //        IntKey(self.0.wrapping_sub(rhs.0))
         IntKey(self.0 - rhs.0)
     }
 }
@@ -153,35 +155,29 @@ impl Sub for IntKey {
 impl Mul for IntKey {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self::Output {
-        let a = BigInt::from(self.0);
-        let b = BigInt::from(rhs.0);
-        let c = (a * b).sqrt().to_i128().unwrap();
-        IntKey(c)
-        //        IntKey(self.0.saturating_mul(rhs.0))
-        //        IntKey(self.0.wrapping_mul(rhs.0))
-        //        IntKey(self.0 * rhs.0)
+        IntKey(self.0 * rhs.0)
     }
 }
 
 impl One for IntKey {
     fn one() -> Self {
-        IntKey(1)
+        IntKey(i256::ONE)
     }
 }
 
 impl Zero for IntKey {
     fn zero() -> Self {
-        IntKey(0)
+        IntKey(i256::ZERO)
     }
     fn is_zero(&self) -> bool {
-        self.0 == 0
+        self.0 == i256::ZERO
     }
 }
 
 impl Num for IntKey {
     type FromStrRadixErr = <i128 as Num>::FromStrRadixErr;
     fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
-        Ok(IntKey(i128::from_str_radix(str, radix)?))
+        Ok(IntKey(i256::from(i128::from_str_radix(str, radix)?)))
     }
 }
 
@@ -203,12 +199,12 @@ impl RTreeObject for LayerEnvelope {
         let lsn_range = self.layer.get_lsn_range();
         AABB::from_corners(
             [
-                IntKey(key_range.start.to_i128()),
-                IntKey(lsn_range.start.0 as i128),
+                IntKey::from(key_range.start.to_i128()),
+                IntKey::from(lsn_range.start.0 as i128),
             ],
             [
-                IntKey(key_range.end.to_i128() - 1),
-                IntKey(lsn_range.end.0 as i128 - 1),
+                IntKey::from(key_range.end.to_i128() - 1),
+                IntKey::from(lsn_range.end.0 as i128 - 1),
             ], // end is exlusive
         )
     }
@@ -238,8 +234,11 @@ impl LayerMap {
         let mut latest_img: Option<Arc<dyn Layer>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
         let envelope = AABB::from_corners(
-            [IntKey(key.to_i128()), IntKey(0i128)],
-            [IntKey(key.to_i128()), IntKey(end_lsn.0 as i128 - 1)],
+            [IntKey::from(key.to_i128()), IntKey::from(0i128)],
+            [
+                IntKey::from(key.to_i128()),
+                IntKey::from(end_lsn.0 as i128 - 1),
+            ],
         );
         for e in self
             .historic_layers
@@ -380,12 +379,12 @@ impl LayerMap {
             let mut made_progress = false;
             let envelope = AABB::from_corners(
                 [
-                    IntKey(range_remain.start.to_i128()),
-                    IntKey(lsn_range.start.0 as i128),
+                    IntKey::from(range_remain.start.to_i128()),
+                    IntKey::from(lsn_range.start.0 as i128),
                 ],
                 [
-                    IntKey(range_remain.end.to_i128() - 1),
-                    IntKey(lsn_range.end.0 as i128 - 1),
+                    IntKey::from(range_remain.end.to_i128() - 1),
+                    IntKey::from(lsn_range.end.0 as i128 - 1),
                 ],
             );
             for e in self
@@ -424,8 +423,8 @@ impl LayerMap {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         let envelope = AABB::from_corners(
-            [IntKey(key.to_i128()), IntKey(0)],
-            [IntKey(key.to_i128()), IntKey(lsn.0 as i128)],
+            [IntKey::from(key.to_i128()), IntKey::from(0)],
+            [IntKey::from(key.to_i128()), IntKey::from(lsn.0 as i128)],
         );
         for e in self
             .historic_layers
@@ -465,8 +464,11 @@ impl LayerMap {
     ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
         let mut points = vec![key_range.start];
         let envelope = AABB::from_corners(
-            [IntKey(key_range.start.to_i128()), IntKey(0)],
-            [IntKey(key_range.end.to_i128()), IntKey(lsn.0 as i128)],
+            [IntKey::from(key_range.start.to_i128()), IntKey::from(0)],
+            [
+                IntKey::from(key_range.end.to_i128()),
+                IntKey::from(lsn.0 as i128),
+            ],
         );
         for e in self
             .historic_layers
@@ -511,12 +513,12 @@ impl LayerMap {
         }
         let envelope = AABB::from_corners(
             [
-                IntKey(key_range.start.to_i128()),
-                IntKey(lsn_range.start.0 as i128),
+                IntKey::from(key_range.start.to_i128()),
+                IntKey::from(lsn_range.start.0 as i128),
             ],
             [
-                IntKey(key_range.end.to_i128() - 1),
-                IntKey(lsn_range.end.0 as i128 - 1),
+                IntKey::from(key_range.end.to_i128() - 1),
+                IntKey::from(lsn_range.end.0 as i128 - 1),
             ],
         );
         for e in self

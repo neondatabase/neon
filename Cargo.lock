@@ -38,6 +38,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "amplify_num"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f27d3d00d3d115395a7a8a4dc045feb7aa82b641e485f7e15f4e67ac16f4f56d"
+
+[[package]]
 name = "ansi_term"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1879,6 +1885,7 @@ checksum = "648001efe5d5c0102d8cea768e348da85d90af8ba91f0bea908f157951493cd4"
 name = "pageserver"
 version = "0.1.0"
 dependencies = [
+ "amplify_num",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -1903,7 +1910,6 @@ dependencies = [
  "itertools",
  "metrics",
  "nix",
- "num-bigint",
  "num-traits",
  "once_cell",
  "postgres",
