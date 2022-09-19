@@ -12,8 +12,8 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     n_iters = 10
     n_records = 100000
 
-    # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
-    # Extend compaction_period and gc_period to disable background compaction and gc.
+    # We want to have a lot of lot of layer files to exercise the layer map. Make
+    # gc_horizon and checkpoint_distance very small, so that we get a lot of small layer files.
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             "gc_period": "100 m",
