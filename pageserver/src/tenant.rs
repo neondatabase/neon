@@ -342,8 +342,7 @@ impl Tenant {
         drop(timelines);
 
         for (timeline_id, timeline) in &timelines_to_compact {
-            let _entered =
-                info_span!("compact", timeline = %timeline_id, tenant = %self.tenant_id).entered();
+            let _entered = info_span!("compact_timeline", timeline = %timeline_id).entered();
             timeline.compact()?;
         }
 
@@ -835,9 +834,6 @@ impl Tenant {
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
-        let _span_guard =
-            info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timeline_id)
-                .entered();
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
