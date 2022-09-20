@@ -931,7 +931,7 @@ impl ReplicationFeedback {
 
     // Deserialize ReplicationFeedback message
     pub fn parse(mut buf: Bytes) -> ReplicationFeedback {
-        let mut zf = ReplicationFeedback::empty();
+        let mut rf = ReplicationFeedback::empty();
         let nfields = buf.get_u8();
         for _ in 0..nfields {
             let key = read_cstr(&mut buf).unwrap();
@@ -939,31 +939,31 @@ impl ReplicationFeedback {
                 b"current_timeline_size" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
-                    zf.current_timeline_size = buf.get_u64();
+                    rf.current_timeline_size = buf.get_u64();
                 }
                 b"ps_writelsn" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
-                    zf.ps_writelsn = buf.get_u64();
+                    rf.ps_writelsn = buf.get_u64();
                 }
                 b"ps_flushlsn" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
-                    zf.ps_flushlsn = buf.get_u64();
+                    rf.ps_flushlsn = buf.get_u64();
                 }
                 b"ps_applylsn" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
-                    zf.ps_applylsn = buf.get_u64();
+                    rf.ps_applylsn = buf.get_u64();
                 }
                 b"ps_replytime" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
                     let raw_time = buf.get_i64();
                     if raw_time > 0 {
-                        zf.ps_replytime = *PG_EPOCH + Duration::from_micros(raw_time as u64);
+                        rf.ps_replytime = *PG_EPOCH + Duration::from_micros(raw_time as u64);
                     } else {
-                        zf.ps_replytime = *PG_EPOCH - Duration::from_micros(-raw_time as u64);
+                        rf.ps_replytime = *PG_EPOCH - Duration::from_micros(-raw_time as u64);
                     }
                 }
                 _ => {
@@ -976,8 +976,8 @@ impl ReplicationFeedback {
                 }
             }
         }
-        trace!("ReplicationFeedback parsed is {:?}", zf);
-        zf
+        trace!("ReplicationFeedback parsed is {:?}", rf);
+        rf
     }
 }
 
@@ -987,29 +987,29 @@ mod tests {
 
     #[test]
     fn test_replication_feedback_serialization() {
-        let mut zf = ReplicationFeedback::empty();
-        // Fill zf with some values
-        zf.current_timeline_size = 12345678;
+        let mut rf = ReplicationFeedback::empty();
+        // Fill rf with some values
+        rf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.
-        zf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        rf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
         let mut data = BytesMut::new();
-        zf.serialize(&mut data).unwrap();
+        rf.serialize(&mut data).unwrap();
 
-        let zf_parsed = ReplicationFeedback::parse(data.freeze());
-        assert_eq!(zf, zf_parsed);
+        let rf_parsed = ReplicationFeedback::parse(data.freeze());
+        assert_eq!(rf, rf_parsed);
     }
 
     #[test]
     fn test_replication_feedback_unknown_key() {
-        let mut zf = ReplicationFeedback::empty();
-        // Fill zf with some values
-        zf.current_timeline_size = 12345678;
+        let mut rf = ReplicationFeedback::empty();
+        // Fill rf with some values
+        rf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.
-        zf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        rf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
         let mut data = BytesMut::new();
-        zf.serialize(&mut data).unwrap();
+        rf.serialize(&mut data).unwrap();
 
         // Add an extra field to the buffer and adjust number of keys
         if let Some(first) = data.first_mut() {
@@ -1021,8 +1021,8 @@ mod tests {
         data.put_u64(42);
 
         // Parse serialized data and check that new field is not parsed
-        let zf_parsed = ReplicationFeedback::parse(data.freeze());
-        assert_eq!(zf, zf_parsed);
+        let rf_parsed = ReplicationFeedback::parse(data.freeze());
+        assert_eq!(rf, rf_parsed);
     }
 
     #[test]

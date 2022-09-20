@@ -128,9 +128,9 @@ typedef struct
 												 * message */
 }			NeonErrorResponse;
 
-extern StringInfoData zm_pack_request(NeonRequest * msg);
-extern NeonResponse * zm_unpack_response(StringInfo s);
-extern char *zm_to_string(NeonMessage * msg);
+extern StringInfoData nm_pack_request(NeonRequest * msg);
+extern NeonResponse * nm_unpack_response(StringInfo s);
+extern char *nm_to_string(NeonMessage * msg);
 
 /*
  * API

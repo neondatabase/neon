@@ -160,7 +160,7 @@ page_server_request(void const *req)
 
 
 StringInfoData
-zm_pack_request(NeonRequest * msg)
+nm_pack_request(NeonRequest * msg)
 {
 	StringInfoData s;
 
@@ -235,7 +235,7 @@ zm_pack_request(NeonRequest * msg)
 }
 
 NeonResponse *
-zm_unpack_response(StringInfo s)
+nm_unpack_response(StringInfo s)
 {
 	NeonMessageTag tag = pq_getmsgbyte(s);
 	NeonResponse *resp = NULL;
@@ -329,7 +329,7 @@ zm_unpack_response(StringInfo s)
 
 /* dump to json for debugging / error reporting purposes */
 char *
-zm_to_string(NeonMessage * msg)
+nm_to_string(NeonMessage * msg)
 {
 	StringInfoData s;
 
@@ -632,7 +632,7 @@ neon_init(void)
  * It may cause problems with XLogFlush. So return pointer backward to the origin of the page.
  */
 static XLogRecPtr
-zm_adjust_lsn(XLogRecPtr lsn)
+nm_adjust_lsn(XLogRecPtr lsn)
 {
 	/*
 	 * If lsn points to the beging of first record on page or segment, then
@@ -685,7 +685,7 @@ neon_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockN
 		elog(DEBUG1, "neon_get_request_lsn GetLastWrittenLSN lsn %X/%X ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 
-		lsn = zm_adjust_lsn(lsn);
+		lsn = nm_adjust_lsn(lsn);
 
 		/*
 		 * Is it possible that the last-written LSN is ahead of last flush
@@ -1569,7 +1569,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	 */
 	lsn = GetXLogInsertRecPtr();
 
-	lsn = zm_adjust_lsn(lsn);
+	lsn = nm_adjust_lsn(lsn);
 
 	/*
 	 * Flush it, too. We don't actually care about it here, but let's uphold

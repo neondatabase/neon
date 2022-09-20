@@ -132,7 +132,7 @@ pub enum TenantState {
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
-    /// Get Timeline handle for given zenith timeline ID.
+    /// Get Timeline handle for given Neon timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
     pub fn get_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<Arc<Timeline>> {
         self.timelines
