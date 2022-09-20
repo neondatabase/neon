@@ -21,7 +21,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
-use remote_storage::path_with_suffix_extension;
 use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
@@ -36,6 +35,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
+use utils::crashsafe_dir::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
 use crate::metrics::{

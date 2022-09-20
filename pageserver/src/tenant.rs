@@ -14,6 +14,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use tokio::sync::watch;
 use tracing::*;
+use utils::crashsafe_dir::path_with_suffix_extension;
 
 use std::cmp::min;
 use std::collections::hash_map;
@@ -45,7 +46,6 @@ use crate::tenant_config::TenantConfOpt;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::WalRedoManager;
 use crate::{CheckpointConfig, TEMP_FILE_SUFFIX};
-use remote_storage::path_with_suffix_extension;
 
 use toml_edit;
 use utils::{
@@ -973,10 +973,6 @@ impl Tenant {
         } else {
             None
         };
-
-        // create a new timeline directory
-        let timelinedir = self.conf.timeline_path(&dst, &self.tenant_id);
-        crashsafe_dir::create_dir(&timelinedir)?;
 
         // Create the metadata file, noting the ancestor of the new timeline.
         // There is initially no data in it, but all the read-calls know to look

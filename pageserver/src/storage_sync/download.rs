@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
-use remote_storage::{path_with_suffix_extension, DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, GenericRemoteStorage};
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
@@ -17,7 +17,10 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 use crate::{config::PageServerConf, storage_sync::SyncTask, TEMP_FILE_SUFFIX};
-use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::{
+    crashsafe_dir::path_with_suffix_extension,
+    id::{TenantId, TenantTimelineId, TimelineId},
+};
 
 use super::{
     index::{IndexPart, RemoteTimeline},
