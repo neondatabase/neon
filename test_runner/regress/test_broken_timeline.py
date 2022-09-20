@@ -113,13 +113,14 @@ def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
 
 def test_fix_broken_timelines_on_startup(neon_simple_env: NeonEnv):
     env = neon_simple_env
+    pageserver_http = env.pageserver.http_client()
 
     tenant_id, _ = env.neon_cli.create_tenant()
 
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
 
     # Introduce failpoint when creating a new timeline
-    env.pageserver.safe_psql("failpoints before-checkpoint-new-timeline=return")
+    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "return"))
     with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
         _ = env.neon_cli.create_timeline("test_fix_broken_timelines", tenant_id)
 

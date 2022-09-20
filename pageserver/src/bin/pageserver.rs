@@ -87,8 +87,8 @@ fn main() -> anyhow::Result<()> {
 
     if arg_matches.is_present("enabled-features") {
         let features: &[&str] = &[
-            #[cfg(feature = "failpoints")]
-            "failpoints",
+            #[cfg(feature = "testing")]
+            "testing",
             #[cfg(feature = "profiling")]
             "profiling",
         ];

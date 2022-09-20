@@ -91,5 +91,5 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
         wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
 
         # run final checkpoint manually to flush all the data to remote storage
-        env.pageserver.safe_psql(f"checkpoint {tenant_id} {timeline_id}")
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)

@@ -964,6 +964,24 @@ class NeonPageserverHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]) -> None:
+        if isinstance(config_strings, tuple):
+            pairs = [config_strings]
+        else:
+            pairs = config_strings
+
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
+
+        res = self.put(
+            f"http://localhost:{self.port}/v1/failpoints",
+            json=[{"name": name, "actions": actions} for name, actions in pairs],
+        )
+        log.info(f"Got failpoints request response code {res.status_code}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
+        return res_json
+
     def tenant_list(self) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         self.verbose_error(res)
@@ -1056,6 +1074,45 @@ class NeonPageserverHttpClient(requests.Session):
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}"
         )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
+        return res_json
+
+    def timeline_gc(
+        self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
+    ) -> dict[str, Any]:
+        log.info(
+            f"Requesting GC: tenant {tenant_id}, timeline {timeline_id}, gc_horizon {repr(gc_horizon)}"
+        )
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc",
+            json={"gc_horizon": gc_horizon},
+        )
+        log.info(f"Got GC request response code: {res.status_code}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_compact(self, tenant_id: TenantId, timeline_id: TimelineId):
+        log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact"
+        )
+        log.info(f"Got compact request response code: {res.status_code}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
+        return res_json
+
+    def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
+        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint"
+        )
+        log.info(f"Got checkpoint request response code: {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None

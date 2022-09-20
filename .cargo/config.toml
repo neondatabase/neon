@@ -13,4 +13,4 @@ opt-level = 3
 opt-level = 1
 
 [alias]
-build_testing = ["build", "--features", "failpoints"]
+build_testing = ["build", "--features", "testing"]

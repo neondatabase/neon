@@ -47,6 +47,7 @@ from fixtures.utils import query_scalar
 #     could not find data for key ... at LSN ..., for request at LSN ...
 def test_branch_and_gc(neon_simple_env: NeonEnv):
     env = neon_simple_env
+    pageserver_http_client = env.pageserver.http_client()
 
     tenant, _ = env.neon_cli.create_tenant(
         conf={
@@ -84,7 +85,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
 
     # Set the GC horizon so that lsn1 is inside the horizon, which means
     # we can create a new branch starting from lsn1.
-    env.pageserver.safe_psql(f"do_gc {tenant} {timeline_main} {lsn2 - lsn1 + 1024}")
+    pageserver_http_client.timeline_gc(tenant, timeline_main, lsn2 - lsn1 + 1024)
 
     env.neon_cli.create_branch(
         "test_branch", "test_main", tenant_id=tenant, ancestor_start_lsn=lsn1
@@ -113,6 +114,8 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
 # For more details, see discussion in https://github.com/neondatabase/neon/pull/2101#issuecomment-1185273447.
 def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     env = neon_simple_env
+    pageserver_http_client = env.pageserver.http_client()
+
     # Disable background GC but set the `pitr_interval` to be small, so GC can delete something
     tenant, _ = env.neon_cli.create_tenant(
         conf={
@@ -147,10 +150,10 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     # Use `failpoint=sleep` and `threading` to make the GC iteration triggers *before* the
     # branch creation task but the individual timeline GC iteration happens *after*
     # the branch creation task.
-    env.pageserver.safe_psql("failpoints before-timeline-gc=sleep(2000)")
+    pageserver_http_client.configure_failpoints(("before-timeline-gc", "sleep(2000)"))
 
     def do_gc():
-        env.pageserver.safe_psql(f"do_gc {tenant} {b0} 0")
+        pageserver_http_client.timeline_gc(tenant, b0, 0)
 
     thread = threading.Thread(target=do_gc, daemon=True)
     thread.start()
@@ -161,7 +164,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     time.sleep(1.0)
 
     # The starting LSN is invalid as the corresponding record is scheduled to be removed by in-queue GC.
-    with pytest.raises(Exception, match="invalid branch start lsn"):
+    with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         env.neon_cli.create_branch("b1", "b0", tenant_id=tenant, ancestor_start_lsn=lsn)
 
     thread.join()

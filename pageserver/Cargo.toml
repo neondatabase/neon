@@ -5,10 +5,10 @@ edition = "2021"
 
 [features]
 default = []
+# Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
+# which adds some runtime cost to run tests on outage conditions
+testing = ["fail/failpoints"]
 
-# Feature that enables a special API, fail_point! macro (adds some runtime cost)
-# to run tests on outage conditions
-failpoints = ["fail/failpoints"]
 profiling = ["pprof"]
 
 [dependencies]

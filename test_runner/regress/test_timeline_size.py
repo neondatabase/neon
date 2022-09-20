@@ -238,6 +238,7 @@ def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
 
 def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
     env = neon_simple_env
+    pageserver_http = env.pageserver.http_client()
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_checkpoint")
     pg = env.postgres.create_start("test_timeline_physical_size_post_checkpoint")
 
@@ -251,7 +252,7 @@ def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
+    pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
@@ -264,6 +265,7 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
     )
 
     env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_compaction")
     pg = env.postgres.create_start("test_timeline_physical_size_post_compaction")
@@ -278,8 +280,8 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
-    env.pageserver.safe_psql(f"compact {env.initial_tenant} {new_timeline_id}")
+    pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
+    pageserver_http.timeline_compact(env.initial_tenant, new_timeline_id)
 
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
@@ -290,6 +292,7 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance=100000, compaction_period='10m', gc_period='10m', pitr_interval='1s'}"
 
     env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_gc")
     pg = env.postgres.create_start("test_timeline_physical_size_post_gc")
@@ -304,7 +307,7 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
+    pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
     pg.safe_psql(
         """
@@ -315,9 +318,9 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
+    pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
-    env.pageserver.safe_psql(f"do_gc {env.initial_tenant} {new_timeline_id} 0")
+    pageserver_http.timeline_gc(env.initial_tenant, new_timeline_id, gc_horizon=None)
 
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
@@ -326,6 +329,7 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
 # Test the metrics.
 def test_timeline_size_metrics(neon_simple_env: NeonEnv):
     env = neon_simple_env
+    pageserver_http = env.pageserver.http_client()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_metrics")
     pg = env.postgres.create_start("test_timeline_size_metrics")
@@ -340,7 +344,7 @@ def test_timeline_size_metrics(neon_simple_env: NeonEnv):
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
+    pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
     # get the metrics and parse the metric for the current timeline's physical size
     metrics = env.pageserver.http_client().get_metrics()
@@ -382,6 +386,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
     random.seed(100)
 
     env = neon_simple_env
+    pageserver_http = env.pageserver.http_client()
     client = env.pageserver.http_client()
 
     tenant, timeline = env.neon_cli.create_tenant()
@@ -405,7 +410,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
         )
 
         wait_for_last_flush_lsn(env, pg, tenant, timeline)
-        env.pageserver.safe_psql(f"checkpoint {tenant} {timeline}")
+        pageserver_http.timeline_checkpoint(tenant, timeline)
 
         timeline_total_size += get_timeline_physical_size(timeline)
 
