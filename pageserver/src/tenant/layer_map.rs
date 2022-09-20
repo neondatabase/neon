@@ -277,7 +277,7 @@ impl LayerMap {
             assert!(l.get_key_range().contains(&key));
             if l.get_lsn_range().start >= end_lsn {
                 info!(
-                    "l.get_lsn_range().start={}, l.get_lsn_range().end={}, end_lsn={}",
+                    "Candidate delta layer {}..{} is too new for lsn {}",
                     l.get_lsn_range().start,
                     l.get_lsn_range().end,
                     end_lsn
@@ -413,8 +413,8 @@ impl LayerMap {
         }
     }
 
-    pub fn iter_historic_layers(&self) -> Box<dyn Iterator<Item = Arc<dyn Layer>> + '_> {
-        Box::new(self.historic_layers.iter().map(|e| e.layer.clone()))
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<dyn Layer>> {
+        self.historic_layers.iter().map(|e| e.layer.clone())
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
