@@ -27,6 +27,8 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::ops::Bound::Included;
 use std::path::Path;
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
@@ -34,16 +36,16 @@ use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
-use crate::metrics::remove_tenant_metrics;
-use crate::storage_sync::index::RemoteIndex;
-use crate::tenant_config::{TenantConf, TenantConfOpt};
-
-use crate::metrics::STORAGE_TIME;
+use crate::import_datadir;
+use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
+use crate::storage_sync::index::RemoteIndex;
 use crate::task_mgr;
+use crate::tenant_config::{TenantConf, TenantConfOpt};
 use crate::virtual_file::VirtualFile;
 use crate::walredo::WalRedoManager;
-use crate::CheckpointConfig;
+use crate::{CheckpointConfig, TEMP_FILE_SUFFIX};
+use remote_storage::path_with_suffix_extension;
 
 use toml_edit;
 use utils::{
@@ -132,6 +134,10 @@ pub enum TenantState {
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
+    pub fn tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
     /// Get Timeline handle for given Neon timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
     pub fn get_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<Arc<Timeline>> {
@@ -142,8 +148,7 @@ impl Tenant {
             .with_context(|| {
                 format!(
                     "Timeline {} was not found for tenant {}",
-                    timeline_id,
-                    self.tenant_id()
+                    timeline_id, self.tenant_id
                 )
             })
             .map(Arc::clone)
@@ -204,98 +209,67 @@ impl Tenant {
         Ok(new_timeline)
     }
 
-    /// Branch a timeline
-    pub fn branch_timeline(
+    /// Create a new timeline.
+    ///
+    /// Returns the new timeline ID and reference to its Timeline object.
+    ///
+    /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
+    /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
+    /// a new unique ID is generated.
+    pub async fn create_timeline(
         &self,
-        src: TimelineId,
-        dst: TimelineId,
-        start_lsn: Option<Lsn>,
-    ) -> Result<Arc<Timeline>> {
-        // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
-        // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
-        // concurrently removes data that is needed by the new timeline.
-        let _gc_cs = self.gc_cs.lock().unwrap();
+        new_timeline_id: Option<TimelineId>,
+        ancestor_timeline_id: Option<TimelineId>,
+        mut ancestor_start_lsn: Option<Lsn>,
+    ) -> Result<Option<Arc<Timeline>>> {
+        let new_timeline_id = new_timeline_id.unwrap_or_else(TimelineId::generate);
 
-        // In order for the branch creation task to not wait for GC/compaction,
-        // we need to make sure that the starting LSN of the child branch is not out of scope midway by
-        //
-        // 1. holding the GC lock to prevent overwritting timeline's GC data
-        // 2. checking both the latest GC cutoff LSN and latest GC info of the source timeline
-        //
-        // Step 2 is to avoid initializing the new branch using data removed by past GC iterations
-        // or in-queue GC iterations.
-
-        // XXX: keep the lock to avoid races during timeline creation
-        let mut timelines = self.timelines.lock().unwrap();
-        let src_timeline = timelines
-            .get(&src)
-            // message about timeline being remote is one .context up in the stack
-            .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {src}"))?;
-
-        let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
-
-        // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
-        let start_lsn = start_lsn.unwrap_or_else(|| {
-            let lsn = src_timeline.get_last_record_lsn();
-            info!("branching timeline {dst} from timeline {src} at last record LSN: {lsn}");
-            lsn
-        });
-
-        // Check if the starting LSN is out of scope because it is less than
-        // 1. the latest GC cutoff LSN or
-        // 2. the planned GC cutoff LSN, which is from an in-queue GC iteration.
-        src_timeline
-            .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
-            .context(format!(
-                "invalid branch start lsn: less than latest GC cutoff {}",
-                *latest_gc_cutoff_lsn,
-            ))?;
+        if self
+            .conf
+            .timeline_path(&new_timeline_id, &self.tenant_id)
+            .exists()
         {
-            let gc_info = src_timeline.gc_info.read().unwrap();
-            let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
-            if start_lsn < cutoff {
-                bail!(format!(
-                    "invalid branch start lsn: less than planned GC cutoff {cutoff}"
-                ));
-            }
+            debug!("timeline {new_timeline_id} already exists");
+            return Ok(None);
         }
 
-        // Determine prev-LSN for the new timeline. We can only determine it if
-        // the timeline was branched at the current end of the source timeline.
-        let RecordLsn {
-            last: src_last,
-            prev: src_prev,
-        } = src_timeline.get_last_record_rlsn();
-        let dst_prev = if src_last == start_lsn {
-            Some(src_prev)
-        } else {
-            None
+        let loaded_timeline = match ancestor_timeline_id {
+            Some(ancestor_timeline_id) => {
+                let ancestor_timeline = self
+                    .get_timeline(ancestor_timeline_id)
+                    .context("Cannot branch off the timeline that's not present in pageserver")?;
+
+                if let Some(lsn) = ancestor_start_lsn.as_mut() {
+                    // Wait for the WAL to arrive and be processed on the parent branch up
+                    // to the requested branch point. The repository code itself doesn't
+                    // require it, but if we start to receive WAL on the new timeline,
+                    // decoding the new WAL might need to look up previous pages, relation
+                    // sizes etc. and that would get confused if the previous page versions
+                    // are not in the repository yet.
+                    *lsn = lsn.align();
+                    ancestor_timeline.wait_lsn(*lsn).await?;
+
+                    let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
+                    if ancestor_ancestor_lsn > *lsn {
+                        // can we safely just branch from the ancestor instead?
+                        anyhow::bail!(
+                    "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
+                    lsn,
+                    ancestor_timeline_id,
+                    ancestor_ancestor_lsn,
+                );
+                    }
+                }
+
+                self.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
+            }
+            None => self.bootstrap_timeline(new_timeline_id)?,
         };
 
-        // create a new timeline directory
-        let timelinedir = self.conf.timeline_path(&dst, &self.tenant_id);
-        crashsafe_dir::create_dir(&timelinedir)?;
+        // Have added new timeline into the tenant, now its background tasks are needed.
+        self.activate(true);
 
-        // Create the metadata file, noting the ancestor of the new timeline.
-        // There is initially no data in it, but all the read-calls know to look
-        // into the ancestor.
-        let metadata = TimelineMetadata::new(
-            start_lsn,
-            dst_prev,
-            Some(src),
-            start_lsn,
-            *src_timeline.latest_gc_cutoff_lsn.read(),
-            src_timeline.initdb_lsn,
-        );
-        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
-        save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
-
-        let new_timeline = self.initialize_new_timeline(dst, metadata, &mut timelines)?;
-        timelines.insert(dst, Arc::clone(&new_timeline));
-
-        info!("branched timeline {dst} from {src} at {start_lsn}");
-
-        Ok(new_timeline)
+        Ok(Some(loaded_timeline))
     }
 
     /// perform one garbage collection iteration, removing old data files from disk.
@@ -948,9 +922,171 @@ impl Tenant {
         Ok(totals)
     }
 
-    pub fn tenant_id(&self) -> TenantId {
-        self.tenant_id
+    fn branch_timeline(
+        &self,
+        src: TimelineId,
+        dst: TimelineId,
+        start_lsn: Option<Lsn>,
+    ) -> Result<Arc<Timeline>> {
+        // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
+        // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
+        // concurrently removes data that is needed by the new timeline.
+        let _gc_cs = self.gc_cs.lock().unwrap();
+
+        // In order for the branch creation task to not wait for GC/compaction,
+        // we need to make sure that the starting LSN of the child branch is not out of scope midway by
+        //
+        // 1. holding the GC lock to prevent overwritting timeline's GC data
+        // 2. checking both the latest GC cutoff LSN and latest GC info of the source timeline
+        //
+        // Step 2 is to avoid initializing the new branch using data removed by past GC iterations
+        // or in-queue GC iterations.
+
+        // XXX: keep the lock to avoid races during timeline creation
+        let mut timelines = self.timelines.lock().unwrap();
+        let src_timeline = timelines
+            .get(&src)
+            // message about timeline being remote is one .context up in the stack
+            .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {src}"))?;
+
+        let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
+
+        // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
+        let start_lsn = start_lsn.unwrap_or_else(|| {
+            let lsn = src_timeline.get_last_record_lsn();
+            info!("branching timeline {dst} from timeline {src} at last record LSN: {lsn}");
+            lsn
+        });
+
+        // Check if the starting LSN is out of scope because it is less than
+        // 1. the latest GC cutoff LSN or
+        // 2. the planned GC cutoff LSN, which is from an in-queue GC iteration.
+        src_timeline
+            .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
+            .context(format!(
+                "invalid branch start lsn: less than latest GC cutoff {}",
+                *latest_gc_cutoff_lsn,
+            ))?;
+        {
+            let gc_info = src_timeline.gc_info.read().unwrap();
+            let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
+            if start_lsn < cutoff {
+                bail!(format!(
+                    "invalid branch start lsn: less than planned GC cutoff {cutoff}"
+                ));
+            }
+        }
+
+        // Determine prev-LSN for the new timeline. We can only determine it if
+        // the timeline was branched at the current end of the source timeline.
+        let RecordLsn {
+            last: src_last,
+            prev: src_prev,
+        } = src_timeline.get_last_record_rlsn();
+        let dst_prev = if src_last == start_lsn {
+            Some(src_prev)
+        } else {
+            None
+        };
+
+        // create a new timeline directory
+        let timelinedir = self.conf.timeline_path(&dst, &self.tenant_id);
+        crashsafe_dir::create_dir(&timelinedir)?;
+
+        // Create the metadata file, noting the ancestor of the new timeline.
+        // There is initially no data in it, but all the read-calls know to look
+        // into the ancestor.
+        let metadata = TimelineMetadata::new(
+            start_lsn,
+            dst_prev,
+            Some(src),
+            start_lsn,
+            *src_timeline.latest_gc_cutoff_lsn.read(),
+            src_timeline.initdb_lsn,
+        );
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
+        save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
+
+        let new_timeline = self.initialize_new_timeline(dst, metadata, &mut timelines)?;
+        timelines.insert(dst, Arc::clone(&new_timeline));
+
+        info!("branched timeline {dst} from {src} at {start_lsn}");
+
+        Ok(new_timeline)
     }
+
+    /// - run initdb to init temporary instance and get bootstrap data
+    /// - after initialization complete, remove the temp dir.
+    fn bootstrap_timeline(&self, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
+        // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
+        // temporary directory for basebackup files for the given timeline.
+        let initdb_path = path_with_suffix_extension(
+            self.conf
+                .timelines_path(&self.tenant_id)
+                .join(format!("basebackup-{timeline_id}")),
+            TEMP_FILE_SUFFIX,
+        );
+
+        // Init temporarily repo to get bootstrap data
+        run_initdb(self.conf, &initdb_path)?;
+        let pgdata_path = initdb_path;
+
+        let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+
+        // Import the contents of the data directory at the initial checkpoint
+        // LSN, and any WAL after that.
+        // Initdb lsn will be equal to last_record_lsn which will be set after import.
+        // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
+        let timeline = self.create_empty_timeline(timeline_id, lsn)?;
+        import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
+
+        fail::fail_point!("before-checkpoint-new-timeline", |_| {
+            bail!("failpoint before-checkpoint-new-timeline");
+        });
+
+        timeline.checkpoint(CheckpointConfig::Forced)?;
+
+        info!(
+            "created root timeline {} timeline.lsn {}",
+            timeline_id,
+            timeline.get_last_record_lsn()
+        );
+
+        // Remove temp dir. We don't need it anymore
+        fs::remove_dir_all(pgdata_path)?;
+
+        Ok(timeline)
+    }
+}
+
+/// Create the cluster temporarily in 'initdbpath' directory inside the repository
+/// to get bootstrap data for timeline initialization.
+fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
+    info!("running initdb in {}... ", initdbpath.display());
+
+    let initdb_path = conf.pg_bin_dir().join("initdb");
+    let initdb_output = Command::new(initdb_path)
+        .args(&["-D", &initdbpath.to_string_lossy()])
+        .args(&["-U", &conf.superuser])
+        .args(&["-E", "utf8"])
+        .arg("--no-instructions")
+        // This is only used for a temporary installation that is deleted shortly after,
+        // so no need to fsync it
+        .arg("--no-sync")
+        .env_clear()
+        .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+        .stdout(Stdio::null())
+        .output()
+        .context("failed to execute initdb")?;
+    if !initdb_output.status.success() {
+        bail!(
+            "initdb failed: '{}'",
+            String::from_utf8_lossy(&initdb_output.stderr)
+        );
+    }
+
+    Ok(())
 }
 
 impl Drop for Tenant {
