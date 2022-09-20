@@ -7,7 +7,9 @@ use anyhow::{anyhow, bail, Result};
 use bytes::BytesMut;
 use tracing::*;
 
+use crate::safekeeper::ServerInfo;
 use crate::timeline::Timeline;
+use crate::GlobalTimelines;
 
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
@@ -20,7 +22,6 @@ use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::timeline::TimelineTools;
 use utils::{
     postgres_backend::PostgresBackend,
     pq_proto::{BeMessage, FeMessage},
@@ -67,15 +68,21 @@ impl<'pg> ReceiveWalConn<'pg> {
 
         // Receive information about server
         let next_msg = poll_reader.recv_msg()?;
-        match next_msg {
+        let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
                     "start handshake with wal proposer {} sysid {} timeline {}",
                     self.peer_addr, greeting.system_id, greeting.tli,
                 );
+                let server_info = ServerInfo {
+                    pg_version: greeting.pg_version,
+                    system_id: greeting.system_id,
+                    wal_seg_size: greeting.wal_seg_size,
+                };
+                GlobalTimelines::create(spg.ttid, server_info)?
             }
             _ => bail!("unexpected message {:?} instead of greeting", next_msg),
-        }
+        };
 
         let mut next_msg = Some(next_msg);
 
@@ -88,7 +95,7 @@ impl<'pg> ReceiveWalConn<'pg> {
                 while let Some(ProposerAcceptorMessage::AppendRequest(append_request)) = next_msg {
                     let msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
 
-                    let reply = spg.process_safekeeper_msg(&msg)?;
+                    let reply = tli.process_msg(&msg)?;
                     if let Some(reply) = reply {
                         self.write_msg(&reply)?;
                     }
@@ -97,13 +104,13 @@ impl<'pg> ReceiveWalConn<'pg> {
                 }
 
                 // flush all written WAL to the disk
-                let reply = spg.process_safekeeper_msg(&ProposerAcceptorMessage::FlushWAL)?;
+                let reply = tli.process_msg(&ProposerAcceptorMessage::FlushWAL)?;
                 if let Some(reply) = reply {
                     self.write_msg(&reply)?;
                 }
             } else if let Some(msg) = next_msg.take() {
                 // process other message
-                let reply = spg.process_safekeeper_msg(&msg)?;
+                let reply = tli.process_msg(&msg)?;
                 if let Some(reply) = reply {
                     self.write_msg(&reply)?;
                 }
@@ -112,9 +119,9 @@ impl<'pg> ReceiveWalConn<'pg> {
                 // Register the connection and defer unregister. Do that only
                 // after processing first message, as it sets wal_seg_size,
                 // wanted by many.
-                spg.timeline.get().on_compute_connect()?;
+                tli.on_compute_connect()?;
                 _guard = Some(ComputeConnectionGuard {
-                    timeline: Arc::clone(spg.timeline.get()),
+                    timeline: Arc::clone(&tli),
                 });
                 first_time_through = false;
             }
@@ -190,6 +197,8 @@ struct ComputeConnectionGuard {
 
 impl Drop for ComputeConnectionGuard {
     fn drop(&mut self) {
-        self.timeline.on_compute_disconnect().unwrap();
+        if let Err(e) = self.timeline.on_compute_disconnect() {
+            error!("failed to unregister compute connection: {}", e);
+        }
     }
 }

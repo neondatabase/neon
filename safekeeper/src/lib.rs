@@ -23,6 +23,9 @@ pub mod wal_backup;
 pub mod wal_service;
 pub mod wal_storage;
 
+mod timelines_global_map;
+pub use timelines_global_map::GlobalTimelines;
+
 pub mod defaults {
     use const_format::formatcp;
     use std::time::Duration;
@@ -65,9 +68,9 @@ impl SafeKeeperConf {
         self.workdir.join(tenant_id.to_string())
     }
 
-    pub fn timeline_dir(&self, zttid: &TenantTimelineId) -> PathBuf {
-        self.tenant_dir(&zttid.tenant_id)
-            .join(zttid.timeline_id.to_string())
+    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> PathBuf {
+        self.tenant_dir(&ttid.tenant_id)
+            .join(ttid.timeline_id.to_string())
     }
 }
 

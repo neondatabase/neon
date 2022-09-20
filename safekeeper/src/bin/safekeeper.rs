@@ -24,9 +24,9 @@ use safekeeper::defaults::{
 };
 use safekeeper::http;
 use safekeeper::remove_wal;
-use safekeeper::timeline::GlobalTimelines;
 use safekeeper::wal_backup;
 use safekeeper::wal_service;
+use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use utils::auth::JwtAuth;
 use utils::{
@@ -298,7 +298,9 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
     let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
     let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
-    GlobalTimelines::init(wal_backup_launcher_tx);
+
+    // Load all timelines from disk to memory.
+    GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
 
     let conf_ = conf.clone();
     threads.push(

@@ -105,7 +105,7 @@ fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds
 }
 
 /// A newtype to store arbitrary data grouped by tenant and timeline ids.
-/// One could use [`utils::zid::TenantTimelineId`] for grouping, but that would
+/// One could use [`utils::id::TenantTimelineId`] for grouping, but that would
 /// not include the cases where a certain tenant has zero timelines.
 /// This is sometimes important: a tenant could be registered during initial load from FS,
 /// even if he has no timelines on disk.

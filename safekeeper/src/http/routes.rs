@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use hyper::{Body, Request, Response, StatusCode, Uri};
 
 use once_cell::sync::Lazy;
@@ -9,7 +10,9 @@ use std::sync::Arc;
 
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
-use crate::timeline::{GlobalTimelines, TimelineDeleteForceResult};
+
+use crate::timelines_global_map::TimelineDeleteForceResult;
+use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 use etcd_broker::subscription_value::SkTimelineInfo;
 use utils::{
@@ -90,15 +93,15 @@ struct TimelineStatus {
 
 /// Report info about timeline.
 async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let zttid = TenantTimelineId::new(
+    let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
-    check_permission(&request, Some(zttid.tenant_id))?;
+    check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
+    let tli = GlobalTimelines::get(ttid)?;
     let (inmem, state) = tli.get_state();
-    let flush_lsn = tli.get_end_of_wal();
+    let flush_lsn = tli.get_flush_lsn();
 
     let acc_state = AcceptorStateStatus {
         term: state.acceptor_state.term,
@@ -108,8 +111,8 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
 
     // Note: we report in memory values which can be lost.
     let status = TimelineStatus {
-        tenant_id: zttid.tenant_id,
-        timeline_id: zttid.timeline_id,
+        tenant_id: ttid.tenant_id,
+        timeline_id: ttid.timeline_id,
         acceptor_state: acc_state,
         flush_lsn,
         timeline_start_lsn: state.timeline_start_lsn,
@@ -125,39 +128,29 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
 
-    let zttid = TenantTimelineId {
+    let ttid = TenantTimelineId {
         tenant_id: parse_request_param(&request, "tenant_id")?,
         timeline_id: request_data.timeline_id,
     };
-    check_permission(&request, Some(zttid.tenant_id))?;
-    GlobalTimelines::create(get_conf(&request), zttid, request_data.peer_ids)
-        .map_err(ApiError::from_err)?;
+    check_permission(&request, Some(ttid.tenant_id))?;
 
-    json_response(StatusCode::CREATED, ())
+    Err(ApiError::from_err(anyhow!("not implemented")))
 }
 
 /// Deactivates the timeline and removes its data directory.
-///
-/// It does not try to stop any processing of the timeline; there is no such code at the time of writing.
-/// However, it tries to check whether the timeline was active and report it to caller just in case.
-/// Note that this information is inaccurate:
-/// 1. There is a race condition between checking the timeline for activity and actual directory deletion.
-/// 2. At the time of writing Safekeeper rarely marks a timeline inactive. E.g. disconnecting the compute node does nothing.
 async fn timeline_delete_force_handler(
     mut request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let zttid = TenantTimelineId::new(
+    let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
-    check_permission(&request, Some(zttid.tenant_id))?;
+    check_permission(&request, Some(ttid.tenant_id))?;
     ensure_no_body(&mut request).await?;
-    json_response(
-        StatusCode::OK,
-        GlobalTimelines::delete_force(get_conf(&request), &zttid)
-            .await
-            .map_err(ApiError::from_err)?,
-    )
+    let resp = tokio::task::spawn_blocking(move || GlobalTimelines::delete_force(&ttid))
+        .await
+        .map_err(ApiError::from_err)??;
+    json_response(StatusCode::OK, resp)
 }
 
 /// Deactivates all timelines for the tenant and removes its data directory.
@@ -168,27 +161,30 @@ async fn tenant_delete_force_handler(
     let tenant_id = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     ensure_no_body(&mut request).await?;
+    let delete_info = tokio::task::spawn_blocking(move || {
+        GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
+    })
+    .await
+    .map_err(ApiError::from_err)??;
     json_response(
         StatusCode::OK,
-        GlobalTimelines::delete_force_all_for_tenant(get_conf(&request), &tenant_id)
-            .await
-            .map_err(ApiError::from_err)?
+        delete_info
             .iter()
-            .map(|(zttid, resp)| (format!("{}", zttid.timeline_id), *resp))
+            .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
             .collect::<HashMap<String, TimelineDeleteForceResult>>(),
     )
 }
 
 /// Used only in tests to hand craft required data.
 async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let zttid = TenantTimelineId::new(
+    let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
-    check_permission(&request, Some(zttid.tenant_id))?;
+    check_permission(&request, Some(ttid.tenant_id))?;
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
-    let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
+    let tli = GlobalTimelines::get(ttid)?;
     tli.record_safekeeper_info(&safekeeper_info, NodeId(1))
         .await?;
 

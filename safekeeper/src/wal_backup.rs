@@ -26,8 +26,8 @@ use tracing::*;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::broker::{Election, ElectionLeader};
-use crate::timeline::{GlobalTimelines, Timeline};
-use crate::{broker, SafeKeeperConf};
+use crate::timeline::Timeline;
+use crate::{broker, GlobalTimelines, SafeKeeperConf};
 
 use once_cell::sync::OnceCell;
 
@@ -53,8 +53,10 @@ pub fn wal_backup_launcher_thread_main(
 
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
-fn is_wal_backup_required(zttid: TenantTimelineId) -> Option<Arc<Timeline>> {
-    GlobalTimelines::get_loaded(zttid).filter(|t| t.wal_backup_attend())
+fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
+    GlobalTimelines::get(ttid)
+        .ok()
+        .filter(|tli| tli.wal_backup_attend())
 }
 
 struct WalBackupTaskHandle {
@@ -70,20 +72,20 @@ struct WalBackupTimelineEntry {
 /// Start per timeline task, if it makes sense for this safekeeper to offload.
 fn consider_start_task(
     conf: &SafeKeeperConf,
-    zttid: TenantTimelineId,
+    ttid: TenantTimelineId,
     task: &mut WalBackupTimelineEntry,
 ) {
     if !task.timeline.can_wal_backup() {
         return;
     }
-    info!("starting WAL backup task for {}", zttid);
+    info!("starting WAL backup task for {}", ttid);
 
     // TODO: decide who should offload right here by simply checking current
     // state instead of running elections in offloading task.
     let election_name = SubscriptionKey {
         cluster_prefix: conf.broker_etcd_prefix.clone(),
         kind: SubscriptionKind::Operation(
-            zttid,
+            ttid,
             NodeKind::Safekeeper,
             OperationKind::Safekeeper(SkOperationKind::WalBackup),
         ),
@@ -97,11 +99,11 @@ fn consider_start_task(
     );
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-    let timeline_dir = conf.timeline_dir(&zttid);
+    let timeline_dir = conf.timeline_dir(&ttid);
 
     let handle = tokio::spawn(
-        backup_task_main(zttid, timeline_dir, shutdown_rx, election)
-            .instrument(info_span!("WAL backup task", zttid = %zttid)),
+        backup_task_main(ttid, timeline_dir, shutdown_rx, election)
+            .instrument(info_span!("WAL backup task", ttid = %ttid)),
     );
 
     task.handle = Some(WalBackupTaskHandle {
@@ -140,33 +142,33 @@ async fn wal_backup_launcher_main_loop(
     let mut ticker = tokio::time::interval(Duration::from_millis(CHECK_TASKS_INTERVAL_MSEC));
     loop {
         tokio::select! {
-            zttid = wal_backup_launcher_rx.recv() => {
+            ttid = wal_backup_launcher_rx.recv() => {
                 // channel is never expected to get closed
-                let zttid = zttid.unwrap();
+                let ttid = ttid.unwrap();
                 if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
                     continue; /* just drain the channel and do nothing */
                 }
-                let timeline = is_wal_backup_required(zttid);
+                let timeline = is_wal_backup_required(ttid);
                 // do we need to do anything at all?
-                if timeline.is_some() != tasks.contains_key(&zttid) {
+                if timeline.is_some() != tasks.contains_key(&ttid) {
                     if let Some(timeline) = timeline {
                         // need to start the task
-                        let entry = tasks.entry(zttid).or_insert(WalBackupTimelineEntry {
+                        let entry = tasks.entry(ttid).or_insert(WalBackupTimelineEntry {
                             timeline,
                             handle: None,
                         });
-                        consider_start_task(&conf, zttid, entry);
+                        consider_start_task(&conf, ttid, entry);
                     } else {
                         // need to stop the task
-                        info!("stopping WAL backup task for {}", zttid);
+                        info!("stopping WAL backup task for {}", ttid);
 
-                        let entry = tasks.remove(&zttid).unwrap();
+                        let entry = tasks.remove(&ttid).unwrap();
                         if let Some(wb_handle) = entry.handle {
                             // Tell the task to shutdown. Error means task exited earlier, that's ok.
                             let _ = wb_handle.shutdown_tx.send(()).await;
                             // Await the task itself. TODO: restart panicked tasks earlier.
                             if let Err(e) = wb_handle.handle.await {
-                                warn!("WAL backup task for {} panicked: {}", zttid, e);
+                                warn!("WAL backup task for {} panicked: {}", ttid, e);
                             }
                         }
                     }
@@ -174,8 +176,8 @@ async fn wal_backup_launcher_main_loop(
             }
             // Start known tasks, if needed and possible.
             _ = ticker.tick() => {
-                for (zttid, entry) in tasks.iter_mut().filter(|(_, entry)| entry.handle.is_none()) {
-                    consider_start_task(&conf, *zttid, entry);
+                for (ttid, entry) in tasks.iter_mut().filter(|(_, entry)| entry.handle.is_none()) {
+                    consider_start_task(&conf, *ttid, entry);
                 }
             }
         }
@@ -191,26 +193,26 @@ struct WalBackupTask {
     election: Election,
 }
 
-/// Offload single timeline.
+/// Offload single timeline. Called only after we checked that backup
+/// is required (wal_backup_attend) and possible (can_wal_backup).
 async fn backup_task_main(
-    zttid: TenantTimelineId,
+    ttid: TenantTimelineId,
     timeline_dir: PathBuf,
     mut shutdown_rx: Receiver<()>,
     election: Election,
 ) {
     info!("started");
-    let timeline: Arc<Timeline> = if let Some(tli) = GlobalTimelines::get_loaded(zttid) {
-        tli
-    } else {
-        /* Timeline could get deleted while task was starting, just exit then. */
-        info!("no timeline, exiting");
+    let res = GlobalTimelines::get(ttid);
+    if let Err(e) = res {
+        error!("backup error for timeline {}: {}", ttid, e);
         return;
-    };
+    }
+    let tli = res.unwrap();
 
     let mut wb = WalBackupTask {
-        wal_seg_size: timeline.get_wal_seg_size(),
-        commit_lsn_watch_rx: timeline.get_commit_lsn_watch_rx(),
-        timeline,
+        wal_seg_size: tli.get_wal_seg_size(),
+        commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
+        timeline: tli,
         timeline_dir,
         leader: None,
         election,
@@ -322,7 +324,11 @@ impl WalBackupTask {
                 {
                     Ok(backup_lsn_result) => {
                         backup_lsn = backup_lsn_result;
-                        self.timeline.set_wal_backup_lsn(backup_lsn_result);
+                        let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
+                        if let Err(e) = res {
+                            error!("backup error: {}", e);
+                            return;
+                        }
                         retry_attempt = 0;
                     }
                     Err(e) => {

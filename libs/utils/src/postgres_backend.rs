@@ -429,8 +429,22 @@ impl PostgresBackend {
                     // full cause of the error, not just the top-level context + its trace.
                     // We don't want to send that in the ErrorResponse though,
                     // because it's not relevant to the compute node logs.
-                    error!("query handler for '{}' failed: {:?}", query_string, e);
-                    self.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?;
+                    //
+                    // We also don't want to log full stacktrace when the error is primitive,
+                    // such as usual connection closed.
+                    let short_error = format!("{:#}", e);
+                    let root_cause = e.root_cause().to_string();
+                    if root_cause.contains("connection closed unexpectedly")
+                        || root_cause.contains("Broken pipe (os error 32)")
+                    {
+                        error!(
+                            "query handler for '{}' failed: {}",
+                            query_string, short_error
+                        );
+                    } else {
+                        error!("query handler for '{}' failed: {:?}", query_string, e);
+                    }
+                    self.write_message_noflush(&BeMessage::ErrorResponse(&short_error))?;
                     // TODO: untangle convoluted control flow
                     if e.to_string().contains("failed to run") {
                         return Ok(ProcessMsgResult::Break);

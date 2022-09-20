@@ -6,18 +6,22 @@
 //! modifications in tests.
 //!
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tracing::*;
+use utils::id::TenantTimelineId;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
+use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
 use crate::safekeeper::{
-    AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected, ProposerGreeting,
+    AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected,
 };
 use crate::safekeeper::{SafeKeeperState, Term, TermHistory, TermSwitchEntry};
-use crate::timeline::TimelineTools;
+use crate::timeline::Timeline;
+use crate::GlobalTimelines;
 use postgres_ffi::v14::xlog_utils;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use utils::{
@@ -57,23 +61,23 @@ struct AppendResult {
 /// content, and then append it with specified term and lsn. This
 /// function is used to test safekeepers in different scenarios.
 pub fn handle_json_ctrl(
-    spg: &mut SafekeeperPostgresHandler,
+    spg: &SafekeeperPostgresHandler,
     pgb: &mut PostgresBackend,
     append_request: &AppendLogicalMessage,
 ) -> Result<()> {
     info!("JSON_CTRL request: {:?}", append_request);
 
     // need to init safekeeper state before AppendRequest
-    prepare_safekeeper(spg)?;
+    let tli = prepare_safekeeper(spg.ttid)?;
 
     // if send_proposer_elected is true, we need to update local history
     if append_request.send_proposer_elected {
-        send_proposer_elected(spg, append_request.term, append_request.epoch_start_lsn)?;
+        send_proposer_elected(&tli, append_request.term, append_request.epoch_start_lsn)?;
     }
 
-    let inserted_wal = append_logical_message(spg, append_request)?;
+    let inserted_wal = append_logical_message(&tli, append_request)?;
     let response = AppendResult {
-        state: spg.timeline.get().get_state().1,
+        state: tli.get_state().1,
         inserted_wal,
     };
     let response_data = serde_json::to_vec(&response)?;
@@ -91,28 +95,20 @@ pub fn handle_json_ctrl(
 
 /// Prepare safekeeper to process append requests without crashes,
 /// by sending ProposerGreeting with default server.wal_seg_size.
-fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
-    let greeting_request = ProposerAcceptorMessage::Greeting(ProposerGreeting {
-        protocol_version: 2, // current protocol
-        pg_version: 0,       // unknown
-        proposer_id: [0u8; 16],
-        system_id: 0,
-        timeline_id: spg.timeline_id.unwrap(),
-        tenant_id: spg.tenant_id.unwrap(),
-        tli: 0,
-        wal_seg_size: WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
-    });
-
-    let response = spg.timeline.get().process_msg(&greeting_request)?;
-    match response {
-        Some(AcceptorProposerMessage::Greeting(_)) => Ok(()),
-        _ => anyhow::bail!("not GreetingResponse"),
-    }
+fn prepare_safekeeper(ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+    GlobalTimelines::create(
+        ttid,
+        ServerInfo {
+            pg_version: 0, // unknown
+            wal_seg_size: WAL_SEGMENT_SIZE as u32,
+            system_id: 0,
+        },
+    )
 }
 
-fn send_proposer_elected(spg: &mut SafekeeperPostgresHandler, term: Term, lsn: Lsn) -> Result<()> {
+fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> Result<()> {
     // add new term to existing history
-    let history = spg.timeline.get().get_state().1.acceptor_state.term_history;
+    let history = tli.get_state().1.acceptor_state.term_history;
     let history = history.up_to(lsn.checked_sub(1u64).unwrap());
     let mut history_entries = history.0;
     history_entries.push(TermSwitchEntry { term, lsn });
@@ -125,7 +121,7 @@ fn send_proposer_elected(spg: &mut SafekeeperPostgresHandler, term: Term, lsn: L
         timeline_start_lsn: lsn,
     });
 
-    spg.timeline.get().process_msg(&proposer_elected_request)?;
+    tli.process_msg(&proposer_elected_request)?;
     Ok(())
 }
 
@@ -138,12 +134,9 @@ struct InsertedWAL {
 
 /// Extend local WAL with new LogicalMessage record. To do that,
 /// create AppendRequest with new WAL and pass it to safekeeper.
-fn append_logical_message(
-    spg: &mut SafekeeperPostgresHandler,
-    msg: &AppendLogicalMessage,
-) -> Result<InsertedWAL> {
+fn append_logical_message(tli: &Arc<Timeline>, msg: &AppendLogicalMessage) -> Result<InsertedWAL> {
     let wal_data = xlog_utils::encode_logical_message(&msg.lm_prefix, &msg.lm_message);
-    let sk_state = spg.timeline.get().get_state().1;
+    let sk_state = tli.get_state().1;
 
     let begin_lsn = msg.begin_lsn;
     let end_lsn = begin_lsn + wal_data.len() as u64;
@@ -167,7 +160,7 @@ fn append_logical_message(
         wal_data: Bytes::from(wal_data),
     });
 
-    let response = spg.timeline.get().process_msg(&append_request)?;
+    let response = tli.process_msg(&append_request)?;
 
     let append_response = match response {
         Some(AcceptorProposerMessage::AppendResponse(resp)) => resp,

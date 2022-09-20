@@ -10,6 +10,7 @@ use etcd_broker::LeaseKeeper;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 use tokio::spawn;
 use tokio::task::JoinHandle;
@@ -17,7 +18,8 @@ use tokio::{runtime, time::sleep};
 use tracing::*;
 use url::Url;
 
-use crate::{timeline::GlobalTimelines, SafeKeeperConf};
+use crate::GlobalTimelines;
+use crate::SafeKeeperConf;
 use etcd_broker::{
     subscription_key::{OperationKind, SkOperationKind, SubscriptionKey},
     Client, PutOptions,
@@ -45,12 +47,12 @@ pub fn thread_main(conf: SafeKeeperConf) {
 /// Key to per timeline per safekeeper data.
 fn timeline_safekeeper_path(
     broker_etcd_prefix: String,
-    zttid: TenantTimelineId,
+    ttid: TenantTimelineId,
     sk_id: NodeId,
 ) -> String {
     format!(
         "{}/{sk_id}",
-        SubscriptionKey::sk_timeline_info(broker_etcd_prefix, zttid).watch_key()
+        SubscriptionKey::sk_timeline_info(broker_etcd_prefix, ttid).watch_key()
     )
 }
 
@@ -162,7 +164,7 @@ pub fn get_candiate_name(system_id: NodeId) -> String {
 }
 
 async fn push_sk_info(
-    zttid: TenantTimelineId,
+    ttid: TenantTimelineId,
     mut client: Client,
     key: String,
     sk_info: SkTimelineInfo,
@@ -190,7 +192,7 @@ async fn push_sk_info(
         .await
         .context("failed to receive LeaseKeepAliveResponse")?;
 
-    Ok((zttid, lease))
+    Ok((ttid, lease))
 }
 
 struct Lease {
@@ -210,11 +212,15 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
         // is under plain mutex. That's ok, all this code is not performance
         // sensitive and there is no risk of deadlock as we don't await while
         // lock is held.
-        let active_tlis = GlobalTimelines::get_active_timelines();
+        let mut active_tlis = GlobalTimelines::get_all();
+        active_tlis.retain(|tli| tli.is_active());
+
+        let active_tlis_set: HashSet<TenantTimelineId> =
+            active_tlis.iter().map(|tli| tli.ttid).collect();
 
         // // Get and maintain (if not yet) per timeline lease to automatically delete obsolete data.
-        for zttid in active_tlis.iter() {
-            if let Entry::Vacant(v) = leases.entry(*zttid) {
+        for tli in &active_tlis {
+            if let Entry::Vacant(v) = leases.entry(tli.ttid) {
                 let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
                 let (keeper, ka_stream) = client.lease_keep_alive(lease.id()).await?;
                 v.insert(Lease {
@@ -224,30 +230,26 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
                 });
             }
         }
-        leases.retain(|zttid, _| active_tlis.contains(zttid));
+        leases.retain(|ttid, _| active_tlis_set.contains(ttid));
 
         // Push data concurrently to not suffer from latency, with many timelines it can be slow.
         let handles = active_tlis
             .iter()
-            .filter_map(|zttid| GlobalTimelines::get_loaded(*zttid))
             .map(|tli| {
                 let sk_info = tli.get_public_info(&conf);
-                let key = timeline_safekeeper_path(
-                    conf.broker_etcd_prefix.clone(),
-                    tli.zttid,
-                    conf.my_id,
-                );
-                let lease = leases.remove(&tli.zttid).unwrap();
-                tokio::spawn(push_sk_info(tli.zttid, client.clone(), key, sk_info, lease))
+                let key =
+                    timeline_safekeeper_path(conf.broker_etcd_prefix.clone(), tli.ttid, conf.my_id);
+                let lease = leases.remove(&tli.ttid).unwrap();
+                tokio::spawn(push_sk_info(tli.ttid, client.clone(), key, sk_info, lease))
             })
             .collect::<Vec<_>>();
         for h in handles {
-            let (zttid, lease) = h.await??;
+            let (ttid, lease) = h.await??;
             // It is ugly to pull leases from hash and then put it back, but
             // otherwise we have to resort to long living per tli tasks (which
             // would generate a lot of errors when etcd is down) as task wants to
             // have 'static objects, we can't borrow to it.
-            leases.insert(zttid, lease);
+            leases.insert(ttid, lease);
         }
 
         sleep(push_interval).await;
@@ -279,7 +281,7 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
         match subscription.value_updates.recv().await {
             Some(new_info) => {
                 // note: there are blocking operations below, but it's considered fine for now
-                if let Ok(tli) = GlobalTimelines::get(&conf, new_info.key.id, false) {
+                if let Ok(tli) = GlobalTimelines::get(new_info.key.id) {
                     tli.record_safekeeper_info(&new_info.value, new_info.key.node_id)
                         .await?
                 }
