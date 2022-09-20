@@ -501,11 +501,7 @@ impl PageServerHandler {
         // Create empty timeline
         info!("creating new timeline");
         let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
-        let timeline = tenant.create_empty_timeline(
-            timeline_id,
-            base_lsn,
-            pg_version,
-        )?;
+        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -529,6 +525,7 @@ impl PageServerHandler {
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
         let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
         tokio::task::block_in_place(|| timeline.import_basebackup_from_tar(reader, base_lsn))?;
+        timeline.initialize()?;
 
         // Drain the rest of the Copy data
         let mut bytes_after_tar = 0;

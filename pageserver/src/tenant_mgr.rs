@@ -12,7 +12,7 @@ use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
 
-use crate::config::{PageServerConf, METADATA_FILE_NAME};
+use crate::config::{PageServerConf, METADATA_FILE_NAME, TIMELINE_TOMBSTONE_SUFFIX};
 use crate::http::models::TenantInfo;
 use crate::storage_sync::index::{LayerFileMetadata, RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData, TimelineLocalFiles};
@@ -602,6 +602,13 @@ fn is_temporary(path: &Path) -> bool {
     }
 }
 
+fn is_tombstone(path: &Path) -> bool {
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().ends_with(TIMELINE_TOMBSTONE_SUFFIX),
+        None => false,
+    }
+}
+
 fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
@@ -632,7 +639,6 @@ fn collect_timelines_for_tenant(
         match timelines_dir_entry {
             Ok(timelines_dir_entry) => {
                 let timeline_dir = timelines_dir_entry.path();
-                // TODO kb check for tombstones
                 if is_temporary(&timeline_dir) {
                     info!(
                         "Found temporary timeline directory, removing: {}",
@@ -645,28 +651,73 @@ fn collect_timelines_for_tenant(
                             e
                         );
                     }
+                } else if is_tombstone(&timeline_dir) {
+                    let timeline_tombstone_file = &timeline_dir;
+                    info!(
+                        "Found a tombstone file {}, removing the timeline and its tombstone",
+                        timeline_tombstone_file.display()
+                    );
+                    let timeline_id = timeline_tombstone_file
+                        .file_stem()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                                "Could not parse timeline id out of the timeline tombstone name {}",
+                                timeline_tombstone_file.display()
+                            )
+                        })?;
+                    let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
+                    if let Err(e) =
+                        remove_timeline_and_tombstone(&timeline_dir, timeline_tombstone_file)
+                    {
+                        error!("Failed to clean up tombstoned timeline: {e:?}");
+                    }
                 } else {
-                    match collect_timeline_files(&timeline_dir) {
-                        Ok((timeline_id, metadata, timeline_files)) => {
-                            tenant_timelines.insert(
-                                timeline_id,
-                                TimelineLocalFiles::collected(metadata, timeline_files),
-                            );
+                    let timeline_id = timeline_dir
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                                "Could not parse timeline id out of the timeline dir name {}",
+                                timeline_dir.display()
+                            )
+                        })?;
+                    let timeline_tombstone_file =
+                        config.timeline_tombstone_file_path(tenant_id, timeline_id);
+                    if timeline_tombstone_file.exists() {
+                        info!("Found a tombstone file for timeline {tenant_id}/{timeline_id}, removing the timeline and its tombstone");
+                        if let Err(e) =
+                            remove_timeline_and_tombstone(&timeline_dir, &timeline_tombstone_file)
+                        {
+                            error!("Failed to clean up tombstoned timeline: {e:?}");
                         }
-                        Err(e) => {
-                            error!(
-                                "Failed to process timeline dir contents at '{}', reason: {:?}",
-                                timeline_dir.display(),
-                                e
-                            );
-                            match remove_if_empty(&timeline_dir) {
-                                Ok(true) => info!(
-                                    "Removed empty timeline directory {}",
-                                    timeline_dir.display()
-                                ),
-                                Ok(false) => (),
-                                Err(e) => {
-                                    error!("Failed to remove empty timeline directory: {e:?}")
+                    } else {
+                        match collect_timeline_files(&timeline_dir) {
+                            Ok((metadata, timeline_files)) => {
+                                tenant_timelines.insert(
+                                    timeline_id,
+                                    TimelineLocalFiles::collected(metadata, timeline_files),
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to process timeline dir contents at '{}', reason: {:?}",
+                                    timeline_dir.display(),
+                                    e
+                                );
+                                match remove_if_empty(&timeline_dir) {
+                                    Ok(true) => info!(
+                                        "Removed empty timeline directory {}",
+                                        timeline_dir.display()
+                                    ),
+                                    Ok(false) => (),
+                                    Err(e) => {
+                                        error!("Failed to remove empty timeline directory: {e:?}")
+                                    }
                                 }
                             }
                         }
@@ -689,24 +740,34 @@ fn collect_timelines_for_tenant(
     Ok((tenant_id, TenantAttachData::Ready(tenant_timelines)))
 }
 
+fn remove_timeline_and_tombstone(
+    timeline_dir: &Path,
+    timeline_tombstone: &Path,
+) -> anyhow::Result<()> {
+    fs::remove_dir_all(&timeline_dir).with_context(|| {
+        format!(
+            "Failed to remove tombstoned timeline directory {}",
+            timeline_dir.display()
+        )
+    })?;
+    fs::remove_file(&timeline_tombstone).with_context(|| {
+        format!(
+            "Failed to remove timeline tombstone file {}",
+            timeline_tombstone.display()
+        )
+    })?;
+
+    Ok(())
+}
+
 // discover timeline files and extract timeline metadata
 //  NOTE: ephemeral files are excluded from the list
 fn collect_timeline_files(
     timeline_dir: &Path,
-) -> anyhow::Result<(
-    TimelineId,
-    TimelineMetadata,
-    HashMap<PathBuf, LayerFileMetadata>,
-)> {
+) -> anyhow::Result<(TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>)> {
     let mut timeline_files = HashMap::new();
     let mut timeline_metadata_path = None;
 
-    let timeline_id = timeline_dir
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or_default()
-        .parse::<TimelineId>()
-        .context("Could not parse timeline id out of the timeline dir name")?;
     let timeline_dir_entries =
         fs::read_dir(&timeline_dir).context("Failed to list timeline dir contents")?;
     for entry in timeline_dir_entries {
@@ -755,5 +816,5 @@ fn collect_timeline_files(
         "Timeline has no ancestor and no layer files"
     );
 
-    Ok((timeline_id, metadata, timeline_files))
+    Ok((metadata, timeline_files))
 }

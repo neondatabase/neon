@@ -24,10 +24,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::ops::Bound::Included;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -126,7 +128,7 @@ pub struct UnInitializedTimeline<'t> {
     raw_timeline: Option<Timeline>,
 }
 
-impl UnInitializedTimeline<'_> {
+impl UninitializedTimeline<'_> {
     pub fn initialize(self) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         self.initialize_with_lock(&mut timelines)
@@ -136,7 +138,6 @@ impl UnInitializedTimeline<'_> {
         mut self,
         timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
     ) -> anyhow::Result<Arc<Timeline>> {
-        // TODO kb: remove the tombstone
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
 
@@ -156,8 +157,11 @@ impl UnInitializedTimeline<'_> {
                 new_timeline
                     .load_layer_map(new_disk_consistent_lsn)
                     .context("failed to load layermap")?;
-
                 new_timeline.launch_wal_receiver()?;
+
+                self.remove_tombstone()
+                    .context("Failed to remove timeline tombstone during init")?;
+
                 v.insert(Arc::clone(&new_timeline));
             }
         }
@@ -205,15 +209,79 @@ impl UnInitializedTimeline<'_> {
             )
         })
     }
+
+    fn create_tombstone(&self) -> anyhow::Result<()> {
+        let tombstone_file_path = self.tombstone_file_path();
+        fs::File::create(&tombstone_file_path)?;
+        crashsafe_dir::fsync_file_and_parent(&tombstone_file_path)?;
+        Ok(())
+    }
+
+    fn remove_tombstone(&self) -> anyhow::Result<()> {
+        let tombstone_file = self.tombstone_file_path();
+        let tombstone_parent = tombstone_file.parent().with_context(|| {
+            format!("Tombstone file {} has no parent", tombstone_file.display())
+        })?;
+
+        fs::remove_file(&tombstone_file)
+            .or_else(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to remove tombstone file at path {}",
+                    tombstone_file.display()
+                )
+            })?;
+
+        crashsafe_dir::fsync(tombstone_parent).context("Failed to fsync tombstone parent")?;
+        Ok(())
+    }
+
+    fn tombstone_file_path(&self) -> PathBuf {
+        let tenant = self.owning_tenant;
+        let tenant_id = tenant.tenant_id;
+        let timeline_id = self.timeline_id;
+        tenant
+            .conf
+            .timeline_tombstone_file_path(tenant_id, timeline_id)
+    }
 }
 
-impl Drop for UnInitializedTimeline<'_> {
+impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
         if self.raw_timeline.is_some() {
-            error!(
-                "Timeline {}/{} got dropped without initializing",
-                self.owning_tenant.tenant_id, self.timeline_id
-            );
+            let tenant_id = self.owning_tenant.tenant_id;
+            let timeline_id = self.timeline_id;
+            let _entered = info_span!("drop_unitialized_timeline", tenant = %tenant_id, timeline = %timeline_id).entered();
+            error!("Timeline got dropped without initializing, cleaning its files");
+
+            let raw_timeline_dir = self
+                .owning_tenant
+                .conf
+                .timeline_path(&timeline_id, &tenant_id);
+            let mut should_remove_tombstone = true;
+            match fs::remove_dir_all(&raw_timeline_dir) {
+                Ok(()) => info!("Timeline dir removed successfully, removing the tombstone"),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    info!("Timeline dir is absent, skipping and removing the tombstone")
+                }
+                Err(e) => {
+                    should_remove_tombstone = false;
+                    error!("Failed to clean up unitialized timeline directory: {e:?}");
+                }
+            }
+
+            if should_remove_tombstone {
+                match self.remove_tombstone() {
+                    Err(e) => error!("Failed to remove a tombstone file for timeline: {e:?}"),
+                    Ok(()) => info!("Tombstone removed successfully"),
+                }
+            }
         }
     }
 }
@@ -260,7 +328,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
-    ) -> Result<UnInitializedTimeline> {
+    ) -> Result<UninitializedTimeline> {
         // XXX: keep the lock to avoid races during timeline creation
         let timelines = self.timelines.lock().unwrap();
 
@@ -488,7 +556,7 @@ impl Tenant {
                 metadata.pg_version()
             );
             // TODO kb check that we don't reinit non-existing timelines instead
-            let timeline = UnInitializedTimeline {
+            let timeline = UninitializedTimeline {
                 owning_tenant: self,
                 timeline_id,
                 raw_timeline: Some(
@@ -1137,7 +1205,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         new_metadata: TimelineMetadata,
         init_layers: bool,
-    ) -> Result<UnInitializedTimeline> {
+    ) -> Result<UninitializedTimeline> {
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&new_timeline_id, &self.tenant_id))
             .with_context(|| {
             format!(
@@ -1169,17 +1237,17 @@ impl Tenant {
                 )
             })?;
         drop(timelines);
-
         if init_layers {
             new_timeline.layers.write().unwrap().next_open_layer_at = Some(new_timeline.initdb_lsn);
         }
-
-        // TODO kb create a tombstone here
-        Ok(UnInitializedTimeline {
+        let timeline = UninitializedTimeline {
             owning_tenant: self,
             timeline_id: new_timeline_id,
             raw_timeline: Some(new_timeline),
-        })
+        };
+
+        timeline.create_tombstone()?;
+        Ok(timeline)
     }
 }
 
