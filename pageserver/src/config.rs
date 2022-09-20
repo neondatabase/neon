@@ -22,6 +22,10 @@ use utils::{
 use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
+/// The name of the metadata file pageserver creates per timeline.
+pub const METADATA_FILE_NAME: &str = "metadata";
+const TENANT_CONFIG_NAME: &str = "config";
+
 pub mod defaults {
     use crate::tenant_config::defaults::*;
     use const_format::formatcp;
@@ -346,12 +350,25 @@ impl PageServerConf {
         self.tenants_path().join(tenant_id.to_string())
     }
 
+    /// Points to a place in pageserver's local directory,
+    /// where certain tenant's tenantconf file should be located.
+    pub fn tenant_config_path(&self, tenant_id: TenantId) -> PathBuf {
+        self.tenant_path(&tenant_id).join(TENANT_CONFIG_NAME)
+    }
+
     pub fn timelines_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
     }
 
     pub fn timeline_path(&self, timeline_id: &TimelineId, tenant_id: &TenantId) -> PathBuf {
         self.timelines_path(tenant_id).join(timeline_id.to_string())
+    }
+
+    /// Points to a place in pageserver's local directory,
+    /// where certain timeline's metadata file should be located.
+    pub fn metadata_path(&self, timeline_id: TimelineId, tenant_id: TenantId) -> PathBuf {
+        self.timeline_path(&timeline_id, &tenant_id)
+            .join(METADATA_FILE_NAME)
     }
 
     //

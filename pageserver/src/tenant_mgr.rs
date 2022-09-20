@@ -12,17 +12,15 @@ use tracing::*;
 
 use remote_storage::{path_with_suffix_extension, GenericRemoteStorage};
 
-use crate::config::PageServerConf;
+use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::http::models::TenantInfo;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::{
-    ephemeral_file::is_ephemeral_file,
-    metadata::{TimelineMetadata, METADATA_FILE_NAME},
-    Tenant, TenantState,
+    ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
 };
-use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
 use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
 
@@ -246,7 +244,7 @@ fn create_tenant_files(
         &temporary_tenant_dir,
     )?;
     let temporary_tenant_config_path = rebase_directory(
-        &TenantConf::path(conf, tenant_id),
+        &conf.tenant_config_path(tenant_id),
         &target_tenant_directory,
         &temporary_tenant_dir,
     )?;
@@ -343,7 +341,7 @@ pub fn update_tenant_config(
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
     get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);
-    Tenant::persist_tenant_config(&TenantConf::path(conf, tenant_id), tenant_conf, false)?;
+    Tenant::persist_tenant_config(&conf.tenant_config_path(tenant_id), tenant_conf, false)?;
     Ok(())
 }
 

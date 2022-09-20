@@ -8,7 +8,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
@@ -28,9 +27,6 @@ use crate::STORAGE_FORMAT_VERSION;
 /// This is the same assumption that PostgreSQL makes with the control file,
 /// see PG_CONTROL_MAX_SAFE_SIZE
 const METADATA_MAX_SIZE: usize = 512;
-
-/// The name of the metadata file pageserver creates per timeline.
-pub const METADATA_FILE_NAME: &str = "metadata";
 
 /// Metadata stored on disk for each timeline
 ///
@@ -166,17 +162,6 @@ impl TimelineMetadata {
     }
 }
 
-/// Points to a place in pageserver's local directory,
-/// where certain timeline's metadata file should be located.
-pub fn metadata_path(
-    conf: &'static PageServerConf,
-    timeline_id: TimelineId,
-    tenant_id: TenantId,
-) -> PathBuf {
-    conf.timeline_path(&timeline_id, &tenant_id)
-        .join(METADATA_FILE_NAME)
-}
-
 /// Save timeline metadata to file
 pub fn save_metadata(
     conf: &'static PageServerConf,
@@ -186,7 +171,7 @@ pub fn save_metadata(
     first_save: bool,
 ) -> anyhow::Result<()> {
     let _enter = info_span!("saving metadata").entered();
-    let path = metadata_path(conf, timeline_id, tenant_id);
+    let path = conf.metadata_path(timeline_id, tenant_id);
     // use OpenOptions to ensure file presence is consistent with first_save
     let mut file = VirtualFile::open_with_options(
         &path,

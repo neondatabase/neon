@@ -41,7 +41,7 @@ use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
 use crate::storage_sync::index::RemoteIndex;
 use crate::task_mgr;
-use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::tenant_config::TenantConfOpt;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::WalRedoManager;
 use crate::{CheckpointConfig, TEMP_FILE_SUFFIX};
@@ -676,7 +676,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
-        let target_config_path = TenantConf::path(conf, tenant_id);
+        let target_config_path = conf.tenant_config_path(tenant_id);
         let target_config_display = target_config_path.display();
 
         info!("loading tenantconf from {target_config_display}");
@@ -1134,7 +1134,6 @@ pub mod harness {
         walredo::{WalRedoError, WalRedoManager},
     };
 
-    use super::metadata::metadata_path;
     use super::*;
     use crate::tenant_config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
@@ -1270,7 +1269,7 @@ pub mod harness {
         timeline_id: TimelineId,
         tenant_id: TenantId,
     ) -> anyhow::Result<TimelineMetadata> {
-        let metadata_path = metadata_path(conf, timeline_id, tenant_id);
+        let metadata_path = conf.metadata_path(timeline_id, tenant_id);
         let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
             format!(
                 "Failed to read metadata bytes from path {}",
@@ -1316,8 +1315,8 @@ pub mod harness {
 
 #[cfg(test)]
 mod tests {
-    use super::metadata::METADATA_FILE_NAME;
     use super::*;
+    use crate::config::METADATA_FILE_NAME;
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
