@@ -16,10 +16,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::{
-    config::PageServerConf, storage_sync::SyncTask, tenant::metadata::metadata_path,
-    TEMP_FILE_SUFFIX,
-};
+use crate::{config::PageServerConf, storage_sync::SyncTask, TEMP_FILE_SUFFIX};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 use super::{
@@ -137,7 +134,8 @@ async fn download_index_part(
     storage: &GenericRemoteStorage,
     sync_id: TenantTimelineId,
 ) -> Result<IndexPart, DownloadError> {
-    let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
+    let index_part_path = conf
+        .metadata_path(sync_id.timeline_id, sync_id.tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
     let mut index_part_download = storage
         .download_storage_object(None, &index_part_path)
@@ -620,9 +618,10 @@ mod tests {
             metadata.to_bytes()?,
         );
 
-        let local_index_part_path =
-            metadata_path(harness.conf, sync_id.timeline_id, sync_id.tenant_id)
-                .with_file_name(IndexPart::FILE_NAME);
+        let local_index_part_path = harness
+            .conf
+            .metadata_path(sync_id.timeline_id, sync_id.tenant_id)
+            .with_file_name(IndexPart::FILE_NAME);
         let index_part_remote_id = local_storage.remote_object_id(&local_index_part_path)?;
         let index_part_local_path = PathBuf::from(index_part_remote_id.to_string());
         fs::create_dir_all(index_part_local_path.parent().unwrap()).await?;

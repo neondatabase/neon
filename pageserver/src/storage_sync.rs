@@ -169,13 +169,8 @@ use self::{
     upload::{upload_index_part, upload_timeline_layers, UploadedTimeline},
 };
 use crate::{
-    config::PageServerConf,
-    exponential_backoff,
-    storage_sync::index::RemoteIndex,
-    task_mgr,
-    task_mgr::TaskKind,
-    task_mgr::BACKGROUND_RUNTIME,
-    tenant::metadata::{metadata_path, TimelineMetadata},
+    config::PageServerConf, exponential_backoff, storage_sync::index::RemoteIndex, task_mgr,
+    task_mgr::TaskKind, task_mgr::BACKGROUND_RUNTIME, tenant::metadata::TimelineMetadata,
     tenant_mgr::attach_local_tenants,
 };
 use crate::{
@@ -1012,7 +1007,7 @@ async fn update_local_metadata(
     };
     let remote_lsn = remote_metadata.disk_consistent_lsn();
 
-    let local_metadata_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id);
+    let local_metadata_path = conf.metadata_path(sync_id.timeline_id, sync_id.tenant_id);
     let local_lsn = if local_metadata_path.exists() {
         let local_metadata = read_metadata_file(&local_metadata_path)
             .await
@@ -1433,7 +1428,7 @@ mod test_utils {
         }
 
         fs::write(
-            metadata_path(harness.conf, timeline_id, harness.tenant_id),
+            harness.conf.metadata_path(timeline_id, harness.tenant_id),
             metadata.to_bytes()?,
         )
         .await?;
