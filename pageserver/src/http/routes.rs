@@ -15,7 +15,7 @@ use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant::{TenantState, Timeline};
 use crate::tenant_config::TenantConfOpt;
-use crate::{config::PageServerConf, tenant_mgr, timelines};
+use crate::{config::PageServerConf, tenant_mgr};
 use utils::{
     auth::JwtAuth,
     http::{
@@ -166,10 +166,9 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
+    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
     let new_timeline_info = async {
-        match timelines::create_timeline(
-            get_config(&request),
-            tenant_id,
+        match tenant.create_timeline(
             request_data.new_timeline_id.map(TimelineId::from),
             request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
