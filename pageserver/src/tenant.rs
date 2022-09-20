@@ -185,26 +185,11 @@ impl Tenant {
             bail!("Timeline directory already exists, but timeline is missing in repository map. This is a bug.")
         }
 
-        // Create the timeline directory, and write initial metadata to file.
-        crashsafe_dir::create_dir_all(timeline_path)?;
-
         let new_metadata =
             TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
-        save_metadata(
-            self.conf,
-            new_timeline_id,
-            self.tenant_id,
-            &new_metadata,
-            true,
-        )?;
-
         let new_timeline =
-            self.initialize_new_timeline(new_timeline_id, new_metadata, &mut timelines)?;
+            self.create_initialized_timeline(new_timeline_id, new_metadata, &mut timelines)?;
         new_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
-
-        if let hash_map::Entry::Vacant(v) = timelines.entry(new_timeline_id) {
-            v.insert(Arc::clone(&new_timeline));
-        }
 
         Ok(new_timeline)
     }
@@ -1004,12 +989,7 @@ impl Tenant {
             *src_timeline.latest_gc_cutoff_lsn.read(),
             src_timeline.initdb_lsn,
         );
-        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
-        save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
-
-        let new_timeline = self.initialize_new_timeline(dst, metadata, &mut timelines)?;
-        timelines.insert(dst, Arc::clone(&new_timeline));
-
+        let new_timeline = self.create_initialized_timeline(dst, metadata, &mut timelines)?;
         info!("branched timeline {dst} from {src} at {start_lsn}");
 
         Ok(new_timeline)
@@ -1056,6 +1036,55 @@ impl Tenant {
         fs::remove_dir_all(pgdata_path)?;
 
         Ok(timeline)
+    }
+
+    fn create_initialized_timeline(
+        &self,
+        new_timeline_id: TimelineId,
+        new_metadata: TimelineMetadata,
+        timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+    ) -> Result<Arc<Timeline>> {
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&new_timeline_id, &self.tenant_id))
+            .with_context(|| {
+            format!(
+                "Failed to create timeline {}/{} directory",
+                new_timeline_id, self.tenant_id
+            )
+        })?;
+        save_metadata(
+            self.conf,
+            new_timeline_id,
+            self.tenant_id,
+            &new_metadata,
+            true,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to create timeline {}/{} metadata",
+                new_timeline_id, self.tenant_id
+            )
+        })?;
+
+        let new_timeline = self
+            .initialize_new_timeline(new_timeline_id, new_metadata, timelines)
+            .with_context(|| {
+                format!(
+                    "Failed to initialize timeline {}/{}",
+                    new_timeline_id, self.tenant_id
+                )
+            })?;
+
+        match timelines.entry(new_timeline_id) {
+            hash_map::Entry::Occupied(_) => anyhow::bail!(
+                "Found freshly initialized timeline {} in the tenant map",
+                new_timeline_id
+            ),
+            hash_map::Entry::Vacant(v) => {
+                v.insert(Arc::clone(&new_timeline));
+            }
+        }
+
+        Ok(new_timeline)
     }
 }
 
