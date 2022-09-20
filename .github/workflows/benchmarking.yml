@@ -183,11 +183,8 @@ jobs:
           neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
-          neon-captest-new)
+          neon-captest-new | neon-captest-prefetch)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
-            ;;
-         neon-captest-prefetch)
-            CONNSTR=${{ steps.create-neon-project.outputs.dsn }}?options=-cenable_seqscan_prefetch%3Don%20-cseqscan_prefetch_buffers%3D10
             ;;
           rds-aurora)
             CONNSTR=${{ secrets.BENCHMARK_RDS_CONNSTR }}
@@ -203,6 +200,14 @@ jobs:
         psql ${CONNSTR} -c "SELECT version();"
       env:
         PLATFORM: ${{ matrix.platform }}
+
+    - name: Set database options
+      if: matrix.platform == 'neon-captest-prefetch'
+      run: |
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_seqscan_prefetch=on"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET seqscan_prefetch_buffers=10"
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
