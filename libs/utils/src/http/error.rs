@@ -4,7 +4,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("Bad request: {0:?}")]
+    #[error("Bad request: {0:#?}")]
     BadRequest(anyhow::Error),
 
     #[error("Forbidden: {0}")]
