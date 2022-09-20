@@ -25,11 +25,16 @@
 //!
 use super::bindings::{ControlFileData, PG_CONTROL_FILE_SIZE};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Context};
 use bytes::{Bytes, BytesMut};
 
 /// Equivalent to sizeof(ControlFileData) in C
 const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
+
+/// Error from [`ControlFileData::decode`]
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)] // forward `Error` impl to underlying `anyhow::Error`
+pub struct ControlFileDecodeError(anyhow::Error); // this field intentionally left private
 
 impl ControlFileData {
     /// Compute the offset of the `crc` field within the `ControlFileData` struct.
@@ -42,7 +47,7 @@ impl ControlFileData {
     ///
     /// Interpret a slice of bytes as a Postgres control file.
     ///
-    pub fn decode(buf: &[u8]) -> Result<ControlFileData> {
+    pub fn decode(buf: &[u8]) -> Result<Self, ControlFileDecodeError> {
         use utils::bin_ser::LeSer;
 
         // Check that the slice has the expected size. The control file is
@@ -50,7 +55,7 @@ impl ControlFileData {
         // larger size too, so that the caller can just the whole file
         // contents without knowing the exact size of the struct.
         if buf.len() < SIZEOF_CONTROLDATA {
-            bail!("control file is too short");
+            return Err(ControlFileDecodeError(anyhow!("Control file is too short")));
         }
 
         // Compute the expected CRC of the content.
@@ -58,15 +63,17 @@ impl ControlFileData {
         let expectedcrc = crc32c::crc32c(&buf[0..OFFSETOF_CRC]);
 
         // Use serde to deserialize the input as a ControlFileData struct.
-        let controlfile = ControlFileData::des_prefix(buf)?;
+        let controlfile = ControlFileData::des_prefix(buf)
+            .context("Could not deserialize control file")
+            .map_err(ControlFileDecodeError)?;
 
         // Check the CRC
         if expectedcrc != controlfile.crc {
-            bail!(
-                "invalid CRC in control file: expected {:08X}, was {:08X}",
+            return Err(ControlFileDecodeError(anyhow!(
+                "Invalid CRC: expected {:08X}, was {:08X}",
                 expectedcrc,
                 controlfile.crc
-            );
+            )));
         }
 
         Ok(controlfile)
