@@ -2444,6 +2444,7 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "utils",
  "workspace_hack",
 ]
 
@@ -3929,13 +3930,7 @@ dependencies = [
  "chrono",
  "either",
  "fail",
- "futures-channel",
- "futures-task",
- "futures-util",
- "generic-array",
  "hashbrown",
- "hex",
- "hyper",
  "indexmap",
  "itoa 0.4.8",
  "libc",

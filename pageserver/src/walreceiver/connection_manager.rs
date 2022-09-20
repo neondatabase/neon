@@ -1358,7 +1358,7 @@ mod tests {
 
     const DUMMY_SAFEKEEPER_CONNSTR: &str = "safekeeper_connstr";
 
-    fn dummy_state(harness: &TenantHarness) -> WalreceiverState {
+    fn dummy_state(harness: &TenantHarness<'_>) -> WalreceiverState {
         WalreceiverState {
             id: TenantTimelineId {
                 tenant_id: harness.tenant_id,

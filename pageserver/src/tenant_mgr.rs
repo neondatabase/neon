@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use tracing::*;
 
-use remote_storage::{path_with_suffix_extension, GenericRemoteStorage};
+use remote_storage::GenericRemoteStorage;
 
 use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::http::models::TenantInfo;
@@ -24,7 +24,7 @@ use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
 use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
 
-use utils::crashsafe_dir;
+use utils::crashsafe_dir::{self, path_with_suffix_extension};
 use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
