@@ -30,7 +30,7 @@ jobs:
         # this is all we need to install our toolchain later via rust-toolchain.toml
         # so don't install any toolchain explicitly.
         os: [ubuntu-latest, macos-latest]
-    timeout-minutes: 60
+    timeout-minutes: 90
     name: check codestyle rust and postgres
     runs-on: ${{ matrix.os }}
 
@@ -107,6 +107,14 @@ jobs:
             ~/.cargo/git
             target
           key: v4-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust
+
+      # https://github.com/facebookincubator/cargo-guppy/tree/main/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
+      - name: Check every project module is covered by Hakari
+        run: |
+          cargo install cargo-hakari
+          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
+          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+        shell: bash -euxo pipefail {0}
 
       - name: Run cargo clippy
         run: ./run_clippy.sh
