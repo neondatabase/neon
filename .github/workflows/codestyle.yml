@@ -108,6 +108,12 @@ jobs:
             target
           key: v4-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust
 
+      - name: Check every project module is covered by Hakari
+        run: |
+          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
+          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+        shell: bash -euxo pipefail {0}
+
       - name: Run cargo clippy
         run: ./run_clippy.sh
 
