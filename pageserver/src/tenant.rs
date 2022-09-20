@@ -17,6 +17,7 @@ use tracing::*;
 use utils::crashsafe_dir::path_with_suffix_extension;
 
 use std::cmp::min;
+use std::collections::hash_map;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -119,6 +120,104 @@ pub struct Tenant {
     upload_layers: bool,
 }
 
+pub struct UnInitializedTimeline<'t> {
+    owning_tenant: &'t Tenant,
+    timeline_id: TimelineId,
+    raw_timeline: Option<Timeline>,
+}
+
+impl UnInitializedTimeline<'_> {
+    pub fn initialize(self) -> anyhow::Result<Arc<Timeline>> {
+        let mut timelines = self.owning_tenant.timelines.lock().unwrap();
+        self.initialize_with_lock(&mut timelines)
+    }
+
+    fn initialize_with_lock(
+        mut self,
+        timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        // TODO kb: remove the tombstone
+        let timeline_id = self.timeline_id;
+        let tenant_id = self.owning_tenant.tenant_id;
+
+        let new_timeline = Arc::new(self.raw_timeline.take().with_context(|| {
+            format!("No metadata for initalization found for timeline {tenant_id}/{timeline_id}")
+        })?);
+
+        let new_disk_consistent_lsn = new_timeline.get_disk_consistent_lsn();
+        ensure!(new_disk_consistent_lsn.is_valid(),
+            "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
+
+        match timelines.entry(timeline_id) {
+            hash_map::Entry::Occupied(_) => anyhow::bail!(
+                "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
+            ),
+            hash_map::Entry::Vacant(v) => {
+                new_timeline
+                    .load_layer_map(new_disk_consistent_lsn)
+                    .context("failed to load layermap")?;
+
+                new_timeline.launch_wal_receiver()?;
+                v.insert(Arc::clone(&new_timeline));
+            }
+        }
+
+        Ok(new_timeline)
+    }
+
+    pub fn import_timeline_from_postgres_datadir(
+        &self,
+        pgdata_path: &Path,
+        pgdata_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let raw_timeline = self.raw_timeline()?;
+        import_datadir::import_timeline_from_postgres_datadir(
+            raw_timeline,
+            pgdata_path,
+            pgdata_lsn,
+        )?;
+
+        fail::fail_point!("before-checkpoint-new-timeline", |_| {
+            bail!("failpoint before-checkpoint-new-timeline");
+        });
+
+        raw_timeline.checkpoint(CheckpointConfig::Forced)?;
+
+        Ok(())
+    }
+
+    pub fn import_basebackup_from_tar(
+        &self,
+        reader: impl std::io::Read,
+        base_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let raw_timeline = self.raw_timeline()?;
+        import_datadir::import_basebackup_from_tar(raw_timeline, reader, base_lsn)?;
+        raw_timeline.checkpoint(CheckpointConfig::Flush)?;
+        Ok(())
+    }
+
+    fn raw_timeline(&self) -> anyhow::Result<&Timeline> {
+        self.raw_timeline.as_ref().with_context(|| {
+            format!(
+                "No raw timeline {}/{} found",
+                self.owning_tenant.tenant_id, self.timeline_id
+            )
+        })
+    }
+}
+
+impl Drop for UnInitializedTimeline<'_> {
+    fn drop(&mut self) {
+        if self.raw_timeline.is_some() {
+            error!(
+                "Timeline {}/{} got dropped without initializing",
+                self.owning_tenant.tenant_id, self.timeline_id
+            );
+        }
+    }
+}
+
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
@@ -161,9 +260,9 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
-    ) -> Result<Arc<Timeline>> {
+    ) -> Result<UnInitializedTimeline> {
         // XXX: keep the lock to avoid races during timeline creation
-        let mut timelines = self.timelines.lock().unwrap();
+        let timelines = self.timelines.lock().unwrap();
 
         anyhow::ensure!(
             timelines.get(&new_timeline_id).is_none(),
@@ -184,9 +283,7 @@ impl Tenant {
             initdb_lsn,
             pg_version,
         );
-        let new_timeline =
-            self.create_initialized_timeline(new_timeline_id, new_metadata, &mut timelines)?;
-        new_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
+        let new_timeline = self.prepare_timeline(new_timeline_id, new_metadata, true)?;
 
         Ok(new_timeline)
     }
@@ -390,22 +487,16 @@ impl Tenant {
                 timeline_id,
                 metadata.pg_version()
             );
-            let ancestor = metadata
-                .ancestor_timeline()
-                .and_then(|ancestor_timeline_id| timelines_accessor.get(&ancestor_timeline_id))
-                .cloned();
-            match timelines_accessor.entry(timeline_id) {
-                Entry::Occupied(_) => warn!(
-                    "Timeline {}/{} already exists in the tenant map, skipping its initialization",
-                    self.tenant_id, timeline_id
+            // TODO kb check that we don't reinit non-existing timelines instead
+            let timeline = UnInitializedTimeline {
+                owning_tenant: self,
+                timeline_id,
+                raw_timeline: Some(
+                    self.create_timeline_data(timeline_id, metadata, &mut timelines_accessor)
+                        .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?,
                 ),
-                Entry::Vacant(v) => {
-                    let timeline = self
-                        .initialize_new_timeline(timeline_id, metadata, ancestor)
-                        .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
-                    v.insert(timeline);
-                }
-            }
+            };
+            timeline.initialize_with_lock(&mut timelines_accessor)?;
         }
 
         Ok(())
@@ -598,12 +689,12 @@ impl Tenant {
         self.tenant_conf.write().unwrap().update(&new_tenant_conf);
     }
 
-    fn initialize_new_timeline(
+    fn create_timeline_data(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> anyhow::Result<Timeline> {
         if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
             anyhow::ensure!(
                 ancestor.is_some(),
@@ -613,7 +704,7 @@ impl Tenant {
 
         let new_disk_consistent_lsn = new_metadata.disk_consistent_lsn();
         let pg_version = new_metadata.pg_version();
-        let new_timeline = Arc::new(Timeline::new(
+        Ok(Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             new_metadata,
@@ -623,15 +714,7 @@ impl Tenant {
             Arc::clone(&self.walredo_mgr),
             self.upload_layers,
             pg_version,
-        ));
-
-        new_timeline
-            .load_layer_map(new_disk_consistent_lsn)
-            .context("failed to load layermap")?;
-
-        new_timeline.launch_wal_receiver()?;
-
-        Ok(new_timeline)
+        ))
     }
 
     pub fn new(
@@ -929,7 +1012,7 @@ impl Tenant {
         // or in-queue GC iterations.
 
         // XXX: keep the lock to avoid races during timeline creation
-        let mut timelines = self.timelines.lock().unwrap();
+        let timelines = self.timelines.lock().unwrap();
         let src_timeline = timelines
             .get(&src)
             // message about timeline being remote is one .context up in the stack
@@ -987,7 +1070,8 @@ impl Tenant {
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
-        let new_timeline = self.create_initialized_timeline(dst, metadata, &mut timelines)?;
+        drop(timelines); // TODO kb should not have the lock taken after tombsone is created
+        let new_timeline = self.prepare_timeline(dst, metadata, false)?.initialize()?;
         info!("branched timeline {dst} from {src} at {start_lsn}");
 
         Ok(new_timeline)
@@ -1009,24 +1093,35 @@ impl Tenant {
             TEMP_FILE_SUFFIX,
         );
 
-        // Init temporarily repo to get bootstrap data
+        // a tombstone was placed in the parent method, nothing else can access this timeline files
+        // current initdb was not run before, so remove whatever was left
+        if initdb_path.exists() {
+            fs::remove_dir_all(&initdb_path).with_context(|| {
+                format!(
+                    "Failed to remove already existing initdb directory: {}",
+                    initdb_path.display()
+                )
+            })?;
+        }
+        // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
         run_initdb(self.conf, &initdb_path, pg_version)?;
-        let pgdata_path = initdb_path;
-
-        let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+        // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
+        scopeguard::defer! {
+            if let Err(e) = fs::remove_dir_all(&initdb_path) {
+                // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
+                error!("Failed to remove temporary initdb directory '{}': {}", initdb_path.display(), e);
+            }
+        }
+        let pgdata_path = &initdb_path;
+        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.
         // Initdb lsn will be equal to last_record_lsn which will be set after import.
         // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
-        let timeline = self.create_empty_timeline(timeline_id, lsn, pg_version)?;
-        import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
-
-        fail::fail_point!("before-checkpoint-new-timeline", |_| {
-            bail!("failpoint before-checkpoint-new-timeline");
-        });
-
-        timeline.checkpoint(CheckpointConfig::Forced)?;
+        let raw_timeline = self.create_empty_timeline(timeline_id, pgdata_lsn)?;
+        raw_timeline.import_timeline_from_postgres_datadir(pgdata_path, pgdata_lsn)?;
+        let timeline = raw_timeline.initialize()?;
 
         info!(
             "created root timeline {} timeline.lsn {}",
@@ -1034,18 +1129,15 @@ impl Tenant {
             timeline.get_last_record_lsn()
         );
 
-        // Remove temp dir. We don't need it anymore
-        fs::remove_dir_all(pgdata_path)?;
-
         Ok(timeline)
     }
 
-    fn create_initialized_timeline(
+    fn prepare_timeline(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: TimelineMetadata,
-        timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
-    ) -> Result<Arc<Timeline>> {
+        init_layers: bool,
+    ) -> Result<UnInitializedTimeline> {
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&new_timeline_id, &self.tenant_id))
             .with_context(|| {
             format!(
@@ -1067,30 +1159,27 @@ impl Tenant {
             )
         })?;
 
-        let ancestor = new_metadata
-            .ancestor_timeline()
-            .and_then(|ancestor_timeline_id| timelines.get(&ancestor_timeline_id))
-            .cloned();
+        let mut timelines = self.timelines.lock().unwrap();
         let new_timeline = self
-            .initialize_new_timeline(new_timeline_id, new_metadata, ancestor)
+            .create_timeline_data(new_timeline_id, new_metadata, &mut timelines)
             .with_context(|| {
                 format!(
-                    "Failed to initialize timeline {}/{}",
-                    new_timeline_id, self.tenant_id
+                    "Failed to create timeline data {}/{}",
+                    new_timeline_id, self.tenant_id,
                 )
             })?;
+        drop(timelines);
 
-        match timelines.entry(new_timeline_id) {
-            Entry::Occupied(_) => bail!(
-                "Found freshly initialized timeline {} in the tenant map",
-                new_timeline_id
-            ),
-            Entry::Vacant(v) => {
-                v.insert(Arc::clone(&new_timeline));
-            }
+        if init_layers {
+            new_timeline.layers.write().unwrap().next_open_layer_at = Some(new_timeline.initdb_lsn);
         }
 
-        Ok(new_timeline)
+        // TODO kb create a tombstone here
+        Ok(UnInitializedTimeline {
+            owning_tenant: self,
+            timeline_id: new_timeline_id,
+            raw_timeline: Some(new_timeline),
+        })
     }
 }
 
@@ -1378,7 +1467,9 @@ mod tests {
     #[test]
     fn test_basic() -> Result<()> {
         let tenant = TenantHarness::create("test_basic")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -1426,7 +1517,9 @@ mod tests {
     #[test]
     fn test_branch() -> Result<()> {
         let tenant = TenantHarness::create("test_branch")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
         let writer = tline.writer();
         use std::str::from_utf8;
 
@@ -1521,7 +1614,9 @@ mod tests {
         let tenant =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
                 .load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
@@ -1595,7 +1690,9 @@ mod tests {
     fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
         let tenant =
             TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
@@ -1612,7 +1709,9 @@ mod tests {
     fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
         let tenant =
             TenantHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
@@ -1640,8 +1739,9 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
         {
             let tenant = harness.load();
-            let tline =
-                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION)?;
+            let tline = tenant
+                .create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION)?
+                .initialize()?;
             make_some_layers(tline.as_ref(), Lsn(0x8000))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
         }
@@ -1661,7 +1761,9 @@ mod tests {
         // create two timelines
         {
             let tenant = harness.load();
-            let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+            let tline = tenant
+                .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+                .initialize()?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
@@ -1734,7 +1836,9 @@ mod tests {
     #[test]
     fn test_images() -> Result<()> {
         let tenant = TenantHarness::create("test_images")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -1784,7 +1888,9 @@ mod tests {
     #[test]
     fn test_bulk_insert() -> Result<()> {
         let tenant = TenantHarness::create("test_bulk_insert")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
 
         let mut lsn = Lsn(0x10);
 
@@ -1824,7 +1930,9 @@ mod tests {
     #[test]
     fn test_random_updates() -> Result<()> {
         let tenant = TenantHarness::create("test_random_updates")?.load();
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -1894,7 +2002,9 @@ mod tests {
     #[test]
     fn test_traverse_branches() -> Result<()> {
         let tenant = TenantHarness::create("test_traverse_branches")?.load();
-        let mut tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let mut tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -1973,7 +2083,9 @@ mod tests {
     #[test]
     fn test_traverse_ancestors() -> Result<()> {
         let tenant = TenantHarness::create("test_traverse_ancestors")?.load();
-        let mut tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
+        let mut tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
 
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;

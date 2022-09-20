@@ -632,6 +632,7 @@ fn collect_timelines_for_tenant(
         match timelines_dir_entry {
             Ok(timelines_dir_entry) => {
                 let timeline_dir = timelines_dir_entry.path();
+                // TODO kb check for tombstones
                 if is_temporary(&timeline_dir) {
                     info!(
                         "Found temporary timeline directory, removing: {}",
