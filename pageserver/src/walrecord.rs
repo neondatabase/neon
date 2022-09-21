@@ -527,7 +527,7 @@ pub fn decode_wal_record(
     record: Bytes,
     decoded: &mut DecodedWALRecord,
     pg_version: u32,
-) -> Result<(), DeserializeError> {
+) -> Result<()> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
@@ -628,7 +628,7 @@ pub fn decode_wal_record(
                     };
 
                     let blk_img_is_compressed =
-                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version);
+                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)?;
 
                     if blk_img_is_compressed {
                         debug!("compressed block image , pg_version = {}", pg_version);
