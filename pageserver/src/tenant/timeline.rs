@@ -39,6 +39,7 @@ use crate::tenant_config::TenantConfOpt;
 
 use postgres_ffi::to_pg_timestamp;
 use utils::{
+    bin_ser::{BeSer, DeserializeError},
     id::{TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
@@ -366,6 +367,19 @@ impl PageLookupError {
         error!("Failed page lookup: {reason:?}");
         PageLookupError { reason }
     }
+
+    fn failed_deserialize(
+        key: Key,
+        lsn: Lsn,
+        type_name: &'static str,
+        err: DeserializeError,
+    ) -> Self {
+        let reason = anyhow::Error::from(err).context(format!(
+            "Failed to deserialize page for {key} at {lsn} as {type_name}"
+        ));
+        error!("{reason:?}");
+        PageLookupError { reason }
+    }
 }
 
 /// Public interface functions
@@ -389,6 +403,16 @@ impl Timeline {
     /// Lock and get timeline's GC cuttof
     pub fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
         self.latest_gc_cutoff_lsn.read()
+    }
+
+    /// Like `get`, but also deserializes the contents of the page in big-endian form
+    pub fn get_des<T>(&self, key: Key, lsn: Lsn) -> Result<T, PageLookupError>
+    where
+        T: for<'de> serde::Deserialize<'de> + std::any::Any, // require Any for type names
+    {
+        let buf = self.get(key, lsn)?;
+        let ty_name = std::any::type_name::<T>();
+        BeSer::des(&buf).map_err(|e| PageLookupError::failed_deserialize(key, lsn, ty_name, e))
     }
 
     /// Look up given page version.

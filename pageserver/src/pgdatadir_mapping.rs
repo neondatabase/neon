@@ -162,8 +162,7 @@ impl Timeline {
         }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
-        let buf = self.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf)?;
+        let dir = self.get_des::<RelDirectory>(key, lsn)?;
 
         let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
 
@@ -171,11 +170,15 @@ impl Timeline {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
-    pub fn list_rels(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<HashSet<RelTag>> {
+    pub fn list_rels(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        lsn: Lsn,
+    ) -> Result<HashSet<RelTag>, PageLookupError> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
-        let buf = self.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf)?;
+        let dir = self.get_des::<RelDirectory>(key, lsn)?;
 
         let rels: HashSet<RelTag> =
             HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
@@ -213,11 +216,15 @@ impl Timeline {
     }
 
     /// Get size of an SLRU segment
-    pub fn get_slru_segment_exists(&self, kind: SlruKind, segno: u32, lsn: Lsn) -> Result<bool> {
+    pub fn get_slru_segment_exists(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+    ) -> Result<bool, PageLookupError> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
-        let buf = self.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf)?;
+        let dir = self.get_des::<SlruSegmentDirectory>(key, lsn)?;
 
         let exists = dir.segments.get(&segno).is_some();
         Ok(exists)
@@ -324,12 +331,15 @@ impl Timeline {
     }
 
     /// Get a list of SLRU segments
-    pub fn list_slru_segments(&self, kind: SlruKind, lsn: Lsn) -> Result<HashSet<u32>> {
+    pub fn list_slru_segments(
+        &self,
+        kind: SlruKind,
+        lsn: Lsn,
+    ) -> Result<HashSet<u32>, PageLookupError> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
-        let buf = self.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf)?;
+        let dir = self.get_des::<SlruSegmentDirectory>(key, lsn)?;
 
         Ok(dir.segments)
     }
@@ -341,10 +351,9 @@ impl Timeline {
         Ok(buf)
     }
 
-    pub fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>> {
+    pub fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>, PageLookupError> {
         // fetch directory entry
-        let buf = self.get(DBDIR_KEY, lsn)?;
-        let dir = DbDirectory::des(&buf)?;
+        let dir = self.get_des::<DbDirectory>(DBDIR_KEY, lsn)?;
 
         Ok(dir.dbdirs)
     }
@@ -378,8 +387,7 @@ impl Timeline {
     /// SLRUs, twophase files etc.
     pub fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<u64> {
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = self.get_des::<DbDirectory>(DBDIR_KEY, lsn)?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
@@ -398,7 +406,7 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    pub fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace> {
+    pub fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace, PageLookupError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -406,8 +414,7 @@ impl Timeline {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = self.get_des::<DbDirectory>(DBDIR_KEY, lsn)?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
@@ -439,8 +446,7 @@ impl Timeline {
         ] {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
-            let buf = self.get(slrudir_key, lsn)?;
-            let dir = SlruSegmentDirectory::des(&buf)?;
+            let dir = self.get_des::<SlruSegmentDirectory>(slrudir_key, lsn)?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
@@ -457,8 +463,7 @@ impl Timeline {
 
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
-        let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
-        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
+        let twophase_dir = self.get_des::<TwoPhaseDirectory>(TWOPHASEDIR_KEY, lsn)?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
         for xid in xids {
