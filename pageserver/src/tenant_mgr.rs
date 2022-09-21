@@ -784,12 +784,22 @@ fn remove_timeline_and_tombstone(
     timeline_dir: &Path,
     timeline_tombstone: &Path,
 ) -> anyhow::Result<()> {
-    fs::remove_dir_all(&timeline_dir).with_context(|| {
-        format!(
-            "Failed to remove tombstoned timeline directory {}",
-            timeline_dir.display()
-        )
-    })?;
+    fs::remove_dir_all(&timeline_dir)
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                // we can leave the tombstone without a timeline dir,
+                // just remove the tombstone then
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .with_context(|| {
+            format!(
+                "Failed to remove tombstoned timeline directory {}",
+                timeline_dir.display()
+            )
+        })?;
     fs::remove_file(&timeline_tombstone).with_context(|| {
         format!(
             "Failed to remove timeline tombstone file {}",
