@@ -53,14 +53,14 @@ pub struct LayerMap {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// All the historic layers are kept here
-    historic_layers: RTree<LayerEnvelope>,
+    historic_layers: RTree<LayerRTreeObject>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
-    /// So L0 layers are held in l0_layers vector, in addition to the R-tree.
-    l0_layers: Vec<Arc<dyn Layer>>,
+    /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
+    l0_delta_layers: Vec<Arc<dyn Layer>>,
 }
 
-struct LayerEnvelope {
+struct LayerRTreeObject {
     layer: Arc<dyn Layer>,
 }
 
@@ -183,7 +183,7 @@ impl Num for IntKey {
     }
 }
 
-impl PartialEq for LayerEnvelope {
+impl PartialEq for LayerRTreeObject {
     fn eq(&self, other: &Self) -> bool {
         // FIXME: ptr_eq might fail to return true for 'dyn'
         // references.  Clippy complains about this. In practice it
@@ -194,7 +194,7 @@ impl PartialEq for LayerEnvelope {
     }
 }
 
-impl RTreeObject for LayerEnvelope {
+impl RTreeObject for LayerRTreeObject {
     type Envelope = AABB<[IntKey; 2]>;
     fn envelope(&self) -> Self::Envelope {
         let key_range = self.layer.get_key_range();
@@ -336,9 +336,9 @@ impl LayerMap {
     ///
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
-            self.l0_layers.push(layer.clone());
+            self.l0_delta_layers.push(layer.clone());
         }
-        self.historic_layers.insert(LayerEnvelope { layer });
+        self.historic_layers.insert(LayerRTreeObject { layer });
         NUM_ONDISK_LAYERS.inc();
     }
 
@@ -349,19 +349,20 @@ impl LayerMap {
     ///
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
-            let len_before = self.l0_layers.len();
+            let len_before = self.l0_delta_layers.len();
 
             // FIXME: ptr_eq might fail to return true for 'dyn'
             // references.  Clippy complains about this. In practice it
             // seems to work, the assertion below would be triggered
             // otherwise but this ought to be fixed.
             #[allow(clippy::vtable_address_comparisons)]
-            self.l0_layers.retain(|other| !Arc::ptr_eq(other, &layer));
-            assert_eq!(self.l0_layers.len(), len_before - 1);
+            self.l0_delta_layers
+                .retain(|other| !Arc::ptr_eq(other, &layer));
+            assert_eq!(self.l0_delta_layers.len(), len_before - 1);
         }
         assert!(self
             .historic_layers
-            .remove(&LayerEnvelope { layer })
+            .remove(&LayerRTreeObject { layer })
             .is_some());
         NUM_ONDISK_LAYERS.dec();
     }
@@ -549,7 +550,7 @@ impl LayerMap {
 
     /// Return all L0 delta layers
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {
-        Ok(self.l0_layers.clone())
+        Ok(self.l0_delta_layers.clone())
     }
 
     /// debugging function to print out the contents of the layer map
