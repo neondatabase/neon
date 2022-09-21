@@ -3,6 +3,7 @@ import random
 import re
 import time
 from contextlib import closing
+from pathlib import Path
 
 import psycopg2.errors
 import psycopg2.extras
@@ -11,7 +12,10 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserverHttpClient,
+    PgBin,
+    PortDistributor,
     Postgres,
+    VanillaPostgres,
     assert_timeline_local,
     wait_for_last_flush_lsn,
 )
@@ -327,7 +331,12 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
 
 # The timeline logical and physical sizes are also exposed as prometheus metrics.
 # Test the metrics.
-def test_timeline_size_metrics(neon_simple_env: NeonEnv):
+def test_timeline_size_metrics(
+    neon_simple_env: NeonEnv,
+    test_output_dir: Path,
+    port_distributor: PortDistributor,
+    pg_version: str,
+):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
 
@@ -369,11 +378,28 @@ def test_timeline_size_metrics(neon_simple_env: NeonEnv):
     assert matches
     tl_logical_size_metric = int(matches.group(1))
 
-    # An empty database is around 8 MB. There at least 3 databases, 'postgres',
-    # 'template0', 'template1'. So the total size should be about 32 MB. This isn't
-    # very accurate and can change with different PostgreSQL versions, so allow a
-    # couple of MB of slack.
-    assert math.isclose(tl_logical_size_metric, 32 * 1024 * 1024, abs_tol=2 * 1024 * 1024)
+    pgdatadir = test_output_dir / "pgdata-vanilla"
+    pg_bin = PgBin(test_output_dir, pg_version)
+    port = port_distributor.get_port()
+    with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
+        vanilla_pg.configure([f"port={port}"])
+        vanilla_pg.start()
+
+        # Create database based on template0 because we can't connect to template0
+        vanilla_pg.safe_psql("CREATE TABLE foo (t text)")
+        vanilla_pg.safe_psql(
+            """INSERT INTO foo
+                                SELECT 'long string to consume some space' || g
+                                FROM generate_series(1, 100000) g"""
+        )
+        vanilla_size_sum = vanilla_pg.safe_psql(
+            "select sum(pg_database_size(oid)) from pg_database"
+        )[0][0]
+
+    # Compare the size with Vanilla postgres.
+    # Allow some slack, because the logical size metric includes some things like
+    # the SLRUs that are not included in pg_database_size().
+    assert math.isclose(tl_logical_size_metric, vanilla_size_sum, abs_tol=2 * 1024 * 1024)
 
     # The sum of the sizes of all databases, as seen by pg_database_size(), should also
     # be close. Again allow some slack, the logical size metric includes some things like
