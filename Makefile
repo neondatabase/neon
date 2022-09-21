@@ -108,8 +108,6 @@ postgres-%: postgres-configure-% \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
-	+@echo "Compiling remotexact $*"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/remotexact install
 
 .PHONY: postgres-clean-%
 postgres-clean-%:
@@ -135,12 +133,18 @@ neon-pg-ext-%: postgres-%
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install
+	+@echo "Compiling remotexact $*"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/remotexact-$*
+	(cd $(POSTGRES_INSTALL_DIR)/build/remotexact-$* && \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
+		-f $(ROOT_PROJECT_DIR)/pgxn/remotexact/Makefile install)
 
 .PHONY: neon-pg-ext-clean-%
 neon-pg-ext-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/neon-$* -f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/neon_walredo-$* -f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/neon_test_utils-$* -f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile clean
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/remotexact-$* -f $(ROOT_PROJECT_DIR)/pgxn/remotexact/Makefile clean
 
 .PHONY: neon-pg-ext
 neon-pg-ext: \

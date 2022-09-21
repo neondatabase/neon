@@ -1,0 +1,4 @@
+# remotetxn extension
+comment = 'remote transactions for multi-master PostgreSQL'
+default_version = '1.0'
+module_pathname = '$libdir/remotexact'
