@@ -122,6 +122,11 @@ pub struct Tenant {
     upload_layers: bool,
 }
 
+/// A timeline with some of its files on disk, being initialized.
+/// The struct API ensures the atomicity of the timeline init: it's either properly created and inserted into pageserver's memory, or
+/// its local files removed (at the worst case of a crash, left with a mark to get removed on the next restart).
+///
+/// A caller is responsible for proper timeline data filling before the final init.
 #[must_use]
 pub struct UninitializedTimeline<'t> {
     owning_tenant: &'t Tenant,
@@ -129,12 +134,19 @@ pub struct UninitializedTimeline<'t> {
     raw_timeline: Option<(Timeline, TimelineTombstone)>,
 }
 
+/// A tombstone file, created along the timeline dir to ensure the timeline either gets fully initialized and loaded into pageserver's memory,
+/// or gets removed eventually.
+///
+/// XXX: it's important to create it near the timeline dir, not inside it to ensure timeline dir gets removed first.
+#[must_use]
 struct TimelineTombstone {
-    remove_tombstone: bool,
+    tombstone_deleted: bool,
     tombstone_path: PathBuf,
+    timeline_path: PathBuf,
 }
 
 impl UninitializedTimeline<'_> {
+    /// Ensures timeline data is valid, loads it into pageserver's memory and removes all temporary marks on success.
     pub fn initialize(self) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         self.initialize_with_lock(&mut timelines)
@@ -148,7 +160,7 @@ impl UninitializedTimeline<'_> {
         let tenant_id = self.owning_tenant.tenant_id;
 
         let (new_timeline, tombstone) = self.raw_timeline.take().with_context(|| {
-            format!("No metadata for initalization found for timeline {tenant_id}/{timeline_id}")
+            format!("No timeline for initalization found for {tenant_id}/{timeline_id}")
         })?;
         let new_timeline = Arc::new(new_timeline);
 
@@ -164,11 +176,15 @@ impl UninitializedTimeline<'_> {
             hash_map::Entry::Vacant(v) => {
                 new_timeline
                     .load_layer_map(new_disk_consistent_lsn)
-                    .context("failed to load layermap")?;
-                new_timeline.launch_wal_receiver()?;
-
-                drop(tombstone);
-
+                    .with_context(|| {
+                        format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
+                    })?;
+                new_timeline.launch_wal_receiver().with_context(|| {
+                    format!("Failed to launch walreceiver for timeline {tenant_id}/{timeline_id}")
+                })?;
+                tombstone.remove_tombstone().with_context(|| {
+                    format!("Failed to remove tombstone for timeline {tenant_id}/{timeline_id}")
+                })?;
                 v.insert(Arc::clone(&new_timeline));
             }
         }
@@ -176,6 +192,7 @@ impl UninitializedTimeline<'_> {
         Ok(new_timeline)
     }
 
+    /// Prepares timeline data by loading it from the pginit datadir.
     pub fn import_timeline_from_postgres_datadir(
         &self,
         pgdata_path: &Path,
@@ -186,25 +203,58 @@ impl UninitializedTimeline<'_> {
             raw_timeline,
             pgdata_path,
             pgdata_lsn,
-        )?;
+        )
+        .with_context(|| {
+            format!(
+                "Failed to import pgdatadir for timeline {}/{}",
+                self.owning_tenant.tenant_id, self.timeline_id
+            )
+        })?;
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
             bail!("failpoint before-checkpoint-new-timeline");
         });
 
-        raw_timeline.checkpoint(CheckpointConfig::Forced)?;
+        raw_timeline
+            .checkpoint(CheckpointConfig::Forced)
+            .with_context(|| {
+                format!(
+                    "Failed to checkpoint after pgdatadir import for timeline {}/{}",
+                    self.owning_tenant.tenant_id, self.timeline_id
+                )
+            })?;
 
         Ok(())
     }
 
+    /// Prepares timeline data by loading it from the basebackup archive.
     pub fn import_basebackup_from_tar(
         &self,
         reader: impl std::io::Read,
         base_lsn: Lsn,
     ) -> anyhow::Result<()> {
         let raw_timeline = self.raw_timeline()?;
-        import_datadir::import_basebackup_from_tar(raw_timeline, reader, base_lsn)?;
-        raw_timeline.checkpoint(CheckpointConfig::Flush)?;
+        import_datadir::import_basebackup_from_tar(raw_timeline, reader, base_lsn).with_context(
+            || {
+                format!(
+                    "Failed to import basebackup for timeline {}/{}",
+                    self.owning_tenant.tenant_id, self.timeline_id
+                )
+            },
+        )?;
+
+        fail::fail_point!("before-checkpoint-new-timeline", |_| {
+            bail!("failpoint before-checkpoint-new-timeline");
+        });
+
+        raw_timeline
+            .checkpoint(CheckpointConfig::Flush)
+            .with_context(|| {
+                format!(
+                    "Failed to checkpoint after basebackup import for timeline {}/{}",
+                    self.owning_tenant.tenant_id, self.timeline_id
+                )
+            })?;
         Ok(())
     }
 
@@ -224,18 +274,15 @@ impl UninitializedTimeline<'_> {
 
 impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
-        if let Some((_raw_timeline, mut tombstone)) = self.raw_timeline.take() {
+        if let Some((_, tombstone)) = self.raw_timeline.take() {
             let tenant_id = self.owning_tenant.tenant_id;
             let timeline_id = self.timeline_id;
             let _entered = info_span!("drop_unitialized_timeline", tenant = %tenant_id, timeline = %timeline_id).entered();
             error!("Timeline got dropped without initializing, cleaning its files");
 
-            let raw_timeline_dir = self
-                .owning_tenant
-                .conf
-                .timeline_path(&timeline_id, &tenant_id);
+            let raw_timeline_dir = &tombstone.timeline_path;
             let mut should_remove_tombstone = true;
-            match fs::remove_dir_all(&raw_timeline_dir) {
+            match fs::remove_dir_all(raw_timeline_dir) {
                 Ok(()) => info!("Timeline dir removed successfully, removing the tombstone"),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     info!("Timeline dir is absent, skipping and removing the tombstone")
@@ -246,59 +293,81 @@ impl Drop for UninitializedTimeline<'_> {
                 }
             }
 
-            tombstone.remove_tombstone = should_remove_tombstone;
-            drop(tombstone);
+            if should_remove_tombstone {
+                if let Err(e) = tombstone.remove_tombstone() {
+                    error!("Failed to remove the tombstone: {e:?}");
+                }
+            }
         }
     }
 }
 
 impl TimelineTombstone {
-    fn new(tombstone_path: PathBuf) -> Self {
+    /// Useful for initializing timelines, existing on disk after the restart.
+    pub fn dummy() -> Self {
         Self {
-            remove_tombstone: true,
-            tombstone_path,
+            tombstone_deleted: true,
+            tombstone_path: PathBuf::new(),
+            timeline_path: PathBuf::new(),
         }
     }
 
-    fn remove_tombstone(&self) -> anyhow::Result<()> {
-        let tombstone_file = &self.tombstone_path;
-        let tombstone_parent = tombstone_file.parent().with_context(|| {
-            format!("Tombstone file {} has no parent", tombstone_file.display())
-        })?;
+    fn new(tombstone_path: PathBuf, timeline_path: PathBuf) -> Self {
+        Self {
+            tombstone_deleted: false,
+            tombstone_path,
+            timeline_path,
+        }
+    }
 
-        fs::remove_file(&tombstone_file)
-            .or_else(|e| {
-                if e.kind() == io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })
-            .with_context(|| {
-                format!(
-                    "Failed to remove tombstone file at path {}",
-                    tombstone_file.display()
-                )
+    fn remove_tombstone(mut self) -> anyhow::Result<()> {
+        if !self.tombstone_deleted {
+            let tombstone_file = &self.tombstone_path;
+            let tombstone_parent = tombstone_file.parent().with_context(|| {
+                format!("Tombstone file {} has no parent", tombstone_file.display())
             })?;
 
-        crashsafe_dir::fsync(tombstone_parent).context("Failed to fsync tombstone parent")?;
+            fs::remove_file(&tombstone_file)
+                .or_else(|e| {
+                    if e.kind() == io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .with_context(|| {
+                    format!(
+                        "Failed to remove tombstone file at path {}",
+                        tombstone_file.display()
+                    )
+                })?;
+
+            crashsafe_dir::fsync(tombstone_parent).context("Failed to fsync tombstone parent")?;
+            self.tombstone_deleted = true;
+        }
+
         Ok(())
     }
 }
 
 impl Drop for TimelineTombstone {
     fn drop(&mut self) {
-        if self.remove_tombstone {
-            match self.remove_tombstone() {
-                Err(e) => error!(
-                    "Failed to remove a tombstone file {} for timeline: {:?}",
+        if !self.tombstone_deleted {
+            if self.timeline_path.exists() {
+                error!(
+                    "Tombstone {} is not removed, timeline {} stays uninitialized",
                     self.tombstone_path.display(),
-                    e
-                ),
-                Ok(()) => info!(
-                    "Tombstone {} removed successfully",
+                    self.timeline_path.display()
+                )
+            } else {
+                // unblock later timeline creation attempts
+                warn!(
+                    "Removing intermediate tombstone file {}",
                     self.tombstone_path.display()
-                ),
+                );
+                if let Err(e) = fs::remove_file(&self.tombstone_path) {
+                    error!("Failed to remove the tombstone file: {e}")
+                }
             }
         }
     }
@@ -376,11 +445,7 @@ impl Tenant {
     ) -> anyhow::Result<Option<Arc<Timeline>>> {
         let new_timeline_id = new_timeline_id.unwrap_or_else(TimelineId::generate);
 
-        if self
-            .conf
-            .timeline_path(&new_timeline_id, &self.tenant_id)
-            .exists()
-        {
+        if self.get_timeline(new_timeline_id).is_ok() {
             debug!("timeline {new_timeline_id} already exists");
             return Ok(None);
         }
@@ -566,10 +631,7 @@ impl Tenant {
                 raw_timeline: Some((
                     self.create_timeline_data(timeline_id, metadata, &mut timelines_accessor)
                         .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?,
-                    TimelineTombstone {
-                        remove_tombstone: false,
-                        tombstone_path: PathBuf::new(),
-                    },
+                    TimelineTombstone::dummy(),
                 )),
             };
             timeline.initialize_with_lock(&mut timelines_accessor)?;
@@ -1073,12 +1135,11 @@ impl Tenant {
         dst: TimelineId,
         start_lsn: Option<Lsn>,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let timeline_tombstone = self.create_timeline_tombstone(dst)?;
-
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
         let _gc_cs = self.gc_cs.lock().unwrap();
+        let timeline_tombstone = self.create_timeline_tombstone(dst)?;
 
         // In order for the branch creation task to not wait for GC/compaction,
         // we need to make sure that the starting LSN of the child branch is not out of scope midway by
@@ -1210,6 +1271,8 @@ impl Tenant {
         Ok(timeline)
     }
 
+    /// Creates intermediate timeline structure and its files, without loading it into memory.
+    /// It's up to the caller to import the necesary data and import the timeline into memory.
     fn prepare_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -1217,8 +1280,7 @@ impl Tenant {
         tombstone: TimelineTombstone,
         init_layers: bool,
     ) -> anyhow::Result<UninitializedTimeline> {
-        crashsafe_dir::create_dir_all(self.conf.timeline_path(&new_timeline_id, &self.tenant_id))
-            .with_context(|| {
+        crashsafe_dir::create_dir_all(&tombstone.timeline_path).with_context(|| {
             format!(
                 "Failed to create timeline {}/{} directory",
                 new_timeline_id, self.tenant_id
@@ -1259,6 +1321,10 @@ impl Tenant {
         })
     }
 
+    /// Attempts to create a tombstone for the timeline initialization.
+    /// Bails, if the timeline is already loaded into the memory (i.e. initialized before), or the tombstone file already exists.
+    ///
+    /// This way, we need to hold the timelines lock only for small amount of time during the tombstone check/creation per timeline init.
     fn create_timeline_tombstone(
         &self,
         timeline_id: TimelineId,
@@ -1279,6 +1345,13 @@ impl Tenant {
             tombstone_path.display()
         );
 
+        let timeline_path = self.conf.timeline_path(&timeline_id, &tenant_id);
+        anyhow::ensure!(
+            !timeline_path.exists(),
+            "Timeline {} already exists, cannot create its initialization tombstone",
+            timeline_path.display()
+        );
+
         fs::File::create(&tombstone_path)
             .context("Failed to create tombstone file")
             .and_then(|_| {
@@ -1290,7 +1363,13 @@ impl Tenant {
             })?;
         drop(timelines);
 
-        Ok(TimelineTombstone::new(tombstone_path))
+        let tombstone = TimelineTombstone::new(tombstone_path, timeline_path);
+
+        fail::fail_point!("after-timeline-tombstone-creation", |_| {
+            bail!("failpoint after-timeline-tombstone-creation");
+        });
+
+        Ok(tombstone)
     }
 }
 

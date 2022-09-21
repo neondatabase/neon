@@ -265,17 +265,6 @@ fn create_tenant_files(
         temporary_tenant_dir.display()
     );
 
-    let temporary_tenant_timelines_dir = rebase_directory(
-        &conf.timelines_path(&tenant_id),
-        &target_tenant_directory,
-        &temporary_tenant_dir,
-    )?;
-    let temporary_tenant_config_path = rebase_directory(
-        &conf.tenant_config_path(tenant_id),
-        &target_tenant_directory,
-        &temporary_tenant_dir,
-    )?;
-
     // top-level dir may exist if we are creating it through CLI
     crashsafe_dir::create_dir_all(&temporary_tenant_dir).with_context(|| {
         format!(
@@ -283,40 +272,91 @@ fn create_tenant_files(
             temporary_tenant_dir.display()
         )
     })?;
-    // first, create a config in the top-level temp directory, fsync the file
-    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true)?;
-    // then, create a subdirectory in the top-level temp directory, fsynced
+
+    let creation_result = try_create_target_tenant_dir(
+        conf,
+        tenant_conf,
+        tenant_id,
+        &temporary_tenant_dir,
+        &target_tenant_directory,
+    );
+
+    if creation_result.is_err() {
+        error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
+        if let Err(e) = fs::remove_dir_all(&temporary_tenant_dir) {
+            error!(
+                "Failed to remove temporary tenant directory {}: {}",
+                temporary_tenant_dir.display(),
+                e
+            )
+        }
+    }
+
+    creation_result
+}
+
+fn try_create_target_tenant_dir(
+    conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
+    tenant_id: TenantId,
+    temporary_tenant_dir: &Path,
+    target_tenant_directory: &Path,
+) -> Result<(), anyhow::Error> {
+    let temporary_tenant_timelines_dir = rebase_directory(
+        &conf.timelines_path(&tenant_id),
+        target_tenant_directory,
+        temporary_tenant_dir,
+    )
+    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary timelines dir"))?;
+    let temporary_tenant_config_path = rebase_directory(
+        &conf.tenant_config_path(tenant_id),
+        target_tenant_directory,
+        temporary_tenant_dir,
+    )
+    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary config path"))?;
+
+    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true).with_context(
+        || {
+            format!(
+                "Failed to write tenant {} config to {}",
+                tenant_id,
+                temporary_tenant_config_path.display()
+            )
+        },
+    )?;
     crashsafe_dir::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
-            "could not create temporary tenant timelines directory {}",
+            "could not create tenant {} temporary timelines directory {}",
+            tenant_id,
             temporary_tenant_timelines_dir.display()
         )
     })?;
-
     fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
         anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
     });
 
-    // move-rename tmp directory with all files synced into a permanent directory, fsync its parent
-    fs::rename(&temporary_tenant_dir, &target_tenant_directory).with_context(|| {
+    fs::rename(&temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
-            "failed to move temporary tenant directory {} into the permanent one {}",
+            "failed to move tenant {} temporary directory {} into the permanent one {}",
+            tenant_id,
             temporary_tenant_dir.display(),
             target_tenant_directory.display()
         )
     })?;
     let target_dir_parent = target_tenant_directory.parent().with_context(|| {
         format!(
-            "Failed to get tenant dir parent for {}",
+            "Failed to get tenant {} dir parent for {}",
+            tenant_id,
             target_tenant_directory.display()
         )
     })?;
-    fs::File::open(target_dir_parent)?.sync_all()?;
-
-    info!(
-        "created tenant directory structure in {}",
-        target_tenant_directory.display()
-    );
+    crashsafe_dir::fsync(target_dir_parent).with_context(|| {
+        format!(
+            "Failed to fsync renamed directory's parent {} for tenant {}",
+            target_dir_parent.display(),
+            tenant_id,
+        )
+    })?;
 
     Ok(())
 }
