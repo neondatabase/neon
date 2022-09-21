@@ -1,12 +1,14 @@
 use anyhow::anyhow;
 use hyper::{Body, Request, Response, StatusCode, Uri};
 
+use anyhow::Context;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
+use tokio::task::JoinError;
 
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
@@ -99,7 +101,12 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid)?;
+    let tli = GlobalTimelines::get(ttid)
+        // FIXME: Currently, the only errors from `GlobalTimelines::get` will be client errors
+        // because the provided timeline isn't there. However, the method can in theory change and
+        // fail from internal errors later. Remove this comment once it the method returns
+        // something other than `anyhow::Result`.
+        .map_err(ApiError::InternalServerError)?;
     let (inmem, state) = tli.get_state();
     let flush_lsn = tli.get_flush_lsn();
 
@@ -134,7 +141,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     };
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    Err(ApiError::from_err(anyhow!("not implemented")))
+    Err(ApiError::BadRequest(anyhow!("not implemented")))
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -147,9 +154,13 @@ async fn timeline_delete_force_handler(
     );
     check_permission(&request, Some(ttid.tenant_id))?;
     ensure_no_body(&mut request).await?;
-    let resp = tokio::task::spawn_blocking(move || GlobalTimelines::delete_force(&ttid))
-        .await
-        .map_err(ApiError::from_err)??;
+    let resp = tokio::task::spawn_blocking(move || {
+        // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
+        // error handling here when we're able to.
+        GlobalTimelines::delete_force(&ttid).map_err(ApiError::InternalServerError)
+    })
+    .await
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
     json_response(StatusCode::OK, resp)
 }
 
@@ -162,10 +173,13 @@ async fn tenant_delete_force_handler(
     check_permission(&request, Some(tenant_id))?;
     ensure_no_body(&mut request).await?;
     let delete_info = tokio::task::spawn_blocking(move || {
+        // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
+        // Using an `InternalServerError` should be fixed when the types support it
         GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
+            .map_err(ApiError::InternalServerError)
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
     json_response(
         StatusCode::OK,
         delete_info
@@ -184,9 +198,18 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
     check_permission(&request, Some(ttid.tenant_id))?;
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
-    let tli = GlobalTimelines::get(ttid)?;
+    let tli = GlobalTimelines::get(ttid)
+        // `GlobalTimelines::get` returns an error when it can't find the timeline.
+        .with_context(|| {
+            format!(
+                "Couldn't get timeline {} for tenant {}",
+                ttid.timeline_id, ttid.tenant_id
+            )
+        })
+        .map_err(ApiError::NotFound)?;
     tli.record_safekeeper_info(&safekeeper_info, NodeId(1))
-        .await?;
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
