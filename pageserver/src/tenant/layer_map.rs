@@ -205,7 +205,7 @@ impl RTreeObject for LayerEnvelope {
             [
                 IntKey::from(key_range.end.to_i128() - 1),
                 IntKey::from(lsn_range.end.0 as i128 - 1),
-            ], // end is exlusive
+            ], // AABB::upper is inclusive, while `key_range.end` and `lsn_range.end` are exclusive
         )
     }
 }
