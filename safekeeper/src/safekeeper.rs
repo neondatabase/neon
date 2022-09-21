@@ -998,6 +998,10 @@ mod tests {
         fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
             Box::new(move |_segno_up_to: XLogSegNo| Ok(()))
         }
+
+        fn get_metrics(&self) -> crate::metrics::WalStorageMetrics {
+            crate::metrics::WalStorageMetrics::default()
+        }
     }
 
     #[test]

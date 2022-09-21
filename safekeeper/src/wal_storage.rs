@@ -8,11 +8,11 @@
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
 use anyhow::{bail, Context, Result};
+
 use std::io::{self, Seek, SeekFrom};
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
-use once_cell::sync::Lazy;
 use postgres_ffi::v14::xlog_utils::{
     find_end_of_wal, IsPartialXLogFileName, IsXLogFileName, XLogFromFileName,
 };
@@ -27,6 +27,7 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
+use crate::metrics::{time_io_closure, WalStorageMetrics};
 use crate::safekeeper::SafeKeeperState;
 
 use crate::wal_backup::read_object;
@@ -36,66 +37,7 @@ use postgres_ffi::XLOG_BLCKSZ;
 
 use postgres_ffi::v14::waldecoder::WalStreamDecoder;
 
-use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
-
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-// The prometheus crate does not support u64 yet, i64 only (see `IntGauge`).
-// i64 is faster than f64, so update to u64 when available.
-static WRITE_WAL_BYTES: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "safekeeper_write_wal_bytes",
-        "Bytes written to WAL in a single request, grouped by timeline",
-        &["tenant_id", "timeline_id"],
-        vec![
-            1.0,
-            10.0,
-            100.0,
-            1024.0,
-            8192.0,
-            128.0 * 1024.0,
-            1024.0 * 1024.0,
-            10.0 * 1024.0 * 1024.0
-        ]
-    )
-    .expect("Failed to register safekeeper_write_wal_bytes histogram vec")
-});
-static WRITE_WAL_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "safekeeper_write_wal_seconds",
-        "Seconds spent writing and syncing WAL to a disk in a single request, grouped by timeline",
-        &["tenant_id", "timeline_id"],
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
-    )
-    .expect("Failed to register safekeeper_write_wal_seconds histogram vec")
-});
-static FLUSH_WAL_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "safekeeper_flush_wal_seconds",
-        "Seconds spent syncing WAL to a disk, grouped by timeline",
-        &["tenant_id", "timeline_id"],
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
-    )
-    .expect("Failed to register safekeeper_flush_wal_seconds histogram vec")
-});
-
-struct WalStorageMetrics {
-    write_wal_bytes: Histogram,
-    write_wal_seconds: Histogram,
-    flush_wal_seconds: Histogram,
-}
-
-impl WalStorageMetrics {
-    fn new(ttid: &TenantTimelineId) -> Self {
-        let tenant_id = ttid.tenant_id.to_string();
-        let timeline_id = ttid.timeline_id.to_string();
-        Self {
-            write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&tenant_id, &timeline_id]),
-            write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&tenant_id, &timeline_id]),
-            flush_wal_seconds: FLUSH_WAL_SECONDS.with_label_values(&[&tenant_id, &timeline_id]),
-        }
-    }
-}
 
 pub trait Storage {
     /// LSN of last durably stored WAL record.
@@ -113,6 +55,9 @@ pub trait Storage {
     /// Remove all segments <= given segno. Returns closure as we want to do
     /// that without timeline lock.
     fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>>;
+
+    /// Get metrics for this timeline.
+    fn get_metrics(&self) -> WalStorageMetrics;
 }
 
 /// PhysicalStorage is a storage that stores WAL on disk. Writes are separated from flushes
@@ -187,7 +132,7 @@ impl PhysicalStorage {
         }
 
         Ok(PhysicalStorage {
-            metrics: WalStorageMetrics::new(ttid),
+            metrics: WalStorageMetrics::default(),
             timeline_dir,
             conf: conf.clone(),
             wal_seg_size,
@@ -200,28 +145,26 @@ impl PhysicalStorage {
     }
 
     /// Call fdatasync if config requires so.
-    fn fdatasync_file(&self, file: &mut File) -> Result<()> {
+    fn fdatasync_file(&mut self, file: &mut File) -> Result<()> {
         if !self.conf.no_sync {
             self.metrics
-                .flush_wal_seconds
-                .observe_closure_duration(|| file.sync_data())?;
+                .observe_flush_seconds(time_io_closure(|| Ok(file.sync_data()?))?);
         }
         Ok(())
     }
 
     /// Call fsync if config requires so.
-    fn fsync_file(&self, file: &mut File) -> Result<()> {
+    fn fsync_file(&mut self, file: &mut File) -> Result<()> {
         if !self.conf.no_sync {
             self.metrics
-                .flush_wal_seconds
-                .observe_closure_duration(|| file.sync_all())?;
+                .observe_flush_seconds(time_io_closure(|| Ok(file.sync_all()?))?);
         }
         Ok(())
     }
 
     /// Open or create WAL segment file. Caller must call seek to the wanted position.
     /// Returns `file` and `is_partial`.
-    fn open_or_create(&self, segno: XLogSegNo) -> Result<(File, bool)> {
+    fn open_or_create(&mut self, segno: XLogSegNo) -> Result<(File, bool)> {
         let (wal_file_path, wal_file_partial_path) =
             wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
 
@@ -335,13 +278,10 @@ impl Storage for PhysicalStorage {
             );
         }
 
-        {
-            let _timer = self.metrics.write_wal_seconds.start_timer();
-            self.write_exact(startpos, buf)?;
-        }
-
+        let write_seconds = time_io_closure(|| self.write_exact(startpos, buf))?;
         // WAL is written, updating write metrics
-        self.metrics.write_wal_bytes.observe(buf.len() as f64);
+        self.metrics.observe_write_seconds(write_seconds);
+        self.metrics.observe_write_bytes(buf.len());
 
         // figure out last record's end lsn for reporting (if we got the
         // whole record)
@@ -443,6 +383,10 @@ impl Storage for PhysicalStorage {
         Box::new(move |segno_up_to: XLogSegNo| {
             remove_segments_from_disk(&timeline_dir, wal_seg_size, |x| x <= segno_up_to)
         })
+    }
+
+    fn get_metrics(&self) -> WalStorageMetrics {
+        self.metrics.clone()
     }
 }
 
