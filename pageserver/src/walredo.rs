@@ -18,6 +18,7 @@
 //! any WAL records, so that even if an attacker hijacks the Postgres
 //! process, he cannot escape out of it.
 //!
+use anyhow::{anyhow, Context};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
@@ -122,12 +123,15 @@ pub enum WalRedoError {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
 
-    #[error("cannot perform WAL redo now")]
-    InvalidState,
-    #[error("cannot perform WAL redo for this request")]
-    InvalidRequest,
-    #[error("cannot perform WAL redo for this record")]
-    InvalidRecord,
+    // Using `#[source]` mimics the formatting of `anyhow`'s source chaining when wrapped with an
+    // `anyhow::Error`. However: directly displaying this type won't show any of the source
+    // information; it's better to `error!` the inner `anyhow::Error` instead.
+    #[error("Cannot perform WAL redo now")]
+    InvalidState(#[source] anyhow::Error),
+    #[error("Invalid WAL redo request")]
+    InvalidRequest(#[source] anyhow::Error),
+    #[error("Invalid WAL redo record")]
+    InvalidRecord(#[source] anyhow::Error),
 }
 
 ///
@@ -149,8 +153,9 @@ impl WalRedoManager for PostgresRedoManager {
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         if records.is_empty() {
-            error!("invalid WAL redo request with no records");
-            return Err(WalRedoError::InvalidRequest);
+            let err = WalRedoError::InvalidRequest(anyhow!("Request has no records"));
+            error!("{err}");
+            return Err(err);
         }
 
         let mut img: Option<Bytes> = base_img;
@@ -210,6 +215,7 @@ impl PostgresRedoManager {
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
+    #[instrument(skip(self, base_img, records))]
     fn apply_batch_postgres(
         &self,
         key: Key,
@@ -219,7 +225,13 @@ impl PostgresRedoManager {
         wal_redo_timeout: Duration,
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
-        let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
+        let (rel, blknum) = key_to_rel_block(key)
+            .context("Failed to get RelTag and Block from key")
+            .map_err(|e| {
+                error!("{e:#}");
+                e
+            })
+            .map_err(WalRedoError::InvalidRecord)?;
 
         let start_time = Instant::now();
 
@@ -286,8 +298,9 @@ impl PostgresRedoManager {
             page.extend_from_slice(&fpi[..]);
         } else {
             // All the current WAL record types that we can handle require a base image.
-            error!("invalid neon WAL redo request with no base image");
-            return Err(WalRedoError::InvalidRequest);
+            let msg = anyhow!("No base image");
+            error!("{msg}");
+            return Err(WalRedoError::InvalidRequest(msg));
         }
 
         // Apply all the WAL records in the batch
@@ -309,6 +322,7 @@ impl PostgresRedoManager {
         Ok(page.freeze())
     }
 
+    #[instrument(skip(self, page, record))]
     fn apply_record_neon(
         &self,
         key: Key,
@@ -321,8 +335,9 @@ impl PostgresRedoManager {
                 will_init: _,
                 rec: _,
             } => {
-                error!("tried to pass postgres wal record to neon WAL redo");
-                return Err(WalRedoError::InvalidRequest);
+                let msg = anyhow!("Tried to pass postgres WAL record to Neon WAL redo");
+                error!("{msg}");
+                return Err(WalRedoError::InvalidRequest(msg));
             }
             NeonWalRecord::ClearVisibilityMapFlags {
                 new_heap_blkno,
@@ -330,7 +345,13 @@ impl PostgresRedoManager {
                 flags,
             } => {
                 // sanity check that this is modifying the correct relation
-                let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                let (rel, blknum) = key_to_rel_block(key)
+                    .context("Failed to get RelTag and Block from key")
+                    .map_err(|e| {
+                        error!("{e:#}");
+                        e
+                    })
+                    .map_err(WalRedoError::InvalidRecord)?;
                 assert!(
                     rel.forknum == VISIBILITYMAP_FORKNUM,
                     "ClearVisibilityMapFlags record on unexpected rel {}",
@@ -367,8 +388,13 @@ impl PostgresRedoManager {
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
             NeonWalRecord::ClogSetCommitted { xids, timestamp } => {
-                let (slru_kind, segno, blknum) =
-                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                let (slru_kind, segno, blknum) = key_to_slru_block(key)
+                    .context("Failed to get SLRU kind et al from key")
+                    .map_err(|e| {
+                        error!("{e:#}");
+                        e
+                    })
+                    .map_err(WalRedoError::InvalidRecord)?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::Clog,
@@ -417,8 +443,13 @@ impl PostgresRedoManager {
                 }
             }
             NeonWalRecord::ClogSetAborted { xids } => {
-                let (slru_kind, segno, blknum) =
-                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                let (slru_kind, segno, blknum) = key_to_slru_block(key)
+                    .context("Failed to get SLRU kind et al from key")
+                    .map_err(|e| {
+                        error!("{e:#}");
+                        e
+                    })
+                    .map_err(WalRedoError::InvalidRecord)?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::Clog,
@@ -448,8 +479,13 @@ impl PostgresRedoManager {
                 }
             }
             NeonWalRecord::MultixactOffsetCreate { mid, moff } => {
-                let (slru_kind, segno, blknum) =
-                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                let (slru_kind, segno, blknum) = key_to_slru_block(key)
+                    .context("Failed to get SLRU kind et al from key")
+                    .map_err(|e| {
+                        error!("{e:#}");
+                        e
+                    })
+                    .map_err(WalRedoError::InvalidRecord)?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::MultiXactOffsets,
@@ -481,8 +517,13 @@ impl PostgresRedoManager {
                 LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
             }
             NeonWalRecord::MultixactMembersCreate { moff, members } => {
-                let (slru_kind, segno, blknum) =
-                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                let (slru_kind, segno, blknum) = key_to_slru_block(key)
+                    .context("Failed to get SLRU kind et al from key")
+                    .map_err(|e| {
+                        error!("{e:#}");
+                        e
+                    })
+                    .map_err(WalRedoError::InvalidRecord)?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::MultiXactMembers,
