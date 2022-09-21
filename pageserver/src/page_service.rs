@@ -663,7 +663,7 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    #[instrument(skip(timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_rel_exists_request(
         &self,
         timeline: &Timeline,
@@ -680,7 +680,7 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_nblocks_request(
         &self,
         timeline: &Timeline,
@@ -697,7 +697,7 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(timeline, req), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
     async fn handle_db_size_request(
         &self,
         timeline: &Timeline,
@@ -717,7 +717,7 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(timeline, req), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
     async fn handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
