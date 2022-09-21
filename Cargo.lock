@@ -4156,6 +4156,7 @@ dependencies = [
  "regex-syntax",
  "scopeguard",
  "serde",
+ "stable_deref_trait",
  "syn",
  "time 0.3.12",
  "tokio",
