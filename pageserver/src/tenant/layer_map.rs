@@ -69,6 +69,8 @@ struct LayerEnvelope {
 // doesn't handle properly integer overflow during area calculation: sum(Xi*Yi).
 // Overflow will cause panic in debug mode and incorrect area calculation in release mode,
 // which leads to non-optimally balanced R-Tree (but doesn't fit correctness of R-Tree work).
+// By using i256 as the type, even though all the actual values would fit in i128, we can be
+// sure that multiplication doesn't overflow.
 //
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Debug)]
