@@ -108,19 +108,31 @@ jobs:
             target
           key: v4-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust
 
-      # https://github.com/facebookincubator/cargo-guppy/tree/main/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
-      - name: Check every project module is covered by Hakari
-        run: |
-          cargo install cargo-hakari
-          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
-          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
-        shell: bash -euxo pipefail {0}
-
       - name: Run cargo clippy
         run: ./run_clippy.sh
 
       - name: Ensure all project builds
         run: cargo build --locked --all --all-targets
+
+  check-rust-dependencies:
+    runs-on: dev
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
+      - name: Check every project module is covered by Hakari
+        run: |
+          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
+          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+        shell: bash -euxo pipefail {0}
 
   check-codestyle-python:
     runs-on: [ self-hosted, Linux, k8s-runner ]
