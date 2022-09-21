@@ -9,7 +9,7 @@
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
-use crate::tenant::Timeline;
+use crate::tenant::{PageLookupError, Timeline};
 use crate::walrecord::NeonWalRecord;
 use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
@@ -101,7 +101,7 @@ impl Timeline {
         }
 
         let key = rel_block_to_key(tag, blknum);
-        self.get(key, lsn)
+        self.get(key, lsn).map_err(|e| e.into())
     }
 
     // Get size of a database in blocks
@@ -195,7 +195,7 @@ impl Timeline {
         segno: u32,
         blknum: BlockNumber,
         lsn: Lsn,
-    ) -> Result<Bytes> {
+    ) -> Result<Bytes, PageLookupError> {
         let key = slru_block_to_key(kind, segno, blknum);
         self.get(key, lsn)
     }
@@ -363,11 +363,11 @@ impl Timeline {
         Ok(dir.xids)
     }
 
-    pub fn get_control_file(&self, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_control_file(&self, lsn: Lsn) -> Result<Bytes, PageLookupError> {
         self.get(CONTROLFILE_KEY, lsn)
     }
 
-    pub fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes, PageLookupError> {
         self.get(CHECKPOINT_KEY, lsn)
     }
 
@@ -1003,7 +1003,7 @@ impl<'a> DatadirModification<'a> {
             }
         } else {
             let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
-            self.tline.get(key, lsn)
+            self.tline.get(key, lsn).map_err(|e| e.into())
         }
     }
 

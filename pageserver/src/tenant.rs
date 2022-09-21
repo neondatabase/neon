@@ -71,7 +71,7 @@ mod timeline;
 
 use storage_layer::Layer;
 
-pub use timeline::Timeline;
+pub use timeline::{PageLookupError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;

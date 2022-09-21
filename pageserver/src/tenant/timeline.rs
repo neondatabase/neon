@@ -300,6 +300,74 @@ pub struct GcInfo {
     pub pitr_cutoff: Lsn,
 }
 
+/// Error from a failing call to [`Timeline::get`]
+///
+/// Any instance of a `PageLookupError` indicates that something has gone wrong, and either the
+/// caller messed up or our own data has become invalid.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct PageLookupError {
+    // DO NOT USE THIS! Instead, construct the error with one of the provided methods,
+    // so that we also emit a log message.
+    reason: anyhow::Error,
+}
+
+impl PageLookupError {
+    /// Constructs an error resulting from an invalid LSN
+    fn invalid_lsn(lsn: Lsn) -> Self {
+        let reason = anyhow!("Invalid LSN {lsn}");
+        error!("Failed page lookup: {reason:#}");
+        PageLookupError { reason }
+    }
+
+    fn failed_reconstruction(key: Key, lsn: Lsn, cause: anyhow::Error) -> Self {
+        let reason = cause.context(format!("Failed to reconstruct value for {key} at {lsn}"));
+        error!("Failed page lookup: {reason:?}");
+        PageLookupError { reason }
+    }
+
+    // Like `failed_reconstruction`, but for a range of LSNs
+    fn failed_reconstruction_in(
+        key: Key,
+        lsn_start: Lsn,
+        lsn_end: Lsn,
+        cause: anyhow::Error,
+    ) -> Self {
+        let reason = cause.context(format!(
+            "Failed to reconstruct value for {key} in {lsn_start}..{lsn_end}"
+        ));
+        error!("Failed page lookup: {reason:?}");
+        PageLookupError { reason }
+    }
+
+    fn missing_ancestor(timeline: &Timeline) -> Self {
+        let reason = anyhow!("Missing ancestor for timeline {}", timeline.timeline_id);
+        error!("Failed page lookup: {reason:?}");
+        PageLookupError { reason }
+    }
+
+    // Reports that the target wasn't found, and produces an error source chain wrapping the error
+    // with the layers traversed to where we gave up
+    fn not_found_in_traversal(
+        root_cause: anyhow::Error,
+        path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)>,
+    ) -> Self {
+        let msg_iter = path.iter().map(|(r, c, l)| {
+            format!(
+                "layer traversal: result {r:?}, cont_lsn {c}, layer: {}",
+                l.filename().display()
+            )
+        });
+
+        // Append all subsequent traversals, and the error message 'msg', as contexts.
+        let err = msg_iter.fold(root_cause, |err, msg| err.context(msg));
+
+        let reason = err.context("Could not find value in layer traversal");
+        error!("Failed page lookup: {reason:?}");
+        PageLookupError { reason }
+    }
+}
+
 /// Public interface functions
 impl Timeline {
     //------------------------------------------------------------------------------
@@ -331,8 +399,10 @@ impl Timeline {
     /// the Repository implementation may incorrectly return a value from an ancestor
     /// branch, for example, or waste a lot of cycles chasing the non-existing key.
     ///
-    pub fn get(&self, key: Key, lsn: Lsn) -> anyhow::Result<Bytes> {
-        anyhow::ensure!(lsn.is_valid(), "Invalid LSN");
+    pub fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageLookupError> {
+        if !lsn.is_valid() {
+            return Err(PageLookupError::invalid_lsn(lsn));
+        }
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
@@ -360,6 +430,7 @@ impl Timeline {
         self.metrics
             .reconstruct_time_histo
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
+            .map_err(|err| PageLookupError::failed_reconstruction(key, lsn, err))
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -828,7 +899,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PageLookupError> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -865,24 +936,27 @@ impl Timeline {
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
-                        return layer_traversal_error(format!(
+                        let msg = anyhow!(
                             "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
                             key,
                             Lsn(cont_lsn.0 - 1),
                             request_lsn,
-                            timeline.ancestor_lsn
-                        ), traversal_path);
+                            timeline.ancestor_lsn,
+                        );
+                        return Err(PageLookupError::not_found_in_traversal(msg, traversal_path));
                     }
                     prev_lsn = cont_lsn;
                 }
                 ValueReconstructResult::Missing => {
-                    return layer_traversal_error(
-                        format!(
+                    return Err(PageLookupError::not_found_in_traversal(
+                        anyhow!(
                             "could not find data for key {} at LSN {}, for request at LSN {}",
-                            key, cont_lsn, request_lsn
+                            key,
+                            cont_lsn,
+                            request_lsn
                         ),
                         traversal_path,
-                    );
+                    ));
                 }
             }
 
@@ -893,7 +967,9 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                let ancestor = timeline.get_ancestor_timeline()?;
+                let ancestor = timeline
+                    .get_ancestor_timeline()
+                    .ok_or_else(|| PageLookupError::missing_ancestor(timeline))?;
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
@@ -911,11 +987,11 @@ impl Timeline {
                     // Get all the data needed to reconstruct the page version from this layer.
                     // But if we have an older cached page image, no need to go past that.
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
-                    result = open_layer.get_value_reconstruct_data(
-                        key,
-                        lsn_floor..cont_lsn,
-                        reconstruct_state,
-                    )?;
+                    result = open_layer
+                        .get_value_reconstruct_data(key, lsn_floor..cont_lsn, reconstruct_state)
+                        .map_err(|e| {
+                            PageLookupError::failed_reconstruction_in(key, lsn_floor, cont_lsn, e)
+                        })?;
                     cont_lsn = lsn_floor;
                     traversal_path.push((result, cont_lsn, open_layer.clone()));
                     continue;
@@ -926,26 +1002,26 @@ impl Timeline {
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
-                    result = frozen_layer.get_value_reconstruct_data(
-                        key,
-                        lsn_floor..cont_lsn,
-                        reconstruct_state,
-                    )?;
+                    result = frozen_layer
+                        .get_value_reconstruct_data(key, lsn_floor..cont_lsn, reconstruct_state)
+                        .map_err(|e| {
+                            PageLookupError::failed_reconstruction_in(key, lsn_floor, cont_lsn, e)
+                        })?;
                     cont_lsn = lsn_floor;
                     traversal_path.push((result, cont_lsn, frozen_layer.clone()));
                     continue 'outer;
                 }
             }
 
-            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
+            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                result = layer.get_value_reconstruct_data(
-                    key,
-                    lsn_floor..cont_lsn,
-                    reconstruct_state,
-                )?;
+                result = layer
+                    .get_value_reconstruct_data(key, lsn_floor..cont_lsn, reconstruct_state)
+                    .map_err(|e| {
+                        PageLookupError::failed_reconstruction_in(key, lsn_floor, cont_lsn, e)
+                    })?;
                 cont_lsn = lsn_floor;
                 traversal_path.push((result, cont_lsn, layer));
             } else if timeline.ancestor_timeline.is_some() {
@@ -970,15 +1046,8 @@ impl Timeline {
         Some((lsn, img))
     }
 
-    fn get_ancestor_timeline(&self) -> Result<Arc<Timeline>> {
-        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
-            format!(
-                "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
-                self.timeline_id,
-                self.get_ancestor_timeline_id(),
-            )
-        })?;
-        Ok(Arc::clone(ancestor))
+    fn get_ancestor_timeline(&self) -> Option<Arc<Timeline>> {
+        self.ancestor_timeline.clone()
     }
 
     ///
@@ -2138,13 +2207,10 @@ impl Timeline {
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
-                let img = self.walredo_mgr.request_redo(
-                    key,
-                    request_lsn,
-                    base_img,
-                    data.records,
-                    self.pg_version,
-                )?;
+                let img = self
+                    .walredo_mgr
+                    .request_redo(key, request_lsn, base_img, data.records, self.pg_version)
+                    .context("WAL redo failed")?;
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();
@@ -2163,32 +2229,6 @@ impl Timeline {
             }
         }
     }
-}
-
-/// Helper function for get_reconstruct_data() to add the path of layers traversed
-/// to an error, as anyhow context information.
-fn layer_traversal_error(
-    msg: String,
-    path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)>,
-) -> anyhow::Result<()> {
-    // We want the original 'msg' to be the outermost context. The outermost context
-    // is the most high-level information, which also gets propagated to the client.
-    let mut msg_iter = path
-        .iter()
-        .map(|(r, c, l)| {
-            format!(
-                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r,
-                c,
-                l.filename().display()
-            )
-        })
-        .chain(std::iter::once(msg));
-    // Construct initial message from the first traversed layer
-    let err = anyhow!(msg_iter.next().unwrap());
-
-    // Append all subsequent traversals, and the error message 'msg', as contexts.
-    Err(msg_iter.fold(err, |err, msg| err.context(msg)))
 }
 
 /// Various functions to mutate the timeline.
