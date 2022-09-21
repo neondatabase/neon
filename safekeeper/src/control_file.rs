@@ -2,7 +2,6 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use once_cell::sync::Lazy;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -10,8 +9,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use crate::control_file_upgrade::upgrade_control_file;
+use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
 use crate::safekeeper::{SafeKeeperState, SK_FORMAT_VERSION, SK_MAGIC};
-use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
 use utils::{bin_ser::LeSer, id::TenantTimelineId};
 
 use crate::SafeKeeperConf;
@@ -23,16 +22,6 @@ const CONTROL_FILE_NAME: &str = "safekeeper.control";
 // needed to atomically update the state using `rename`
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
 pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
-
-static PERSIST_CONTROL_FILE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "safekeeper_persist_control_file_seconds",
-        "Seconds to persist and sync control file, grouped by timeline",
-        &["tenant_id", "timeline_id"],
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
-    )
-    .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec")
-});
 
 /// Storage should keep actual state inside of it. It should implement Deref
 /// trait to access state fields and have persist method for updating that state.
@@ -46,7 +35,6 @@ pub struct FileStorage {
     // save timeline dir to avoid reconstructing it every time
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
-    persist_control_file_seconds: Histogram,
 
     /// Last state persisted to disk.
     state: SafeKeeperState,
@@ -56,16 +44,12 @@ impl FileStorage {
     /// Initialize storage by loading state from disk.
     pub fn restore_new(ttid: &TenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
         let timeline_dir = conf.timeline_dir(ttid);
-        let tenant_id = ttid.tenant_id.to_string();
-        let timeline_id = ttid.timeline_id.to_string();
 
         let state = Self::load_control_file_conf(conf, ttid)?;
 
         Ok(FileStorage {
             timeline_dir,
             conf: conf.clone(),
-            persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
-                .with_label_values(&[&tenant_id, &timeline_id]),
             state,
         })
     }
@@ -77,14 +61,10 @@ impl FileStorage {
         state: SafeKeeperState,
     ) -> Result<FileStorage> {
         let timeline_dir = conf.timeline_dir(ttid);
-        let tenant_id = ttid.tenant_id.to_string();
-        let timeline_id = ttid.timeline_id.to_string();
 
         let store = FileStorage {
             timeline_dir,
             conf: conf.clone(),
-            persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
-                .with_label_values(&[&tenant_id, &timeline_id]),
             state,
         };
 
@@ -175,7 +155,7 @@ impl Storage for FileStorage {
     /// persists state durably to underlying storage
     /// for description see https://lwn.net/Articles/457667/
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
-        let _timer = &self.persist_control_file_seconds.start_timer();
+        let _timer = PERSIST_CONTROL_FILE_SECONDS.start_timer();
 
         // write data to safekeeper.control.partial
         let control_partial_path = self.timeline_dir.join(CONTROL_FILE_NAME_PARTIAL);

@@ -534,6 +534,7 @@ impl Timeline {
                 mem_state: state.sk.inmem.clone(),
                 persisted_state: state.sk.state.clone(),
                 flush_lsn: state.sk.wal_store.flush_lsn(),
+                wal_storage: state.sk.wal_store.get_metrics(),
             })
         } else {
             None
