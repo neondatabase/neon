@@ -86,6 +86,7 @@ runs:
         # and it is needed to distinguish different environments
         export PLATFORM=${PLATFORM:-github-actions-selfhosted}
         export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
+        export DEFAULT_PG_VERSION=${DEFAULT_PG_VERSION:-14}
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
