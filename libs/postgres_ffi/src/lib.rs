@@ -79,14 +79,13 @@ pub use v14::xlog_utils::XLogFileName;
 
 pub use v14::bindings::DBState_DB_SHUTDOWNED;
 
-pub fn bkpimage_is_compressed(bimg_info: u8, version: u32) -> bool {
-    if version == 14 {
-        bimg_info & v14::bindings::BKPIMAGE_IS_COMPRESSED != 0
-    } else {
-        assert_eq!(version, 15);
-        bimg_info & v15::bindings::BKPIMAGE_COMPRESS_PGLZ != 0
+pub fn bkpimage_is_compressed(bimg_info: u8, version: u32) -> anyhow::Result<bool> {
+    match version {
+        14 => Ok(bimg_info & v14::bindings::BKPIMAGE_IS_COMPRESSED != 0),
+        15 => Ok(bimg_info & v15::bindings::BKPIMAGE_COMPRESS_PGLZ != 0
             || bimg_info & v15::bindings::BKPIMAGE_COMPRESS_LZ4 != 0
-            || bimg_info & v15::bindings::BKPIMAGE_COMPRESS_ZSTD != 0
+            || bimg_info & v15::bindings::BKPIMAGE_COMPRESS_ZSTD != 0),
+        _ => anyhow::bail!("Unknown version {}", version),
     }
 }
 
