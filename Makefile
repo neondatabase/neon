@@ -115,8 +115,6 @@ postgres-v14: postgres-v14-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pageinspect install
-	+@echo "Compiling remotexact v14"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/remotexact install
 
 .PHONY: postgres-v15
 postgres-v15: postgres-v15-configure \
@@ -129,8 +127,6 @@ postgres-v15: postgres-v15-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect v15"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pageinspect install
-	+@echo "Compiling remotexact v15"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/remotexact install
 
 # shorthand to build all Postgres versions
 postgres: postgres-v14 postgres-v15
@@ -165,6 +161,11 @@ neon-pg-ext-v14: postgres-v14
 	(cd $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v14 && \
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v14/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install)
+	+@echo "Compiling remotexact v14"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/remotexact-v14
+	(cd $(POSTGRES_INSTALL_DIR)/build/remotexact-v14 && \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v14/bin/pg_config \
+		-f $(ROOT_PROJECT_DIR)/pgxn/remotexact/Makefile install)
 
 neon-pg-ext-v15: postgres-v15
 	+@echo "Compiling neon v15"
@@ -182,6 +183,11 @@ neon-pg-ext-v15: postgres-v15
 	(cd $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v15 && \
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install)
+	+@echo "Compiling remotexact v15"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/remotexact-v15
+	(cd $(POSTGRES_INSTALL_DIR)/build/remotexact-v15 && \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config \
+		-f $(ROOT_PROJECT_DIR)/pgxn/remotexact/Makefile install)
 
 .PHONY: neon-pg-ext-clean
 	$(MAKE) -C $(ROOT_PROJECT_DIR)/pgxn/neon clean
@@ -199,6 +205,7 @@ clean:
 	$(CARGO_CMD_PREFIX) cargo clean
 	cd pgxn/neon && $(MAKE) clean
 	cd pgxn/neon_test_utils && $(MAKE) clean
+	cd pgxn/remotexact && $(MAKE) clean
 
 # This removes everything
 .PHONY: distclean
