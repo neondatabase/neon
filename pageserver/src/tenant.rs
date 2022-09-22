@@ -186,8 +186,15 @@ impl Tenant {
             bail!("Timeline directory already exists, but timeline is missing in repository map. This is a bug.")
         }
 
-        let new_metadata =
-            TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn, pg_version,);
+        let new_metadata = TimelineMetadata::new(
+            Lsn(0),
+            None,
+            None,
+            Lsn(0),
+            initdb_lsn,
+            initdb_lsn,
+            pg_version,
+        );
         let new_timeline =
             self.create_initialized_timeline(new_timeline_id, new_metadata, &mut timelines)?;
         new_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
@@ -207,6 +214,7 @@ impl Tenant {
         new_timeline_id: Option<TimelineId>,
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
+        pg_version: u32,
     ) -> Result<Option<Arc<Timeline>>> {
         let new_timeline_id = new_timeline_id.unwrap_or_else(TimelineId::generate);
 
@@ -249,7 +257,7 @@ impl Tenant {
 
                 self.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
             }
-            None => self.bootstrap_timeline(new_timeline_id)?,
+            None => self.bootstrap_timeline(new_timeline_id, pg_version)?,
         };
 
         // Have added new timeline into the tenant, now its background tasks are needed.
@@ -1001,7 +1009,11 @@ impl Tenant {
 
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization complete, remove the temp dir.
-    fn bootstrap_timeline(&self, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
+    fn bootstrap_timeline(
+        &self,
+        timeline_id: TimelineId,
+        pg_version: u32,
+    ) -> Result<Arc<Timeline>> {
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
         let initdb_path = path_with_suffix_extension(
@@ -1012,7 +1024,7 @@ impl Tenant {
         );
 
         // Init temporarily repo to get bootstrap data
-        run_initdb(self.conf, &initdb_path)?;
+        run_initdb(self.conf, &initdb_path, pg_version)?;
         let pgdata_path = initdb_path;
 
         let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
@@ -1021,7 +1033,7 @@ impl Tenant {
         // LSN, and any WAL after that.
         // Initdb lsn will be equal to last_record_lsn which will be set after import.
         // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
-        let timeline = self.create_empty_timeline(timeline_id, lsn)?;
+        let timeline = self.create_empty_timeline(timeline_id, lsn, pg_version)?;
         import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
@@ -1094,10 +1106,10 @@ impl Tenant {
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
 /// to get bootstrap data for timeline initialization.
-fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
+fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path, pg_version: u32) -> Result<()> {
     info!("running initdb in {}... ", initdbpath.display());
 
-    let initdb_path = conf.pg_bin_dir().join("initdb");
+    let initdb_path = conf.pg_bin_dir(pg_version).join("initdb");
     let initdb_output = Command::new(initdb_path)
         .args(&["-D", &initdbpath.to_string_lossy()])
         .args(&["-U", &conf.superuser])
@@ -1107,8 +1119,8 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
         // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
-        .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
-        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+        .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
         .stdout(Stdio::null())
         .output()
         .context("failed to execute initdb")?;
