@@ -287,6 +287,7 @@ class PgProtocol:
         if "dsn" in kwargs:
             result.update(parse_dsn(kwargs["dsn"]))
         result.update(kwargs)
+        result = {k: v for k, v in result.items() if v is not None}
 
         # Individual statement timeout in seconds. 2 minutes should be
         # enough for our tests, but if you need a longer, you can
