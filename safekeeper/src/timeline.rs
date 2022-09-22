@@ -24,12 +24,12 @@ use utils::{
     pq_proto::ReplicationFeedback,
 };
 
-use crate::control_file;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
     SafekeeperMemState, ServerInfo,
 };
 use crate::send_wal::HotStandbyFeedback;
+use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::FullTimelineInfo;
 use crate::wal_storage;
@@ -101,6 +101,10 @@ impl SharedState {
     ) -> Result<Self> {
         if state.server.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(*ttid));
+        }
+
+        if state.server.pg_version == UNKNOWN_SERVER_VERSION {
+            bail!(TimelineError::UninitialinzedPgVersion(*ttid));
         }
 
         // We don't want to write anything to disk, because we may have existing timeline there.
@@ -270,6 +274,8 @@ pub enum TimelineError {
     AlreadyExists(TenantTimelineId),
     #[error("Timeline {0} is not initialized, wal_seg_size is zero")]
     UninitializedWalSegSize(TenantTimelineId),
+    #[error("Timeline {0} is not initialized, pg_version is unknown")]
+    UninitialinzedPgVersion(TenantTimelineId),
 }
 
 /// Timeline struct manages lifecycle (creation, deletion, restore) of a safekeeper timeline.

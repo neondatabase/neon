@@ -13,9 +13,7 @@ use std::io::{self, Seek, SeekFrom};
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
-use postgres_ffi::v14::xlog_utils::{
-    IsPartialXLogFileName, IsXLogFileName, XLogFromFileName,
-};
+use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use std::cmp::{max, min};
 
@@ -29,7 +27,6 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::metrics::{time_io_closure, WalStorageMetrics};
 use crate::safekeeper::SafeKeeperState;
-use crate::safekeeper::UNKNOWN_SERVER_VERSION;
 
 use crate::wal_backup::read_object;
 use crate::SafeKeeperConf;
@@ -117,7 +114,19 @@ impl PhysicalStorage {
         let write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
-            find_end_of_wal(&timeline_dir, wal_seg_size, state.commit_lsn)?
+            match state.server.pg_version / 10000 {
+                14 => postgres_ffi::v14::xlog_utils::find_end_of_wal(
+                    &timeline_dir,
+                    wal_seg_size,
+                    state.commit_lsn,
+                )?,
+                15 => postgres_ffi::v15::xlog_utils::find_end_of_wal(
+                    &timeline_dir,
+                    wal_seg_size,
+                    state.commit_lsn,
+                )?,
+                _ => bail!("unsupported postgres version"),
+            }
         };
 
         // TODO: do we really know that write_lsn is fully flushed to disk?
@@ -140,7 +149,7 @@ impl PhysicalStorage {
             write_lsn,
             write_record_lsn: write_lsn,
             flush_record_lsn: flush_lsn,
-            decoder: WalStreamDecoder::new(write_lsn, UNKNOWN_SERVER_VERSION),
+            decoder: WalStreamDecoder::new(write_lsn, state.server.pg_version / 10000),
             file: None,
         })
     }
