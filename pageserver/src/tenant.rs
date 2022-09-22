@@ -247,11 +247,11 @@ impl Tenant {
                     if ancestor_ancestor_lsn > *lsn {
                         // can we safely just branch from the ancestor instead?
                         anyhow::bail!(
-                    "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
-                    lsn,
-                    ancestor_timeline_id,
-                    ancestor_ancestor_lsn,
-                );
+                            "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
+                            lsn,
+                            ancestor_timeline_id,
+                            ancestor_ancestor_lsn,
+                        );
                     }
                 }
 
@@ -768,7 +768,7 @@ impl Tenant {
                 })
                 .with_context(|| {
                     format!(
-                        "Failed to fsync on firts save for config {}",
+                        "Failed to fsync on first save for config {}",
                         target_config_path.display()
                     )
                 })?;

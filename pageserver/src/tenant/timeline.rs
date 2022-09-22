@@ -343,7 +343,9 @@ impl Timeline {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
                     Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
-                    Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
+                    Ordering::Greater => {
+                        unreachable!("the returned lsn should never be after the requested lsn")
+                    }
                 }
                 Some((cached_lsn, cached_img))
             }
