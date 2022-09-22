@@ -125,7 +125,17 @@ impl PhysicalStorage {
                     wal_seg_size,
                     state.commit_lsn,
                 )?,
-                _ => bail!("unsupported postgres version"),
+                pg_majorversion => {
+                    // This is a quik hack to work with old timelines that don't have
+                    // pg_version in the control file. We can remove it after this is fixed properly.
+                    const DEFAULT_PG_MAJOR_VERSION: u32 = 14;
+                    warn!("unknown postgres version {pg_majorversion} assume {DEFAULT_PG_MAJOR_VERSION}");
+                    postgres_ffi::v14::xlog_utils::find_end_of_wal(
+                        &timeline_dir,
+                        wal_seg_size,
+                        state.commit_lsn,
+                    )?
+                }
             }
         };
 
