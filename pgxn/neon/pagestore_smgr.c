@@ -1728,16 +1728,20 @@ static void neon_read_at_lsn_multi_region(RelFileNode rnode, ForkNumber forkNum,
 	{
 		case T_NeonGetPageResponse:
 			memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
-			if (RegionIsRemote(region))
-			{
-				XLogRecPtr lsn = ((NeonGetPageResponse *) resp)->lsn;
-				/*
-					Set the LSN on the page to be equal to the LSN snapshot of the current transaction
-					so that we don't need to evict the page from local buffer if we use the same LSN
-					snapshot for the subsequent transactions.
-				*/
-				PageSetLSN((Page) buffer, lsn);
-			}
+			// TODO (ctring): potential optimization, but need more testing before uncommenting
+			// if (RegionIsRemote(region))
+			// {
+			// 	XLogRecPtr lsn = ((NeonGetPageResponse *) resp)->lsn;
+			// 	/*
+			// 	 * Set the LSN on the page to be equal to the LSN snapshot of the current transaction
+			// 	 * so that we don't need to evict the page from local buffer if we use the same LSN
+			// 	 * snapshot for the subsequent transactions.
+			// 	 * Only do this when the LSN is not 0, otherwise an all-zero page will be dirtied and
+			// 	 * not recognized as all-zero by PageIsVerifiedExtended.
+			// 	 */
+			// 	if (PageGetLSN((Page) buffer) != 0)
+			// 		PageSetLSN((Page) buffer, lsn);
+			// }
 			break;
 
 		case T_NeonErrorResponse:

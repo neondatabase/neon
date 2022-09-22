@@ -255,7 +255,14 @@ rx_collect_update(Relation relation, HeapTuple oldtuple, HeapTuple newtuple)
 	if (relreplident != REPLICA_IDENTITY_DEFAULT &&
 		relreplident != REPLICA_IDENTITY_FULL &&
 		relreplident != REPLICA_IDENTITY_INDEX)
+	{
+		ereport(WARNING,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("target relation \"%s\" has neither REPLICA IDENTITY "
+						"index nor REPLICA IDENTITY FULL",
+						RelationGetRelationName(relation))));
 		return;
+	}
 
 	buf = &rwset_collection_buffer->writes;
 
@@ -305,7 +312,14 @@ rx_collect_delete(Relation relation, HeapTuple oldtuple)
 	if (relreplident != REPLICA_IDENTITY_DEFAULT &&
 		relreplident != REPLICA_IDENTITY_FULL &&
 		relreplident != REPLICA_IDENTITY_INDEX)
+	{
+		ereport(WARNING,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("target relation \"%s\" has neither REPLICA IDENTITY "
+						"index nor REPLICA IDENTITY FULL",
+						RelationGetRelationName(relation))));
 		return;
+	}
 
 	if (oldtuple == NULL)
 		return;
