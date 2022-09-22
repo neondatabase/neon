@@ -728,10 +728,10 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn layer_removal_guard(&self) -> Result<MutexGuard<()>, anyhow::Error> {
+    pub fn layer_removal_guard(&self) -> anyhow::Result<MutexGuard<()>> {
         self.layer_removal_cs
             .try_lock()
-            .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
+            .map_err(|e| anyhow!("cannot lock compaction critical section {e}"))
     }
 
     /// Retrieve current logical size of the timeline.
