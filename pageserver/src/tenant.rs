@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use tokio::sync::watch;
 use tracing::*;
 use utils::crashsafe_dir::path_with_suffix_extension;
@@ -21,6 +21,9 @@ use std::collections::hash_map;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+#[cfg(test)]
+use std::error::Error;
+use std::fmt::{self, Display};
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -43,6 +46,7 @@ use crate::repository::GcResult;
 use crate::storage_sync::index::RemoteIndex;
 use crate::task_mgr;
 use crate::tenant_config::TenantConfOpt;
+use crate::tenant_mgr::TenantError;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::WalRedoManager;
 use crate::{CheckpointConfig, TEMP_FILE_SUFFIX};
@@ -131,6 +135,123 @@ pub enum TenantState {
     Broken,
 }
 
+/// Generic error occuring from some kind of operation involving a timeline
+#[derive(Debug)]
+pub struct TimelineError {
+    kind: TimelineErrorKind,
+    // DO NOT USE THIS DIRECTLY. This is exposed only so that `TenantError` can directly access it.
+    pub reason: anyhow::Error,
+}
+
+/// General category of error for a [`TimelineError`]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TimelineErrorKind {
+    /// The timeline doesn't exist
+    NotFound,
+    /// The timeline already exists
+    AlreadyExists,
+    /// Error occuring because the timeline has children
+    HasChildrenTimelines,
+    /// The LSN used for an operation was invalid for this timeline
+    BadLsn,
+    /// An unexpected error occured
+    Internal,
+}
+
+// Forward the Display implementation to the underlying `anyhow::Error`
+impl Display for TimelineError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        Display::fmt(&self.reason, f)
+    }
+}
+
+// Forward the Error implementation to the underlying `anyhow::Error`
+//
+// We only need to implement `source` because the other methods are deprecated or unstable.
+impl std::error::Error for TimelineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.reason.source()
+    }
+}
+
+impl TimelineError {
+    /// Returns the general kind of error that occured
+    pub fn kind(&self) -> TimelineErrorKind {
+        self.kind
+    }
+
+    fn not_found(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+        let reason = anyhow!("Timeline {timeline_id} not found for Tenant {tenant_id}");
+        info!("{reason}");
+        TimelineError {
+            kind: TimelineErrorKind::NotFound,
+            reason,
+        }
+    }
+
+    fn already_exists(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+        let reason = anyhow!("Timeline {timeline_id} already exists for Tenant {tenant_id}");
+        info!("{reason}");
+        TimelineError {
+            kind: TimelineErrorKind::AlreadyExists,
+            reason,
+        }
+    }
+
+    fn has_children(tenant_id: TenantId, timeline_id: TimelineId, err: anyhow::Error) -> Self {
+        let reason = err.context(format!(
+            "Timeline {timeline_id} of Tenant {tenant_id} has child timelines"
+        ));
+        info!("{reason:?}");
+        TimelineError {
+            kind: TimelineErrorKind::HasChildrenTimelines,
+            reason,
+        }
+    }
+
+    fn bad_lsn(tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn, err: anyhow::Error) -> Self {
+        let reason = err.context(format!(
+            "Invalid LSN {lsn} for Timeline {timeline_id} of Tenant {tenant_id}"
+        ));
+        warn!("{reason:?}");
+        TimelineError {
+            kind: TimelineErrorKind::BadLsn,
+            reason,
+        }
+    }
+
+    fn internal(tenant_id: TenantId, timeline_id: TimelineId, err: anyhow::Error) -> Self {
+        let reason = err.context(format!(
+            "Internal error while operating on Timeline {timeline_id} of Tenant {tenant_id}"
+        ));
+        error!("{reason:?}");
+        TimelineError {
+            kind: TimelineErrorKind::Internal,
+            reason,
+        }
+    }
+
+    /// Provides extra context to the error, without erasing the tagged error kind
+    fn context<C>(self, ctx: C) -> Self
+    where
+        C: std::fmt::Display + Send + Sync + 'static,
+    {
+        TimelineError {
+            kind: self.kind,
+            reason: self.reason.context(ctx),
+        }
+    }
+
+    fn set_kind(&mut self, kind: TimelineErrorKind) {
+        // Only show a the first line of the error
+        info!(
+            "Timeline error kind changed from {:?} to {:?}: {}",
+            self.kind, kind, self.reason
+        );
+        self.kind = kind;
+    }
+}
+
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
@@ -140,18 +261,13 @@ impl Tenant {
 
     /// Get Timeline handle for given Neon timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
-    pub fn get_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<Arc<Timeline>> {
+    pub fn get_timeline(&self, timeline_id: TimelineId) -> Result<Arc<Timeline>, TimelineError> {
         self.timelines
             .lock()
             .unwrap()
             .get(&timeline_id)
-            .with_context(|| {
-                format!(
-                    "Timeline {} was not found for tenant {}",
-                    timeline_id, self.tenant_id
-                )
-            })
-            .map(Arc::clone)
+            .cloned()
+            .ok_or_else(|| TimelineError::not_found(self.tenant_id, timeline_id))
     }
 
     /// Lists timelines the tenant contains.
@@ -172,18 +288,25 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
-    ) -> Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, TimelineError> {
         // XXX: keep the lock to avoid races during timeline creation
         let mut timelines = self.timelines.lock().unwrap();
 
-        anyhow::ensure!(
-            timelines.get(&new_timeline_id).is_none(),
-            "Timeline {new_timeline_id} already exists"
-        );
+        if timelines.get(&new_timeline_id).is_some() {
+            return Err(TimelineError::already_exists(
+                self.tenant_id,
+                new_timeline_id,
+            ));
+        }
 
         let timeline_path = self.conf.timeline_path(&new_timeline_id, &self.tenant_id);
         if timeline_path.exists() {
-            bail!("Timeline directory already exists, but timeline is missing in repository map. This is a bug.")
+            let msg = anyhow!("Timeline directory already exists, but timeline is missing in repository map. This is a bug.");
+            return Err(TimelineError::internal(
+                self.tenant_id,
+                new_timeline_id,
+                msg,
+            ));
         }
 
         let new_metadata = TimelineMetadata::new(
@@ -195,8 +318,9 @@ impl Tenant {
             initdb_lsn,
             pg_version,
         );
-        let new_timeline =
-            self.create_initialized_timeline(new_timeline_id, new_metadata, &mut timelines)?;
+        let new_timeline = self
+            .create_initialized_timeline(new_timeline_id, new_metadata, &mut timelines)
+            .map_err(|e| TimelineError::internal(self.tenant_id, new_timeline_id, e))?;
         new_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
 
         Ok(new_timeline)
@@ -207,15 +331,16 @@ impl Tenant {
     /// Returns the new timeline ID and reference to its Timeline object.
     ///
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
-    /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
-    /// a new unique ID is generated.
+    /// the same timeline ID already exists, returns `TimelineErrorKind::AlreadyExists`. If
+    /// `new_timeline_id` is not given, a new unique ID is generated.
     pub async fn create_timeline(
         &self,
         new_timeline_id: Option<TimelineId>,
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
-    ) -> Result<Option<Arc<Timeline>>> {
+    ) -> Result<Arc<Timeline>, TimelineError> {
+        let caller_specified_timeline = new_timeline_id.is_some();
         let new_timeline_id = new_timeline_id.unwrap_or_else(TimelineId::generate);
 
         if self
@@ -223,15 +348,22 @@ impl Tenant {
             .timeline_path(&new_timeline_id, &self.tenant_id)
             .exists()
         {
-            debug!("timeline {new_timeline_id} already exists");
-            return Ok(None);
+            let mut e = TimelineError::already_exists(self.tenant_id, new_timeline_id);
+            // TimelineId::generate generates 16 random bytes. If the information already exists
+            // *and we generated it*, then something went wrong. (e.g., bad path calculation, bad
+            // randomness source [no entropy], etc.)
+            if caller_specified_timeline {
+                error!("Generated timeline {new_timeline_id} already exists on disk");
+                e.set_kind(TimelineErrorKind::Internal);
+            }
+            return Err(e);
         }
 
         let loaded_timeline = match ancestor_timeline_id {
             Some(ancestor_timeline_id) => {
-                let ancestor_timeline = self
-                    .get_timeline(ancestor_timeline_id)
-                    .context("Cannot branch off the timeline that's not present in pageserver")?;
+                let ancestor_timeline = self.get_timeline(ancestor_timeline_id).map_err(|e| {
+                    e.context("Cannot branch off timeline that's not present in pageserver")
+                })?;
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     // Wait for the WAL to arrive and be processed on the parent branch up
@@ -240,18 +372,30 @@ impl Tenant {
                     // decoding the new WAL might need to look up previous pages, relation
                     // sizes etc. and that would get confused if the previous page versions
                     // are not in the repository yet.
+                    let unaligned_lsn = *lsn;
                     *lsn = lsn.align();
-                    ancestor_timeline.wait_lsn(*lsn).await?;
+                    if *lsn != unaligned_lsn {
+                        info!("Aligned create_timeline LSN from {unaligned_lsn} to {lsn}");
+                    }
+                    ancestor_timeline.wait_lsn(*lsn).await.map_err(|e| {
+                        TimelineError::bad_lsn(self.tenant_id, ancestor_timeline_id, *lsn, e)
+                    })?;
 
                     let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                     if ancestor_ancestor_lsn > *lsn {
                         // can we safely just branch from the ancestor instead?
-                        anyhow::bail!(
-                    "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
-                    lsn,
-                    ancestor_timeline_id,
-                    ancestor_ancestor_lsn,
-                );
+                        let msg = anyhow!(
+                            "Start LSN {} less than ancestor timeline's start LSN {}",
+                            lsn,
+                            ancestor_ancestor_lsn
+                        );
+                        let ctx = format!(
+                            "Start LSN is not valid for ancestor timeline {}",
+                            ancestor_timeline_id
+                        );
+                        let e =
+                            TimelineError::bad_lsn(self.tenant_id, ancestor_timeline_id, *lsn, msg);
+                        return Err(e.context(ctx));
                     }
                 }
 
@@ -263,7 +407,7 @@ impl Tenant {
         // Have added new timeline into the tenant, now its background tasks are needed.
         self.activate(true);
 
-        Ok(Some(loaded_timeline))
+        Ok(loaded_timeline)
     }
 
     /// perform one garbage collection iteration, removing old data files from disk.
@@ -281,7 +425,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
-    ) -> Result<GcResult> {
+    ) -> Result<GcResult, TimelineError> {
         let timeline_str = target_timeline_id
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
@@ -344,7 +488,7 @@ impl Tenant {
     }
 
     /// Removes timeline-related in-memory data
-    pub fn delete_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<()> {
+    pub fn delete_timeline(&self, timeline_id: TimelineId) -> Result<(), TimelineError> {
         // in order to be retriable detach needs to be idempotent
         // (or at least to a point that each time the detach is called it can make progress)
         let mut timelines = self.timelines.lock().unwrap();
@@ -355,24 +499,33 @@ impl Tenant {
             .iter()
             .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
 
-        ensure!(
-            !children_exist,
-            "Cannot detach timeline which has child timelines"
-        );
+        if children_exist {
+            return Err(TimelineError::has_children(
+                self.tenant_id,
+                timeline_id,
+                anyhow!("Cannot detach timeline which has child timelines"),
+            ));
+        }
+
         let timeline_entry = match timelines.entry(timeline_id) {
             Entry::Occupied(e) => e,
-            Entry::Vacant(_) => bail!("timeline not found"),
+            Entry::Vacant(_) => return Err(TimelineError::not_found(self.tenant_id, timeline_id)),
         };
 
-        let layer_removal_guard = timeline_entry.get().layer_removal_guard()?;
+        let layer_removal_guard = timeline_entry
+            .get()
+            .layer_removal_guard()
+            .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
 
         let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
-        std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
-            format!(
-                "Failed to remove local timeline directory '{}'",
-                local_timeline_directory.display()
-            )
-        })?;
+        std::fs::remove_dir_all(&local_timeline_directory)
+            .with_context(|| {
+                format!(
+                    "Failed to remove local timeline directory '{}'",
+                    local_timeline_directory.display()
+                )
+            })
+            .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
         info!("detach removed files");
 
         drop(layer_removal_guard);
@@ -384,7 +537,7 @@ impl Tenant {
     pub fn init_attach_timelines(
         &self,
         timelines: HashMap<TimelineId, TimelineMetadata>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), TenantError> {
         let sorted_timelines = if timelines.len() == 1 {
             timelines.into_iter().collect()
         } else if !timelines.is_empty() {
@@ -403,13 +556,15 @@ impl Tenant {
             );
             let timeline = self
                 .initialize_new_timeline(timeline_id, metadata, &mut timelines_accessor)
-                .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
+                .map_err(|e| e.context("Failed to initialize timeline"))?;
 
             match timelines_accessor.entry(timeline.timeline_id) {
-                hash_map::Entry::Occupied(_) => anyhow::bail!(
-                    "Found freshly initialized timeline {} in the tenant map",
-                    timeline.timeline_id
-                ),
+                hash_map::Entry::Occupied(_) => {
+                    let msg = anyhow!(
+                        "Found freshly initialized timeline {timeline_id} in the tenant map "
+                    );
+                    return Err(TimelineError::internal(self.tenant_id, timeline_id, msg).into());
+                }
                 hash_map::Entry::Vacant(v) => {
                     v.insert(timeline);
                 }
@@ -478,7 +633,7 @@ impl Tenant {
 /// before the children.
 fn tree_sort_timelines(
     timelines: HashMap<TimelineId, TimelineMetadata>,
-) -> Result<Vec<(TimelineId, TimelineMetadata)>> {
+) -> Result<Vec<(TimelineId, TimelineMetadata)>, TenantError> {
     let mut result = Vec::with_capacity(timelines.len());
 
     let mut now = Vec::with_capacity(timelines.len());
@@ -510,7 +665,9 @@ fn tree_sort_timelines(
                 error!("could not load timeline {orphan_id} because its ancestor timeline {missing_id} could not be loaded");
             }
         }
-        bail!("could not load tenant because some timelines are missing ancestors");
+        return Err(TenantError::internal(anyhow!(
+            "Could not load tenant because some timelines are missing ancestors"
+        )));
     }
 
     Ok(result)
@@ -611,18 +768,17 @@ impl Tenant {
         new_timeline_id: TimelineId,
         new_metadata: TimelineMetadata,
         timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, TimelineError> {
         let ancestor = match new_metadata.ancestor_timeline() {
-            Some(ancestor_timeline_id) => Some(
-                timelines
-                    .get(&ancestor_timeline_id)
-                    .cloned()
-                    .with_context(|| {
-                        format!(
-                        "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
+            Some(ancestor_timeline_id) => match timelines.get(&ancestor_timeline_id) {
+                Some(timeline) => Some(timeline.clone()),
+                None => {
+                    return Err(
+                        TimelineError::not_found(self.tenant_id, ancestor_timeline_id)
+                            .context("Could not find ancestor timeline"),
                     )
-                    })?,
-            ),
+                }
+            },
             None => None,
         };
 
@@ -642,9 +798,10 @@ impl Tenant {
 
         new_timeline
             .load_layer_map(new_disk_consistent_lsn)
-            .context("failed to load layermap")?;
+            .context("Failed to load layermap")
+            .map_err(|e| TimelineError::internal(self.tenant_id, new_timeline_id, e))?;
 
-        new_timeline.launch_wal_receiver()?;
+        new_timeline.launch_wal_receiver();
 
         Ok(new_timeline)
     }
@@ -807,7 +964,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
-    ) -> Result<GcResult> {
+    ) -> Result<GcResult, TimelineError> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
@@ -820,9 +977,9 @@ impl Tenant {
         // the branch point where it was created.
         let mut all_branchpoints: BTreeSet<(TimelineId, Lsn)> = BTreeSet::new();
         let timeline_ids = {
-            if let Some(target_timeline_id) = target_timeline_id.as_ref() {
-                if timelines.get(target_timeline_id).is_none() {
-                    bail!("gc target timeline does not exist")
+            if let Some(target_timeline_id) = target_timeline_id {
+                if timelines.get(&target_timeline_id).is_none() {
+                    return Err(TimelineError::not_found(self.tenant_id, target_timeline_id));
                 }
             };
 
@@ -862,7 +1019,8 @@ impl Tenant {
             // Timeline is known to be local and loaded.
             let timeline = self
                 .get_timeline(timeline_id)
-                .with_context(|| format!("Timeline {timeline_id} was not found"))?;
+                .context("Could not find existing timeline")
+                .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
 
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timeline_id) = target_timeline_id {
@@ -879,9 +1037,11 @@ impl Tenant {
                     ))
                     .map(|&x| x.1)
                     .collect();
-                timeline.update_gc_info(branchpoints, cutoff, pitr)?;
+                timeline
+                    .update_gc_info(branchpoints, cutoff, pitr)
+                    .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
 
-                gc_timelines.push(timeline);
+                gc_timelines.push((timeline_id, timeline));
             }
         }
         drop(gc_cs);
@@ -896,7 +1056,7 @@ impl Tenant {
         //
         // See comments in [`Tenant::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
-        for timeline in gc_timelines {
+        for (timeline_id, timeline) in gc_timelines {
             if task_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
@@ -907,14 +1067,18 @@ impl Tenant {
             // so that they too can be garbage collected. That's
             // used in tests, so we want as deterministic results as possible.
             if checkpoint_before_gc {
-                timeline.checkpoint(CheckpointConfig::Forced)?;
+                timeline
+                    .checkpoint(CheckpointConfig::Forced)
+                    .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
                 info!(
                     "timeline {} checkpoint_before_gc done",
                     timeline.timeline_id
                 );
             }
 
-            let result = timeline.gc()?;
+            let result = timeline
+                .gc()
+                .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
             totals += result;
         }
 
@@ -927,7 +1091,7 @@ impl Tenant {
         src: TimelineId,
         dst: TimelineId,
         start_lsn: Option<Lsn>,
-    ) -> Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, TimelineError> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
@@ -947,9 +1111,12 @@ impl Tenant {
         let src_timeline = timelines
             .get(&src)
             // message about timeline being remote is one .context up in the stack
-            .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {src}"))?;
+            .ok_or_else(|| TimelineError::not_found(self.tenant_id, src))?;
 
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
+
+        // Store this for later so that we can decide the severity of `start_lsn`-related errors
+        let manually_specified_start_lsn = start_lsn.is_some();
 
         // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
         let start_lsn = start_lsn.unwrap_or_else(|| {
@@ -963,17 +1130,25 @@ impl Tenant {
         // 2. the planned GC cutoff LSN, which is from an in-queue GC iteration.
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
-            .context(format!(
-                "invalid branch start lsn: less than latest GC cutoff {}",
-                *latest_gc_cutoff_lsn,
-            ))?;
+            .map_err(|e| {
+                let mut e = TimelineError::bad_lsn(self.tenant_id, src, start_lsn, e)
+                    .context("Invalid branch start LSN");
+                if !manually_specified_start_lsn {
+                    e.set_kind(TimelineErrorKind::Internal);
+                }
+                e
+            })?;
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
             let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
             if start_lsn < cutoff {
-                bail!(format!(
-                    "invalid branch start lsn: less than planned GC cutoff {cutoff}"
-                ));
+                let msg = anyhow!("LSN less than panned GC cutoff {cutoff}");
+                let mut e = TimelineError::bad_lsn(self.tenant_id, src, start_lsn, msg)
+                    .context("Invalid branch start LSN");
+                if !manually_specified_start_lsn {
+                    e.set_kind(TimelineErrorKind::Internal);
+                }
+                return Err(e);
             }
         }
 
@@ -1001,7 +1176,9 @@ impl Tenant {
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
-        let new_timeline = self.create_initialized_timeline(dst, metadata, &mut timelines)?;
+        let new_timeline = self
+            .create_initialized_timeline(dst, metadata, &mut timelines)
+            .map_err(|e| TimelineError::internal(self.tenant_id, dst, e))?;
         info!("branched timeline {dst} from {src} at {start_lsn}");
 
         Ok(new_timeline)
@@ -1013,7 +1190,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
-    ) -> Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, TimelineError> {
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
         let initdb_path = path_with_suffix_extension(
@@ -1024,23 +1201,44 @@ impl Tenant {
         );
 
         // Init temporarily repo to get bootstrap data
-        run_initdb(self.conf, &initdb_path, pg_version)?;
+        run_initdb(self.conf, &initdb_path, pg_version)
+            .with_context(|| {
+                format!(
+                    "Failed to run initdb with directory {}",
+                    initdb_path.display()
+                )
+            })
+            .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
         let pgdata_path = initdb_path;
 
-        let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+        let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)
+            .context("Could not get checkpoint LSN from control file")
+            .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?
+            .align();
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.
         // Initdb lsn will be equal to last_record_lsn which will be set after import.
         // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
         let timeline = self.create_empty_timeline(timeline_id, lsn, pg_version)?;
-        import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
+        import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)
+            .with_context(|| {
+                format!(
+                    "Failed to import timeline data from datadir {}",
+                    pgdata_path.display()
+                )
+            })
+            .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
-            bail!("failpoint before-checkpoint-new-timeline");
+            let msg = anyhow!("failpoint before-checkpoint-new-timeline");
+            Err(TimelineError::internal(self.tenant_id, timeline_id, msg))
         });
 
-        timeline.checkpoint(CheckpointConfig::Forced)?;
+        timeline
+            .checkpoint(CheckpointConfig::Forced)
+            .context("Failed to run checkpoint on timeline")
+            .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
 
         info!(
             "created root timeline {} timeline.lsn {}",
@@ -1049,7 +1247,14 @@ impl Tenant {
         );
 
         // Remove temp dir. We don't need it anymore
-        fs::remove_dir_all(pgdata_path)?;
+        fs::remove_dir_all(&pgdata_path)
+            .with_context(|| {
+                format!(
+                    "Failed to remove bootstrapping temp dir at {}",
+                    pgdata_path.display()
+                )
+            })
+            .map_err(|e| TimelineError::internal(self.tenant_id, timeline_id, e))?;
 
         Ok(timeline)
     }
@@ -1268,10 +1473,12 @@ pub mod harness {
             })
         }
 
+        #[cfg(test)]
         pub fn load(&self) -> Tenant {
             self.try_load().expect("failed to load test tenant")
         }
 
+        #[cfg(test)]
         pub fn try_load(&self) -> Result<Tenant> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
@@ -1404,10 +1611,11 @@ mod tests {
 
         match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION) {
             Ok(_) => panic!("duplicate timeline creation should fail"),
-            Err(e) => assert_eq!(
-                e.to_string(),
-                format!("Timeline {TIMELINE_ID} already exists")
-            ),
+            Err(e) => {
+                assert!(e
+                    .to_string()
+                    .starts_with(&format!("Timeline {TIMELINE_ID} already exists")));
+            }
         }
 
         Ok(())
@@ -1534,12 +1742,18 @@ mod tests {
         match tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
-                assert!(err.to_string().contains("invalid branch start lsn"));
-                assert!(err
-                    .source()
-                    .unwrap()
-                    .to_string()
-                    .contains("we might've already garbage collected needed data"))
+                assert_eq!(err.kind(), TimelineErrorKind::BadLsn);
+                let mut has_matching_mesage = false;
+                let mut source_err = err.source();
+                let msg = "we might've already garbage collected needed data";
+                while let Some(e) = source_err {
+                    has_matching_mesage |= e.to_string().contains(msg);
+                    source_err = e.source();
+                }
+                assert!(
+                    has_matching_mesage,
+                    "expected error message containing {msg:?}"
+                );
             }
         }
 
@@ -1556,12 +1770,18 @@ mod tests {
         match tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
-                assert!(&err.to_string().contains("invalid branch start lsn"));
-                assert!(&err
-                    .source()
-                    .unwrap()
-                    .to_string()
-                    .contains("is earlier than latest GC horizon"));
+                assert_eq!(err.kind(), TimelineErrorKind::BadLsn);
+                let mut has_matching_mesage = false;
+                let mut source_err = err.source();
+                let msg = "is earlier than latest GC horizon";
+                while let Some(e) = source_err {
+                    has_matching_mesage |= e.to_string().contains(msg);
+                    source_err = e.source();
+                }
+                assert!(
+                    has_matching_mesage,
+                    "expected error message containing {msg:?}"
+                );
             }
         }
 

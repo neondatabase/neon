@@ -3,11 +3,12 @@
 
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ffi::OsStr;
+use std::fmt::{self, Display};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
@@ -19,12 +20,14 @@ use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
+    TimelineError, TimelineErrorKind,
 };
 use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
 use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe_dir::{self, path_with_suffix_extension};
+use utils::http::error::ApiError;
 use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
@@ -50,6 +53,159 @@ mod tenants_state {
         TENANTS
             .write()
             .expect("Failed to write() tenants lock, it got poisoned")
+    }
+}
+
+/// Generic error occuring from *some* kind of operation involving a tenant
+#[derive(Debug)]
+pub struct TenantError {
+    kind: TenantErrorKind,
+    // DO NOT USE DIRECTLY. Instead, construct the error with one of the provided methods, so that
+    // we also emit a log message.
+    reason: anyhow::Error,
+}
+
+/// General category of error for a [`TenantError`]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TenantErrorKind {
+    /// We couldn't find the tenant
+    ///
+    /// Errors of this type are logged only at an `Info` level on creation, but a `Warn` level on
+    /// conversion to an [`ApiError`]
+    NotFound,
+
+    /// The tenant already exists
+    ///
+    /// Errors of this type are logged only at an `Info` level on creation, but a `Warn` level on
+    /// conversion to an [`ApiError`]
+    AlreadyExists,
+
+    /// The tenant exists, but is not active
+    ///
+    /// Errors of this type are logged only at an `Info` level on creation, but a `Warn` level on
+    /// conversion to an [`ApiError`]
+    Inactive,
+
+    /// The error occured because of a problem with one of the tenant's timelines
+    ///
+    /// Logging for this error is dependent on the type of error that occured.
+    Timeline(TimelineErrorKind),
+
+    /// An unexpected error occured (indicating a problem on our end)
+    ///
+    /// Errors of this type are logged at an `Error` level on creation and an `Info` level on
+    /// conversion to an [`ApiError`].
+    Internal,
+}
+
+// Forward the Display implementation to the underlying `anyhow::Error`
+impl Display for TenantError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        Display::fmt(&self.reason, f)
+    }
+}
+
+// Forward the Error implementation to the underlying `anyhow::Error`
+//
+// We only need to implement `source` because the other methods are deprecated or unstable.
+impl std::error::Error for TenantError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.reason.source()
+    }
+}
+
+// Allows implicit conversions via `?` from a TimelineError into a TenantError. There isn't any
+// information we need to add because the TimelineError constructors are all given the TenantId
+// anyways.
+impl From<TimelineError> for TenantError {
+    fn from(err: TimelineError) -> Self {
+        TenantError::from_timeline(err)
+    }
+}
+
+impl TenantError {
+    /// Return the general kind of error that occured
+    pub fn kind(&self) -> TenantErrorKind {
+        self.kind
+    }
+
+    /// Converts the `TenantError` into an [`ApiError`], appropriately logging the response
+    ///
+    /// Error kinds are mapped as:
+    /// * `NotFound` becomes [`ApiError::NotFound`]
+    /// * `Inactive` becomes [`ApiError::NotFound`]
+    /// * `Timeline` becomes (TODO)
+    /// * `Internal` becomes [`ApiError::InternalServerError`]
+    pub fn into_api_error(self) -> ApiError {
+        match self.kind {
+            TenantErrorKind::NotFound
+            | TenantErrorKind::Inactive
+            | TenantErrorKind::Timeline(TimelineErrorKind::NotFound) => {
+                warn!("Responding to request with NotFound from tenant error: {self:?}");
+                ApiError::NotFound(self.reason)
+            }
+            TenantErrorKind::AlreadyExists
+            | TenantErrorKind::Timeline(TimelineErrorKind::AlreadyExists) => {
+                warn!("Responding to request with Conflict from tenant error: {self:?}");
+                ApiError::Conflict(self.reason.to_string())
+            }
+            TenantErrorKind::Timeline(TimelineErrorKind::BadLsn)
+            | TenantErrorKind::Timeline(TimelineErrorKind::HasChildrenTimelines) => {
+                warn!("Repsonding to request with BadRequest from tenant error: {self:?}");
+                ApiError::BadRequest(self.reason)
+            }
+            TenantErrorKind::Internal | TenantErrorKind::Timeline(TimelineErrorKind::Internal) => {
+                // We already logged the error when this was created; the follow-up log isn't as
+                // important, so it's `info!` and just gives the outermost error reason.
+                info!("Repsonding to request with InternalServerError from tenant error: {self:?}");
+                ApiError::InternalServerError(self.reason)
+            }
+        }
+    }
+
+    fn not_found(id: TenantId) -> Self {
+        let reason = anyhow!("Tenant {id} not found in the local state");
+        info!("{reason}");
+        TenantError {
+            kind: TenantErrorKind::NotFound,
+            reason,
+        }
+    }
+
+    fn already_exists(id: TenantId) -> Self {
+        let reason = anyhow!("Tenant {id} already exists");
+        info!("{reason}");
+        TenantError {
+            kind: TenantErrorKind::AlreadyExists,
+            reason,
+        }
+    }
+
+    // FIXME: there's more than one reason why a tenant might be inactive (see: TenantState). Maybe
+    // that should be exposed here or through a separate method so that we can better report things
+    // that are more indicative of internal errors.
+    fn inactive(id: TenantId) -> Self {
+        let reason = anyhow!("Tenant {id} is not active");
+        info!("{reason}");
+        TenantError {
+            kind: TenantErrorKind::Inactive,
+            reason,
+        }
+    }
+
+    pub fn internal(err: anyhow::Error) -> Self {
+        error!("{err:?}");
+        TenantError {
+            kind: TenantErrorKind::Internal,
+            reason: err,
+        }
+    }
+
+    fn from_timeline(err: TimelineError) -> Self {
+        TenantError {
+            kind: TenantErrorKind::Timeline(err.kind()),
+            reason: err.reason,
+        }
     }
 }
 
@@ -310,15 +466,14 @@ pub fn create_tenant(
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
     remote_index: RemoteIndex,
-) -> anyhow::Result<Option<TenantId>> {
+) -> Result<TenantId, TenantError> {
     match tenants_state::write_tenants().entry(tenant_id) {
-        hash_map::Entry::Occupied(_) => {
-            debug!("tenant {tenant_id} already exists");
-            Ok(None)
-        }
+        hash_map::Entry::Occupied(_) => Err(TenantError::already_exists(tenant_id)),
         hash_map::Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-            create_tenant_files(conf, tenant_conf, tenant_id)?;
+            create_tenant_files(conf, tenant_conf, tenant_id)
+                .with_context(|| format!("Failed to create files for new tenant {tenant_id}"))
+                .map_err(TenantError::internal)?;
             let tenant = Arc::new(Tenant::new(
                 conf,
                 tenant_conf,
@@ -329,7 +484,7 @@ pub fn create_tenant(
             ));
             tenant.activate(false);
             v.insert(tenant);
-            Ok(Some(tenant_id))
+            Ok(tenant_id)
         }
     }
 }
@@ -338,28 +493,34 @@ pub fn update_tenant_config(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> Result<(), TenantError> {
     info!("configuring tenant {tenant_id}");
     get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);
-    Tenant::persist_tenant_config(&conf.tenant_config_path(tenant_id), tenant_conf, false)?;
+    Tenant::persist_tenant_config(&conf.tenant_config_path(tenant_id), tenant_conf, false)
+        .with_context(|| format!("Failed to persist updated config for tenant {tenant_id}"))
+        .map_err(TenantError::internal)?;
     Ok(())
 }
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-pub fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
+pub fn get_tenant(tenant_id: TenantId, active_only: bool) -> Result<Arc<Tenant>, TenantError> {
     let m = tenants_state::read_tenants();
     let tenant = m
         .get(&tenant_id)
-        .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
+        .ok_or_else(|| TenantError::not_found(tenant_id))?;
     if active_only && !tenant.is_active() {
-        anyhow::bail!("Tenant {tenant_id} is not active")
+        Err(TenantError::inactive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
     }
 }
 
-pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<()> {
+// Returns a `TenantError` so that it handles the case where `tenant_id` is invalid
+pub async fn delete_timeline(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<(), TenantError> {
     // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
     // It is important that we do not take locks here, and do not check whether the timeline exists
     // because if we hold tenants_state::write_tenants() while awaiting for the tasks to join
@@ -381,14 +542,10 @@ pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> an
     info!("waiting for timeline tasks to shutdown");
     task_mgr::shutdown_tasks(None, Some(tenant_id), Some(timeline_id)).await;
     info!("timeline task shutdown completed");
-    match get_tenant(tenant_id, true) {
-        Ok(tenant) => {
-            tenant.delete_timeline(timeline_id)?;
-            if tenant.list_timelines().is_empty() {
-                tenant.activate(false);
-            }
-        }
-        Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
+    let tenant = get_tenant(tenant_id, true)?;
+    tenant.delete_timeline(timeline_id)?;
+    if tenant.list_timelines().is_empty() {
+        tenant.activate(false);
     }
 
     Ok(())
@@ -397,13 +554,13 @@ pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> an
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> Result<(), TenantError> {
     let tenant = match {
         let mut tenants_accessor = tenants_state::write_tenants();
         tenants_accessor.remove(&tenant_id)
     } {
         Some(tenant) => tenant,
-        None => anyhow::bail!("Tenant not found for id {tenant_id}"),
+        None => return Err(TenantError::not_found(tenant_id)),
     };
 
     tenant.set_state(TenantState::Paused);
@@ -417,12 +574,14 @@ pub async fn detach_tenant(
     // we will attempt to remove files which no longer exist. This can be fixed by having shutdown
     // mechanism for tenant that will clean temporary data to avoid any references to ephemeral files
     let local_tenant_directory = conf.tenant_path(&tenant_id);
-    fs::remove_dir_all(&local_tenant_directory).with_context(|| {
-        format!(
-            "Failed to remove local tenant directory '{}'",
-            local_tenant_directory.display()
-        )
-    })?;
+    fs::remove_dir_all(&local_tenant_directory)
+        .with_context(|| {
+            format!(
+                "Failed to remove local tenant directory '{}'",
+                local_tenant_directory.display()
+            )
+        })
+        .map_err(TenantError::internal)?;
 
     Ok(())
 }

@@ -4,7 +4,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("Bad request: {0:#?}")]
+    #[error("Bad request: {0:?}")]
     BadRequest(anyhow::Error),
 
     #[error("Forbidden: {0}")]
@@ -27,7 +27,7 @@ impl ApiError {
     pub fn into_response(self) -> Response<Body> {
         match self {
             ApiError::BadRequest(err) => HttpErrorBody::response_from_msg_and_status(
-                format!("{err:#?}"), // use debug printing so that we give the cause
+                format!("{err:?}"), // use debug printing so that we give the cause
                 StatusCode::BAD_REQUEST,
             ),
             ApiError::Forbidden(_) => {
@@ -44,7 +44,7 @@ impl ApiError {
                 HttpErrorBody::response_from_msg_and_status(self.to_string(), StatusCode::CONFLICT)
             }
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
-                err.to_string(),
+                format!("{err:?}"),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         }

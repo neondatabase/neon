@@ -28,7 +28,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     tenant_id = TenantId.generate()
     with pytest.raises(
         expected_exception=NeonPageserverApiException,
-        match=f"Tenant not found for id {tenant_id}",
+        match=f"Tenant {tenant_id} not found",
     ):
         pageserver_http.tenant_detach(tenant_id)
 
@@ -48,10 +48,11 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     )
 
     # gc should not try to even start
+    bogus_timeline_id = TimelineId.generate()
     with pytest.raises(
-        expected_exception=NeonPageserverApiException, match="gc target timeline does not exist"
+        expected_exception=NeonPageserverApiException,
+        match=f"Timeline {bogus_timeline_id} not found for Tenant {tenant_id}",
     ):
-        bogus_timeline_id = TimelineId.generate()
         pageserver_http.timeline_gc(tenant_id, bogus_timeline_id, 0)
 
     # try to concurrently run gc and detach

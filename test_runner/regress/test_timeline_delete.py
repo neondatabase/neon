@@ -11,7 +11,10 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     # first try to delete non existing timeline
     # for existing tenant:
     invalid_timeline_id = TimelineId.generate()
-    with pytest.raises(NeonPageserverApiException, match="timeline not found"):
+    with pytest.raises(
+        NeonPageserverApiException,
+        match=f"Timeline {invalid_timeline_id} not found for Tenant {env.initial_tenant}",
+    ):
         ps_http.timeline_delete(tenant_id=env.initial_tenant, timeline_id=invalid_timeline_id)
 
     # for non existing tenant:

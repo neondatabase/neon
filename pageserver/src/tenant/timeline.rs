@@ -694,11 +694,11 @@ impl Timeline {
         result
     }
 
-    pub fn launch_wal_receiver(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub fn launch_wal_receiver(self: &Arc<Self>) {
         if !is_etcd_client_initialized() {
             if cfg!(test) {
                 info!("not launching WAL receiver because etcd client hasn't been initialized");
-                return Ok(());
+                return;
             } else {
                 panic!("etcd client not initialized");
             }
@@ -720,15 +720,13 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
         let self_clone = Arc::clone(self);
-        let _ = spawn_connection_manager_task(
+        spawn_connection_manager_task(
             self.conf.broker_etcd_prefix.clone(),
             self_clone,
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
-        )?;
-
-        Ok(())
+        );
     }
 
     ///

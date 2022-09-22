@@ -164,7 +164,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     time.sleep(1.0)
 
     # The starting LSN is invalid as the corresponding record is scheduled to be removed by in-queue GC.
-    with pytest.raises(Exception, match="invalid branch start lsn: .*"):
+    with pytest.raises(Exception, match="Invalid branch start LSN"):
         env.neon_cli.create_branch("b1", "b0", tenant_id=tenant, ancestor_start_lsn=lsn)
 
     thread.join()

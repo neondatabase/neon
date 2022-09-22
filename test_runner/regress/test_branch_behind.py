@@ -95,11 +95,11 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     assert pg.safe_psql("SELECT 1")[0][0] == 1
 
     # branch at pre-initdb lsn
-    with pytest.raises(Exception, match="invalid branch start lsn: .*"):
+    with pytest.raises(Exception, match="Invalid branch start LSN"):
         env.neon_cli.create_branch("test_branch_preinitdb", ancestor_start_lsn=Lsn("0/42"))
 
     # branch at pre-ancestor lsn
-    with pytest.raises(Exception, match="less than timeline ancestor lsn"):
+    with pytest.raises(Exception, match="Start LSN .* less than ancestor timeline's start LSN"):
         env.neon_cli.create_branch(
             "test_branch_preinitdb", "test_branch_behind", ancestor_start_lsn=Lsn("0/42")
         )
@@ -109,7 +109,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
         gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
         print_gc_result(gc_result)
 
-    with pytest.raises(Exception, match="invalid branch start lsn: .*"):
+    with pytest.raises(Exception, match="Invalid branch start LSN"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
         env.neon_cli.create_branch(
             "test_branch_create_fail", "test_branch_behind", ancestor_start_lsn=gced_lsn

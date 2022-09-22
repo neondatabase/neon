@@ -41,7 +41,7 @@ use crate::reltag::RelTag;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
-use crate::tenant_mgr;
+use crate::tenant_mgr::{self, TenantError};
 use crate::CheckpointConfig;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -551,7 +551,7 @@ impl PageServerHandler {
         info!("flushing layers");
         timeline.checkpoint(CheckpointConfig::Flush)?;
 
-        timeline.launch_wal_receiver()?;
+        timeline.launch_wal_receiver();
 
         info!("done");
         Ok(())
@@ -1097,8 +1097,11 @@ impl postgres_backend_async::Handler for PageServerHandler {
     }
 }
 
-fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
-    tenant_mgr::get_tenant(tenant_id, true).and_then(|tenant| tenant.get_timeline(timeline_id))
+fn get_local_timeline(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<Arc<Timeline>, TenantError> {
+    Ok(tenant_mgr::get_tenant(tenant_id, true)?.get_timeline(timeline_id)?)
 }
 
 ///
