@@ -3,11 +3,15 @@
 zenith-us-stage-ps-2 console_region_id=27
 zenith-us-stage-ps-3 console_region_id=27
 zenith-us-stage-ps-4 console_region_id=27
+zenith-us-stage-test-ps-1 console_region_id=28
 
 [safekeepers]
 zenith-us-stage-sk-4 console_region_id=27
 zenith-us-stage-sk-5 console_region_id=27
 zenith-us-stage-sk-6 console_region_id=27
+zenith-us-stage-test-sk-1 console_region_id=28
+zenith-us-stage-test-sk-2 console_region_id=28
+zenith-us-stage-test-sk-3 console_region_id=28
 
 [storage:children]
 pageservers
