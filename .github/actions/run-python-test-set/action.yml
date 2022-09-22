@@ -189,6 +189,15 @@ runs:
         path: /tmp/test_output/test_create_snapshot/compatibility_snapshot_pg14/
         prefix: latest
 
+    - name: Make sure there are no sensitive data in logs
+      env:
+        TEST_OUTPUT: /tmp/test_output
+      shell: bash -euxo pipefail {0}
+      # Most of our JWT tokens start with `eyJ`
+      run: |
+        # Ensure grep of sensitive data from logs fails (configs are ok)
+        ! grep -iR eyJ $TEST_OUTPUT --include="*.log"
+
     - name: Create Allure report
       if: success() || failure()
       uses: ./.github/actions/allure-report
