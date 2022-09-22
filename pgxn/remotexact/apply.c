@@ -10,6 +10,7 @@
 #include "postgres.h"
 
 #include "access/table.h"
+#include "access/tableam.h"
 #include "access/remotexact.h"
 #include "access/xact.h"
 #include "apply.h"
@@ -38,15 +39,30 @@ typedef struct SlotErrCallbackArg
 } SlotErrCallbackArg;
 
 static void apply_handle_insert(StringInfo s, bool skip);
+static void apply_handle_insert_internal(ApplyExecutionData *edata,
+										 ResultRelInfo *relinfo,
+										 TupleTableSlot *remoteslot);
 static void apply_handle_update(StringInfo s, bool skip);
+static void apply_handle_update_internal(ApplyExecutionData *edata,
+										 ResultRelInfo *relinfo,
+										 TupleTableSlot *remoteslot,
+										 LogicalRepTupleData *newtup);
 static void apply_handle_delete(StringInfo s, bool skip);
+static void apply_handle_delete_internal(ApplyExecutionData *edata,
+										 ResultRelInfo *relinfo,
+									     TupleTableSlot *remoteslot);
+static bool FindReplTupleInLocalRel(EState *estate, Relation localrel,
+									TupleTableSlot *remoteslot,
+									TupleTableSlot **localslot);
 static Relation open_relation(LogicalRepRelId relid, LOCKMODE lockmode);
 static void close_relation(Relation rel, LOCKMODE lockmode);
+static void check_relation_updatable(Relation rel);
 static ApplyExecutionData *create_edata_for_relation(Relation rel);
 static void finish_edata(ApplyExecutionData *edata);
-static void slot_store_data(TupleTableSlot *slot,
-                            Relation rel,
+static void slot_store_data(TupleTableSlot *slot, Relation rel,
 				            LogicalRepTupleData *tupleData);
+static void slot_modify_data(TupleTableSlot *slot, TupleTableSlot *srcslot,
+							 Relation rel, LogicalRepTupleData *tupleData);
 
 void
 apply_writes(RWSet *rwset)
@@ -127,31 +143,289 @@ apply_handle_insert(StringInfo s, bool skip)
 	MemoryContextSwitchTo(oldctx);
 
 	/* Unlike logical replication, we never write to a partitioned relation
-	   (but the relation can be  a partition of a partitioned relation), so
-	   we don't need to check whether the relation is partitioned or not. */
+	   (but the written relation can be a partition of a partitioned relation),
+	   so we don't need to check whether the relation is partitioned or not. */
 
-	/* We must open indexes here. */
-	ExecOpenIndices(edata->targetRelInfo, false);
-
-	/* Do the insert. */
-	ExecSimpleRelationInsert(edata->targetRelInfo, edata->estate, remoteslot);
-
-	/* Cleanup. */
-	ExecCloseIndices(edata->targetRelInfo);
+	apply_handle_insert_internal(edata, edata->targetRelInfo, remoteslot);
 
 	finish_edata(edata);
 
 	close_relation(rel, NoLock);
 }
 
+/*
+ * Ported from apply_handle_insert_internal in backend/replication/logical/worker.c
+ */
+static void
+apply_handle_insert_internal(ApplyExecutionData *edata,
+							 ResultRelInfo *relinfo,
+							 TupleTableSlot *remoteslot)
+{
+	EState	   *estate = edata->estate;
+
+	/* We must open indexes here. */
+	ExecOpenIndices(relinfo, false);
+
+	/* Do the insert. */
+	ExecSimpleRelationInsert(relinfo, estate, remoteslot);
+
+	/* Cleanup. */
+	ExecCloseIndices(relinfo);
+}
+
 static void
 apply_handle_update(StringInfo s, bool skip)
 {
+	Relation rel;
+	LogicalRepRelId relid;
+	ApplyExecutionData *edata;
+	EState	   *estate;
+	LogicalRepTupleData oldtup;
+	LogicalRepTupleData newtup;
+	bool		has_oldtup;
+	TupleTableSlot *remoteslot;
+	RangeTblEntry *target_rte;
+	MemoryContext oldctx;
+
+	relid = logicalrep_read_update(s, &has_oldtup, &oldtup,
+								   &newtup);
+
+	if (skip)
+		return;
+
+	rel = open_relation(relid, RowExclusiveLock);
+
+	/* Check if we can do the update. */
+	check_relation_updatable(rel);
+
+	/* Initialize the executor state. */
+	edata = create_edata_for_relation(rel);
+	estate = edata->estate;
+	remoteslot = ExecInitExtraTupleSlot(estate,
+										RelationGetDescr(rel),
+										&TTSOpsVirtual);
+
+	/*
+	 * Populate updatedCols so that per-column triggers can fire, and so
+	 * executor can correctly pass down indexUnchanged hint.  This could
+	 * include more columns than were actually changed on the publisher
+	 * because the logical replication protocol doesn't contain that
+	 * information.  But it would for example exclude columns that only exist
+	 * on the subscriber, since we are not touching those.
+	 */
+	target_rte = list_nth(estate->es_range_table, 0);
+	for (int i = 0; i < remoteslot->tts_tupleDescriptor->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(remoteslot->tts_tupleDescriptor, i);
+
+		if (!att->attisdropped)
+		{
+			if (newtup.colstatus[i] != LOGICALREP_COLUMN_UNCHANGED)
+				target_rte->updatedCols =
+					bms_add_member(target_rte->updatedCols,
+								   i + 1 - FirstLowInvalidHeapAttributeNumber);
+		}
+	}
+
+	/* Also populate extraUpdatedCols, in case we have generated columns */
+	fill_extraUpdatedCols(target_rte, rel);
+
+	/* Build the search tuple. */
+	oldctx = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+	slot_store_data(remoteslot, rel,
+					has_oldtup ? &oldtup : &newtup);
+	MemoryContextSwitchTo(oldctx);
+
+	/* Unlike logical replication, we never write to a partitioned relation
+	   (but the written relation can be a partition of a partitioned relation),
+	   so we don't need to check whether the relation is partitioned or not. */
+
+	apply_handle_update_internal(edata, edata->targetRelInfo, remoteslot, &newtup);
+
+	finish_edata(edata);
+
+	close_relation(rel, NoLock);
+}
+
+/*
+ * Ported from apply_handle_update_internal in backend/replication/logical/worker.c
+ */
+static void
+apply_handle_update_internal(ApplyExecutionData *edata,
+							 ResultRelInfo *relinfo,
+							 TupleTableSlot *remoteslot,
+							 LogicalRepTupleData *newtup)
+{
+	EState	   *estate = edata->estate;
+	Relation	localrel = relinfo->ri_RelationDesc;
+	EPQState	epqstate;
+	TupleTableSlot *localslot;
+	bool		found;
+	MemoryContext oldctx;
+
+	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1);
+	ExecOpenIndices(relinfo, false);
+
+	found = FindReplTupleInLocalRel(estate, localrel,
+									remoteslot, &localslot);
+	ExecClearTuple(remoteslot);
+
+	/*
+	 * Tuple found.
+	 *
+	 * Note this will fail if there are other conflicting unique indexes.
+	 */
+	if (found)
+	{
+		/* Process and store remote tuple in the slot */
+		oldctx = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+		slot_modify_data(remoteslot, localslot, localrel, newtup);
+		MemoryContextSwitchTo(oldctx);
+
+		EvalPlanQualSetSlot(&epqstate, remoteslot);
+
+		/* Do the actual update. */
+		ExecSimpleRelationUpdate(relinfo, estate, &epqstate, localslot,
+								 remoteslot);
+	}
+	else
+	{
+		/*
+		 * The tuple to be updated could not be found. Abort the surrogate
+		 * transaction.
+		 */
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			errmsg("surrogate transaction did not find row to be updated "
+				   "in relation \"%s\"",
+					RelationGetRelationName(localrel))));
+	}
+
+	/* Cleanup. */
+	ExecCloseIndices(relinfo);
+	EvalPlanQualEnd(&epqstate);
 }
 
 static void
 apply_handle_delete(StringInfo s, bool skip)
 {
+	Relation rel;
+	LogicalRepTupleData oldtup;
+	LogicalRepRelId relid;
+	ApplyExecutionData *edata;
+	EState	   *estate;
+	TupleTableSlot *remoteslot;
+	MemoryContext oldctx;
+
+	relid = logicalrep_read_delete(s, &oldtup);
+
+	if (skip)
+		return;
+
+	rel = open_relation(relid, RowExclusiveLock);
+
+	/* Check if we can do the delete. */
+	check_relation_updatable(rel);
+
+	/* Initialize the executor state. */
+	edata = create_edata_for_relation(rel);
+	estate = edata->estate;
+	remoteslot = ExecInitExtraTupleSlot(estate,
+										RelationGetDescr(rel),
+										&TTSOpsVirtual);
+
+	/* Build the search tuple. */
+	oldctx = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+	slot_store_data(remoteslot, rel, &oldtup);
+	MemoryContextSwitchTo(oldctx);
+
+	/* Unlike logical replication, we never write to a partitioned relation
+	   (but the written relation can be a partition of a partitioned relation),
+	   so we don't need to check whether the relation is partitioned or not. */
+
+	apply_handle_delete_internal(edata, edata->targetRelInfo, remoteslot);
+
+	finish_edata(edata);
+
+	close_relation(rel, NoLock);
+}
+
+/*
+ * Ported from apply_handle_delete_internal in backend/replication/logical/worker.c
+ */
+static void
+apply_handle_delete_internal(ApplyExecutionData *edata,
+							 ResultRelInfo *relinfo,
+							 TupleTableSlot *remoteslot)
+{
+	EState	   *estate = edata->estate;
+	Relation	localrel = relinfo->ri_RelationDesc;
+	EPQState	epqstate;
+	TupleTableSlot *localslot;
+	bool		found;
+
+	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1);
+	ExecOpenIndices(relinfo, false);
+
+	found = FindReplTupleInLocalRel(estate, localrel,
+									remoteslot, &localslot);
+
+	/* If found delete it. */
+	if (found)
+	{
+		EvalPlanQualSetSlot(&epqstate, localslot);
+
+		/* Do the actual delete. */
+		ExecSimpleRelationDelete(relinfo, estate, &epqstate, localslot);
+	}
+	else
+	{
+		/*
+		 * The tuple to be deleted could not be found. Abort the surrogate
+		 * transaction.
+		 */
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			errmsg("surrogate transaction did not find row to be deleted "
+				   "in relation \"%s\"",
+					RelationGetRelationName(localrel))));
+	}
+
+	/* Cleanup. */
+	ExecCloseIndices(relinfo);
+	EvalPlanQualEnd(&epqstate);
+}
+
+/*
+ * Ported from FindReplTupleInLocalRel in backend/replication/logical/worker.c
+ */
+static bool
+FindReplTupleInLocalRel(EState *estate, Relation localrel,
+						TupleTableSlot *remoteslot,
+						TupleTableSlot **localslot)
+{
+	Oid			idxoid;
+	bool		found;
+
+	*localslot = table_slot_create(localrel, &estate->es_tupleTable);
+
+	idxoid = RelationGetReplicaIndex(localrel);
+
+	if (!OidIsValid(idxoid))
+		idxoid = RelationGetPrimaryKeyIndex(localrel);
+
+	Assert(OidIsValid(idxoid) ||
+		   (localrel->rd_rel->relreplident == REPLICA_IDENTITY_FULL));
+
+	if (OidIsValid(idxoid))
+		found = RelationFindReplTupleByIndex(localrel, idxoid,
+											 LockTupleExclusive,
+											 remoteslot, *localslot);
+	else
+		found = RelationFindReplTupleSeq(localrel, LockTupleExclusive,
+										 remoteslot, *localslot);
+
+	return found;
 }
 
 /*
@@ -175,6 +449,24 @@ static void
 close_relation(Relation rel, LOCKMODE lockmode)
 {
 	table_close(rel, lockmode);
+}
+
+/*
+ * Ported from check_relation_updatable in backend/replication/logical/worker.c
+ */
+static void
+check_relation_updatable(Relation rel)
+{
+	char	relreplident = rel->rd_rel->relreplident;
+
+	if (relreplident != REPLICA_IDENTITY_DEFAULT &&
+		relreplident != REPLICA_IDENTITY_FULL &&
+		relreplident != REPLICA_IDENTITY_INDEX)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("target relation \"%s\" has neither REPLICA IDENTITY "
+					   "index nor REPLICA IDENTITY FULL",
+						RelationGetRelationName(rel))));
 }
 
 /*
@@ -365,5 +657,102 @@ slot_store_data(TupleTableSlot *slot, Relation rel,
 	/* Pop the error context stack */
 	error_context_stack = errcallback.previous;
 
+	ExecStoreVirtualTuple(slot);
+}
+
+/*
+ * Ported from slot_modify_data in backend/replication/logical/worker.c
+ */
+static void
+slot_modify_data(TupleTableSlot *slot, TupleTableSlot *srcslot,
+				 Relation rel,
+				 LogicalRepTupleData *tupleData)
+{
+	int			natts = slot->tts_tupleDescriptor->natts;
+	int			i;
+	SlotErrCallbackArg errarg;
+	ErrorContextCallback errcallback;
+
+	/* We'll fill "slot" with a virtual tuple, so we must start with ... */
+	ExecClearTuple(slot);
+
+	/*
+	 * Copy all the column data from srcslot, so that we'll have valid values
+	 * for unreplaced columns.
+	 */
+	Assert(natts == srcslot->tts_tupleDescriptor->natts);
+	slot_getallattrs(srcslot);
+	memcpy(slot->tts_values, srcslot->tts_values, natts * sizeof(Datum));
+	memcpy(slot->tts_isnull, srcslot->tts_isnull, natts * sizeof(bool));
+
+	/* For error reporting, push callback + info on the error context stack */
+	errarg.rel = rel;
+	errarg.attnum = -1;
+	errcallback.callback = slot_store_error_callback;
+	errcallback.arg = (void *) &errarg;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+
+	/* Call the "in" function for each replaced attribute */
+	for (i = 0; i < natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, i);
+
+		if (tupleData->colstatus[i] != LOGICALREP_COLUMN_UNCHANGED)
+		{
+			StringInfo	colvalue = &tupleData->colvalues[i];
+
+			errarg.attnum = i;
+
+			if (tupleData->colstatus[i] == LOGICALREP_COLUMN_TEXT)
+			{
+				Oid			typinput;
+				Oid			typioparam;
+
+				getTypeInputInfo(att->atttypid, &typinput, &typioparam);
+				slot->tts_values[i] =
+					OidInputFunctionCall(typinput, colvalue->data,
+										 typioparam, att->atttypmod);
+				slot->tts_isnull[i] = false;
+			}
+			else if (tupleData->colstatus[i] == LOGICALREP_COLUMN_BINARY)
+			{
+				Oid			typreceive;
+				Oid			typioparam;
+
+				/*
+				 * In some code paths we may be asked to re-parse the same
+				 * tuple data.  Reset the StringInfo's cursor so that works.
+				 */
+				colvalue->cursor = 0;
+
+				getTypeBinaryInputInfo(att->atttypid, &typreceive, &typioparam);
+				slot->tts_values[i] =
+					OidReceiveFunctionCall(typreceive, colvalue,
+										   typioparam, att->atttypmod);
+
+				/* Trouble if it didn't eat the whole buffer */
+				if (colvalue->cursor != colvalue->len)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+							 errmsg("incorrect binary data format in logical replication column %d",
+									i + 1)));
+				slot->tts_isnull[i] = false;
+			}
+			else
+			{
+				/* must be LOGICALREP_COLUMN_NULL */
+				slot->tts_values[i] = (Datum) 0;
+				slot->tts_isnull[i] = true;
+			}
+
+			errarg.attnum = -1;
+		}
+	}
+
+	/* Pop the error context stack */
+	error_context_stack = errcallback.previous;
+
+	/* And finally, declare that "slot" contains a valid virtual tuple */
 	ExecStoreVirtualTuple(slot);
 }
