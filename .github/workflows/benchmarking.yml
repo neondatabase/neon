@@ -151,7 +151,7 @@ jobs:
         # neon-captest-new: Run pgbench in a freshly created project
         # neon-captest-reuse: Same, but reusing existing project
         # neon-captest-prefetch: Same, with prefetching enabled (new project)
-        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch, rds-aurora ]
+        platform: [ neon-captest-reuse ]
 
     runs-on: dev
     container:
