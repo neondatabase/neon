@@ -710,8 +710,8 @@ if __name__ == "__main__":
         "--psql-path",
         dest="psql_path",
         required=False,
-        default="/usr/local/bin/psql",
-        help="Path to the psql binary. Default: /usr/local/bin/psql",
+        default="/usr/local/v14/bin/psql",
+        help="Path to the psql binary. Default: /usr/local/v14/bin/psql",
     )
     parser.add_argument(
         "--only-import",
