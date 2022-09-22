@@ -46,7 +46,8 @@ jobs:
     runs-on: [self-hosted, zenith-benchmarker]
 
     env:
-      POSTGRES_DISTRIB_DIR: "/usr/pgsql-14"
+      POSTGRES_DISTRIB_DIR: /tmp/pg_install
+      DEFAULT_PG_VERSION: 14
 
     steps:
     - name: Checkout zenith repo
@@ -71,7 +72,7 @@ jobs:
         echo Poetry
         poetry --version
         echo Pgbench
-        $POSTGRES_DISTRIB_DIR/bin/pgbench --version
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
 
     - name: Create Neon Project
       id: create-neon-project
@@ -140,7 +141,8 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: "10gb"
-      POSTGRES_DISTRIB_DIR: /usr
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
@@ -163,10 +165,17 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    - name: Install Deps
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    - name: Add Postgres binaries to PATH
       run: |
-        sudo apt -y update
-        sudo apt install -y postgresql-14
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
     - name: Create Neon Project
       if: matrix.platform != 'neon-captest-reuse'
