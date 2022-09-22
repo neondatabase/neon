@@ -16,7 +16,7 @@ use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
-use tracing::{debug, error, info, info_span, trace, warn, Instrument};
+use tracing::{debug, error, info, trace, warn};
 
 use super::TaskEvent;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
@@ -112,8 +112,7 @@ pub async fn handle_walreceiver_connection(
                 _ = connection_cancellation.changed() => info!("Connection cancelled"),
             }
             Ok(())
-        }
-        .instrument(info_span!("walreceiver connection")),
+        },
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.
