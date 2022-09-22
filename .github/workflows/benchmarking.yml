@@ -140,7 +140,7 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: "10gb"
-      POSTGRES_DISTRIB_DIR: /usr
+      POSTGRES_DISTRIB_DIR: /tmp/pg_install
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
@@ -200,6 +200,13 @@ jobs:
         psql ${CONNSTR} -c "SELECT version();"
       env:
         PLATFORM: ${{ matrix.platform }}
+
+    - name: Hack psql path
+      run: |
+        mkdir /tmp/pg_install
+        ln -s /usr/ /tmp/pg_install/v14
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Set database options
       if: matrix.platform == 'neon-captest-prefetch'
