@@ -830,6 +830,10 @@ where
         self.epoch_start_lsn = msg.h.epoch_start_lsn;
         self.inmem.proposer_uuid = msg.h.proposer_uuid;
 
+        // bootstrap the decoder, if not yet
+        self.wal_store
+            .init_decoder(self.state.server.pg_version / 10000, self.state.commit_lsn)?;
+
         // do the job
         if !msg.wal_data.is_empty() {
             self.wal_store.write_wal(msg.h.begin_lsn, &msg.wal_data)?;
@@ -986,6 +990,10 @@ mod tests {
     }
 
     impl wal_storage::Storage for DummyWalStore {
+        fn init_decoder(&mut self, _pg_majorversion: u32, _commit_lsn: Lsn) -> Result<()> {
+            Ok(())
+        }
+
         fn flush_lsn(&self) -> Lsn {
             self.lsn
         }

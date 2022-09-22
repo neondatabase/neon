@@ -13,9 +13,7 @@ use std::io::{self, Seek, SeekFrom};
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
-use postgres_ffi::v14::xlog_utils::{
-    IsPartialXLogFileName, IsXLogFileName, XLogFromFileName,
-};
+use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use std::cmp::{max, min};
 
@@ -29,7 +27,6 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::metrics::{time_io_closure, WalStorageMetrics};
 use crate::safekeeper::SafeKeeperState;
-use crate::safekeeper::UNKNOWN_SERVER_VERSION;
 
 use crate::wal_backup::read_object;
 use crate::SafeKeeperConf;
@@ -41,6 +38,8 @@ use postgres_ffi::waldecoder::WalStreamDecoder;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub trait Storage {
+    // Bootstrap the wal decoder with correct pg_version
+    fn init_decoder(&mut self, pg_majorversion: u32, commit_lsn: Lsn) -> Result<()>;
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn;
 
@@ -90,7 +89,8 @@ pub struct PhysicalStorage {
     flush_record_lsn: Lsn,
 
     /// Decoder is required for detecting boundaries of WAL records.
-    decoder: WalStreamDecoder,
+    /// None until it is initialized
+    decoder: Option<WalStreamDecoder>,
 
     /// Cached open file for the last segment.
     ///
@@ -117,7 +117,9 @@ impl PhysicalStorage {
         let write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
-            find_end_of_wal(&timeline_dir, wal_seg_size, state.commit_lsn)?
+            // FIXME What would be the correct value here, if we can not
+            // call find_end_of_wal yet, because we don't know pg_version?
+            state.commit_lsn
         };
 
         // TODO: do we really know that write_lsn is fully flushed to disk?
@@ -140,7 +142,7 @@ impl PhysicalStorage {
             write_lsn,
             write_record_lsn: write_lsn,
             flush_record_lsn: flush_lsn,
-            decoder: WalStreamDecoder::new(write_lsn, UNKNOWN_SERVER_VERSION),
+            decoder: None,
             file: None,
         })
     }
@@ -255,6 +257,42 @@ impl PhysicalStorage {
 }
 
 impl Storage for PhysicalStorage {
+    fn init_decoder(&mut self, pg_majorversion: u32, commit_lsn: Lsn) -> Result<()> {
+        if self.decoder.is_some() {
+            return Ok(());
+        }
+
+        info!(
+            "init_decoder for pg_version {} and commit_lsn {}",
+            pg_majorversion, commit_lsn
+        );
+
+        let write_lsn = match pg_majorversion {
+            14 => postgres_ffi::v14::xlog_utils::find_end_of_wal(
+                &self.timeline_dir,
+                self.wal_seg_size,
+                commit_lsn,
+            )?,
+            15 => postgres_ffi::v15::xlog_utils::find_end_of_wal(
+                &self.timeline_dir,
+                self.wal_seg_size,
+                commit_lsn,
+            )?,
+            _ => bail!("unsupported postgres version"),
+        };
+
+        info!(
+            "init_decoder for pg_version {} and commit_lsn {}. write_lsn = {}",
+            pg_majorversion, commit_lsn, write_lsn
+        );
+
+        self.decoder = Some(WalStreamDecoder::new(write_lsn, pg_majorversion));
+        self.flush_record_lsn = write_lsn;
+        self.write_record_lsn = write_lsn;
+
+        Ok(())
+    }
+
     /// flush_lsn returns LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn
@@ -286,18 +324,18 @@ impl Storage for PhysicalStorage {
 
         // figure out last record's end lsn for reporting (if we got the
         // whole record)
-        if self.decoder.available() != startpos {
+        if self.decoder.as_ref().unwrap().available() != startpos {
             info!(
                 "restart decoder from {} to {}",
-                self.decoder.available(),
+                self.decoder.as_ref().unwrap().available(),
                 startpos,
             );
-            let pg_version = self.decoder.pg_version;
-            self.decoder = WalStreamDecoder::new(startpos, pg_version);
+            let pg_version = self.decoder.as_ref().unwrap().pg_version;
+            self.decoder = Some(WalStreamDecoder::new(startpos, pg_version));
         }
-        self.decoder.feed_bytes(buf);
+        self.decoder.as_mut().unwrap().feed_bytes(buf);
         loop {
-            match self.decoder.poll_decode()? {
+            match self.decoder.as_mut().unwrap().poll_decode()? {
                 None => break, // no full record yet
                 Some((lsn, _rec)) => {
                     self.write_record_lsn = lsn;
