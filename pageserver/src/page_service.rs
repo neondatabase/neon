@@ -1023,6 +1023,9 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(params.len() == 1, "invalid param number for config command");
             let tenant_id = TenantId::from_str(params[0])?;
+
+            self.check_permission(Some(tenant_id))?;
+
             let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
@@ -1067,14 +1070,14 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let caps = re
                 .captures(query_string)
                 .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
-
             let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = get_local_timeline(tenant_id, timeline_id)?;
-
             let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
             let timestamp_pg = to_pg_timestamp(timestamp);
 
+            self.check_permission(Some(tenant_id))?;
+
+            let timeline = get_local_timeline(tenant_id, timeline_id)?;
             pgb.write_message(&BeMessage::RowDescription(&[RowDescriptor::text_col(
                 b"lsn",
             )]))?;
