@@ -58,6 +58,10 @@ pub struct LayerMap {
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
     l0_delta_layers: Vec<Arc<dyn Layer>>,
+    ///
+    /// Low boundary for searching LSN. we guarantee that for any older layer exists newer colvering image layers.
+    ///
+    latest_snapshot_lsn: Lsn,
 }
 
 struct LayerRTreeObject {
@@ -236,7 +240,10 @@ impl LayerMap {
         let mut latest_img: Option<Arc<dyn Layer>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
         let envelope = AABB::from_corners(
-            [IntKey::from(key.to_i128()), IntKey::from(0i128)],
+            [
+                IntKey::from(key.to_i128()),
+                IntKey::from(self.latest_snapshot_lsn.0 as i128),
+            ],
             [
                 IntKey::from(key.to_i128()),
                 IntKey::from(end_lsn.0 as i128 - 1),
@@ -426,7 +433,10 @@ impl LayerMap {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         let envelope = AABB::from_corners(
-            [IntKey::from(key.to_i128()), IntKey::from(0)],
+            [
+                IntKey::from(key.to_i128()),
+                IntKey::from(self.latest_snapshot_lsn.0 as i128),
+            ],
             [IntKey::from(key.to_i128()), IntKey::from(lsn.0 as i128)],
         );
         for e in self
@@ -467,7 +477,10 @@ impl LayerMap {
     ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
         let mut points = vec![key_range.start];
         let envelope = AABB::from_corners(
-            [IntKey::from(key_range.start.to_i128()), IntKey::from(0)],
+            [
+                IntKey::from(key_range.start.to_i128()),
+                IntKey::from(self.latest_snapshot_lsn.0 as i128),
+            ],
             [
                 IntKey::from(key_range.end.to_i128()),
                 IntKey::from(lsn.0 as i128),
@@ -551,6 +564,15 @@ impl LayerMap {
     /// Return all L0 delta layers
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {
         Ok(self.l0_delta_layers.clone())
+    }
+
+    ///
+    /// Update latest snapshot.
+    ///
+    pub fn update_snapshot(&mut self, lsn: Lsn) {
+        if self.latest_snapshot_lsn < lsn {
+            self.latest_snapshot_lsn = lsn;
+        }
     }
 
     /// debugging function to print out the contents of the layer map

@@ -419,6 +419,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<NonZeroU64>())
                 .transpose()
                 .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
+            snapshot_interval: settings
+                .remove("snapshot_interval")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'snapshot_interval' as non zero integer")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -481,6 +486,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
+                snapshot_interval: settings
+                    .get("snapshot_interval")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'snapshot_interval' as non zero integer")?,
             })
             .send()?
             .error_from_body()?;

@@ -487,6 +487,13 @@ impl Timeline {
 
 // Private functions
 impl Timeline {
+    fn get_snapshot_interval(&self) -> u64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .snapshot_interval
+            .unwrap_or(self.conf.default_tenant_conf.snapshot_interval)
+    }
+
     fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -1432,7 +1439,7 @@ impl Timeline {
     // Is it time to create a new image layer for the given partition?
     fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> Result<bool> {
         let layers = self.layers.read().unwrap();
-
+        let snapshot_interval = self.get_snapshot_interval();
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
             for (img_range, last_img) in image_coverage {
@@ -1460,7 +1467,9 @@ impl Timeline {
                         "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
                         img_range.start, img_range.end, num_deltas, img_lsn, lsn
                     );
-                    if num_deltas >= self.get_image_creation_threshold() {
+                    if num_deltas >= self.get_image_creation_threshold()
+                        || (snapshot_interval != 0 && img_lsn + snapshot_interval < lsn)
+                    {
                         return Ok(true);
                     }
                 }
@@ -1524,6 +1533,10 @@ impl Timeline {
                 .current_physical_size_gauge
                 .add(l.path().metadata()?.len());
             layers.insert_historic(Arc::new(l));
+        }
+        let snapshot_interval = self.get_snapshot_interval();
+        if snapshot_interval != 0 && lsn.0 > snapshot_interval {
+            layers.update_snapshot(Lsn(lsn.0 - snapshot_interval));
         }
         drop(layers);
         timer.stop_and_record();

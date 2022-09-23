@@ -514,6 +514,9 @@ impl PageServerConf {
         if let Some(pitr_interval) = item.get("pitr_interval") {
             t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
         }
+        if let Some(pitr_interval) = item.get("pitr_interval") {
+            t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
+        }
         if let Some(walreceiver_connect_timeout) = item.get("walreceiver_connect_timeout") {
             t_conf.walreceiver_connect_timeout = Some(parse_toml_duration(
                 "walreceiver_connect_timeout",
@@ -528,6 +531,10 @@ impl PageServerConf {
         }
         if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
             t_conf.max_lsn_wal_lag = Some(parse_toml_from_str("max_lsn_wal_lag", max_lsn_wal_lag)?);
+        }
+        if let Some(snapshot_interval) = item.get("snapshot_interval") {
+            t_conf.snapshot_interval =
+                Some(parse_toml_from_str("snapshot_interval", snapshot_interval)?);
         }
 
         Ok(t_conf)

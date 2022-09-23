@@ -34,6 +34,7 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
+    pub const DEFAULT_SNAPSHOT_INTERVAL: u64 = 1024 * 1024 * 1024;
 }
 
 /// Per-tenant configuration options
@@ -82,6 +83,8 @@ pub struct TenantConf {
     /// A lagging safekeeper will be changed after `lagging_wal_timeout` time elapses since the last WAL update,
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
+    // Max LSN rage after which snapshot should be created
+    pub snapshot_interval: u64,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -105,6 +108,7 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     pub lagging_wal_timeout: Option<Duration>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+    pub snapshot_interval: Option<u64>,
 }
 
 impl TenantConfOpt {
@@ -138,6 +142,9 @@ impl TenantConfOpt {
                 .lagging_wal_timeout
                 .unwrap_or(global_conf.lagging_wal_timeout),
             max_lsn_wal_lag: self.max_lsn_wal_lag.unwrap_or(global_conf.max_lsn_wal_lag),
+            snapshot_interval: self
+                .snapshot_interval
+                .unwrap_or(global_conf.snapshot_interval),
         }
     }
 
@@ -178,6 +185,9 @@ impl TenantConfOpt {
         if let Some(max_lsn_wal_lag) = other.max_lsn_wal_lag {
             self.max_lsn_wal_lag = Some(max_lsn_wal_lag);
         }
+        if let Some(snapshot_interval) = other.snapshot_interval {
+            self.snapshot_interval = Some(snapshot_interval);
+        }
     }
 }
 
@@ -207,6 +217,7 @@ impl TenantConf {
                 .expect("cannot parse default walreceiver lagging wal timeout"),
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
+            snapshot_interval: DEFAULT_SNAPSHOT_INTERVAL,
         }
     }
 
@@ -232,6 +243,7 @@ impl TenantConf {
             .unwrap(),
             max_lsn_wal_lag: NonZeroU64::new(defaults::DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .unwrap(),
+            snapshot_interval: defaults::DEFAULT_SNAPSHOT_INTERVAL,
         }
     }
 }

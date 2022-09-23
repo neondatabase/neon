@@ -602,6 +602,13 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag)
     }
 
+    pub fn get_snapshot_interval(&self) -> u64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .snapshot_interval
+            .unwrap_or(self.conf.default_tenant_conf.snapshot_interval)
+    }
+
     pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().update(&new_tenant_conf);
     }
@@ -1216,6 +1223,7 @@ pub mod harness {
                 walreceiver_connect_timeout: Some(tenant_conf.walreceiver_connect_timeout),
                 lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
                 max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
+                snapshot_interval: Some(tenant_conf.snapshot_interval),
             }
         }
     }
