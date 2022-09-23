@@ -59,13 +59,16 @@ pub mod block_io;
 mod delta_layer;
 mod disk_btree;
 pub(crate) mod ephemeral_file;
-mod filename;
+pub mod filename;
 mod image_layer;
 mod inmemory_layer;
-mod layer_map;
+pub mod layer_map;
+#[cfg(test)]
+mod layer_map_test;
+
 pub mod metadata;
 mod par_fsync;
-mod storage_layer;
+pub mod storage_layer;
 
 mod timeline;
 

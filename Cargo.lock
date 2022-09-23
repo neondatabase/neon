@@ -1959,6 +1959,7 @@ dependencies = [
  "close_fds",
  "const_format",
  "crc32c",
+ "criterion",
  "crossbeam-utils",
  "daemonize",
  "etcd_broker",
