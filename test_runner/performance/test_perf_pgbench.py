@@ -4,7 +4,7 @@ import os
 import timeit
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, PgBenchInitResult, PgBenchRunResult
@@ -24,14 +24,18 @@ def utc_now_timestamp() -> int:
     return calendar.timegm(datetime.utcnow().utctimetuple())
 
 
-def init_pgbench(env: PgCompare, cmdline):
+def init_pgbench(env: PgCompare, cmdline, password: None):
+    environ: Dict[str, str] = {}
+    if password is not None:
+        environ["PGPASSWORD"] = password
+
     # calculate timestamps and durations separately
     # timestamp is intended to be used for linking to grafana and logs
     # duration is actually a metric and uses float instead of int for timestamp
     start_timestamp = utc_now_timestamp()
     t0 = timeit.default_timer()
     with env.record_pageserver_writes("init.pageserver_writes"):
-        out = env.pg_bin.run_capture(cmdline)
+        out = env.pg_bin.run_capture(cmdline, env=environ)
         env.flush()
 
     duration = timeit.default_timer() - t0
@@ -48,13 +52,15 @@ def init_pgbench(env: PgCompare, cmdline):
     env.zenbenchmark.record_pg_bench_init_result("init", res)
 
 
-def run_pgbench(env: PgCompare, prefix: str, cmdline):
+def run_pgbench(env: PgCompare, prefix: str, cmdline, password: None):
+    environ: Dict[str, str] = {}
+    if password is not None:
+        environ["PGPASSWORD"] = password
+
     with env.record_pageserver_writes(f"{prefix}.pageserver_writes"):
         run_start_timestamp = utc_now_timestamp()
         t0 = timeit.default_timer()
-        out = env.pg_bin.run_capture(
-            cmdline,
-        )
+        out = env.pg_bin.run_capture(cmdline, env=environ)
         run_duration = timeit.default_timer() - t0
         run_end_timestamp = utc_now_timestamp()
         env.flush()
@@ -82,10 +88,14 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline):
 def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: PgBenchLoadType):
     env.zenbenchmark.record("scale", scale, "", MetricReport.TEST_PARAM)
 
+    password = env.pg.default_options.get("password", None)
+    options = "-cstatement_timeout=1h " + env.pg.default_options.get("options", "")
+    # drop password from the connection string by passing password=None and set password separately
+    connstr = env.pg.connstr(password=None, options=options)
+
     if workload_type == PgBenchLoadType.INIT:
         # Run initialize
-        options = "-cstatement_timeout=1h " + env.pg.default_options.get("options", "")
-        init_pgbench(env, ["pgbench", f"-s{scale}", "-i", env.pg.connstr(options=options)])
+        init_pgbench(env, ["pgbench", f"-s{scale}", "-i", connstr], password=password)
 
     if workload_type == PgBenchLoadType.SIMPLE_UPDATE:
         # Run simple-update workload
@@ -99,8 +109,9 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
                 f"-T{duration}",
                 "-P2",
                 "--progress-timestamp",
-                env.pg.connstr(),
+                connstr,
             ],
+            password=password,
         )
 
     if workload_type == PgBenchLoadType.SELECT_ONLY:
@@ -115,8 +126,9 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
                 f"-T{duration}",
                 "-P2",
                 "--progress-timestamp",
-                env.pg.connstr(),
+                connstr,
             ],
+            password=password,
         )
 
     env.report_size()
