@@ -178,6 +178,7 @@ use crate::{
     TenantTimelineValues,
 };
 
+use crate::metrics::{IMAGE_SYNC_COUNT, IMAGE_SYNC_TIME_HISTOGRAM};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 use self::download::download_index_parts;
@@ -835,7 +836,6 @@ async fn process_sync_task_batch(
                             sync_id,
                             upload_data,
                             sync_start,
-                            "upload",
                         )
                         .await
                     }
@@ -879,7 +879,6 @@ async fn process_sync_task_batch(
                             sync_id,
                             download_data,
                             sync_start,
-                            "download",
                         )
                         .await;
                     }
@@ -911,7 +910,6 @@ async fn process_sync_task_batch(
                             sync_id,
                             delete_data,
                             sync_start,
-                            "delete",
                         )
                         .instrument(info_span!("delete_timeline_data"))
                         .await;
@@ -948,8 +946,9 @@ async fn download_timeline_data(
     sync_id: TenantTimelineId,
     new_download_data: SyncData<LayersDownload>,
     sync_start: Instant,
-    task_name: &str,
 ) -> DownloadStatus {
+    static TASK_NAME: &str = "download";
+
     match download_timeline_layers(
         conf,
         storage,
@@ -961,19 +960,19 @@ async fn download_timeline_data(
     .await
     {
         DownloadedTimeline::Abort => {
-            register_sync_status(sync_id, sync_start, task_name, None);
+            register_sync_status(sync_id, sync_start, TASK_NAME, None);
             if let Err(e) = index.write().await.set_awaits_download(&sync_id, false) {
                 error!("Timeline {sync_id} was expected to be in the remote index after a download attempt, but it's absent: {e:?}");
             }
         }
         DownloadedTimeline::FailedAndRescheduled => {
-            register_sync_status(sync_id, sync_start, task_name, Some(false));
+            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
         }
         DownloadedTimeline::Successful(mut download_data) => {
             match update_local_metadata(conf, sync_id, current_remote_timeline).await {
                 Ok(()) => match index.write().await.set_awaits_download(&sync_id, false) {
                     Ok(()) => {
-                        register_sync_status(sync_id, sync_start, task_name, Some(true));
+                        register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
                         return DownloadStatus::Downloaded;
                     }
                     Err(e) => {
@@ -984,7 +983,7 @@ async fn download_timeline_data(
                     error!("Failed to update local timeline metadata: {e:?}");
                     download_data.retries += 1;
                     sync_queue.push(sync_id, SyncTask::Download(download_data));
-                    register_sync_status(sync_id, sync_start, task_name, Some(false));
+                    register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
                 }
             }
         }
@@ -1060,8 +1059,9 @@ async fn delete_timeline_data(
     sync_id: TenantTimelineId,
     mut new_delete_data: SyncData<LayersDeletion>,
     sync_start: Instant,
-    task_name: &str,
 ) {
+    static TASK_NAME: &str = "delete";
+
     let timeline_delete = &mut new_delete_data.data;
 
     if !timeline_delete.deletion_registered {
@@ -1077,14 +1077,14 @@ async fn delete_timeline_data(
             error!("Failed to update remote timeline {sync_id}: {e:?}");
             new_delete_data.retries += 1;
             sync_queue.push(sync_id, SyncTask::Delete(new_delete_data));
-            register_sync_status(sync_id, sync_start, task_name, Some(false));
+            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
             return;
         }
     }
     timeline_delete.deletion_registered = true;
 
     let sync_status = delete_timeline_layers(storage, sync_queue, sync_id, new_delete_data).await;
-    register_sync_status(sync_id, sync_start, task_name, Some(sync_status));
+    register_sync_status(sync_id, sync_start, TASK_NAME, Some(sync_status));
 }
 
 async fn read_metadata_file(metadata_path: &Path) -> anyhow::Result<TimelineMetadata> {
@@ -1103,8 +1103,8 @@ async fn upload_timeline_data(
     sync_id: TenantTimelineId,
     new_upload_data: SyncData<LayersUpload>,
     sync_start: Instant,
-    task_name: &str,
 ) -> UploadStatus {
+    static TASK_NAME: &str = "upload";
     let mut uploaded_data = match upload_timeline_layers(
         storage,
         sync_queue,
@@ -1115,7 +1115,7 @@ async fn upload_timeline_data(
     .await
     {
         UploadedTimeline::FailedAndRescheduled(e) => {
-            register_sync_status(sync_id, sync_start, task_name, Some(false));
+            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
             return UploadStatus::Failed(e);
         }
         UploadedTimeline::Successful(upload_data) => upload_data,
@@ -1134,14 +1134,14 @@ async fn upload_timeline_data(
     .await
     {
         Ok(()) => {
-            register_sync_status(sync_id, sync_start, task_name, Some(true));
+            register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
             UploadStatus::Uploaded
         }
         Err(e) => {
             error!("Failed to update remote timeline {sync_id}: {e:?}");
             uploaded_data.retries += 1;
             sync_queue.push(sync_id, SyncTask::Upload(uploaded_data));
-            register_sync_status(sync_id, sync_start, task_name, Some(false));
+            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
             UploadStatus::Failed(e)
         }
     }
@@ -1391,16 +1391,22 @@ fn register_sync_status(
 
     let tenant_id = sync_id.tenant_id.to_string();
     let timeline_id = sync_id.timeline_id.to_string();
-    match sync_status {
-        Some(true) => {
-            IMAGE_SYNC_TIME.with_label_values(&[&tenant_id, &timeline_id, sync_name, "success"])
-        }
-        Some(false) => {
-            IMAGE_SYNC_TIME.with_label_values(&[&tenant_id, &timeline_id, sync_name, "failure"])
-        }
-        None => return,
-    }
-    .observe(secs_elapsed)
+
+    let sync_status = match sync_status {
+        Some(true) => "success",
+        Some(false) => "failure",
+        None => "abort",
+    };
+
+    IMAGE_SYNC_TIME_HISTOGRAM
+        .with_label_values(&[sync_name, sync_status])
+        .observe(secs_elapsed);
+    IMAGE_SYNC_TIME
+        .with_label_values(&[&tenant_id, &timeline_id])
+        .add(secs_elapsed);
+    IMAGE_SYNC_COUNT
+        .with_label_values(&[&tenant_id, &timeline_id, sync_name, sync_status])
+        .inc();
 }
 
 #[cfg(test)]
