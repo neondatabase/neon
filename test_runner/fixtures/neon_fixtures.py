@@ -283,6 +283,10 @@ class PgProtocol:
         return str(make_dsn(**self.conn_options(**kwargs)))
 
     def conn_options(self, **kwargs):
+        """
+        Construct a dictionary of connection options from default values and extra parameters.
+        An option can be dropped from the returning dictionary by None-valued extra parameter.
+        """
         result = self.default_options.copy()
         if "dsn" in kwargs:
             result.update(parse_dsn(kwargs["dsn"]))

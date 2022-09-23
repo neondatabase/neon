@@ -90,6 +90,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
 
     password = env.pg.default_options.get("password", None)
     options = "-cstatement_timeout=1h " + env.pg.default_options.get("options", "")
+    # drop password from the connection string by passing password=None and set password separately
     connstr = env.pg.connstr(password=None, options=options)
 
     if workload_type == PgBenchLoadType.INIT:
