@@ -588,7 +588,16 @@ jobs:
       - name: Pull rust image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
 
-      - name: Configure docker login
+      - name: Push images to production ECR
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.event_name != 'workflow_dispatch'
+        run: |
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID 093970136003.dkr.ecr.us-east-2.amazonaws.com/neon:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID 093970136003.dkr.ecr.us-east-2.amazonaws.com/compute-tools:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID 093970136003.dkr.ecr.us-east-2.amazonaws.com/compute-node:latest
+
+      - name: Configure Docker Hub login
         run: |
           # ECR Credential Helper & Docker Hub don't work together in config, hence reset
           echo "" > /github/home/.docker/config.json
@@ -609,7 +618,7 @@ jobs:
       - name: Push rust image to Docker Hub
         run: crane push rust neondatabase/rust:pinned
 
-      - name: Add latest tag to images
+      - name: Add latest tag to images in Docker Hub
         if: |
           (github.ref_name == 'main' || github.ref_name == 'release') &&
           github.event_name != 'workflow_dispatch'
