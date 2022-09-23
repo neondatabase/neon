@@ -2,7 +2,7 @@
 
 use std::time::{Instant, SystemTime};
 
-use ::metrics::{register_histogram, GaugeVec, Histogram, DISK_WRITE_SECONDS_BUCKETS};
+use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_WRITE_SECONDS_BUCKETS};
 use anyhow::Result;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericGaugeVec, Opts},
@@ -135,6 +135,7 @@ pub struct TimelineCollector {
     written_wal_seconds: GaugeVec,
     flushed_wal_seconds: GaugeVec,
     collect_timeline_metrics: Gauge,
+    timelines_count: IntGauge,
 }
 
 impl Default for TimelineCollector {
@@ -311,6 +312,13 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(collect_timeline_metrics.desc().into_iter().cloned());
 
+        let timelines_count = IntGauge::new(
+            "safekeeper_timelines",
+            "Total number of timelines loaded in-memory",
+        )
+        .unwrap();
+        descs.extend(timelines_count.desc().into_iter().cloned());
+
         TimelineCollector {
             descs,
             commit_lsn,
@@ -330,6 +338,7 @@ impl TimelineCollector {
             written_wal_seconds,
             flushed_wal_seconds,
             collect_timeline_metrics,
+            timelines_count,
         }
     }
 }
@@ -361,6 +370,7 @@ impl Collector for TimelineCollector {
         self.flushed_wal_seconds.reset();
 
         let timelines = GlobalTimelines::get_all();
+        let timelines_count = timelines.len();
 
         for arc_tli in timelines {
             let tli = arc_tli.info_for_metrics();
@@ -473,6 +483,10 @@ impl Collector for TimelineCollector {
         let elapsed = start_collecting.elapsed().as_secs_f64();
         self.collect_timeline_metrics.set(elapsed);
         mfs.extend(self.collect_timeline_metrics.collect());
+
+        // report total number of timelines
+        self.timelines_count.set(timelines_count as i64);
+        mfs.extend(self.timelines_count.collect());
 
         mfs
     }
