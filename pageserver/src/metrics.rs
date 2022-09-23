@@ -434,6 +434,14 @@ impl Drop for TimelineMetrics {
         for op in SMGR_QUERY_TIME_OPERATIONS {
             let _ = SMGR_QUERY_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
         }
+
+        for op in IMAGE_SYNC_OPERATION_KINDS {
+            for status in IMAGE_SYNC_STATUS {
+                let _ = IMAGE_SYNC_COUNT.remove_label_values(&[tenant_id, timeline_id, op, status]);
+            }
+        }
+
+        let _ = IMAGE_SYNC_TIME.remove_label_values(&[tenant_id, timeline_id]);
     }
 }
 
