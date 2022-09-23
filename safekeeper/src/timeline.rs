@@ -314,6 +314,8 @@ impl Timeline {
         ttid: TenantTimelineId,
         wal_backup_launcher_tx: Sender<TenantTimelineId>,
     ) -> Result<Timeline> {
+        let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
+
         let shared_state = SharedState::restore(&conf, &ttid)?;
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state.commit_lsn);

@@ -249,6 +249,18 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
         oldstate.local_start_lsn = Lsn(1);
 
         return Ok(oldstate);
+    } else if version == 6 {
+        info!("reading safekeeper control file version {}", version);
+        let mut oldstate = SafeKeeperState::des(&buf[..buf.len()])?;
+        if oldstate.server.pg_version != 0 {
+            return Ok(oldstate);
+        }
+
+        // set pg_version to the default v14
+        info!("setting pg_version to 140005");
+        oldstate.server.pg_version = 140005;
+
+        return Ok(oldstate);
     }
     bail!("unsupported safekeeper control file version {}", version)
 }

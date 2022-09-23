@@ -25,7 +25,7 @@ use utils::{
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 6;
+pub const SK_FORMAT_VERSION: u32 = 7;
 const SK_PROTOCOL_VERSION: u32 = 2;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 
@@ -639,7 +639,6 @@ where
 
             let mut state = self.state.clone();
             state.server.system_id = msg.system_id;
-            state.server.wal_seg_size = msg.wal_seg_size;
             if msg.pg_version != UNKNOWN_SERVER_VERSION {
                 state.server.pg_version = msg.pg_version;
             }
