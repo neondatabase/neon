@@ -33,6 +33,7 @@ toml_edit = { version = "0.13", features = ["easy"] }
 thiserror = "1"
 parking_lot = "0.12.1"
 
+safekeeper_api = { path = "../libs/safekeeper_api" }
 postgres_ffi = { path = "../libs/postgres_ffi" }
 metrics = { path = "../libs/metrics" }
 utils = { path = "../libs/utils" }
