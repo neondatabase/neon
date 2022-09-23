@@ -109,3 +109,9 @@ pub fn page_set_lsn(pg: &mut [u8], lsn: Lsn) {
     pg[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
     pg[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
 }
+
+pub fn page_set_visible(pg: &mut [u8]) {
+    let mut flags = u16::from_le_bytes(pg[10..12].try_into().unwrap());
+    flags |= v14::pg_constants::PD_ALL_VISIBLE;
+    pg[10..12].copy_from_slice(&flags.to_le_bytes());
+}

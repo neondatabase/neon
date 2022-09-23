@@ -12,9 +12,12 @@ use crate::tenant::block_io::BlockReader;
 use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use crate::walrecord;
+use crate::walrecord::{self, NeonWalRecord};
 use crate::walredo::WalRedoManager;
 use anyhow::{bail, ensure, Result};
+use bytes::{Bytes, BytesMut};
+use postgres_ffi::page_set_visible;
+use postgres_ffi::v14::{pg_constants, XLogRecord};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -359,32 +362,81 @@ impl InMemoryLayer {
 
         let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
         keys.sort_by_key(|k| k.0);
+        let mut n_gen_images: usize = 0;
+        let mut n_inlined_visible: usize = 0;
+        let mut n_records: usize = 0;
         for (key, vec_map) in keys.iter() {
             let key = **key;
             // Write all page versions
+            let mut gen_image: Option<Bytes> = None;
+            let mut gen_image_lsn: Option<Lsn> = None;
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf)?;
                 let value = Value::des(&buf)?;
                 let will_init = value.will_init();
-
-                // If record is large enough (i.e. MULTIINSERT) it may be reasonable to reconstruct correspondent
+                n_records += 1;
+                // COPY generates pairs of MULTI_INSERT+INIT and VISIBLE records.
+                // If we replace MULTI_INSERT with page image, we can just set ALL_VISIBLE bit directly.
+                if let Some(img) = gen_image {
+                    gen_image = None;
+                    if let Value::WalRecord(wal_rec) = &value {
+                        if let NeonWalRecord::Postgres { will_init: _, rec } = &wal_rec {
+                            let xlogrec = XLogRecord::from_bytes(&mut rec.clone())?;
+                            if xlogrec.xl_rmid == pg_constants::RM_HEAP2_ID
+                                && (xlogrec.xl_info & pg_constants::XLOG_HEAP_OPMASK)
+                                    == pg_constants::XLOG_HEAP2_VISIBLE
+                            {
+                                let mut pg = BytesMut::from(&img[..]);
+                                page_set_visible(&mut pg);
+                                delta_layer_writer.put_value_bytes(
+                                    key,
+                                    gen_image_lsn.unwrap(),
+                                    &Value::Image(pg.freeze()).ser()?,
+                                    true,
+                                )?;
+                                n_inlined_visible += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    delta_layer_writer.put_value_bytes(
+                        key,
+                        gen_image_lsn.unwrap(),
+                        &Value::Image(img).ser()?,
+                        true,
+                    )?;
+                }
+                // If record is large enough (i.e. MULTI_INSERT) it may be reasonable to reconstruct correspondent
                 // page image and store it instead of original WAL record to avoid page recostruction overhead
-                // on subsequent get_page_at_lsn()
+                // at subsequent get_page_at_lsn()
                 if will_init && buf.len() > WAL_RECORD_RECONSTURCT_THRESHOLD {
-                    if let Value::WalRecord(rec) = value {
-                        let img = walredo_mgr.request_redo(key, *lsn, None, vec![(*lsn, rec)])?;
-                        delta_layer_writer.put_value_bytes(
+                    if let Value::WalRecord(wal_rec) = value {
+                        gen_image = Some(walredo_mgr.request_redo(
                             key,
                             *lsn,
-                            &Value::Image(img).ser()?,
-                            true,
-                        )?;
+                            None,
+                            vec![(*lsn, wal_rec)],
+                        )?);
+                        gen_image_lsn = Some(*lsn);
+                        n_gen_images += 1;
                         continue;
                     }
                 }
                 delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
             }
+            if let Some(img) = gen_image {
+                delta_layer_writer.put_value_bytes(
+                    key,
+                    gen_image_lsn.unwrap(),
+                    &Value::Image(img).ser()?,
+                    true,
+                )?;
+            }
         }
+        info!(
+            "Create delta layer: {} records, {} generated images, {} inlined visible",
+            n_records, n_gen_images, n_inlined_visible
+        );
         let delta_layer = delta_layer_writer.finish(Key::MAX)?;
         Ok(delta_layer)
     }

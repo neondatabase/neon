@@ -35,6 +35,7 @@ pub const SMGR_TRUNCATE_FSM: u32 = 0x0004;
 //
 // From bufpage.h
 //
+pub const PD_ALL_VISIBLE: u16 = 0x0004u16;
 
 // Assumes 8 byte alignment
 const SIZEOF_PAGE_HEADER_DATA: usize = std::mem::size_of::<PageHeaderData>();
