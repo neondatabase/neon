@@ -17,7 +17,6 @@ use tracing::*;
 use utils::crashsafe_dir::path_with_suffix_extension;
 
 use std::cmp::min;
-use std::collections::hash_map;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -246,12 +245,12 @@ impl Tenant {
                     let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                     if ancestor_ancestor_lsn > *lsn {
                         // can we safely just branch from the ancestor instead?
-                        anyhow::bail!(
-                    "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
-                    lsn,
-                    ancestor_timeline_id,
-                    ancestor_ancestor_lsn,
-                );
+                        bail!(
+                            "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
+                            lsn,
+                            ancestor_timeline_id,
+                            ancestor_ancestor_lsn,
+                        );
                     }
                 }
 
@@ -406,11 +405,11 @@ impl Tenant {
                 .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
 
             match timelines_accessor.entry(timeline.timeline_id) {
-                hash_map::Entry::Occupied(_) => anyhow::bail!(
+                Entry::Occupied(_) => bail!(
                     "Found freshly initialized timeline {} in the tenant map",
                     timeline.timeline_id
                 ),
-                hash_map::Entry::Vacant(v) => {
+                Entry::Vacant(v) => {
                     v.insert(timeline);
                 }
             }
@@ -768,7 +767,7 @@ impl Tenant {
                 })
                 .with_context(|| {
                     format!(
-                        "Failed to fsync on firts save for config {}",
+                        "Failed to fsync on first save for config {}",
                         target_config_path.display()
                     )
                 })?;
@@ -1091,11 +1090,11 @@ impl Tenant {
             })?;
 
         match timelines.entry(new_timeline_id) {
-            hash_map::Entry::Occupied(_) => anyhow::bail!(
+            Entry::Occupied(_) => bail!(
                 "Found freshly initialized timeline {} in the tenant map",
                 new_timeline_id
             ),
-            hash_map::Entry::Vacant(v) => {
+            Entry::Vacant(v) => {
                 v.insert(Arc::clone(&new_timeline));
             }
         }

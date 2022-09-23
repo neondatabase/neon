@@ -343,7 +343,9 @@ impl Timeline {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
                     Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
-                    Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
+                    Ordering::Greater => {
+                        unreachable!("the returned lsn should never be after the requested lsn")
+                    }
                 }
                 Some((cached_lsn, cached_img))
             }
@@ -726,10 +728,10 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn layer_removal_guard(&self) -> Result<MutexGuard<()>, anyhow::Error> {
+    pub fn layer_removal_guard(&self) -> anyhow::Result<MutexGuard<()>> {
         self.layer_removal_cs
             .try_lock()
-            .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
+            .map_err(|e| anyhow!("cannot lock compaction critical section {e}"))
     }
 
     /// Retrieve current logical size of the timeline.
