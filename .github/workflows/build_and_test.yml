@@ -589,9 +589,9 @@ jobs:
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
 
       - name: Push images to production ECR
-          #if: |
-        #(github.ref_name == 'main' || github.ref_name == 'release') &&
-        #github.event_name != 'workflow_dispatch'
+        if: |
+        (github.ref_name == 'main' || github.ref_name == 'release') &&
+        github.event_name != 'workflow_dispatch'
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID 093970136003.dkr.ecr.us-east-2.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID 093970136003.dkr.ecr.us-east-2.amazonaws.com/compute-tools:latest
