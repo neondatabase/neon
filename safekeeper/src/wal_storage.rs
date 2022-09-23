@@ -111,6 +111,10 @@ impl PhysicalStorage {
 
         // Find out where stored WAL ends, starting at commit_lsn which is a
         // known recent record boundary (unless we don't have WAL at all).
+        //
+        // NB: find_end_of_wal MUST be backwards compatible with the previously
+        // written WAL. If find_end_of_wal fails to read any WAL written by an
+        // older version of the code, we could lose data forever.
         let write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
@@ -125,17 +129,7 @@ impl PhysicalStorage {
                     wal_seg_size,
                     state.commit_lsn,
                 )?,
-                pg_majorversion => {
-                    // This is a quik hack to work with old timelines that don't have
-                    // pg_version in the control file. We can remove it after this is fixed properly.
-                    const DEFAULT_PG_MAJOR_VERSION: u32 = 14;
-                    warn!("unknown postgres version {pg_majorversion} assume {DEFAULT_PG_MAJOR_VERSION}");
-                    postgres_ffi::v14::xlog_utils::find_end_of_wal(
-                        &timeline_dir,
-                        wal_seg_size,
-                        state.commit_lsn,
-                    )?
-                }
+                _ => bail!("unsupported postgres version: {}", state.server.pg_version),
             }
         };
 
