@@ -24,8 +24,8 @@ tar -xzf postgres_install.tar.gz -C neon_install
 docker cp ${ID}:/usr/local/bin/pageserver neon_install/bin/
 docker cp ${ID}:/usr/local/bin/safekeeper neon_install/bin/
 docker cp ${ID}:/usr/local/bin/proxy neon_install/bin/
-docker cp ${ID}:/usr/local/v14/bin/postgres neon_install/bin/v14
-docker cp ${ID}:/usr/local/v15/bin/postgres neon_install/bin/v15
+docker cp ${ID}:/usr/local/v14/bin/ neon_install/v14/bin/
+docker cp ${ID}:/usr/local/v15/bin/ neon_install/v15/bin/
 docker rm -vf ${ID}
 
 # store version to file (for ansible playbooks) and create binaries tarball
