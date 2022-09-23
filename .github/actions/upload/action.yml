@@ -7,6 +7,9 @@ inputs:
   path:
     description: "A directory or file to upload"
     required: true
+  prefix:
+    description: "S3 prefix. Default is '${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
+    required: false
 
 runs:
   using: "composite"
@@ -42,14 +45,14 @@ runs:
       env:
         SOURCE: ${{ inputs.path }}
         ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+        PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}', github.run_id, github.run_attempt) }}
       run: |
         BUCKET=neon-github-public-dev
-        PREFIX=artifacts/${GITHUB_RUN_ID}
         FILENAME=$(basename $ARCHIVE)
 
         FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
 
-        time aws s3 mv --only-show-errors ${ARCHIVE} s3://${BUCKET}/${PREFIX}/${GITHUB_RUN_ATTEMPT}/${FILENAME}
+        time aws s3 mv --only-show-errors ${ARCHIVE} s3://${BUCKET}/${PREFIX}/${FILENAME}
 
         # Ref https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary
-        echo "[${FILENAME}](https://${BUCKET}.s3.amazonaws.com/${PREFIX}/${GITHUB_RUN_ATTEMPT}/${FILENAME}) ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}
+        echo "[${FILENAME}](https://${BUCKET}.s3.amazonaws.com/${PREFIX}/${FILENAME}) ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}

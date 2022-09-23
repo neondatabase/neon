@@ -127,7 +127,7 @@ runs:
 
         # Wake up the cluster if we use remote neon instance
         if [ "${{ inputs.build_type }}" = "remote" ] && [ -n "${BENCHMARK_CONNSTR}" ]; then
-          ${POSTGRES_DISTRIB_DIR}/v{$DEFAULT_PG_VERSION}/bin/psql ${BENCHMARK_CONNSTR} -c "SELECT version();"
+          ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/psql ${BENCHMARK_CONNSTR} -c "SELECT version();"
         fi
 
         # Run the tests.
