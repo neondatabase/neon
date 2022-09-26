@@ -34,14 +34,14 @@ class PasswordFilter(logging.Filter):
     """Filter out password from logs."""
 
     # Good enough to filter our passwords produced by PgProtocol.connstr
-    FILTER = re.compile(r"(\s*)password=[^\s]+(\s*)")
+    FILTER: re.Pattern = re.compile(r"(\s*)password=[^\s]+(\s*)")  # type: ignore[type-arg]
 
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = self.FILTER.sub(r"\1password=<hidden>\2", str(record.msg))
         return True
 
 
-def getLogger(name="root") -> logging.Logger:
+def getLogger(name: str = "root") -> logging.Logger:
     """Method to get logger for tests.
 
     Should be used to get correctly initialized logger."""

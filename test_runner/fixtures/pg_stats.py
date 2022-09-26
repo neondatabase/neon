@@ -1,21 +1,30 @@
-from typing import List
+from typing import List, Tuple
 
 import pytest
 
 
 class PgStatTable:
+    __slots__: Tuple[str, ...] = (
+        "table",
+        "columns",
+        "additional_query",
+        "_query",
+    )
+
     table: str
     columns: List[str]
     additional_query: str
+    _query: str
 
     def __init__(self, table: str, columns: List[str], filter_query: str = ""):
         self.table = table
         self.columns = columns
         self.additional_query = filter_query
+        self._query = f"SELECT {','.join(self.columns)} FROM {self.table} {self.additional_query}"
 
     @property
     def query(self) -> str:
-        return f"SELECT {','.join(self.columns)} FROM {self.table} {self.additional_query}"
+        return self._query
 
 
 @pytest.fixture(scope="function")
@@ -55,6 +64,5 @@ def pg_stats_wal() -> List[PgStatTable]:
         PgStatTable(
             "pg_stat_wal",
             ["wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write"],
-            "",
         )
     ]
