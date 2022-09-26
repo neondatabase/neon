@@ -16,10 +16,10 @@ use std::{
     time::Duration,
 };
 
-use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
 use crate::tenant::Timeline;
+use crate::{task_mgr, walreceiver::TaskStateUpdate};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use etcd_broker::{
@@ -145,19 +145,26 @@ async fn connection_manager_loop_step(
                 let wal_connection = walreceiver_state.wal_connection.as_mut()
                     .expect("Should have a connection, as checked by the corresponding select! guard");
                 match wal_connection_update {
-                    TaskEvent::Started => {},
-                    TaskEvent::NewEvent(status) => {
-                        if status.has_processed_wal {
-                            // We have advanced last_record_lsn by processing the WAL received
-                            // from this safekeeper. This is good enough to clean unsuccessful
-                            // retries history and allow reconnecting to this safekeeper without
-                            // sleeping for a long time.
-                            walreceiver_state.wal_connection_retries.remove(&wal_connection.sk_id);
+                    TaskEvent::Update(c) => {
+                        match c {
+                            TaskStateUpdate::Init | TaskStateUpdate::Started => {},
+                            TaskStateUpdate::Progress(status) => {
+                                if status.has_processed_wal {
+                                    // We have advanced last_record_lsn by processing the WAL received
+                                    // from this safekeeper. This is good enough to clean unsuccessful
+                                    // retries history and allow reconnecting to this safekeeper without
+                                    // sleeping for a long time.
+                                    walreceiver_state.wal_connection_retries.remove(&wal_connection.sk_id);
+                                }
+                                wal_connection.status = status.to_owned();
+                            }
                         }
-                        wal_connection.status = status;
                     },
-                    TaskEvent::End => {
-                        debug!("WAL receiving task finished");
+                    TaskEvent::End(walreceiver_task_result) => {
+                        match walreceiver_task_result {
+                            Ok(()) => debug!("WAL receiving task finished"),
+                            Err(e) => error!("wal receiver task finished with an error: {e:?}"),
+                        }
                         walreceiver_state.drop_old_connection(false).await;
                     },
                 }
@@ -363,13 +370,13 @@ impl WalreceiverState {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
-                    &new_wal_source_connstr,
-                    events_sender.as_ref(),
+                    new_wal_source_connstr,
+                    events_sender,
                     cancellation,
                     connect_timeout,
                 )
                 .await
-                .map_err(|e| format!("walreceiver connection handling failure: {e:#}"))
+                .context("walreceiver connection handling failure")
             }
             .instrument(info_span!("walreceiver_connection", id = %id))
         });
@@ -885,7 +892,7 @@ mod tests {
             status: connection_status.clone(),
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
-                    .send(TaskEvent::NewEvent(connection_status.clone()))
+                    .send(TaskStateUpdate::Progress(connection_status.clone()))
                     .ok();
                 Ok(())
             }),
@@ -1145,7 +1152,7 @@ mod tests {
             status: connection_status.clone(),
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
-                    .send(TaskEvent::NewEvent(connection_status.clone()))
+                    .send(TaskStateUpdate::Progress(connection_status.clone()))
                     .ok();
                 Ok(())
             }),
@@ -1233,7 +1240,7 @@ mod tests {
             status: connection_status.clone(),
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
-                    .send(TaskEvent::NewEvent(connection_status.clone()))
+                    .send(TaskStateUpdate::Progress(connection_status.clone()))
                     .ok();
                 Ok(())
             }),

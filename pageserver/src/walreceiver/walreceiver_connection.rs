@@ -18,8 +18,7 @@ use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tracing::{debug, error, info, trace, warn};
 
-use super::TaskEvent;
-use crate::metrics::LIVE_CONNECTIONS_COUNT;
+use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
 use crate::{
     task_mgr,
     task_mgr::TaskKind,
@@ -55,8 +54,8 @@ pub struct WalConnectionStatus {
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
-    wal_source_connstr: &str,
-    events_sender: &watch::Sender<TaskEvent<WalConnectionStatus>>,
+    wal_source_connstr: String,
+    events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
@@ -81,7 +80,7 @@ pub async fn handle_walreceiver_connection(
         streaming_lsn: None,
         commit_lsn: None,
     };
-    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
         return Ok(());
     }
@@ -133,7 +132,7 @@ pub async fn handle_walreceiver_connection(
     connection_status.latest_connection_update = Utc::now().naive_utc();
     connection_status.latest_wal_update = Utc::now().naive_utc();
     connection_status.commit_lsn = Some(end_of_wal);
-    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
         warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
         return Ok(());
     }
@@ -201,7 +200,7 @@ pub async fn handle_walreceiver_connection(
             }
             &_ => {}
         };
-        if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
             warn!("Wal connection event listener dropped, aborting the connection: {e}");
             return Ok(());
         }
@@ -267,7 +266,8 @@ pub async fn handle_walreceiver_connection(
         if !connection_status.has_processed_wal && last_rec_lsn > last_rec_lsn_before_msg {
             // We have successfully processed at least one WAL record.
             connection_status.has_processed_wal = true;
-            if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone()))
+            {
                 warn!("Wal connection event listener dropped, aborting the connection: {e}");
                 return Ok(());
             }
