@@ -66,6 +66,7 @@ RUN set -e \
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy      /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/           /usr/local/release/
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
