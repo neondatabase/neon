@@ -645,6 +645,7 @@ impl PageServerHandler {
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
+            lsn,
             db_size,
         }))
     }
