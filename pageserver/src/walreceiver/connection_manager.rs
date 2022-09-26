@@ -147,8 +147,7 @@ async fn connection_manager_loop_step(
                 match wal_connection_update {
                     TaskEvent::Update(c) => {
                         match c {
-                            TaskStateUpdate::Init => {},
-                            TaskStateUpdate::Started => {},
+                            TaskStateUpdate::Init | TaskStateUpdate::Started => {},
                             TaskStateUpdate::Progress(status) => {
                                 if status.has_processed_wal {
                                     // We have advanced last_record_lsn by processing the WAL received
@@ -161,11 +160,11 @@ async fn connection_manager_loop_step(
                             }
                         }
                     },
-                    TaskEvent::End(r) => {
-                        if let Err(e) = r {
-                            error!("wal receiver task finished with an error: {e}")
+                    TaskEvent::End(walreceiver_task_result) => {
+                        match walreceiver_task_result {
+                            Ok(()) => debug!("WAL receiving task finished"),
+                            Err(e) => error!("wal receiver task finished with an error: {e:?}"),
                         }
-                        debug!("WAL receiving task finished");
                         walreceiver_state.drop_old_connection(false).await;
                     },
                 }

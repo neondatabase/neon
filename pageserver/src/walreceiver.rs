@@ -158,7 +158,17 @@ impl<E: Clone> TaskHandle<E> {
         match self.join_handle {
             Some(jh) => {
                 self.cancellation.send(()).ok();
-                let _ = jh.await;
+                match jh.await {
+                    Ok(Ok(())) => debug!("Shutdown success"),
+                    Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
+                    Err(join_error) => {
+                        if join_error.is_cancelled() {
+                            error!("Shutdown task was cancelled");
+                        } else {
+                            error!("Shutdown task join error: {join_error}")
+                        }
+                    }
+                }
             }
             None => {}
         }
