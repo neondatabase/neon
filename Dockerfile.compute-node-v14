@@ -116,7 +116,8 @@ RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.0.1.tar.gz -O h3
 #
 FROM build-deps AS neon-pg-ext-build
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
+# plv8 still sometimes crashes during the creation
+# COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /h3/usr /
 COPY pgxn/ pgxn/
