@@ -168,9 +168,7 @@ impl TimelineMetadata {
         );
 
         if hdr.format_version != METADATA_FORMAT_VERSION {
-            // If metadata has the old format,
-            // upgrade it and return the result
-            TimelineMetadata::upgrade_timeline_metadata(metadata_bytes)
+            anyhow::bail!("expected new metadata version, got the old one");
         } else {
             let body =
                 TimelineMetadataBodyV2::des(&metadata_bytes[METADATA_HDR_SIZE..metadata_size])?;
@@ -188,6 +186,30 @@ impl TimelineMetadata {
         let hdr = TimelineMetadataHeader {
             size: metadata_size as u16,
             format_version: METADATA_FORMAT_VERSION,
+            checksum: crc32c::crc32c(&body_bytes),
+        };
+        let hdr_bytes = hdr.ser()?;
+        let mut metadata_bytes = vec![0u8; METADATA_MAX_SIZE];
+        metadata_bytes[0..METADATA_HDR_SIZE].copy_from_slice(&hdr_bytes);
+        metadata_bytes[METADATA_HDR_SIZE..metadata_size].copy_from_slice(&body_bytes);
+        Ok(metadata_bytes)
+    }
+
+    pub fn to_bytes_v1(&self) -> anyhow::Result<Vec<u8>> {
+        let v1_meta = TimelineMetadataBodyV1 {
+            disk_consistent_lsn: self.disk_consistent_lsn(),
+            prev_record_lsn: self.prev_record_lsn(),
+            ancestor_timeline: self.ancestor_timeline(),
+            ancestor_lsn: self.ancestor_lsn(),
+            latest_gc_cutoff_lsn: self.latest_gc_cutoff_lsn(),
+            initdb_lsn: self.latest_gc_cutoff_lsn(),
+        };
+
+        let body_bytes = v1_meta.ser()?;
+        let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
+        let hdr = TimelineMetadataHeader {
+            size: metadata_size as u16,
+            format_version: METADATA_OLD_FORMAT_VERSION,
             checksum: crc32c::crc32c(&body_bytes),
         };
         let hdr_bytes = hdr.ser()?;
