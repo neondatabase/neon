@@ -753,6 +753,7 @@ nm_unpack_response(StringInfo s)
 				NeonDbSizeResponse *msg_resp = palloc0(sizeof(NeonDbSizeResponse));
 
 				msg_resp->tag = tag;
+				msg_resp->lsn = pq_getmsgint64(s);
 				msg_resp->db_size = pq_getmsgint64(s);
 				pq_getmsgend(s);
 
@@ -968,6 +969,7 @@ nm_to_string(NeonMessage * msg)
 				NeonDbSizeResponse *msg_resp = (NeonDbSizeResponse *) msg;
 
 				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeResponse\"");
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_resp->lsn));
 				appendStringInfo(&s, ", \"db_size\": %ld}",
 								 msg_resp->db_size);
 				appendStringInfoChar(&s, '}');
@@ -1728,20 +1730,24 @@ static void neon_read_at_lsn_multi_region(RelFileNode rnode, ForkNumber forkNum,
 	{
 		case T_NeonGetPageResponse:
 			memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
-			// TODO (ctring): potential optimization, but need more testing before uncommenting
-			// if (RegionIsRemote(region))
-			// {
-			// 	XLogRecPtr lsn = ((NeonGetPageResponse *) resp)->lsn;
-			// 	/*
-			// 	 * Set the LSN on the page to be equal to the LSN snapshot of the current transaction
-			// 	 * so that we don't need to evict the page from local buffer if we use the same LSN
-			// 	 * snapshot for the subsequent transactions.
-			// 	 * Only do this when the LSN is not 0, otherwise an all-zero page will be dirtied and
-			// 	 * not recognized as all-zero by PageIsVerifiedExtended.
-			// 	 */
-			// 	if (PageGetLSN((Page) buffer) != 0)
-			// 		PageSetLSN((Page) buffer, lsn);
-			// }
+			if (RegionIsRemote(region))
+			{
+				XLogRecPtr lsn = ((NeonGetPageResponse *) resp)->lsn;
+				/*
+				 * Set the LSN on the page to be equal to the LSN snapshot of the current transaction
+				 * so that we don't need to evict the page from local buffer if we use the same LSN
+				 * snapshot for the subsequent transactions.
+				 * 
+				 * When a page is requested to insert tuples, neon may response with an all-zero
+				 * page if the page does not exist previously (e.g. the relation is empty). The function
+				 * PageIsVerifiedExtended checks either the checksum of a page is valid or the page
+				 * is all-zero. If we set the LSN for an all-zero page, that function will consider the
+				 * page invalid, so we only set the LSN if the the LSN of the page is not zero, meaning
+				 * the page is not an all-zero page. 
+				 */
+				if (PageGetLSN((Page) buffer) != 0)
+					PageSetLSN((Page) buffer, lsn);
+			}
 			break;
 
 		case T_NeonErrorResponse:

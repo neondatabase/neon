@@ -249,9 +249,6 @@ rx_collect_update(Relation relation, HeapTuple oldtuple, HeapTuple newtuple)
 
 	init_rwset_collection_buffer(relation->rd_node.dbNode);
 
-	// TOOD(ctring): We need to set the replica identity to something other than NOTHING
-	// to collect the write set. Need to figure out a way to get rid of this step
-	// or a check to prevent us from forgetting to do this step.
 	if (relreplident != REPLICA_IDENTITY_DEFAULT &&
 		relreplident != REPLICA_IDENTITY_FULL &&
 		relreplident != REPLICA_IDENTITY_INDEX)
@@ -306,9 +303,6 @@ rx_collect_delete(Relation relation, HeapTuple oldtuple)
 
 	init_rwset_collection_buffer(relation->rd_node.dbNode);
 
-	// TOOD(ctring): We need to set the replica identity to something other than NOTHING
-	// to collect the write set. Need to figure out a way to get rid of this step
-	// or a check to prevent us from forgetting to do this step.
 	if (relreplident != REPLICA_IDENTITY_DEFAULT &&
 		relreplident != REPLICA_IDENTITY_FULL &&
 		relreplident != REPLICA_IDENTITY_INDEX)

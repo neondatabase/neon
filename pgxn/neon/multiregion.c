@@ -30,11 +30,6 @@
 		(errmsg(NEON_TAG fmt, ## __VA_ARGS__), \
 		 errhidestmt(true), errhidecontext(true)))
 
-#define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag, \
-		(errmsg(NEON_TAG fmt, ## __VA_ARGS__), \
-		 errhidestmt(true), errhidecontext(true)))
-
 /* GUCs */
 char *neon_region_timelines;
 
@@ -121,8 +116,9 @@ init_region_lsns()
 }
 
 /*
- * Set the LSN for a given region if it wasn't previously set. The set LSN is use
- * for that region throughout the life of the transaction.
+ * Set the LSN for a given region if it wasn't previously set. 
+ * This LSN is used in Neon requests for that region throughout
+ * the life of the current transaction.
  */
 void
 set_region_lsn(int region, NeonResponse *msg)
@@ -147,6 +143,9 @@ set_region_lsn(int region, NeonResponse *msg)
 			break;
 		case T_NeonGetSlruPageResponse:
 			lsn = ((NeonGetSlruPageResponse *) msg)->lsn;
+			break;
+		case T_NeonDbSizeResponse:
+			lsn = ((NeonDbSizeResponse *) msg)->lsn;
 			break;
 		case T_NeonErrorResponse:
 			break;

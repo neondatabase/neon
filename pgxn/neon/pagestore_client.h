@@ -146,6 +146,7 @@ typedef struct
 typedef struct
 {
 	NeonMessageTag tag;
+	XLogRecPtr	lsn;
 	int64		db_size;
 }			NeonDbSizeResponse;
 
