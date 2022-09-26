@@ -56,6 +56,14 @@ If you want to run all tests that have the string "bench" in their names:
 
 `./scripts/pytest -k bench`
 
+To run tests in parellel we utilize `pytest-xdist` plugin. By default everything runs single threaded. Number of workers can be specified with `-n` argument:
+
+`./scripts/pytest -n4`
+
+By default performance tests are excluded. To run them explicitly pass performance tests selection to the script:
+
+`./scripts/pytest test_runner/performance`
+
 Useful environment variables:
 
 `NEON_BIN`: The directory where neon binaries can be found.
