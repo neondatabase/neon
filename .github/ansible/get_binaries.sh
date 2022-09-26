@@ -21,6 +21,7 @@ docker pull --quiet neondatabase/neon:${DOCKER_TAG}
 ID=$(docker create neondatabase/neon:${DOCKER_TAG})
 docker cp ${ID}:/data/postgres_install.tar.gz .
 tar -xzf postgres_install.tar.gz -C neon_install
+mkdir neon_install/bin/
 docker cp ${ID}:/usr/local/bin/pageserver neon_install/bin/
 docker cp ${ID}:/usr/local/bin/safekeeper neon_install/bin/
 docker cp ${ID}:/usr/local/bin/proxy neon_install/bin/
