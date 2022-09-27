@@ -21,7 +21,8 @@ use num_traits::identities::{One, Zero};
 use num_traits::{Bounded, Num, Signed};
 use rstar::{RTree, RTreeObject, AABB};
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+use std::ops::Bound::{Included, Unbounded};
 use std::ops::Range;
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 use std::sync::Arc;
@@ -58,6 +59,10 @@ pub struct LayerMap {
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
     l0_delta_layers: Vec<Arc<dyn Layer>>,
+
+    /// Collection of latest image layers.
+    /// It is used to provide efficient layers lookup in find_latest_layer
+    latest_image_layers: BTreeMap<Key, Arc<dyn Layer>>,
 }
 
 struct LayerRTreeObject {
@@ -311,14 +316,24 @@ impl LayerMap {
                 "found (old) layer {} for request on {key} at {end_lsn}",
                 l.filename().display(),
             );
-            let lsn_floor = std::cmp::max(
-                Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
-                l.get_lsn_range().start,
-            );
-            Ok(Some(SearchResult {
-                lsn_floor,
-                layer: l,
-            }))
+            if let Some(img) = latest_img {
+                if latest_img_lsn.unwrap() > l.get_lsn_range().start {
+                    Ok(Some(SearchResult {
+                        lsn_floor: latest_img_lsn.unwrap(),
+                        layer: img,
+                    }))
+                } else {
+                    Ok(Some(SearchResult {
+                        lsn_floor: l.get_lsn_range().start,
+                        layer: l,
+                    }))
+                }
+            } else {
+                Ok(Some(SearchResult {
+                    lsn_floor: l.get_lsn_range().start,
+                    layer: l,
+                }))
+            }
         } else if let Some(l) = latest_img {
             trace!("found img layer and no deltas for request on {key} at {end_lsn}");
             Ok(Some(SearchResult {
@@ -337,6 +352,10 @@ impl LayerMap {
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
+        }
+        if !layer.is_incremental() {
+            self.latest_image_layers
+                .insert(layer.get_key_range().start, layer.clone());
         }
         self.historic_layers.insert(LayerRTreeObject { layer });
         NUM_ONDISK_LAYERS.inc();
@@ -423,6 +442,20 @@ impl LayerMap {
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
     fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+        let mut iter = self.latest_image_layers.range((Unbounded, Included(key)));
+        if let Some((_key, img)) = iter.next_back() {
+            if img.get_key_range().contains(&key) {
+                if img.get_lsn_range().start <= lsn {
+                    return Some(img.clone());
+                } else {
+                    return self.find_latest_image_at_lsn(key, lsn);
+                }
+            }
+        }
+        None
+    }
+
+    fn find_latest_image_at_lsn(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         let envelope = AABB::from_corners(
