@@ -137,7 +137,7 @@ impl PhysicalStorage {
         //      If not, maybe it's better to call fsync() here to be sure?
         let flush_lsn = write_lsn;
 
-        info!(
+        debug!(
             "initialized storage for timeline {}, flush_lsn={}, commit_lsn={}, peer_horizon_lsn={}",
             ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
         );
