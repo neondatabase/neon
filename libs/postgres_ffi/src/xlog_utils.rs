@@ -170,7 +170,7 @@ pub fn find_end_of_wal(
     let mut curr_lsn = start_lsn;
     let mut buf = [0u8; XLOG_BLCKSZ];
     let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
-    info!("find_end_of_wal PG_VERSION: {}", pg_version);
+    debug!("find_end_of_wal PG_VERSION: {}", pg_version);
 
     let mut decoder = WalStreamDecoder::new(start_lsn, pg_version);
 
@@ -182,7 +182,7 @@ pub fn find_end_of_wal(
         match open_wal_segment(&seg_file_path)? {
             None => {
                 // no more segments
-                info!(
+                debug!(
                     "find_end_of_wal reached end at {:?}, segment {:?} doesn't exist",
                     result, seg_file_path
                 );
@@ -205,7 +205,7 @@ pub fn find_end_of_wal(
                         match decoder.poll_decode() {
                             Ok(Some(record)) => result = record.0,
                             Err(e) => {
-                                info!(
+                                debug!(
                                     "find_end_of_wal reached end at {:?}, decode error: {:?}",
                                     result, e
                                 );
