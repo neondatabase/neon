@@ -316,6 +316,15 @@ impl LayerMap {
                 "found (old) layer {} for request on {key} at {end_lsn}",
                 l.filename().display(),
             );
+            let lsn_floor = std::cmp::max(
+                Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
+                l.get_lsn_range().start,
+            );
+            Ok(Some(SearchResult {
+                lsn_floor,
+                layer: l,
+            }))
+/*
             if let Some(img) = latest_img {
                 if latest_img_lsn.unwrap() > l.get_lsn_range().start {
                     Ok(Some(SearchResult {
@@ -334,6 +343,7 @@ impl LayerMap {
                     layer: l,
                 }))
             }
+*/
         } else if let Some(l) = latest_img {
             trace!("found img layer and no deltas for request on {key} at {end_lsn}");
             Ok(Some(SearchResult {
