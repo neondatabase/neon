@@ -26,8 +26,6 @@ use etcd_broker::{
     subscription_key::SubscriptionKey, subscription_value::SkTimelineInfo, BrokerSubscription,
     BrokerUpdate, Client,
 };
-use postgres_ffi::v14::xlog_utils::normalize_lsn;
-use postgres_ffi::WAL_SEGMENT_SIZE;
 use tokio::select;
 use tracing::*;
 
@@ -572,10 +570,6 @@ impl WalreceiverState {
                     .commit_lsn
                     .unwrap_or(current_lsn);
                 let candidate_commit_lsn = new_safekeeper_etcd_data.commit_lsn.unwrap_or(Lsn(0));
-
-				let current_lsn = normalize_lsn(current_lsn, WAL_SEGMENT_SIZE);
-				let current_commit_lsn = normalize_lsn(current_commit_lsn, WAL_SEGMENT_SIZE);
-				let candidate_commit_lsn = normalize_lsn(candidate_commit_lsn, WAL_SEGMENT_SIZE);
 
                 // Keep discovered_new_wal only if connected safekeeper has not caught up yet.
                 let mut discovered_new_wal = existing_wal_connection
