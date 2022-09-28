@@ -565,13 +565,17 @@ impl WalreceiverState {
 
                 let current_lsn = match existing_wal_connection.status.streaming_lsn {
                     Some(lsn) => lsn,
-                    None => normalize_lsn(self.timeline.get_last_record_lsn(), WAL_SEGMENT_SIZE),
+                    None => self.timeline.get_last_record_lsn(),
                 };
                 let current_commit_lsn = existing_wal_connection
                     .status
                     .commit_lsn
                     .unwrap_or(current_lsn);
                 let candidate_commit_lsn = new_safekeeper_etcd_data.commit_lsn.unwrap_or(Lsn(0));
+
+				let current_lsn = normalize_lsn(current_lsn, WAL_SEGMENT_SIZE);
+				let current_commit_lsn = normalize_lsn(current_commit_lsn, WAL_SEGMENT_SIZE);
+				let candidate_commit_lsn = normalize_lsn(candidate_commit_lsn, WAL_SEGMENT_SIZE);
 
                 // Keep discovered_new_wal only if connected safekeeper has not caught up yet.
                 let mut discovered_new_wal = existing_wal_connection
