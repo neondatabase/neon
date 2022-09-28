@@ -26,6 +26,8 @@ use etcd_broker::{
     subscription_key::SubscriptionKey, subscription_value::SkTimelineInfo, BrokerSubscription,
     BrokerUpdate, Client,
 };
+use postgres_ffi::v14::xlog_utils::normalize_lsn;
+use postgres_ffi::WAL_SEGMENT_SIZE;
 use tokio::select;
 use tracing::*;
 
@@ -563,7 +565,7 @@ impl WalreceiverState {
 
                 let current_lsn = match existing_wal_connection.status.streaming_lsn {
                     Some(lsn) => lsn,
-                    None => self.timeline.get_last_record_lsn(),
+                    None => normalize_lsn(self.timeline.get_last_record_lsn(), WAL_SEGMENT_SIZE),
                 };
                 let current_commit_lsn = existing_wal_connection
                     .status
