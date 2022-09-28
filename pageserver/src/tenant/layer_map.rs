@@ -324,26 +324,26 @@ impl LayerMap {
                 lsn_floor,
                 layer: l,
             }))
-/*
-            if let Some(img) = latest_img {
-                if latest_img_lsn.unwrap() > l.get_lsn_range().start {
-                    Ok(Some(SearchResult {
-                        lsn_floor: latest_img_lsn.unwrap(),
-                        layer: img,
-                    }))
-                } else {
-                    Ok(Some(SearchResult {
-                        lsn_floor: l.get_lsn_range().start,
-                        layer: l,
-                    }))
-                }
-            } else {
-                Ok(Some(SearchResult {
-                    lsn_floor: l.get_lsn_range().start,
-                    layer: l,
-                }))
-            }
-*/
+        /*
+                    if let Some(img) = latest_img {
+                        if latest_img_lsn.unwrap() > l.get_lsn_range().start {
+                            Ok(Some(SearchResult {
+                                lsn_floor: latest_img_lsn.unwrap(),
+                                layer: img,
+                            }))
+                        } else {
+                            Ok(Some(SearchResult {
+                                lsn_floor: l.get_lsn_range().start,
+                                layer: l,
+                            }))
+                        }
+                    } else {
+                        Ok(Some(SearchResult {
+                            lsn_floor: l.get_lsn_range().start,
+                            layer: l,
+                        }))
+                    }
+        */
         } else if let Some(l) = latest_img {
             trace!("found img layer and no deltas for request on {key} at {end_lsn}");
             Ok(Some(SearchResult {
