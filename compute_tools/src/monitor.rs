@@ -36,14 +36,16 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     continue;
                 }
 
-                // Get all running client backends except ourself, use RFC3339 DateTime format.
+                // Get all running client backends except ourselves, use RFC3339 DateTime format.
+                let _ = cli.query("SET application_name = 'compute_monitor';", &[]);
                 let backends = cli
                     .query(
                         "SELECT state, to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS state_change
                          FROM pg_stat_activity
                          WHERE backend_type = 'client backend'
                             AND pid != pg_backend_pid()
-                            AND usename != 'cloud_admin';", // XXX: find a better way to filter other monitors?
+                            AND usename != 'cloud_admin'
+                            AND application_name != 'compute_monitor';",
                         &[],
                     );
                 let mut last_active = compute.state.read().unwrap().last_active;
@@ -74,10 +76,8 @@ fn watch_compute_activity(compute: &ComputeNode) {
                         }
                     }
 
-                    // Sort idle backend `state_change` timestamps. The last one corresponds
-                    // to the last activity.
-                    idle_backs.sort();
-                    if let Some(last) = idle_backs.last() {
+                    // Get idle backend `state_change` that performed last
+                    if let Some(last) = idle_backs.iter().max() {
                         last_active = *last;
                     }
                 }
