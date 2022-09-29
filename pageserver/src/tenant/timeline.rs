@@ -2057,7 +2057,7 @@ impl Timeline {
                 l.filename().display(),
                 l.is_incremental(),
             );
-            layers_to_remove.push(Arc::clone(&l));
+            layers_to_remove.push(Arc::clone(l));
         }
 
         // Actually delete the layers from disk and remove them from the map.
