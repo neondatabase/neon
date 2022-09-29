@@ -285,7 +285,7 @@ impl LocalEnv {
         branch_name: &str,
         tenant_id: TenantId,
     ) -> Option<TimelineId> {
-        self.branch_name_mappings
+        dbg!(&self.branch_name_mappings)
             .get(branch_name)?
             .iter()
             .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
