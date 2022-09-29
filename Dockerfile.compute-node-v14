@@ -60,10 +60,8 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.0.tar.gz && \
 # Layer "pg-stat-contribs-build"
 # Build pg_stat_statements, pg_wait_sampling, pg_query_state
 
-FROM build-deps AS pg-stat-contribs-build
+FROM build-deps AS pg-query-state-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
-RUN echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_stat_statements.control
 
 RUN wget https://github.com/postgrespro/pg_query_state/archive/refs/heads/master.tar.gz && \
     tar xvzf master.tar.gz && \
@@ -73,6 +71,9 @@ RUN wget https://github.com/postgrespro/pg_query_state/archive/refs/heads/master
     USE_PGXS=true PG_CONFIG=/usr/local/pgsql/bin/pg_config make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_query_state.control && \
     rm master.tar.gz
+
+FROM build-deps AS pg-wait-sampling-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN wget https://github.com/postgrespro/pg_wait_sampling/archive/refs/heads/master.tar.gz && \
     tar xvzf master.tar.gz && \
@@ -143,7 +144,8 @@ RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.0.1.tar.gz -O h3
 #
 FROM build-deps AS neon-pg-ext-build
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-stat-contribs-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-query-state-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-wait-sampling-build /usr/local/pgsql/ /usr/local/pgsql/
 # plv8 still sometimes crashes during the creation
 # COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
