@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 def make_tarfile(output_filename, source_dir):
-    cmd = ["tar", "--transform=s/\\.//", "-C", str(source_dir), "-cvf", str(output_filename), "."]
+    cmd = ["tar", r"--transform=s/\.\///", "-C", str(source_dir), "-cvf", str(output_filename), "."]
     print('Command: ', ' '.join(cmd))
     r = subprocess.check_output(cmd).decode()
     print(textwrap.indent(r, '> '))
