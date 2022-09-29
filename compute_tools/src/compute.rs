@@ -49,7 +49,6 @@ pub struct ComputeNode {
     /// to allow HTTP API server to serve status requests, while configuration
     /// is in progress.
     pub state: RwLock<ComputeState>,
-    pub insights_count: AtomicU64,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,7 +58,7 @@ pub struct InsightsRow {
     pub mean_runtime: String,
 }
 
-#[derive (Serialize)]
+#[derive(Serialize)]
 pub struct Insights {
     count: u64,
     statements: Vec<InsightsRow>,
@@ -368,10 +367,8 @@ impl ComputeNode {
         self.run()
     }
 
-    pub async fn collect_insights(&self) -> Insights {
-        let prev = self.insights_count.fetch_add(1, Ordering::Relaxed);
-
-        let mut result_rows: Vec<InsightsRow> = Vec::new();
+    pub async fn collect_insights(&self) -> String {
+        let mut result_rows: Vec<String> = Vec::new();
         let connect_result = tokio_postgres::connect(self.connstr.as_str(), NoTls).await;
         let (client, connection) = connect_result.unwrap();
         tokio::spawn(async move {
@@ -379,24 +376,31 @@ impl ComputeNode {
                 eprintln!("connection error: {}", e);
             }
         });
-        for message in (client.simple_query("
-SELECT query, total_exec_time, mean_exec_time
-FROM pg_stat_statements
-ORDER BY total_exec_time DESC LIMIT 100").await).unwrap().iter() {
+        for message in (client
+            .simple_query(
+                "
+SELECT
+    row_to_json(pg_stat_statements)
+FROM
+    pg_stat_statements
+WHERE
+    userid != 'cloud_admin'::regrole::oid
+ORDER BY
+    (mean_exec_time + mean_plan_time) DESC
+LIMIT 100",
+            )
+            .await)
+            .unwrap()
+            .iter()
+        {
             match message {
                 postgres::SimpleQueryMessage::Row(row) => {
-                    result_rows.push(InsightsRow {
-                        query: row.get(0).unwrap().to_string(),
-                        total_runtime: row.get(1).unwrap().to_string(),
-                        mean_runtime: row.get(2).unwrap().to_string(),
-                    });
+                    result_rows.push(row.get(0).unwrap().to_string());
                 }
                 _ => {}
             }
         }
-        return Insights {
-            count: prev + 1,
-            statements: result_rows,
-        };
+
+        format!("{{\"pg_stat_statements\": [{}]}}", result_rows.join(","))
     }
 }

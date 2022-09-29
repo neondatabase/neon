@@ -26,7 +26,6 @@
 //!             -b /usr/local/bin/postgres
 //! ```
 //!
-use std::sync::atomic::AtomicU64;
 use std::fs::File;
 use std::panic;
 use std::path::Path;
@@ -142,7 +141,6 @@ fn main() -> Result<()> {
         pageserver_connstr,
         metrics: ComputeMetrics::new(),
         state: RwLock::new(ComputeState::new()),
-        insights_count: AtomicU64::new(0),
     };
     let compute = Arc::new(compute_state);
 
