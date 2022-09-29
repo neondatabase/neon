@@ -66,7 +66,17 @@ def main(args):
     print("Import a backup")
     create_tenant(args.tenant_id)
     from_backup_at(args, backup_dir)
-    print(backup_dir)
+
+    print("Tenant:", args.tenant_id)
+    print("Timeline:", args.timeline_id)
+    print("Node:", args.node)
+
+    cmd = f'neon_local pg start --tenant-id={args.tenant_id} --timeline-id={args.timeline_id} args.node'.split()
+    r = subprocess.check_output(cmd).decode()
+    print(textwrap.indent(r, '> '))
+
+    cmd = ["psql", "host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres"]
+    subprocess.call(cmd)
 
 
 if __name__ == "__main__":
