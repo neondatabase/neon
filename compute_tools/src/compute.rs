@@ -296,6 +296,7 @@ impl ComputeNode {
             Ok(client) => client,
         };
 
+        create_system_extensions(&mut client)?;
         handle_roles(&self.spec, &mut client)?;
         handle_databases(&self.spec, &mut client)?;
         handle_role_deletions(self, &mut client)?;

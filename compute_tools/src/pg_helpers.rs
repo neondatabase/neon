@@ -61,7 +61,9 @@ impl GenericOption {
 
     /// Represent `GenericOption` as configuration option.
     pub fn to_pg_setting(&self) -> String {
-        if let Some(val) = &self.value {
+        if let Some(val) = self.value.as_ref() {
+            // XXX: such overrides don't look as they should be here, but I cannot find a better place now
+            // Probably, we need to add some override pass before the first compute start steps.
             let name = match self.name.as_str() {
                 "safekeepers" => "neon.safekeepers",
                 "wal_acceptor_reconnect" => "neon.safekeeper_reconnect_timeout",
@@ -69,9 +71,16 @@ impl GenericOption {
                 it => it,
             };
 
+            let mut res_val = val.to_owned();
+            if self.name == "shared_preload_libraries" {
+                if !res_val.contains("pg_stat_statements") {
+                    res_val = format!("{},pg_stat_statements", res_val)
+                }
+            }
+
             match self.vartype.as_ref() {
-                "string" => format!("{} = '{}'", name, val),
-                _ => format!("{} = {}", name, val),
+                "string" => format!("{} = '{}'", name, res_val),
+                _ => format!("{} = {}", name, res_val),
             }
         } else {
             self.name.to_owned()
