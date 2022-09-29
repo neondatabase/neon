@@ -19,7 +19,7 @@ def make_tarfile(output_filename, source_dir):
 
 
 def create_tenant(tenant_id):
-    cmd = f"target/debug/neon_local tenant create --tenant-id {tenant_id}"
+    cmd = f"neon_local tenant create --tenant-id {tenant_id}"
     print("Run command:", cmd)
     r = subprocess.check_output(cmd.split()).decode()
     print(textwrap.indent(r, "> "))
@@ -36,7 +36,7 @@ def from_backup_at(args, backup_dir: Path):
     make_tarfile(tar, backup_dir / "data")
 
     cmd = (
-        "target/debug/neon_local timeline import "
+        "neon_local timeline import "
         f"--tenant-id {args.tenant_id} "
         f"--base-lsn {start_lsn} "
         f"--end-lsn {end_lsn} "
