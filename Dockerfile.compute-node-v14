@@ -71,7 +71,8 @@ RUN wget https://github.com/postgrespro/pg_query_state/archive/refs/heads/master
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     USE_PGXS=true PG_CONFIG=/usr/local/pgsql/bin/pg_config make -j $(getconf _NPROCESSORS_ONLN) && \
     USE_PGXS=true PG_CONFIG=/usr/local/pgsql/bin/pg_config make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_query_state.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_query_state.control && \
+    rm master.tar.gz
 
 RUN wget https://github.com/postgrespro/pg_wait_sampling/archive/refs/heads/master.tar.gz && \
     tar xvzf master.tar.gz && \
@@ -79,7 +80,9 @@ RUN wget https://github.com/postgrespro/pg_wait_sampling/archive/refs/heads/mast
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     USE_PGXS=true PG_CONFIG=/usr/local/pgsql/bin/pg_config make -j $(getconf _NPROCESSORS_ONLN) && \
     USE_PGXS=true PG_CONFIG=/usr/local/pgsql/bin/pg_config make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_wait_sampling.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_wait_sampling.control && \
+    rm master.tar.gz
+
 
 #
 # Layer "plv8-build"
