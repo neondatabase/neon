@@ -4,25 +4,25 @@ import argparse
 import json
 import subprocess
 import sys
-import testgres
 import textwrap
 import uuid
-
 from pathlib import Path
+
+import testgres
 
 
 def make_tarfile(output_filename, source_dir):
     cmd = ["tar", r"--transform=s/\.\///", "-C", str(source_dir), "-cf", str(output_filename), "."]
-    print('Command: ', ' '.join(cmd))
+    print("Command: ", " ".join(cmd))
     r = subprocess.check_output(cmd).decode()
-    print(textwrap.indent(r, '> '))
+    print(textwrap.indent(r, "> "))
 
 
 def create_tenant(tenant_id):
     cmd = f"target/debug/neon_local tenant create --tenant-id {tenant_id}"
     print("Run command:", cmd)
     r = subprocess.check_output(cmd.split()).decode()
-    print(textwrap.indent(r, '> '))
+    print(textwrap.indent(r, "> "))
 
 
 def from_backup_at(args, backup_dir: Path):
@@ -32,8 +32,8 @@ def from_backup_at(args, backup_dir: Path):
     print("LSNs:", start_lsn, end_lsn)
 
     print("Make tarball")
-    tar = Path('/tmp/base.tar')
-    make_tarfile(tar, backup_dir / 'data')
+    tar = Path("/tmp/base.tar")
+    make_tarfile(tar, backup_dir / "data")
 
     cmd = (
         "target/debug/neon_local timeline import "
@@ -47,22 +47,24 @@ def from_backup_at(args, backup_dir: Path):
 
     print("Run neon_local")
     r = subprocess.check_output(cmd.split()).decode()
-    print(textwrap.indent(r, '> '))
+    print(textwrap.indent(r, "> "))
 
 
 def debug_prints(node):
-    print('RELID:', node.execute("select 'foo'::regclass::oid")[0][0])
-    print("DBs:", node.execute('table pg_database'))
-    print("foo:", node.execute('table foo'))
+    print("RELID:", node.execute("select 'foo'::regclass::oid")[0][0])
+    print("DBs:", node.execute("table pg_database"))
+    print("foo:", node.execute("table foo"))
 
 
 def main(args):
     print("Create a node")
     node = testgres.get_new_node()
     node.init(unix_sockets=False, allow_streaming=True).start()
-    node.execute("""
+    node.execute(
+        """
         create table foo as select 1;
-    """)
+    """
+    )
     debug_prints(node)
     # node.pgbench_init(scale=1)
 
@@ -83,9 +85,9 @@ def main(args):
     print("Timeline:", args.timeline_id)
     print("Node:", args.node)
 
-    cmd = f'neon_local pg start --tenant-id={args.tenant_id} --timeline-id={args.timeline_id} args.node'.split()
+    cmd = f"neon_local pg start --tenant-id={args.tenant_id} --timeline-id={args.timeline_id} {args.node}".split()
     r = subprocess.check_output(cmd).decode()
-    print(textwrap.indent(r, '> '))
+    print(textwrap.indent(r, "> "))
 
     cmd = ["psql", "host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres"]
     subprocess.call(cmd)
