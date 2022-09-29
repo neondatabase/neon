@@ -323,7 +323,7 @@ impl PostgresNode {
         };
         conf.append(
             "shared_preload_libraries",
-            "neon, pg_stat_statements, pg_wait_sampling",
+            "neon, pg_stat_statements, pg_wait_sampling, pg_query_state",
         );
         conf.append_line("");
         conf.append("neon.pageserver_connstring", &pageserver_connstr);
