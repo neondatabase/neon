@@ -69,6 +69,7 @@ RUN wget https://github.com/postgrespro/pg_query_state/archive/refs/heads/master
     tar xvzf master.tar.gz && \
     cd pg_query_state-master && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
+    ./configure && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /pg_query_state-* && \
@@ -78,6 +79,7 @@ RUN wget https://github.com/postgrespro/pg_wait_sampling/archive/refs/heads/mast
     tar xvzf master.tar.gz && \
     cd pg_wait_sampling-master && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
+    ./configure && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /pg_wait_sampling-* && \
