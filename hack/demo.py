@@ -57,6 +57,7 @@ def main(args):
     node.execute("""
         create table foo as select 1;
     """)
+    print('RELID:', node.execute("select 'foo'::regclass::oid")[0])
     # node.pgbench_init(scale=1)
 
     print("Create a backup")
