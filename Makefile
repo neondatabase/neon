@@ -116,6 +116,16 @@ postgres-v14: postgres-v14-configure \
 	+@echo "Compiling pageinspect v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pageinspect install
 
+.PHONY: pg_wait_sampling-v14
+pg_wait_sampling-v14: postgres-v14-configure
+	+@echo "Compiling pg_wait_sampling v14"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_wait_sampling install
+
+.PHONY: pg_stat_statements-v14
+pg_stat_statements-v14: postgres-v14-configure
+	+@echo "Compiling pg_stat_statements v14"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_stat_statements install
+
 .PHONY: postgres-v15
 postgres-v15: postgres-v15-configure \
 		  postgres-v15-headers # to prevent `make install` conflicts with neon's `postgres-headers`
