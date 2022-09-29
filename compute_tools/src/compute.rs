@@ -54,14 +54,15 @@ pub struct ComputeNode {
 
 #[derive(Debug, Serialize)]
 pub struct InsightsRow {
-    pub backend_type: String,
-    pub count: String,
+    pub query: String,
+    pub total_runtime: String,
+    pub mean_runtime: String,
 }
 
 #[derive (Serialize)]
 pub struct Insights {
     count: u64,
-    rows: Vec<InsightsRow>,
+    statements: Vec<InsightsRow>,
 }
 
 fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
@@ -378,12 +379,16 @@ impl ComputeNode {
                 eprintln!("connection error: {}", e);
             }
         });
-        for message in (client.simple_query("SELECT backend_type, count(*) FROM pg_stat_activity GROUP BY backend_type").await).unwrap().iter() {
+        for message in (client.simple_query("
+SELECT query, total_exec_time, mean_exec_time
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC LIMIT 100").await).unwrap().iter() {
             match message {
                 postgres::SimpleQueryMessage::Row(row) => {
                     result_rows.push(InsightsRow {
-                        backend_type: row.get(0).unwrap().to_string(),
-                        count: row.get(1).unwrap().to_string(),
+                        query: row.get(0).unwrap().to_string(),
+                        total_runtime: row.get(1).unwrap().to_string(),
+                        mean_runtime: row.get(2).unwrap().to_string(),
                     });
                 }
                 _ => {}
@@ -391,7 +396,7 @@ impl ComputeNode {
         }
         return Insights {
             count: prev + 1,
-            rows: result_rows,
+            statements: result_rows,
         };
     }
 }
