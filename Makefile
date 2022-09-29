@@ -126,6 +126,11 @@ pg_stat_statements-v14: postgres-v14-configure
 	+@echo "Compiling pg_stat_statements v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_stat_statements install
 
+.PHONY: pg_query_state-v14
+pg_query_state-v14: postgres-v14-configure
+	+@echo "Compiling pg_query_state v14"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_query_state install
+
 .PHONY: postgres-v15
 postgres-v15: postgres-v15-configure \
 		  postgres-v15-headers # to prevent `make install` conflicts with neon's `postgres-headers`
