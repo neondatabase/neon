@@ -50,6 +50,12 @@ def from_backup_at(args, backup_dir: Path):
     print(textwrap.indent(r, '> '))
 
 
+def debug_prints(node):
+    print('RELID:', node.execute("select 'foo'::regclass::oid")[0][0])
+    print("DBs:", node.execute('table pg_database'))
+    print("foo:", node.execute('table foo'))
+
+
 def main(args):
     print("Create a node")
     node = testgres.get_new_node()
@@ -57,12 +63,16 @@ def main(args):
     node.execute("""
         create table foo as select 1;
     """)
-    print('RELID:', node.execute("select 'foo'::regclass::oid")[0][0])
+    debug_prints(node)
     # node.pgbench_init(scale=1)
 
     print("Create a backup")
     backup = node.backup()
     backup_dir = Path(backup.base_dir)
+
+    # pr = backup.spawn_primary().start()
+    # debug_prints(pr)
+    # exit(1)
 
     print("Import a backup")
     create_tenant(args.tenant_id)
