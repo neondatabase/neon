@@ -26,6 +26,7 @@ use chrono::{DateTime, Utc};
 use log::info;
 use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
+use tokio_postgres;
 
 use crate::checker::create_writablity_check_data;
 use crate::config;
@@ -48,6 +49,19 @@ pub struct ComputeNode {
     /// to allow HTTP API server to serve status requests, while configuration
     /// is in progress.
     pub state: RwLock<ComputeState>,
+    pub insights_count: AtomicU64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InsightsRow {
+    pub backend_type: String,
+    pub count: String,
+}
+
+#[derive (Serialize)]
+pub struct Insights {
+    count: u64,
+    rows: Vec<InsightsRow>,
 }
 
 fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
@@ -351,5 +365,33 @@ impl ComputeNode {
 
         self.prepare_pgdata()?;
         self.run()
+    }
+
+    pub async fn collect_insights(&self) -> Insights {
+        let prev = self.insights_count.fetch_add(1, Ordering::Relaxed);
+
+        let mut result_rows: Vec<InsightsRow> = Vec::new();
+        let connect_result = tokio_postgres::connect(self.connstr.as_str(), NoTls).await;
+        let (client, connection) = connect_result.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+        for message in (client.simple_query("SELECT backend_type, count(*) FROM pg_stat_activity GROUP BY backend_type").await).unwrap().iter() {
+            match message {
+                postgres::SimpleQueryMessage::Row(row) => {
+                    result_rows.push(InsightsRow {
+                        backend_type: row.get(0).unwrap().to_string(),
+                        count: row.get(1).unwrap().to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        return Insights {
+            count: prev + 1,
+            rows: result_rows,
+        };
     }
 }
