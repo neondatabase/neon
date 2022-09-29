@@ -393,11 +393,8 @@ LIMIT 100",
             .unwrap()
             .iter()
         {
-            match message {
-                postgres::SimpleQueryMessage::Row(row) => {
-                    result_rows.push(row.get(0).unwrap().to_string());
-                }
-                _ => {}
+            if let postgres::SimpleQueryMessage::Row(row) = message {
+                result_rows.push(row.get(0).unwrap().to_string());
             }
         }
 

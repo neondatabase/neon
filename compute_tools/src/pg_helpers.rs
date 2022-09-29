@@ -72,10 +72,8 @@ impl GenericOption {
             };
 
             let mut res_val = val.to_owned();
-            if self.name == "shared_preload_libraries" {
-                if !res_val.contains("pg_stat_statements") {
-                    res_val = format!("{},pg_stat_statements", res_val)
-                }
+            if self.name == "shared_preload_libraries" && !res_val.contains("pg_stat_statements") {
+                res_val = format!("{},pg_stat_statements", res_val)
             }
 
             match self.vartype.as_ref() {
