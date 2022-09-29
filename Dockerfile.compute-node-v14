@@ -63,6 +63,8 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.0.tar.gz && \
 FROM build-deps AS pg-stat-contribs-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+RUN echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_stat_statements.control
+
 RUN wget https://github.com/postgrespro/pg_query_state/archive/refs/heads/master.tar.gz && \
     tar xvzf master.tar.gz && \
     cd pg_query_state-master && \
