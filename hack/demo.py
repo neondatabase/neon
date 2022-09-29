@@ -57,7 +57,7 @@ def main(args):
     node.execute("""
         create table foo as select 1;
     """)
-    print('RELID:', node.execute("select 'foo'::regclass::oid")[0])
+    print('RELID:', node.execute("select 'foo'::regclass::oid")[0][0])
     # node.pgbench_init(scale=1)
 
     print("Create a backup")
@@ -68,6 +68,7 @@ def main(args):
     create_tenant(args.tenant_id)
     from_backup_at(args, backup_dir)
 
+    print("Backup dir:", backup_dir)
     print("Tenant:", args.tenant_id)
     print("Timeline:", args.timeline_id)
     print("Node:", args.node)
