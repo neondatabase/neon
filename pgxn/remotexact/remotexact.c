@@ -9,6 +9,7 @@
 #include "libpq/pqformat.h"
 #include "replication/logicalproto.h"
 #include "rwset.h"
+#include "storage/latch.h"
 #include "storage/predicate.h"
 #include "storage/smgr.h"
 #include "utils/guc.h"
@@ -16,7 +17,10 @@
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/rel.h"
+#include "utils/wait_event.h"
 #include "miscadmin.h"
+
+#define SingleRegion(region) (UINT64CONST(1) << region)
 
 PG_MODULE_MAGIC;
 
@@ -66,11 +70,12 @@ static void rx_collect_tuple(Oid dbid, Oid relid, BlockNumber blkno, OffsetNumbe
 static void rx_collect_insert(Relation relation, HeapTuple newtuple);
 static void rx_collect_update(Relation relation, HeapTuple oldtuple, HeapTuple newtuple);
 static void rx_collect_delete(Relation relation, HeapTuple oldtuple);
-static void rx_clear_rwset_collection_buffer(void);
-static void rx_send_rwset_and_wait(void);
+static void rx_execute_remote_xact(void);
 
 static CollectedRelation *get_collected_relation(Oid relid, bool create_if_not_found);
 static bool connect_to_txn_server(void);
+static int call_PQgetCopyData(PGconn *conn, char **buffer);
+static void clean_up_xact_callback(XactEvent event, void *arg);
 
 static void
 init_rwset_collection_buffer(Oid dbid)
@@ -101,7 +106,7 @@ init_rwset_collection_buffer(Oid dbid)
 	snapshot = GetLatestSnapshot();
 	rwset_collection_buffer->header.csn = snapshot->snapshot_csn;
 	/* The current region is always a participant of the transaction */
-	rwset_collection_buffer->header.region_set = UINT64CONST(1) << current_region;
+	rwset_collection_buffer->header.region_set = SingleRegion(current_region);
 
 	/* Initialize a map from relation oid to the read set of the relation */
 	hash_ctl.hcxt = rwset_collection_buffer->context;
@@ -125,7 +130,7 @@ rwset_add_region(int region)
 	Assert(rwset_collection_buffer != NULL);
 
 	/* Set the corresponding region bit in the header */
-	rwset_collection_buffer->header.region_set |= UINT64CONST(1) << region;
+	rwset_collection_buffer->header.region_set |= SingleRegion(region);
 }
 
 static void
@@ -339,24 +344,23 @@ rx_collect_delete(Relation relation, HeapTuple oldtuple)
 	rwset_add_region(region);
 }
 
-
 static void
-rx_clear_rwset_collection_buffer(void)
+rx_execute_remote_xact(void)
 {
-	rwset_collection_buffer = NULL;
-}
-
-static void
-rx_send_rwset_and_wait(void)
-{
-	RWSet	   *rwset;
-	RWSetHeader *header;
-	CollectedRelation *collected_relation;
-	HASH_SEQ_STATUS status;
-	int			read_len = 0;
-	StringInfoData buf;
+	RWSetHeader			*header;
+	CollectedRelation	*collected_relation;
+	HASH_SEQ_STATUS		status;
+	StringInfoData		buf, resp_buf;
+	int		read_len = 0;
+	int		committed;
 
 	if (rwset_collection_buffer == NULL)
+		return;
+
+	header = &rwset_collection_buffer->header;
+
+	/* No need to start a remote xact for a local single-region xact */
+	if (header->region_set == SingleRegion(current_region))
 		return;
 
 	if (!connect_to_txn_server())
@@ -365,7 +369,6 @@ rx_send_rwset_and_wait(void)
 	initStringInfo(&buf);
 
 	/* Assemble the header */
-	header = &rwset_collection_buffer->header;
 	pq_sendint32(&buf, header->dbid);
 	pq_sendint32(&buf, header->xid);
 	pq_sendint64(&buf, header->csn);
@@ -412,19 +415,71 @@ rx_send_rwset_and_wait(void)
 
 	pq_sendbytes(&buf, rwset_collection_buffer->writes.data, rwset_collection_buffer->writes.len);
 
-	/* Actually send the buffer to the xact server */
+	/* Send the buffer to the xact server */
 	if (PQputCopyData(XactServerConn, buf.data, buf.len) <= 0 || PQflush(XactServerConn))
-		ereport(WARNING, errmsg("[remotexact] failed to send read/write set"));
+		ereport(ERROR, errmsg("[remotexact] failed to send read/write set"));
 
-	/*
-	 * TODO(ctring): This code is for debugging rwset remove all after the
-	 * remote worker is implemented
-	 */
-	rwset = RWSetAllocate();
-	buf.cursor = 0;
-	RWSetDecode(rwset, &buf);
-	ereport(LOG, errmsg("[remotexact] sent: %s", RWSetToString(rwset)));
-	RWSetFree(rwset);
+	/* Read the response */
+	resp_buf.len = call_PQgetCopyData(XactServerConn, &resp_buf.data);
+	resp_buf.cursor = 0;
+	if (resp_buf.len < 0)
+	{
+		if (resp_buf.len == -1)
+			ereport(ERROR, errmsg("[remotexact] end of COPY"));
+		else if (resp_buf.len == -2)
+			ereport(ERROR, errmsg("[remotexact] could not read COPY data: %s",
+								  PQerrorMessage(XactServerConn)));
+	}
+
+	// TODO (ctring): include more information in the response so that we can report
+	//				  the cause of abort in more details
+	committed = pq_getmsgbyte(&resp_buf);
+	PQfreemem(resp_buf.data);
+
+	if (!committed)
+		ereport(ERROR, errmsg("[remotexact] validation failed"));
+}
+
+/*
+ * A wrapper around PQgetCopyData that checks for interrupts while sleeping.
+ * 
+ * Taken from neon/libpagestore.c
+ */
+static int
+call_PQgetCopyData(PGconn *conn, char **buffer)
+{
+	int			ret;
+
+retry:
+	ret = PQgetCopyData(conn, buffer, 1 /* async */ );
+
+	if (ret == 0)
+	{
+		int			wc;
+
+		/* Sleep until there's something to do */
+		wc = WaitLatchOrSocket(MyLatch,
+							   WL_LATCH_SET | WL_SOCKET_READABLE |
+							   WL_EXIT_ON_PM_DEATH,
+							   PQsocket(conn),
+							   -1L, PG_WAIT_EXTENSION);
+		ResetLatch(MyLatch);
+
+		CHECK_FOR_INTERRUPTS();
+
+		/* Data available in socket? */
+		if (wc & WL_SOCKET_READABLE)
+		{
+			if (!PQconsumeInput(conn))
+				ereport(ERROR,
+						errmsg("[remotexact] could not get response from xactserver: %s",
+								PQerrorMessage(conn)));
+		}
+
+		goto retry;
+	}
+
+	return ret;
 }
 
 static CollectedRelation *
@@ -463,6 +518,7 @@ get_collected_relation(Oid relid, bool create_if_not_found)
 	return relation;
 }
 
+// TODO (ctring): need better handling of interrupted connection / reconnection
 static bool
 connect_to_txn_server(void)
 {
@@ -513,17 +569,26 @@ connect_to_txn_server(void)
 	return Connected;
 }
 
+static void
+clean_up_xact_callback(XactEvent event, void *arg)
+{
+	if (event == XACT_EVENT_ABORT ||
+		event == XACT_EVENT_PARALLEL_ABORT ||
+		event == XACT_EVENT_COMMIT ||
+		event == XACT_EVENT_PARALLEL_COMMIT)
+		rwset_collection_buffer = NULL;
+}
+
 static const RemoteXactHook remote_xact_hook =
 {
 	.collect_region = rx_collect_region,
 	.collect_tuple = rx_collect_tuple,
 	.collect_relation = rx_collect_relation,
 	.collect_page = rx_collect_page,
-	.clear_rwset = rx_clear_rwset_collection_buffer,
 	.collect_insert = rx_collect_insert,
 	.collect_update = rx_collect_update,
 	.collect_delete = rx_collect_delete,
-	.send_rwset_and_wait = rx_send_rwset_and_wait
+	.execute_remote_xact = rx_execute_remote_xact
 };
 
 void
@@ -544,6 +609,7 @@ _PG_init(void)
 	if (remotexact_connstring && remotexact_connstring[0])
 	{
 		SetRemoteXactHook(&remote_xact_hook);
+		RegisterXactCallback(clean_up_xact_callback, NULL);
 
 		ereport(LOG, errmsg("[remotexact] initialized"));
 		ereport(LOG, errmsg("[remotexact] xactserver connection string \"%s\"", remotexact_connstring));
