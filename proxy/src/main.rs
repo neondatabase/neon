@@ -147,6 +147,10 @@ async fn main() -> anyhow::Result<()> {
     println!("Starting http on {}", http_address);
     let http_listener = TcpListener::bind(http_address).await?.into_std()?;
 
+    let ws_address: SocketAddr = "0.0.0.0:8000".parse()?;
+    println!("Starting ws on {}", ws_address);
+    let ws_listener = TcpListener::bind(ws_address).await?.into_std()?;
+
     println!("Starting mgmt on {}", mgmt_address);
     let mgmt_listener = TcpListener::bind(mgmt_address).await?.into_std()?;
 
@@ -155,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
 
     let tasks = [
         tokio::spawn(http::server::thread_main(http_listener)),
+        tokio::spawn(http::server::ws_thread_main(ws_listener)),
         tokio::spawn(proxy::thread_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
     ]
