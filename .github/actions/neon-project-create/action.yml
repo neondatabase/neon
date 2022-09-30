@@ -63,7 +63,39 @@ runs:
               \"name\": \"Created by actions/neon-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
               \"platform_id\": \"aws\",
               \"region_id\": \"${REGION_ID}\",
-              \"settings\": { }
+              \"settings\": {
+                \"constraint_exclusion\": \"off\",
+                \"cpu_index_tuple_cost\": \"1.637272286893718e+308\",
+                \"cpu_operator_cost\": \"1.79769e+308\",
+                \"cpu_tuple_cost\": \"1.6957485653186957e+308\",
+                \"cursor_tuple_fraction\": \"0.4685070675008615\",
+                \"enable_async_append\": \"off\",
+                \"enable_bitmapscan\": \"on\",
+                \"enable_gathermerge\": \"on\",
+                \"enable_hashagg\": \"on\",
+                \"enable_hashjoin\": \"off\",
+                \"enable_incremental_sort\": \"on\",
+                \"enable_indexonlyscan\": \"on\",
+                \"enable_indexscan\": \"on\",
+                \"enable_material\": \"off\",
+                \"enable_mergejoin\": \"off\",
+                \"enable_nestloop\": \"off\",
+                \"enable_parallel_append\": \"off\",
+                \"enable_parallel_hash\": \"off\",
+                \"enable_partition_pruning\": \"on\",
+                \"enable_partitionwise_aggregate\": \"off\",
+                \"enable_partitionwise_join\": \"on\",
+                \"enable_seqscan\": \"on\",
+                \"enable_sort\": \"off\",
+                \"enable_tidscan\": \"off\",
+                \"from_collapse_limit\": \"1594910280\",
+                \"min_parallel_table_scan_size\": \"0\",
+                \"parallel_setup_cost\": \"1.79769e+308\",
+                \"parallel_tuple_cost\": \"6.288448285557434e+307\",
+                \"plan_cache_mode\": \"force_custom_plan\",
+                \"random_page_cost\": \"2.468072863935744e+307\",
+                \"seq_page_cost\": \"0.0\"
+              }
             }
           }")
 

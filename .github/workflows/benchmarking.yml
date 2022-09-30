@@ -153,7 +153,7 @@ jobs:
         # neon-captest-new: Run pgbench in a freshly created project
         # neon-captest-reuse: Same, but reusing existing project
         # neon-captest-prefetch: Same, with prefetching enabled (new project)
-        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch, rds-aurora ]
+        platform: [ neon-captest-prefetch ]
 
     runs-on: dev
     container:
@@ -213,55 +213,24 @@ jobs:
     - name: Set database options
       if: matrix.platform == 'neon-captest-prefetch'
       run: |
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET constraint_exclusion=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET cpu_index_tuple_cost=1.637272286893718e+308"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET cpu_operator_cost=1.79769e+308"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET cpu_tuple_cost=1.6957485653186957e+308"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET cursor_tuple_fraction=0.4685070675008615"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET default_statistics_target=1"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET effective_cache_size=872767456"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_async_append=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_bitmapscan=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_gathermerge=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_hashagg=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_hashjoin=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_incremental_sort=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_indexonlyscan=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_indexscan=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_material=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_memoize=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_mergejoin=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_nestloop=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_parallel_append=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_parallel_hash=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_partition_pruning=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_partitionwise_aggregate=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_partitionwise_join=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_seqscan=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_sort=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_tidscan=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET from_collapse_limit=1594910280"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_effort=10"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_generations=2147483647"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_pool_size=1574739104"
         psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_seed=1.0"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_selection_bias=2.0"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_threshold=2"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET jit=off"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET jit_above_cost=-1.0"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET jit_inline_above_cost=-1.0"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET jit_optimize_above_cost=1.79769e+308"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET join_collapse_limit=1"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET min_parallel_index_scan_size=0"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET min_parallel_table_scan_size=0"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET parallel_setup_cost=1.79769e+308"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET parallel_tuple_cost=6.288448285557434e+307"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET plan_cache_mode=force_custom_plan"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET random_page_cost=2.468072863935744e+307"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET seq_page_cost=0.0"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_effort=10"
         psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET seqscan_prefetch_buffers=647"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET default_statistics_target=1"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET jit_above_cost=-1.0"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET join_collapse_limit=1"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_selection_bias=2.0"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_pool_size=1574739104"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_generations=2147483647"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_memoize=off"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET jit_inline_above_cost=-1.0"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET min_parallel_index_scan_size=0"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo_threshold=2"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_seqscan_prefetch=on"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET jit=off"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET jit_optimize_above_cost=1.79769e+308"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET geqo=on"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET effective_cache_size=872767456"
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
