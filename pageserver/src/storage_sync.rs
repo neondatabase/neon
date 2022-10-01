@@ -639,6 +639,7 @@ pub fn spawn_storage_sync_task(
                 (storage, remote_index_clone, sync_queue),
                 max_sync_errors,
             )
+            .instrument(info_span!("storage_sync_loop"))
             .await;
             Ok(())
         },
