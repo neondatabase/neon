@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -94,7 +95,7 @@ def main(args):
     run_command(cmd)
 
     print("* Opening psql session...")
-    cmd = ["psql", "host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres"]
+    cmd = ["psql", f"host=127.0.0.1 port=55432 user={os.getlogin()} dbname=postgres"]
     subprocess.call(cmd)
 
 
