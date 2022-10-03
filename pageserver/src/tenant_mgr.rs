@@ -108,6 +108,10 @@ pub fn init_tenant_mgr(
 /// Attempts to load as many entites as possible: if a certain timeline fails during the load, the tenant is marked as "Broken",
 /// and the load continues.
 ///
+/// For successful tenant attach, it first has to have a `timelines/` subdirectory and a tenant config file that's loaded into memory successfully.
+/// If either of the conditions fails, the tenant will be added to memory with [`TenantState::Broken`] state, otherwise we start to load its timelines.
+/// Alternatively, tenant is considered loaded successfully, if it's already in pageserver's memory (i.e. was loaded already before).
+///
 /// Attach happens on startup and sucessful timeline downloads
 /// (some subset of timeline files, always including its metadata, after which the new one needs to be registered).
 pub fn attach_local_tenants(
@@ -173,16 +177,28 @@ fn load_local_tenant(
         remote_index.clone(),
         conf.remote_storage_config.is_some(),
     ));
-    match Tenant::load_tenant_config(conf, tenant_id) {
-        Ok(tenant_conf) => {
-            tenant.update_tenant_config(tenant_conf);
-            tenant.activate(false);
-        }
-        Err(e) => {
-            error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
-            tenant.set_state(TenantState::Broken);
+
+    let tenant_timelines_dir = conf.timelines_path(&tenant_id);
+    if !tenant_timelines_dir.is_dir() {
+        error!(
+            "Tenant {} has no timelines directory at {}",
+            tenant_id,
+            tenant_timelines_dir.display()
+        );
+        tenant.set_state(TenantState::Broken);
+    } else {
+        match Tenant::load_tenant_config(conf, tenant_id) {
+            Ok(tenant_conf) => {
+                tenant.update_tenant_config(tenant_conf);
+                tenant.activate(false);
+            }
+            Err(e) => {
+                error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
+                tenant.set_state(TenantState::Broken);
+            }
         }
     }
+
     tenant
 }
 
@@ -630,14 +646,10 @@ fn collect_timelines_for_tenant(
     }
 
     if tenant_timelines.is_empty() {
-        match remove_if_empty(&timelines_dir) {
-            Ok(true) => info!(
-                "Removed empty tenant timelines directory {}",
-                timelines_dir.display()
-            ),
-            Ok(false) => (),
-            Err(e) => error!("Failed to remove empty tenant timelines directory: {e:?}"),
-        }
+        // this is normal, we've removed all broken, empty and temporary timeline dirs
+        // but should allow the tenant to stay functional and allow creating new timelines
+        // on a restart, we require tenants to have the timelines dir, so leave it on disk
+        debug!("Tenant {tenant_id} has no timelines loaded");
     }
 
     Ok((tenant_id, tenant_timelines))
