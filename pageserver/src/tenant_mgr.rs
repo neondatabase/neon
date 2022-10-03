@@ -107,6 +107,9 @@ pub fn init_tenant_mgr(
 /// Ignores other timelines that might be present for tenant, but were not passed as a parameter.
 /// Attempts to load as many entites as possible: if a certain timeline fails during the load, the tenant is marked as "Broken",
 /// and the load continues.
+///
+/// Attach happens on startup and sucessful timeline downloads
+/// (some subset of timeline files, always including its metadata, after which the new one needs to be registered).
 pub fn attach_local_tenants(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
