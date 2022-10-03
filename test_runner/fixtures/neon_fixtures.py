@@ -455,6 +455,9 @@ class RemoteStorageKind(enum.Enum):
     LOCAL_FS = "local_fs"
     MOCK_S3 = "mock_s3"
     REAL_S3 = "real_s3"
+    # Pass to tests that are generic to remote storage
+    # to ensure the test pass with or without the remote storage
+    NOOP = "noop"
 
 
 def available_remote_storages() -> List[RemoteStorageKind]:
@@ -583,7 +586,9 @@ class NeonEnvBuilder:
         test_name: str,
         force_enable: bool = True,
     ):
-        if remote_storage_kind == RemoteStorageKind.LOCAL_FS:
+        if remote_storage_kind == RemoteStorageKind.NOOP:
+            return
+        elif remote_storage_kind == RemoteStorageKind.LOCAL_FS:
             self.enable_local_fs_remote_storage(force_enable=force_enable)
         elif remote_storage_kind == RemoteStorageKind.MOCK_S3:
             self.enable_mock_s3_remote_storage(bucket_name=test_name, force_enable=force_enable)

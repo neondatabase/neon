@@ -8,8 +8,13 @@ from typing import List
 import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import PAGESERVER_PER_TENANT_METRICS, parse_metrics
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
-from fixtures.types import Lsn, TenantId
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    RemoteStorageKind,
+    available_remote_storages,
+)
+from fixtures.types import Lsn, TenantId, TimelineId
 from prometheus_client.samples import Sample
 
 
@@ -204,26 +209,50 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
         assert post_detach_samples == set()
 
 
-def test_pageserver_with_empty_tenants(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+# Check that empty tenants work with or without the remote storage
+@pytest.mark.parametrize(
+    "remote_storage_kind", available_remote_storages() + [RemoteStorageKind.NOOP]
+)
+def test_pageserver_with_empty_tenants(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_pageserver_with_empty_tenants",
+    )
+
+    env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
     tenant_without_timelines_dir = env.initial_tenant
+    log.info(
+        f"Tenant {tenant_without_timelines_dir} becomes broken: it abnormally looses tenants/ directory and is expected to be completely ignored when pageserver restarts"
+    )
     shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
 
     tenant_with_empty_timelines_dir = client.tenant_create()
-    for timeline_dir_entry in Path.iterdir(
-        Path(env.repo_dir) / "tenants" / str(tenant_with_empty_timelines_dir) / "timelines"
-    ):
-        if timeline_dir_entry.is_dir():
-            shutil.rmtree(timeline_dir_entry)
-        else:
-            timeline_dir_entry.unlink()
+    log.info(
+        f"Tenant {tenant_with_empty_timelines_dir} gets all of its timelines deleted: still should be functional"
+    )
+    temp_timelines = client.timeline_list(tenant_with_empty_timelines_dir)
+    for temp_timeline in temp_timelines:
+        client.timeline_delete(
+            tenant_with_empty_timelines_dir, TimelineId(temp_timeline["timeline_id"])
+        )
+    files_in_timelines_dir = sum(
+        1
+        for _p in Path.iterdir(
+            Path(env.repo_dir) / "tenants" / str(tenant_with_empty_timelines_dir) / "timelines"
+        )
+    )
+    assert (
+        files_in_timelines_dir == 0
+    ), f"Tenant {tenant_with_empty_timelines_dir} should have an empty timelines/ directory"
 
+    # Trigger timeline reinitialization after pageserver restart
     env.postgres.stop_all()
-    for _ in range(0, 3):
-        env.pageserver.stop()
-        env.pageserver.start()
+    env.pageserver.stop()
+    env.pageserver.start()
 
     client = env.pageserver.http_client()
     tenants = client.tenant_list()

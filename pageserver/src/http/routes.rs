@@ -337,9 +337,16 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     info!("Handling tenant attach {tenant_id}");
 
     tokio::task::spawn_blocking(move || match tenant_mgr::get_tenant(tenant_id, false) {
-        Ok(_) => Err(ApiError::Conflict(
-            "Tenant is already present locally".to_owned(),
-        )),
+        Ok(tenant) => {
+            if tenant.list_timelines().is_empty() {
+                info!("Attaching to tenant {tenant_id} with zero timelines");
+                Ok(())
+            } else {
+                Err(ApiError::Conflict(
+                    "Tenant is already present locally".to_owned(),
+                ))
+            }
+        }
         Err(_) => Ok(()),
     })
     .await
