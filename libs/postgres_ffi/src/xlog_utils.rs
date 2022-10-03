@@ -57,12 +57,10 @@ pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 /// in order to let CLOG_TRUNCATE mechanism correctly extend CLOG.
 const XID_CHECKPOINT_INTERVAL: u32 = 1024;
 
-#[allow(non_snake_case)]
 pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
     (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo
 }
 
-#[allow(non_snake_case)]
 pub fn XLogSegNoOffsetToRecPtr(
     segno: XLogSegNo,
     offset: u32,
@@ -71,7 +69,6 @@ pub fn XLogSegNoOffsetToRecPtr(
     segno * (wal_segsz_bytes as u64) + (offset as u64)
 }
 
-#[allow(non_snake_case)]
 pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize) -> String {
     format!(
         "{:>08X}{:>08X}{:>08X}",
@@ -81,7 +78,6 @@ pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize
     )
 }
 
-#[allow(non_snake_case)]
 pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
     let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
     let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
@@ -89,12 +85,10 @@ pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLin
     (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli)
 }
 
-#[allow(non_snake_case)]
 pub fn IsXLogFileName(fname: &str) -> bool {
     return fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit());
 }
 
-#[allow(non_snake_case)]
 pub fn IsPartialXLogFileName(fname: &str) -> bool {
     fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
 }
