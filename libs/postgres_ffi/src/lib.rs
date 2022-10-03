@@ -6,6 +6,11 @@
 // suppress warnings on rust 1.53 due to bindgen unit tests.
 // https://github.com/rust-lang/rust-bindgen/issues/1651
 #![allow(deref_nullptr)]
+// noted at 1.63 that in many cases there's a u32 -> u32 transmutes in bindgen code.
+#![allow(clippy::useless_transmute)]
+// modules included with the postgres_ffi macro depend on the types of the specific version's
+// types, and trigger a too eager lint.
+#![allow(clippy::duplicate_mod)]
 
 use bytes::Bytes;
 use utils::bin_ser::SerializeError;
