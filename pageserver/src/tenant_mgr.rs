@@ -107,6 +107,9 @@ pub fn init_tenant_mgr(
 /// Ignores other timelines that might be present for tenant, but were not passed as a parameter.
 /// Attempts to load as many entites as possible: if a certain timeline fails during the load, the tenant is marked as "Broken",
 /// and the load continues.
+///
+/// Attach happens on startup and sucessful timeline downloads
+/// (some subset of timeline files, always including its metadata, after which the new one needs to be registered).
 pub fn attach_local_tenants(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
@@ -122,18 +125,20 @@ pub fn attach_local_tenants(
         );
         debug!("Timelines to attach: {local_timelines:?}");
 
-        let tenant = load_local_tenant(conf, tenant_id, remote_index);
-        {
-            match tenants_state::write_tenants().entry(tenant_id) {
-                hash_map::Entry::Occupied(_) => {
-                    error!("Cannot attach tenant {tenant_id}: there's already an entry in the tenant state");
-                    continue;
-                }
-                hash_map::Entry::Vacant(v) => {
-                    v.insert(Arc::clone(&tenant));
-                }
+        let mut tenants_accessor = tenants_state::write_tenants();
+        let tenant = match tenants_accessor.entry(tenant_id) {
+            hash_map::Entry::Occupied(o) => {
+                info!("Tenant {tenant_id} was found in pageserver's memory");
+                Arc::clone(o.get())
             }
-        }
+            hash_map::Entry::Vacant(v) => {
+                info!("Tenant {tenant_id} was not found in pageserver's memory, loading it");
+                let tenant = load_local_tenant(conf, tenant_id, remote_index);
+                v.insert(Arc::clone(&tenant));
+                tenant
+            }
+        };
+        drop(tenants_accessor);
 
         if tenant.current_state() == TenantState::Broken {
             warn!("Skipping timeline load for broken tenant {tenant_id}")

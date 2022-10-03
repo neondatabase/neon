@@ -400,16 +400,19 @@ impl Tenant {
                 timeline_id,
                 metadata.pg_version()
             );
-            let timeline = self
-                .initialize_new_timeline(timeline_id, metadata, &mut timelines_accessor)
-                .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
-
-            match timelines_accessor.entry(timeline.timeline_id) {
-                Entry::Occupied(_) => bail!(
-                    "Found freshly initialized timeline {} in the tenant map",
-                    timeline.timeline_id
+            let ancestor = metadata
+                .ancestor_timeline()
+                .and_then(|ancestor_timeline_id| timelines_accessor.get(&ancestor_timeline_id))
+                .cloned();
+            match timelines_accessor.entry(timeline_id) {
+                Entry::Occupied(_) => warn!(
+                    "Timeline {}/{} already exists in the tenant map, skipping its initialization",
+                    self.tenant_id, timeline_id
                 ),
                 Entry::Vacant(v) => {
+                    let timeline = self
+                        .initialize_new_timeline(timeline_id, metadata, ancestor)
+                        .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
                     v.insert(timeline);
                 }
             }
@@ -609,21 +612,14 @@ impl Tenant {
         &self,
         new_timeline_id: TimelineId,
         new_metadata: TimelineMetadata,
-        timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        ancestor: Option<Arc<Timeline>>,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let ancestor = match new_metadata.ancestor_timeline() {
-            Some(ancestor_timeline_id) => Some(
-                timelines
-                    .get(&ancestor_timeline_id)
-                    .cloned()
-                    .with_context(|| {
-                        format!(
-                        "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
-                    )
-                    })?,
-            ),
-            None => None,
-        };
+        if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
+            anyhow::ensure!(
+                ancestor.is_some(),
+                "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
+            )
+        }
 
         let new_disk_consistent_lsn = new_metadata.disk_consistent_lsn();
         let pg_version = new_metadata.pg_version();
@@ -1080,8 +1076,12 @@ impl Tenant {
             )
         })?;
 
+        let ancestor = new_metadata
+            .ancestor_timeline()
+            .and_then(|ancestor_timeline_id| timelines.get(&ancestor_timeline_id))
+            .cloned();
         let new_timeline = self
-            .initialize_new_timeline(new_timeline_id, new_metadata, timelines)
+            .initialize_new_timeline(new_timeline_id, new_metadata, ancestor)
             .with_context(|| {
                 format!(
                     "Failed to initialize timeline {}/{}",
