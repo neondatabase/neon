@@ -627,7 +627,7 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
         let self_clone = Arc::clone(self);
-        let _ = spawn_connection_manager_task(
+        spawn_connection_manager_task(
             self.conf.broker_etcd_prefix.clone(),
             self_clone,
             walreceiver_connect_timeout,

@@ -129,13 +129,13 @@ mod tests {
             assert!(CANCEL_MAP.contains(&session));
 
             tx.send(()).expect("failed to send");
-            let () = futures::future::pending().await; // sleep forever
+            futures::future::pending::<()>().await; // sleep forever
 
             Ok(())
         }));
 
         // Wait until the task has been spawned.
-        let () = rx.await.context("failed to hear from the task")?;
+        rx.await.context("failed to hear from the task")?;
 
         // Drop the session's entry by cancelling the task.
         task.abort();
