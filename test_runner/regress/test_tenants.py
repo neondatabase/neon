@@ -1,4 +1,5 @@
 import os
+import shutil
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -201,3 +202,39 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
 
         post_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
         assert post_detach_samples == set()
+
+
+def test_pageserver_with_empty_tenants(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    client = env.pageserver.http_client()
+
+    tenant_without_timelines_dir = env.initial_tenant
+    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
+
+    tenant_with_empty_timelines_dir = client.tenant_create()
+    for timeline_dir_entry in Path.iterdir(
+        Path(env.repo_dir) / "tenants" / str(tenant_with_empty_timelines_dir) / "timelines"
+    ):
+        if timeline_dir_entry.is_dir():
+            shutil.rmtree(timeline_dir_entry)
+        else:
+            timeline_dir_entry.unlink()
+
+    env.postgres.stop_all()
+    for _ in range(0, 3):
+        env.pageserver.stop()
+        env.pageserver.start()
+
+    client = env.pageserver.http_client()
+    tenants = client.tenant_list()
+
+    assert (
+        len(tenants) == 1
+    ), "Pageserver should attach only tenants with empty timelines/ dir on restart"
+    loaded_tenant = tenants[0]
+    assert loaded_tenant["id"] == str(
+        tenant_with_empty_timelines_dir
+    ), f"Tenant {tenant_with_empty_timelines_dir} should be loaded as the only one with tenants/ directory"
+    assert loaded_tenant["state"] == {
+        "Active": {"background_jobs_running": False}
+    }, "Empty tenant should be loaded and ready for timeline creation"
