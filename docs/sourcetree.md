@@ -96,7 +96,7 @@ A single virtual environment with all dependencies is described in the single `P
       sudo apt install python3.9
       ```
 - Install `poetry`
-    - Exact version of `poetry` is not important, see installation instructions available at poetry's [website](https://python-poetry.org/docs/#installation)`.
+    - Exact version of `poetry` is not important, see installation instructions available at poetry's [website](https://python-poetry.org/docs/#installation).
 - Install dependencies via `./scripts/pysync`.
     - Note that CI uses specific Python version (look for `PYTHON_VERSION` [here](https://github.com/neondatabase/docker-images/blob/main/rust/Dockerfile))
       so if you have different version some linting tools can yield different result locally vs in the CI.
