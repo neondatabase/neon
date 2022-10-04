@@ -8,6 +8,7 @@ use metrics::{register_int_counter, IntCounter};
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{error, info};
 use utils::pq_proto::{BeMessage as Be, *};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
@@ -43,7 +44,7 @@ where
     F: std::future::Future<Output = anyhow::Result<R>>,
 {
     future.await.map_err(|err| {
-        println!("error: {}", err);
+        error!("{err}");
         err
     })
 }
@@ -53,7 +54,7 @@ pub async fn thread_main(
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
-        println!("proxy has shut down");
+        info!("proxy has shut down");
     }
 
     // When set for the server socket, the keepalive setting
@@ -63,7 +64,7 @@ pub async fn thread_main(
     let cancel_map = Arc::new(CancelMap::default());
     loop {
         let (socket, peer_addr) = listener.accept().await?;
-        println!("accepted connection from {}", peer_addr);
+        info!("accepted connection from {peer_addr}");
 
         let cancel_map = Arc::clone(&cancel_map);
         tokio::spawn(log_error(async move {
@@ -127,7 +128,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
         let msg = stream.read_startup_packet().await?;
-        println!("got message: {:?}", msg);
+        info!("got message: {msg:?}");
 
         use FeStartupPacket::*;
         match msg {

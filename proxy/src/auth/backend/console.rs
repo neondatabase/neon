@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::info;
 
 const REQUEST_FAILED: &str = "Console request failed";
 
@@ -161,7 +162,7 @@ impl<'a> Api<'a> {
             .build()?;
 
         // TODO: use a proper logger
-        println!("cplane request: {}", req.url());
+        info!("cplane request: {}", req.url());
 
         let resp = self.endpoint.execute(req).await?;
         if !resp.status().is_success() {
@@ -189,7 +190,7 @@ impl<'a> Api<'a> {
             .build()?;
 
         // TODO: use a proper logger
-        println!("cplane request: {}", req.url());
+        info!("cplane request: {}", req.url());
 
         let resp = self.endpoint.execute(req).await?;
         if !resp.status().is_success() {

@@ -5,6 +5,7 @@ use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::NoTls;
+use tracing::error;
 use utils::pq_proto::StartupMessageParams;
 
 #[derive(Debug, Error)]
@@ -88,7 +89,7 @@ impl NodeInfo {
                 Ok(socket) => return Ok(socket),
                 Err(err) => {
                     // We can't throw an error here, as there might be more hosts to try.
-                    println!("failed to connect to compute `{host}:{port}`: {err}");
+                    error!("failed to connect to compute `{host}:{port}`: {err}");
                     connection_error = Some(err);
                 }
             }
