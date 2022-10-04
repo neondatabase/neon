@@ -251,10 +251,13 @@ impl Timeline {
                 Lsn(mid * 8),
                 &mut found_smaller,
                 &mut found_larger,
-            )?;
-
-            if cmp {
-                high = mid;
+            );
+            if let Ok(ge) = cmp {
+                if ge {
+                    high = mid;
+                } else {
+                    low = mid + 1;
+                }
             } else {
                 low = mid + 1;
             }
