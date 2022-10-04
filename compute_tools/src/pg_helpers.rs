@@ -1,16 +1,19 @@
 use std::fmt::Write;
+use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
-use std::{fs, thread, time};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use postgres::{Client, Transaction};
 use serde::Deserialize;
 
-const POSTGRES_WAIT_TIMEOUT: u64 = 60 * 1000; // milliseconds
+use notify::{RecursiveMode, Watcher};
+
+const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
 /// Rust representation of Postgres role info with only those fields
 /// that matter for us.
@@ -233,29 +236,63 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
 /// 'ready'.
 pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
-    let mut slept: u64 = 0; // ms
-    let pause = time::Duration::from_millis(100);
 
+    // PostgreSQL writes line "ready" to the postmaster.pid file, when it has
+    // completed initialization and is ready to accept connections. We want to
+    // react quickly and perform the rest of our initialization as soon as
+    // PostgreSQL starts accepting connections. Use 'notify' to be notified
+    // whenever the PID file is changed, and whenever it changes, read it to
+    // check if it's now "ready".
+    //
+    // You cannot actually watch a file before it exists, so we first watch the
+    // data directory, and once the postmaster.pid file appears, we switch to
+    // watch the file instead. We also wake up every 100 ms to poll, just in
+    // case we miss some events for some reason. Not strictly necessary, but
+    // better safe than sorry.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })?;
+    watcher.watch(pgdata, RecursiveMode::NonRecursive)?;
+
+    let started_at = Instant::now();
+    let mut postmaster_pid_seen = false;
     loop {
-        // Sleep POSTGRES_WAIT_TIMEOUT at max
-        if slept >= POSTGRES_WAIT_TIMEOUT {
-            bail!("timed out while waiting for Postgres to start");
-        }
-
         if let Ok(Some(status)) = pg.try_wait() {
             // Postgres exited, that is not what we expected, bail out earlier.
             let code = status.code().unwrap_or(-1);
             bail!("Postgres exited unexpectedly with code {}", code);
         }
 
+        let res = rx.recv_timeout(Duration::from_millis(100));
+        log::debug!("woken up by notify: {res:?}");
+        // If there are multiple events in the channel already, we only need to be
+        // check once. Swallow the extra events before we go ahead to check the
+        // pid file.
+        while let Ok(res) = rx.try_recv() {
+            log::debug!("swallowing extra event: {res:?}");
+        }
+
         // Check that we can open pid file first.
         if let Ok(file) = File::open(&pid_path) {
+            if !postmaster_pid_seen {
+                log::debug!("postmaster.pid appeared");
+                watcher
+                    .unwatch(pgdata)
+                    .expect("Failed to remove pgdata dir watch");
+                watcher
+                    .watch(&pid_path, RecursiveMode::NonRecursive)
+                    .expect("Failed to add postmaster.pid file watch");
+                postmaster_pid_seen = true;
+            }
+
             let file = BufReader::new(file);
             let last_line = file.lines().last();
 
             // Pid file could be there and we could read it, but it could be empty, for example.
             if let Some(Ok(line)) = last_line {
                 let status = line.trim();
+                log::debug!("last line of postmaster.pid: {status:?}");
 
                 // Now Postgres is ready to accept connections
                 if status == "ready" {
@@ -264,8 +301,11 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
             }
         }
 
-        thread::sleep(pause);
-        slept += 100;
+        // Give up after POSTGRES_WAIT_TIMEOUT.
+        let duration = started_at.elapsed();
+        if duration >= POSTGRES_WAIT_TIMEOUT {
+            bail!("timed out while waiting for Postgres to start");
+        }
     }
 
     log::info!("PostgreSQL is now running, continuing to configure it");
