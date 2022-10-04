@@ -1,11 +1,9 @@
 use std::fmt::Write;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
-use std::str::FromStr;
 use std::{fs, thread, time};
 
 use anyhow::{bail, Result};
@@ -230,21 +228,16 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
     Ok(postgres_dbs)
 }
 
-/// Wait for Postgres to become ready to accept connections:
-/// - state should be `ready` in the `pgdata/postmaster.pid`
-/// - and we should be able to connect to 127.0.0.1:5432
-pub fn wait_for_postgres(pg: &mut Child, port: &str, pgdata: &Path) -> Result<()> {
+/// Wait for Postgres to become ready to accept connections. It's ready to
+/// accept connections when the state-field in `pgdata/postmaster.pid` says
+/// 'ready'.
+pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
     let mut slept: u64 = 0; // ms
     let pause = time::Duration::from_millis(100);
 
-    let timeout = time::Duration::from_millis(10);
-    let addr = SocketAddr::from_str(&format!("127.0.0.1:{}", port)).unwrap();
-
     loop {
-        // Sleep POSTGRES_WAIT_TIMEOUT at max (a bit longer actually if consider a TCP timeout,
-        // but postgres starts listening almost immediately, even if it is not really
-        // ready to accept connections).
+        // Sleep POSTGRES_WAIT_TIMEOUT at max
         if slept >= POSTGRES_WAIT_TIMEOUT {
             bail!("timed out while waiting for Postgres to start");
         }
@@ -263,10 +256,9 @@ pub fn wait_for_postgres(pg: &mut Child, port: &str, pgdata: &Path) -> Result<()
             // Pid file could be there and we could read it, but it could be empty, for example.
             if let Some(Ok(line)) = last_line {
                 let status = line.trim();
-                let can_connect = TcpStream::connect_timeout(&addr, timeout).is_ok();
 
                 // Now Postgres is ready to accept connections
-                if status == "ready" && can_connect {
+                if status == "ready" {
                     break;
                 }
             }
@@ -275,6 +267,8 @@ pub fn wait_for_postgres(pg: &mut Child, port: &str, pgdata: &Path) -> Result<()
         thread::sleep(pause);
         slept += 100;
     }
+
+    log::info!("PostgreSQL is now running, continuing to configure it");
 
     Ok(())
 }
