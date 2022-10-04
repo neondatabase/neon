@@ -1950,6 +1950,54 @@ impl Timeline {
                 new_gc_cutoff
             );
             write_guard.store_and_unlock(new_gc_cutoff).wait();
+
+            // Persist metadata file
+            let disk_consistent_lsn = self.disk_consistent_lsn.load();
+
+            let RecordLsn {
+                last: last_record_lsn,
+                prev: prev_record_lsn,
+            } = self.last_record_lsn.load();
+
+            let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
+                Some(prev_record_lsn)
+            } else {
+                None
+            };
+
+            let ancestor_timeline_id = self
+                .ancestor_timeline
+                .as_ref()
+                .map(|ancestor| ancestor.timeline_id);
+
+            let metadata = TimelineMetadata::new(
+                disk_consistent_lsn,
+                ondisk_prev_record_lsn,
+                ancestor_timeline_id,
+                self.ancestor_lsn,
+                new_gc_cutoff,
+                self.initdb_lsn,
+                self.pg_version,
+            );
+
+            save_metadata(
+                self.conf,
+                self.timeline_id,
+                self.tenant_id,
+                &metadata,
+                false,
+            )?;
+
+            let layer_paths_to_upload = HashSet::new();
+
+            if self.upload_layers.load(atomic::Ordering::Relaxed) {
+                storage_sync::schedule_layer_upload(
+                    self.tenant_id,
+                    self.timeline_id,
+                    layer_paths_to_upload,
+                    Some(metadata),
+                );
+            }
         }
 
         info!("GC starting");
