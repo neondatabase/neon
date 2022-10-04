@@ -117,7 +117,7 @@ jobs:
   check-rust-dependencies:
     runs-on: dev
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3172216511
       options: --init
 
     steps:
