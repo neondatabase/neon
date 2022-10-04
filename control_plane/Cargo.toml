@@ -19,7 +19,9 @@ thiserror = "1"
 nix = "0.23"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
-pageserver = { path = "../pageserver" }
-safekeeper = { path = "../safekeeper" }
+# Note: Do not directly depend on pageserver or safekeeper; use pageserver_api or safekeeper_api
+# instead, so that recompile times are better.
+pageserver_api = { path = "../libs/pageserver_api" }
+safekeeper_api = { path = "../libs/safekeeper_api" }
 utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }

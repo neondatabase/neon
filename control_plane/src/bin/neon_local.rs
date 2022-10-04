@@ -12,12 +12,12 @@ use control_plane::local_env::{EtcdBroker, LocalEnv};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage::PageServerNode;
 use control_plane::{etcd, local_env};
-use pageserver::config::defaults::{
+use pageserver_api::models::TimelineInfo;
+use pageserver_api::{
     DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
     DEFAULT_PG_LISTEN_ADDR as DEFAULT_PAGESERVER_PG_ADDR,
 };
-use pageserver::http::models::TimelineInfo;
-use safekeeper::defaults::{
+use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };

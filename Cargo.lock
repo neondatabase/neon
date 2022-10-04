@@ -542,11 +542,11 @@ dependencies = [
  "git-version",
  "nix",
  "once_cell",
- "pageserver",
+ "pageserver_api",
  "postgres",
  "regex",
  "reqwest",
- "safekeeper",
+ "safekeeper_api",
  "serde",
  "serde_with",
  "tar",
@@ -2044,6 +2044,7 @@ dependencies = [
  "nix",
  "num-traits",
  "once_cell",
+ "pageserver_api",
  "postgres",
  "postgres-protocol",
  "postgres-types",
@@ -2069,6 +2070,17 @@ dependencies = [
  "url",
  "utils",
  "walkdir",
+ "workspace_hack",
+]
+
+[[package]]
+name = "pageserver_api"
+version = "0.1.0"
+dependencies = [
+ "const_format",
+ "serde",
+ "serde_with",
+ "utils",
  "workspace_hack",
 ]
 
@@ -2960,6 +2972,7 @@ dependencies = [
  "postgres_ffi",
  "regex",
  "remote_storage",
+ "safekeeper_api",
  "serde",
  "serde_json",
  "serde_with",
@@ -2971,6 +2984,17 @@ dependencies = [
  "toml_edit",
  "tracing",
  "url",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
+name = "safekeeper_api"
+version = "0.1.0"
+dependencies = [
+ "const_format",
+ "serde",
+ "serde_with",
  "utils",
  "workspace_hack",
 ]

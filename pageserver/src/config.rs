@@ -30,10 +30,10 @@ pub mod defaults {
     use crate::tenant_config::defaults::*;
     use const_format::formatcp;
 
-    pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
-    pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
-    pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
-    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
+    pub use pageserver_api::{
+        DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
+        DEFAULT_PG_LISTEN_PORT,
+    };
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";

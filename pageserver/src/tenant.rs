@@ -45,6 +45,7 @@ use crate::tenant_config::TenantConfOpt;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::WalRedoManager;
 use crate::{CheckpointConfig, TEMP_FILE_SUFFIX};
+pub use pageserver_api::models::TenantState;
 
 use toml_edit;
 use utils::{
@@ -116,18 +117,6 @@ pub struct Tenant {
 
     /// Makes every timeline to backup their files to remote storage.
     upload_layers: bool,
-}
-
-/// A state of a tenant in pageserver's memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum TenantState {
-    /// Tenant is fully operational, its background jobs might be running or not.
-    Active { background_jobs_running: bool },
-    /// A tenant is recognized by pageserver, but not yet ready to operate:
-    /// e.g. not present locally and being downloaded or being read into memory from the file system.
-    Paused,
-    /// A tenant is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
-    Broken,
 }
 
 /// A repository corresponds to one .neon directory. One repository holds multiple

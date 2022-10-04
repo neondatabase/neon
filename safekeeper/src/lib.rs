@@ -27,14 +27,13 @@ mod timelines_global_map;
 pub use timelines_global_map::GlobalTimelines;
 
 pub mod defaults {
-    use const_format::formatcp;
     use std::time::Duration;
 
-    pub const DEFAULT_PG_LISTEN_PORT: u16 = 5454;
-    pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
+    pub use safekeeper_api::{
+        DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
+        DEFAULT_PG_LISTEN_PORT,
+    };
 
-    pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 7676;
-    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
     pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(10);
     pub const DEFAULT_WAL_BACKUP_RUNTIME_THREADS: usize = 8;
 }

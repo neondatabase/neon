@@ -12,7 +12,7 @@ use nix::unistd::Pid;
 use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
-use safekeeper::http::models::TimelineCreateRequest;
+use safekeeper_api::models::TimelineCreateRequest;
 use thiserror::Error;
 use utils::{
     connstring::connection_address,

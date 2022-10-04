@@ -58,6 +58,7 @@ rstar = "0.9.3"
 num-traits = "0.2.15"
 amplify_num = "0.4.1"
 
+pageserver_api = { path = "../libs/pageserver_api" }
 postgres_ffi = { path = "../libs/postgres_ffi" }
 etcd_broker = { path = "../libs/etcd_broker" }
 metrics = { path = "../libs/metrics" }
