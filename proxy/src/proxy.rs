@@ -49,7 +49,7 @@ where
     })
 }
 
-pub async fn thread_main(
+pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {

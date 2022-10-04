@@ -13,7 +13,7 @@ fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
     router.get("/v1/status", status_handler)
 }
 
-pub async fn thread_main(http_listener: TcpListener) -> anyhow::Result<()> {
+pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("http has shut down");
     }

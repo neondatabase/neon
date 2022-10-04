@@ -160,8 +160,8 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
     let tasks = [
-        tokio::spawn(http::server::thread_main(http_listener)),
-        tokio::spawn(proxy::thread_main(config, proxy_listener)),
+        tokio::spawn(http::server::task_main(http_listener)),
+        tokio::spawn(proxy::task_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
     ]
     .map(flatten_err);
