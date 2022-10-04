@@ -1,6 +1,7 @@
 use crate::{auth, compute, error::UserFacingError, stream::PqStream, waiters};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::info;
 use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 #[derive(Debug, Error)]
@@ -53,14 +54,16 @@ pub async fn handle_user(
     let greeting = hello_message(link_uri, &psql_session_id);
 
     let db_info = super::with_waiter(psql_session_id, |waiter| async {
-        // Give user a URL to spawn a new database
+        // Give user a URL to spawn a new database.
+        info!("sending the auth URL to the user");
         client
             .write_message_noflush(&Be::AuthenticationOk)?
             .write_message_noflush(&BeParameterStatusMessage::encoding())?
             .write_message(&Be::NoticeResponse(&greeting))
             .await?;
 
-        // Wait for web console response (see `mgmt`)
+        // Wait for web console response (see `mgmt`).
+        info!("waiting for console's reply...");
         waiter.await?.map_err(LinkAuthError::AuthFailed)
     })
     .await?;

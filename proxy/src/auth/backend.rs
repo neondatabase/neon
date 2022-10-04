@@ -15,6 +15,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{info, warn};
 
 static CPLANE_WAITERS: Lazy<Waiters<mgmt::ComputeReady>> = Lazy::new(Default::default);
 
@@ -171,6 +172,8 @@ impl BackendType<'_, ClientCredentials<'_>> {
             // support SNI or other means of passing the project name.
             // We now expect to see a very specific payload in the place of password.
             if creds.project().is_none() {
+                warn!("project name not specified, resorting to the password hack auth flow");
+
                 let payload = AuthFlow::new(client)
                     .begin(auth::PasswordHack)
                     .await?
@@ -179,6 +182,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
 
                 // Finally we may finish the initialization of `creds`.
                 // TODO: add missing type safety to ClientCredentials.
+                info!(project = &payload.project, "received missing parameter");
                 creds.project = Some(payload.project.into());
 
                 let mut config = match &self {
@@ -196,6 +200,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 // We should use a password from payload as well.
                 config.password(payload.password);
 
+                info!("user successfully authenticated (using the password hack)");
                 return Ok(compute::NodeInfo {
                     reported_auth_ok: false,
                     config,
@@ -203,19 +208,31 @@ impl BackendType<'_, ClientCredentials<'_>> {
             }
         }
 
-        match self {
+        let res = match self {
             Console(endpoint, creds) => {
+                info!(
+                    user = creds.user,
+                    project = creds.project(),
+                    "performing authentication using the console"
+                );
                 console::Api::new(&endpoint, extra, &creds)
                     .handle_user(client)
                     .await
             }
             Postgres(endpoint, creds) => {
+                info!("performing mock authentication using a local postgres instance");
                 postgres::Api::new(&endpoint, &creds)
                     .handle_user(client)
                     .await
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Link(url) => link::handle_user(&url, client).await,
-        }
+            Link(url) => {
+                info!("performing link authentication");
+                link::handle_user(&url, client).await
+            }
+        }?;
+
+        info!("user successfully authenticated");
+        Ok(res)
     }
 }

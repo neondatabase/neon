@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     collections::HashMap,
+    fmt,
     future::Future,
     io::{self, Cursor},
     str,
@@ -122,6 +123,19 @@ impl StartupMessageParams {
 pub struct CancelKeyData {
     pub backend_pid: i32,
     pub cancel_key: i32,
+}
+
+impl fmt::Display for CancelKeyData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hi = (self.backend_pid as u64) << 32;
+        let lo = self.cancel_key as u64;
+        let id = hi | lo;
+
+        // This format is more compact and might work better for logs.
+        f.debug_tuple("CancelKeyData")
+            .field(&format_args!("{:x}", id))
+            .finish()
+    }
 }
 
 use rand::distributions::{Distribution, Standard};
