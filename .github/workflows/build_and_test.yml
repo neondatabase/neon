@@ -564,7 +564,7 @@ jobs:
 
   promote-images:
     runs-on: dev
-    needs: [ neon-image, compute-node-image, compute-node-image-v14, compute-tools-image ]
+    needs: [ neon-image, compute-node-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
@@ -573,7 +573,7 @@ jobs:
         # compute-node uses postgres 14, which is default now
         # cloud repo depends on this image name, thus duplicating it
         # remove compute-node when cloud repo is updated
-        name: [ neon, compute-node, compute-node-v14, compute-tools ]
+        name: [ neon, compute-node, compute-node-v14, compute-node-v15, compute-tools ]
 
     steps:
       - name: Promote image to latest
