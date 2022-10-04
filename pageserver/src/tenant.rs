@@ -310,7 +310,7 @@ impl Tenant {
 
         for (timeline_id, timeline) in &timelines_to_compact {
             let _entered = info_span!("compact_timeline", timeline = %timeline_id).entered();
-            timeline.compact()?;
+            timeline.reconstruct()?;
         }
 
         Ok(())

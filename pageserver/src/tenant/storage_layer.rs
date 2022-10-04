@@ -139,9 +139,9 @@ pub trait Layer: Send + Sync {
     /// Iterate through all keys and values stored in the layer
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
 
-    /// Iterate through all keys stored in the layer. Returns key, lsn and value size
-    /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+    /// Iterate through all keys stored in the layer. Returns key, lsn and value size.
+    /// It is used only for reconstruction and so is currently implemented only for DeltaLayer
+    fn key_iter(&self, _skip_images: bool) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
         panic!("Not implemented")
     }
 

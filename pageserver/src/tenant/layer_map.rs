@@ -55,9 +55,8 @@ pub struct LayerMap {
     /// All the historic layers are kept here
     historic_layers: RTree<LayerRTreeObject>,
 
-    /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
-    /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<Arc<dyn Layer>>,
+    /// Latest stored delta layer
+    latest_delta_layer: Option<Arc<dyn Layer>>,
 }
 
 struct LayerRTreeObject {
@@ -336,7 +335,7 @@ impl LayerMap {
     ///
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
-            self.l0_delta_layers.push(layer.clone());
+            self.latest_delta_layer = Some(layer.clone());
         }
         self.historic_layers.insert(LayerRTreeObject { layer });
         NUM_ONDISK_LAYERS.inc();
@@ -349,16 +348,11 @@ impl LayerMap {
     ///
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
-            let len_before = self.l0_delta_layers.len();
-
-            // FIXME: ptr_eq might fail to return true for 'dyn'
-            // references.  Clippy complains about this. In practice it
-            // seems to work, the assertion below would be triggered
-            // otherwise but this ought to be fixed.
-            #[allow(clippy::vtable_address_comparisons)]
-            self.l0_delta_layers
-                .retain(|other| !Arc::ptr_eq(other, &layer));
-            assert_eq!(self.l0_delta_layers.len(), len_before - 1);
+            if let Some(latest_layer) = &self.latest_delta_layer {
+                if Arc::ptr_eq(&layer, latest_layer) {
+                    self.latest_delta_layer = None;
+                }
+            }
         }
         assert!(self
             .historic_layers
@@ -549,8 +543,8 @@ impl LayerMap {
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {
-        Ok(self.l0_delta_layers.clone())
+    pub fn get_latest_delta_layer(&mut self) -> Option<Arc<dyn Layer>> {
+        self.latest_delta_layer.take()
     }
 
     /// debugging function to print out the contents of the layer map
