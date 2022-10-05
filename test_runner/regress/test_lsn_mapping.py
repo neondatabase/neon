@@ -40,18 +40,24 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     with env.pageserver.http_client() as client:
         # Check edge cases: timestamp in the future
         probe_timestamp = tbl[-1][1] + timedelta(hours=1)
-        result = client.timeline_get_lsn_by_timestamp(env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z")
+        result = client.timeline_get_lsn_by_timestamp(
+            env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z"
+        )
         assert result == "future"
 
         # timestamp too the far history
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
-        result = client.timeline_get_lsn_by_timestamp(env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z")
+        result = client.timeline_get_lsn_by_timestamp(
+            env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z"
+        )
         assert result == "past"
 
         # Probe a bunch of timestamps in the valid range
         for i in range(1, len(tbl), 100):
             probe_timestamp = tbl[i][1]
-            lsn = client.timeline_get_lsn_by_timestamp(env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z")
+            lsn = client.timeline_get_lsn_by_timestamp(
+                env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z"
+            )
             # Call get_lsn_by_timestamp to get the LSN
             # Launch a new read-only node at that LSN, and check that only the rows
             # that were supposed to be committed at that point in time are visible.

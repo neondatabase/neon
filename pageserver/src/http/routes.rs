@@ -350,14 +350,14 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
-    
+
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let timestamp_raw = get_query_param(&request, "timestamp")?;
     let timestamp = humantime::parse_rfc3339(timestamp_raw.as_str())
         .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
-    
+
     let timeline = tenant_mgr::get_tenant(tenant_id, true)
         .and_then(|tenant| tenant.get_timeline(timeline_id))
         .with_context(|| format!("No timeline {timeline_id} in repository for tenant {tenant_id}"))
