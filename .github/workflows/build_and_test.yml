@@ -608,6 +608,9 @@ jobs:
       - name: Pull compute node v14 image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest compute-node-v14
 
+      - name: Pull compute node v15 image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest compute-node-v15
+
       - name: Pull rust image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
 
@@ -638,6 +641,9 @@ jobs:
       - name: Push compute node v14 image to Docker Hub
         run: crane push compute-node-v14 neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
 
+      - name: Push compute node v15 image to Docker Hub
+        run: crane push compute-node-v15 neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}}
+
       - name: Push rust image to Docker Hub
         run: crane push rust neondatabase/rust:pinned
 
@@ -650,6 +656,7 @@ jobs:
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]
