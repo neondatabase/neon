@@ -917,7 +917,7 @@ impl<'a> DeltaKeyIter {
                             last.1 = pos - first_pos;
                         }
                     }
-					all_keys.push((delta_key, pos));
+                    all_keys.push((delta_key, pos));
                 }
                 true
             },

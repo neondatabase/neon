@@ -1533,35 +1533,35 @@ impl Timeline {
         let mut layers = self.layers.write().unwrap();
         let latest_delta_layer = layers.get_latest_delta_layer();
         drop(layers);
-		let mut writer: Option<DeltaLayerWriter> = None;
+        let mut writer: Option<DeltaLayerWriter> = None;
         let mut new_layers = Vec::new();
-		let mut last_key: Option<Key> = None;
+        let mut last_key: Option<Key> = None;
         if let Some(last_delta_layer) = latest_delta_layer {
             for (key, lsn, _) in last_delta_layer.key_iter(true) {
-				match &writer {
-					Some(curr_writer) => {
-						if curr_writer.size() > target_file_size {
-							new_layers.push(writer.take().unwrap().finish(key)?);
-							writer = None;
-						}
-					},
-					_ => {
-						// Create writer if not initiaized yet
-						writer = Some(DeltaLayerWriter::new(
-							self.conf,
-							self.timeline_id,
-							self.tenant_id,
-							key,
-							last_delta_layer.get_lsn_range().clone(),
-						)?);
-					}
+                match &writer {
+                    Some(curr_writer) => {
+                        if curr_writer.size() > target_file_size {
+                            new_layers.push(writer.take().unwrap().finish(key)?);
+                            writer = None;
+                        }
+                    }
+                    _ => {
+                        // Create writer if not initiaized yet
+                        writer = Some(DeltaLayerWriter::new(
+                            self.conf,
+                            self.timeline_id,
+                            self.tenant_id,
+                            key,
+                            last_delta_layer.get_lsn_range().clone(),
+                        )?);
+                    }
                 }
                 let value = self.get(key, lsn)?;
                 writer
                     .as_mut()
                     .unwrap()
                     .put_value(key, lsn, Value::Image(value))?;
-				last_key = Some(key);
+                last_key = Some(key);
             }
         }
         if let Some(writer) = writer {
