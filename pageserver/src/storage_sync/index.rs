@@ -273,8 +273,9 @@ pub enum IndexPart {
     // V2(IndexPartV2),
 }
 
+/// The optional version identifier of [`IndexPart`] (de)serialization.
 #[derive(Serialize, Deserialize)]
-pub enum IndexPartVersion {
+enum IndexPartVersion {
     /// First version as of 2022-10-04 a50e46f5, and earlier.
     #[serde(rename = "1")]
     V1,
