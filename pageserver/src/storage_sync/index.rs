@@ -393,6 +393,20 @@ impl IndexPart {
         }
     }
 
+    /// Upgrade the description in-place, if needed.
+    ///
+    /// Returns true when the document was updated and serializing it will produce different
+    /// result than what it was deserialized from.
+    pub fn upgrade(&mut self) -> bool {
+        match self {
+            IndexPart::V1 { versioned, .. } if !*versioned => {
+                *versioned = true;
+                true
+            }
+            IndexPart::V1 { .. } => false,
+        }
+    }
+
     pub fn from_remote_timeline(
         timeline_path: &Path,
         remote_timeline: RemoteTimeline,
@@ -657,6 +671,16 @@ mod tests {
         let part = serde_json::from_str::<IndexPart>(UNVERSIONED_V1_INDEXPART).unwrap();
         let serialized = serde_json::to_string(&part).unwrap();
         assert_eq!(UNVERSIONED_V1_INDEXPART, &serialized);
+    }
+
+    #[test]
+    fn upgraded_v1_indexpart_serializes_as_latest() {
+        let mut part = serde_json::from_str::<IndexPart>(UNVERSIONED_V1_INDEXPART).unwrap();
+        assert!(part.upgrade());
+
+        let serialized = serde_json::to_string(&part).unwrap();
+        // we accept the "version" in any position of the json, but we serialize it as first
+        assert_eq!(VERSIONED_V1_INDEXPART, serialized);
     }
 
     static VERSIONED_V1_INDEXPART: &str = r#"{"version":"1","timeline_layers":["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"],"missing_layers":["not_a_real_layer_but_adding_coverage"],"disk_consistent_lsn":"0/16960E8","metadata_bytes":[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
