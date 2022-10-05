@@ -262,6 +262,9 @@ impl RemoteTimeline {
 
 /// Part of the remote index, corresponding to a certain timeline.
 /// Contains the data about all files in the timeline, present remotely and its metadata.
+///
+/// Important to note: none of the payloads can contain "version" field due to it's usage in the
+/// envelope.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IndexPart {
     /// With or without a "version" field. Note, the serialized form will not transparently upgrade the type.
