@@ -465,6 +465,7 @@ struct LayersUpload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LayersDownload {
     layers_to_skip: HashSet<PathBuf>,
+    missing_layers: HashSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,6 +564,7 @@ pub fn schedule_layer_download(tenant_id: TenantId, timeline_id: TimelineId) {
         },
         SyncTask::download(LayersDownload {
             layers_to_skip: HashSet::new(),
+            missing_layers: HashSet::new(),
         }),
     );
     debug!("Download task for tenant {tenant_id}, timeline {timeline_id} sent")
@@ -970,21 +972,46 @@ async fn download_timeline_data(
             register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
         }
         DownloadedTimeline::Successful(mut download_data) => {
-            match update_local_metadata(conf, sync_id, current_remote_timeline).await {
-                Ok(()) => match index.write().await.set_awaits_download(&sync_id, false) {
-                    Ok(()) => {
-                        register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
-                        return DownloadStatus::Downloaded;
-                    }
-                    Err(e) => {
-                        error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
-                    }
-                },
+            let update_result = if download_data.data.missing_layers.is_empty() {
+                Ok(())
+            } else {
+                update_remote_data(
+                    conf,
+                    storage,
+                    index,
+                    sync_id,
+                    RemoteDataUpdate::Download {
+                        missing_layers: download_data.data.missing_layers.clone(),
+                    },
+                )
+                .await
+            };
+
+            match update_result {
                 Err(e) => {
-                    error!("Failed to update local timeline metadata: {e:?}");
+                    error!("Failed to update remote timeline {sync_id} with download data: {e:?}");
                     download_data.retries += 1;
                     sync_queue.push(sync_id, SyncTask::Download(download_data));
                     register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
+                }
+                Ok(()) => {
+                    match update_local_metadata(conf, sync_id, current_remote_timeline).await {
+                        Ok(()) => match index.write().await.set_awaits_download(&sync_id, false) {
+                            Ok(()) => {
+                                register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
+                                return DownloadStatus::Downloaded;
+                            }
+                            Err(e) => {
+                                error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to update local timeline metadata: {e:?}");
+                            download_data.retries += 1;
+                            sync_queue.push(sync_id, SyncTask::Download(download_data));
+                            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
+                        }
+                    }
                 }
             }
         }
@@ -1153,6 +1180,9 @@ enum RemoteDataUpdate<'a> {
         uploaded_data: LayersUpload,
         upload_failed: bool,
     },
+    Download {
+        missing_layers: HashSet<PathBuf>,
+    },
     Delete(&'a HashSet<PathBuf>),
 }
 
@@ -1181,13 +1211,15 @@ async fn update_remote_data(
                             }
                         }
                         if upload_failed {
-                            existing_entry.add_upload_failures(
-                                uploaded_data.layers_to_upload.iter().cloned(),
-                            );
+                            existing_entry
+                                .add_missing_layers(uploaded_data.layers_to_upload.clone());
                         } else {
                             existing_entry
                                 .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
                         }
+                    }
+                    RemoteDataUpdate::Download { missing_layers } => {
+                        existing_entry.add_missing_layers(missing_layers);
                     }
                     RemoteDataUpdate::Delete(layers_to_remove) => {
                         existing_entry.remove_layers(layers_to_remove)
@@ -1207,7 +1239,7 @@ async fn update_remote_data(
                     let mut new_remote_timeline = RemoteTimeline::new(new_metadata.clone());
                     if upload_failed {
                         new_remote_timeline
-                            .add_upload_failures(uploaded_data.layers_to_upload.iter().cloned());
+                            .add_missing_layers(uploaded_data.layers_to_upload.clone());
                     } else {
                         new_remote_timeline
                             .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
@@ -1215,6 +1247,9 @@ async fn update_remote_data(
 
                     index_accessor.add_timeline_entry(sync_id, new_remote_timeline.clone());
                     new_remote_timeline
+                }
+                RemoteDataUpdate::Download { missing_layers } => {
+                    bail!("Unexpected: received a download task result with no remote index entry. Missing layers: {missing_layers:?}");
                 }
                 RemoteDataUpdate::Delete(_) => {
                     warn!("No remote index entry for timeline {sync_id}, skipping deletion");
@@ -1348,6 +1383,7 @@ fn compare_local_and_remote_timeline(
             sync_id,
             SyncTask::download(LayersDownload {
                 layers_to_skip: local_files.clone(),
+                missing_layers: HashSet::new(),
             }),
         ));
         info!("NeedsSync");
@@ -1499,6 +1535,7 @@ mod tests {
 
         let download_task = SyncTask::download(LayersDownload {
             layers_to_skip: HashSet::from([PathBuf::from("sk")]),
+            missing_layers: HashSet::new(),
         });
         let upload_task = SyncTask::upload(LayersUpload {
             layers_to_upload: HashSet::from([PathBuf::from("up")]),
@@ -1548,6 +1585,7 @@ mod tests {
 
         let download = LayersDownload {
             layers_to_skip: HashSet::from([PathBuf::from("sk")]),
+            missing_layers: HashSet::new(),
         };
         let upload = LayersUpload {
             layers_to_upload: HashSet::from([PathBuf::from("up")]),
@@ -1601,15 +1639,19 @@ mod tests {
         let sync_queue = SyncQueue::new(NonZeroUsize::new(1).unwrap());
         let download_1 = LayersDownload {
             layers_to_skip: HashSet::from([PathBuf::from("sk1")]),
+            missing_layers: HashSet::new(),
         };
         let download_2 = LayersDownload {
             layers_to_skip: HashSet::from([PathBuf::from("sk2")]),
+            missing_layers: HashSet::new(),
         };
         let download_3 = LayersDownload {
             layers_to_skip: HashSet::from([PathBuf::from("sk3")]),
+            missing_layers: HashSet::new(),
         };
         let download_4 = LayersDownload {
             layers_to_skip: HashSet::from([PathBuf::from("sk4")]),
+            missing_layers: HashSet::new(),
         };
 
         let sync_id_2 = TenantTimelineId {
@@ -1642,6 +1684,7 @@ mod tests {
                             set.extend(download_4.layers_to_skip.into_iter());
                             set
                         },
+                        missing_layers: HashSet::new(),
                     }
                 }),
                 upload: None,

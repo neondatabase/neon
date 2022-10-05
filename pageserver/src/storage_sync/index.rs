@@ -233,8 +233,10 @@ impl RemoteTimeline {
         self.timeline_layers.extend(new_layers.into_iter());
     }
 
-    pub fn add_upload_failures(&mut self, upload_failures: impl IntoIterator<Item = PathBuf>) {
-        self.missing_layers.extend(upload_failures.into_iter());
+    pub fn add_missing_layers(&mut self, missing_layers: HashSet<PathBuf>) {
+        self.timeline_layers
+            .retain(|layer| !missing_layers.contains(layer));
+        self.missing_layers.extend(missing_layers.into_iter());
     }
 
     pub fn remove_layers(&mut self, layers_to_remove: &HashSet<PathBuf>) {

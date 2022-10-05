@@ -192,7 +192,11 @@ impl S3Bucket {
         })
     }
 
-    async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
+    async fn download_object(
+        &self,
+        from: &RemoteObjectId,
+        request: GetObjectRequest,
+    ) -> Result<Download, DownloadError> {
         let _guard = self
             .concurrency_limiter
             .acquire()
@@ -215,7 +219,9 @@ impl S3Bucket {
                     download_stream: Box::pin(io::BufReader::new(body.into_async_read())),
                 }),
             },
-            Err(RusotoError::Service(GetObjectError::NoSuchKey(_))) => Err(DownloadError::NotFound),
+            Err(RusotoError::Service(GetObjectError::NoSuchKey(_))) => {
+                Err(DownloadError::NotFound(from.clone()))
+            }
             Err(e) => {
                 metrics::inc_get_object_fail();
                 Err(DownloadError::Other(anyhow::anyhow!(
@@ -386,11 +392,14 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn download(&self, from: &RemoteObjectId) -> Result<Download, DownloadError> {
-        self.download_object(GetObjectRequest {
-            bucket: self.bucket_name.clone(),
-            key: from.0.to_owned(),
-            ..GetObjectRequest::default()
-        })
+        self.download_object(
+            from,
+            GetObjectRequest {
+                bucket: self.bucket_name.clone(),
+                key: from.0.to_owned(),
+                ..GetObjectRequest::default()
+            },
+        )
         .await
     }
 
@@ -408,12 +417,15 @@ impl RemoteStorage for S3Bucket {
             None => format!("bytes={}-", start_inclusive),
         });
 
-        self.download_object(GetObjectRequest {
-            bucket: self.bucket_name.clone(),
-            key: from.0.to_owned(),
-            range,
-            ..GetObjectRequest::default()
-        })
+        self.download_object(
+            from,
+            GetObjectRequest {
+                bucket: self.bucket_name.clone(),
+                key: from.0.to_owned(),
+                range,
+                ..GetObjectRequest::default()
+            },
+        )
         .await
     }
 

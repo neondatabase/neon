@@ -248,7 +248,7 @@ impl RemoteStorage for LocalFs {
                 download_stream: Box::pin(source),
             })
         } else {
-            Err(DownloadError::NotFound)
+            Err(DownloadError::NotFound(from.clone()))
         }
     }
 
@@ -304,7 +304,7 @@ impl RemoteStorage for LocalFs {
                 },
             })
         } else {
-            Err(DownloadError::NotFound)
+            Err(DownloadError::NotFound(from.clone()))
         }
     }
 
@@ -688,7 +688,7 @@ mod fs_tests {
 
         let non_existing_path = "somewhere/else";
         match storage.download(&RemoteObjectId(non_existing_path.to_string())).await {
-            Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
+            Err(DownloadError::NotFound{..}) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
         Ok(())

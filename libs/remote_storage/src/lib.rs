@@ -156,7 +156,7 @@ pub enum DownloadError {
     /// Validation or other error happened due to user input.
     BadInput(anyhow::Error),
     /// The file was not found in the remote storage.
-    NotFound,
+    NotFound(RemoteObjectId),
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
@@ -167,7 +167,10 @@ impl std::fmt::Display for DownloadError {
             DownloadError::BadInput(e) => {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
-            DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
+            DownloadError::NotFound(remote_id) => write!(
+                f,
+                "No remote storage object was found remotely, id {remote_id}",
+            ),
             DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e}"),
         }
     }

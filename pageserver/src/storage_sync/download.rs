@@ -88,8 +88,8 @@ pub async fn download_index_parts(
             }
             Err(download_error) => {
                 match download_error {
-                    DownloadError::NotFound => {
-                        // thats ok because it means that we didnt upload something we have locally for example
+                    DownloadError::NotFound(_) => {
+                        // thats ok because it means that we didn't upload something we have locally for example
                     }
                     e => {
                         let tenant_parts = index_parts.entry(id.tenant_id).or_default();
@@ -253,22 +253,19 @@ pub(super) async fn download_timeline_layers<'a>(
                 let temp_file_path =
                     path_with_suffix_extension(&layer_destination_path, TEMP_FILE_SUFFIX);
 
-                let mut destination_file =
-                    fs::File::create(&temp_file_path).await.with_context(|| {
+                let mut layer_download = storage
+                    .download_storage_object(None, &layer_destination_path)
+                    .await?;
+
+                let mut destination_file = fs::File::create(&temp_file_path)
+                    .await
+                    .with_context(|| {
                         format!(
                             "Failed to create a destination file for layer '{}'",
                             temp_file_path.display()
                         )
-                    })?;
-
-                let mut layer_download = storage.download_storage_object(None, &layer_destination_path)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to initiate the download the layer for {sync_id} into file '{}'",
-                            temp_file_path.display()
-                        )
-                    })?;
+                    })
+                    .map_err(DownloadError::Other)?;
                 io::copy(&mut layer_download.download_stream, &mut destination_file)
                     .await
                     .with_context(|| {
@@ -276,7 +273,8 @@ pub(super) async fn download_timeline_layers<'a>(
                             "Failed to download the layer for {sync_id} into file '{}'",
                             temp_file_path.display()
                         )
-                    })?;
+                    })
+                    .map_err(DownloadError::Other)?;
 
                 // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
                 // A file will not be closed immediately when it goes out of scope if there are any IO operations
@@ -286,36 +284,58 @@ pub(super) async fn download_timeline_layers<'a>(
                 // From the tokio code I see that it waits for pending operations to complete. There shouldn't be any because
                 // we assume that `destination_file` file is fully written. I.e there is no pending .write(...).await operations.
                 // But for additional safety let's check/wait for any pending operations.
-                destination_file.flush().await.with_context(|| {
-                    format!(
-                        "failed to flush source file at {}",
-                        temp_file_path.display()
-                    )
-                })?;
+                destination_file
+                    .flush()
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to flush source file at {}",
+                            temp_file_path.display()
+                        )
+                    })
+                    .map_err(DownloadError::Other)?;
 
                 // not using sync_data because it can lose file size update
-                destination_file.sync_all().await.with_context(|| {
-                    format!(
-                        "failed to fsync source file at {}",
-                        temp_file_path.display()
-                    )
-                })?;
+                destination_file
+                    .sync_all()
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to fsync source file at {}",
+                            temp_file_path.display()
+                        )
+                    })
+                    .map_err(DownloadError::Other)?;
                 drop(destination_file);
 
                 fail::fail_point!("remote-storage-download-pre-rename", |_| {
-                    anyhow::bail!("remote-storage-download-pre-rename failpoint triggered")
+                    return Err(DownloadError::Other(anyhow::anyhow!(
+                        "remote-storage-download-pre-rename failpoint triggered"
+                    )));
                 });
 
-                fs::rename(&temp_file_path, &layer_destination_path).await?;
+                fs::rename(&temp_file_path, &layer_destination_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to move tmp file {} to the layer file {}",
+                            temp_file_path.display(),
+                            layer_destination_path.display()
+                        )
+                    })
+                    .map_err(DownloadError::Other)?;
 
-                fsync_path(&layer_destination_path).await.with_context(|| {
-                    format!(
-                        "Cannot fsync layer destination path {}",
-                        layer_destination_path.display(),
-                    )
-                })?;
+                fsync_path(&layer_destination_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Cannot fsync layer destination path {}",
+                            layer_destination_path.display(),
+                        )
+                    })
+                    .map_err(DownloadError::Other)?;
             }
-            Ok::<_, anyhow::Error>(layer_destination_path)
+            Ok::<_, DownloadError>(layer_destination_path)
         })
         .collect::<FuturesUnordered<_>>();
 
@@ -328,9 +348,22 @@ pub(super) async fn download_timeline_layers<'a>(
                 undo.insert(downloaded_path.clone());
                 download.layers_to_skip.insert(downloaded_path);
             }
+            Err(DownloadError::NotFound(missing_id)) => {
+                error!("Remote object with id {missing_id} is present in the storage index file, but not in the storage itself");
+                // we've filtered out the remote layers that are present locally, so no sense to look them up, they are lost.
+                // Don't mark it as an error, since there's nothing we can do about it, reenqueuing would not help.
+                match storage.local_path(&missing_id) {
+                    Ok(missing_path) => {
+                        download.missing_layers.insert(missing_path);
+                    }
+                    Err(e) => {
+                        error!("Failed to convert missing id {missing_id} to local path: {e:?}")
+                    }
+                }
+            }
             Err(e) => {
                 errors_happened = true;
-                error!("Failed to download a layer for timeline {sync_id}: {e:?}");
+                error!("Failed to download a layer file: {e:#}");
             }
         }
     }
@@ -489,6 +522,7 @@ mod tests {
                 current_retries,
                 LayersDownload {
                     layers_to_skip: HashSet::from([local_timeline_path.join("layer_to_skip")]),
+                    missing_layers: HashSet::new(),
                 },
             ),
         )
@@ -556,6 +590,7 @@ mod tests {
                 0,
                 LayersDownload {
                     layers_to_skip: HashSet::new(),
+                    missing_layers: HashSet::new(),
                 },
             ),
         )
@@ -580,6 +615,7 @@ mod tests {
                 0,
                 LayersDownload {
                     layers_to_skip: HashSet::new(),
+                    missing_layers: HashSet::new(),
                 },
             ),
         )
@@ -635,6 +671,121 @@ mod tests {
         assert_eq!(
             downloaded_index_part, index_part,
             "Downloaded index part should be the same as the one in storage"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_index_has_missing_files() -> anyhow::Result<()> {
+        // TODO kb
+        let harness = TenantHarness::create("remote_index_has_missing_files")?;
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let lost_layer_name = "lost_layer";
+        let layer_files = ["a", "b", lost_layer_name];
+        let storage = GenericRemoteStorage::new(LocalFs::new(
+            tempdir()?.path().to_owned(),
+            harness.conf.workdir.clone(),
+        )?);
+        let local_storage = storage.as_local().unwrap();
+        let current_retries = 3;
+        let metadata = dummy_metadata(Lsn(0x30));
+        let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
+        let timeline_upload =
+            create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
+
+        for local_path in timeline_upload.layers_to_upload {
+            let remote_path =
+                local_storage.resolve_in_storage(&storage.remote_object_id(&local_path)?)?;
+            let remote_parent_dir = remote_path.parent().unwrap();
+            if !remote_parent_dir.exists() {
+                fs::create_dir_all(&remote_parent_dir).await?;
+            }
+            fs::copy(&local_path, &remote_path).await?;
+        }
+
+        let mut read_dir = fs::read_dir(&local_timeline_path).await?;
+        while let Some(dir_entry) = read_dir.next_entry().await? {
+            fs::remove_file(dir_entry.path()).await?;
+            // "loose" the files, by removing them from the storage, but keeping them in the remote index
+            if dir_entry.file_name().to_str() == Some(lost_layer_name) {
+                let storage_id = storage.remote_object_id(&dir_entry.path())?;
+                local_storage.delete(&storage_id).await?;
+            }
+        }
+        let mut remote_timeline = RemoteTimeline::new(metadata.clone());
+        remote_timeline.awaits_download = true;
+        remote_timeline.add_timeline_layers(
+            layer_files
+                .iter()
+                .map(|layer| local_timeline_path.join(layer)),
+        );
+
+        let download_data = match download_timeline_layers(
+            harness.conf,
+            &storage,
+            &sync_queue,
+            Some(&remote_timeline),
+            sync_id,
+            SyncData::new(
+                current_retries,
+                LayersDownload {
+                    layers_to_skip: HashSet::new(),
+                    missing_layers: HashSet::new(),
+                },
+            ),
+        )
+        .await
+        {
+            DownloadedTimeline::Successful(data) => data,
+            wrong_result => {
+                panic!("Expected a successful download for timeline, but got: {wrong_result:?}")
+            }
+        };
+
+        assert_eq!(
+            current_retries, download_data.retries,
+            "On successful download, retries are not expected to change"
+        );
+        assert_eq!(
+            download_data
+                .data
+                .layers_to_skip
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            layer_files
+                .iter()
+                .filter(|layer| layer != &&lost_layer_name)
+                .map(|layer| local_timeline_path.join(layer))
+                .collect(),
+            "On successful download, layers to skip should contain all downloaded files and present layers that were skipped"
+        );
+
+        let mut downloaded_files = BTreeSet::new();
+        let mut read_dir = fs::read_dir(&local_timeline_path).await?;
+        while let Some(dir_entry) = read_dir.next_entry().await? {
+            downloaded_files.insert(dir_entry.path());
+        }
+        assert_eq!(
+            downloaded_files,
+            layer_files
+                .iter()
+                .filter(|layer| layer != &&lost_layer_name)
+                .map(|layer| local_timeline_path.join(layer))
+                .collect(),
+            "On successful download, all layers that were not skipped and lost, should be downloaded"
+        );
+
+        assert_eq!(
+            download_data
+                .data
+                .missing_layers
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([local_timeline_path.join(lost_layer_name)]),
+            "On successful download, all missing layers should be registered"
         );
 
         Ok(())
