@@ -279,14 +279,57 @@ pub enum IndexPartVersion {
 
 /// Part of the remote index, corresponding to a certain timeline.
 /// Contains the data about all files in the timeline, present remotely and its metadata.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-#[serde(tag = "version")]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IndexPart {
-    #[serde(alias = "1")]
-    V1(IndexPartV1),
+    /// Without "version" field. Note, the serialized form will not transparently upgrade the type.
+    V1 { inner: IndexPartV1, versioned: bool },
     /// V2 uses the same IndexPartV1 as nothing changed except the envelope got a version.
-    #[serde(alias = "2")]
     V2(IndexPartV1),
+}
+
+impl Serialize for IndexPart {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use IndexPart::*;
+        match self {
+            V1 { inner, versioned } if *versioned => {
+                todo!("versioned")
+            }
+            V1 { inner, .. } => inner.serialize(serializer),
+            V2(inner) => todo!("versioned"),
+        }
+    }
+}
+
+/// Non-derived implementation for supporting non-versioned documents.
+///
+/// Initial implementation: <https://github.com/serde-rs/serde/issues/1221>
+impl<'de> Deserialize<'de> for IndexPart {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // TODO: what is #[serde(field_identifier, ...)]?
+        // first buffer whole subtree as serde_json::Value, as we don't really know if the "version" is present or not
+        let v = serde_json::value::Value::deserialize(deserializer)?;
+
+        Result::<_, D::Error>::Ok(
+            match Option::deserialize(&v["version"]).map_err(serde::de::Error::custom)? {
+                Some(IndexPartVersion::V2) => {
+                    IndexPart::V2(IndexPartV1::deserialize(v).map_err(serde::de::Error::custom)?)
+                }
+                versioned @ Some(IndexPartVersion::V1) | versioned @ None => {
+                    // understand and serialize version = "1", even though they should never be seen anywhere
+                    IndexPart::V1 {
+                        inner: IndexPartV1::deserialize(v).map_err(serde::de::Error::custom)?,
+                        versioned: versioned.is_some(),
+                    }
+                }
+            },
+        )
+    }
 }
 
 impl IndexPart {
@@ -309,26 +352,26 @@ impl IndexPart {
 
     pub fn timeline_layers(&self) -> &HashSet<RelativePath> {
         match self {
-            Self::V1(v1) | Self::V2(v1) => &v1.timeline_layers,
+            Self::V1 { inner: v1, .. } | Self::V2(v1) => &v1.timeline_layers,
         }
     }
 
     // FIXME: this should probably be missing_layers()
     pub fn missing_files(&self) -> &HashSet<RelativePath> {
         match self {
-            Self::V1(v1) | Self::V2(v1) => &v1.missing_layers,
+            Self::V1 { inner: v1, .. } | Self::V2(v1) => &v1.missing_layers,
         }
     }
 
     pub fn disk_consistent_lsn(&self) -> Lsn {
         match self {
-            Self::V1(v1) | Self::V2(v1) => v1.disk_consistent_lsn,
+            Self::V1 { inner: v1, .. } | Self::V2(v1) => v1.disk_consistent_lsn,
         }
     }
 
     pub fn metadata_bytes(&self) -> &[u8] {
         match self {
-            Self::V1(v1) | Self::V2(v1) => &v1.metadata_bytes,
+            Self::V1 { inner: v1, .. } | Self::V2(v1) => &v1.metadata_bytes,
         }
     }
 
@@ -570,14 +613,23 @@ mod tests {
         // the fake missing layer is just that, added to have non-Default::default missing_layers.
         let example = r#"{"timeline_layers":["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"],"missing_layers":["not_a_real_layer_but_adding_coverage"],"disk_consistent_lsn":"0/16960E8","metadata_bytes":[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
 
-        let expected = IndexPart::V1(IndexPartV1 {
+        let inner = IndexPartV1 {
             timeline_layers: [RelativePath("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".to_owned())].into_iter().collect(),
             missing_layers: [RelativePath("not_a_real_layer_but_adding_coverage".to_owned())].into_iter().collect(),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: vec![113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        });
+        };
+
+        let expected = IndexPart::V1 {
+            inner,
+            versioned: false,
+        };
 
         let part = serde_json::from_str::<IndexPart>(example).unwrap();
         assert_eq!(part, expected);
+
+        let serialized = serde_json::to_string(&part).unwrap();
+
+        assert_eq!(example, &serialized);
     }
 }
