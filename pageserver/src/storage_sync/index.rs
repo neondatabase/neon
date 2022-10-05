@@ -260,23 +260,6 @@ impl RemoteTimeline {
     }
 }
 
-// plan for versioning: https://github.com/serde-rs/serde/issues/1221
-// as the internal tag will be optional, the whole thing will need to be buffered before-hand
-// bad thing is that we need to go through serde_json::Value deserialization, but that's a small
-// hurdle.
-//
-// alternative would be to wrap the whole document with a version, and maybe have the old version
-// as untagged.
-#[derive(Serialize, Deserialize)]
-pub enum IndexPartVersion {
-    /// First version as of 2022-10-04 a50e46f5, and earlier.
-    #[serde(rename = "1")]
-    V1,
-    /// Second iteration added a version number to facilitate later versions.
-    #[serde(rename = "2")]
-    V2,
-}
-
 /// Part of the remote index, corresponding to a certain timeline.
 /// Contains the data about all files in the timeline, present remotely and its metadata.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -285,6 +268,16 @@ pub enum IndexPart {
     V1 { inner: IndexPartV1, versioned: bool },
     /// V2 uses the same IndexPartV1 as nothing changed except the envelope got a version.
     V2(IndexPartV1),
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum IndexPartVersion {
+    /// First version as of 2022-10-04 a50e46f5, and earlier.
+    #[serde(rename = "1")]
+    V1,
+    // later versions will need a new tag, like:
+    // #[serde(rename = "2")]
+    // V2,
 }
 
 impl Serialize for IndexPart {
