@@ -1221,78 +1221,76 @@ impl Timeline {
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
         let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
-        self.update_disk_consistent_lsn(disk_consistent_lsn, layer_paths_to_upload)?;
+        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
 
+        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
+        // After crash, we will restart WAL streaming and processing from that point.
+        if disk_consistent_lsn != old_disk_consistent_lsn {
+            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+            self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)?;
+            // Also update the in-memory copy
+            self.disk_consistent_lsn.store(disk_consistent_lsn);
+        }
         Ok(())
     }
 
     /// Update metadata file
-    fn update_disk_consistent_lsn(
+    fn update_metadata_file(
         &self,
         disk_consistent_lsn: Lsn,
         layer_paths_to_upload: HashSet<PathBuf>,
     ) -> Result<()> {
-        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
-        // After crash, we will restart WAL streaming and processing from that point.
-        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
-        if disk_consistent_lsn != old_disk_consistent_lsn {
-            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+        // We can only save a valid 'prev_record_lsn' value on disk if we
+        // flushed *all* in-memory changes to disk. We only track
+        // 'prev_record_lsn' in memory for the latest processed record, so we
+        // don't remember what the correct value that corresponds to some old
+        // LSN is. But if we flush everything, then the value corresponding
+        // current 'last_record_lsn' is correct and we can store it on disk.
+        let RecordLsn {
+            last: last_record_lsn,
+            prev: prev_record_lsn,
+        } = self.last_record_lsn.load();
+        let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
+            Some(prev_record_lsn)
+        } else {
+            None
+        };
 
-            // We can only save a valid 'prev_record_lsn' value on disk if we
-            // flushed *all* in-memory changes to disk. We only track
-            // 'prev_record_lsn' in memory for the latest processed record, so we
-            // don't remember what the correct value that corresponds to some old
-            // LSN is. But if we flush everything, then the value corresponding
-            // current 'last_record_lsn' is correct and we can store it on disk.
-            let RecordLsn {
-                last: last_record_lsn,
-                prev: prev_record_lsn,
-            } = self.last_record_lsn.load();
-            let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
-                Some(prev_record_lsn)
-            } else {
-                None
-            };
+        let ancestor_timeline_id = self
+            .ancestor_timeline
+            .as_ref()
+            .map(|ancestor| ancestor.timeline_id);
 
-            let ancestor_timeline_id = self
-                .ancestor_timeline
-                .as_ref()
-                .map(|ancestor| ancestor.timeline_id);
+        let metadata = TimelineMetadata::new(
+            disk_consistent_lsn,
+            ondisk_prev_record_lsn,
+            ancestor_timeline_id,
+            self.ancestor_lsn,
+            *self.latest_gc_cutoff_lsn.read(),
+            self.initdb_lsn,
+            self.pg_version,
+        );
 
-            let metadata = TimelineMetadata::new(
-                disk_consistent_lsn,
-                ondisk_prev_record_lsn,
-                ancestor_timeline_id,
-                self.ancestor_lsn,
-                *self.latest_gc_cutoff_lsn.read(),
-                self.initdb_lsn,
-                self.pg_version,
-            );
+        fail_point!("checkpoint-before-saving-metadata", |x| bail!(
+            "{}",
+            x.unwrap()
+        ));
 
-            fail_point!("checkpoint-before-saving-metadata", |x| bail!(
-                "{}",
-                x.unwrap()
-            ));
+        save_metadata(
+            self.conf,
+            self.timeline_id,
+            self.tenant_id,
+            &metadata,
+            false,
+        )?;
 
-            save_metadata(
-                self.conf,
-                self.timeline_id,
+        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            storage_sync::schedule_layer_upload(
                 self.tenant_id,
-                &metadata,
-                false,
-            )?;
-
-            if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                storage_sync::schedule_layer_upload(
-                    self.tenant_id,
-                    self.timeline_id,
-                    layer_paths_to_upload,
-                    Some(metadata),
-                );
-            }
-
-            // Also update the in-memory copy
-            self.disk_consistent_lsn.store(disk_consistent_lsn);
+                self.timeline_id,
+                layer_paths_to_upload,
+                Some(metadata),
+            );
         }
 
         Ok(())
@@ -1952,52 +1950,7 @@ impl Timeline {
             write_guard.store_and_unlock(new_gc_cutoff).wait();
 
             // Persist metadata file
-            let disk_consistent_lsn = self.disk_consistent_lsn.load();
-
-            let RecordLsn {
-                last: last_record_lsn,
-                prev: prev_record_lsn,
-            } = self.last_record_lsn.load();
-
-            let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
-                Some(prev_record_lsn)
-            } else {
-                None
-            };
-
-            let ancestor_timeline_id = self
-                .ancestor_timeline
-                .as_ref()
-                .map(|ancestor| ancestor.timeline_id);
-
-            let metadata = TimelineMetadata::new(
-                disk_consistent_lsn,
-                ondisk_prev_record_lsn,
-                ancestor_timeline_id,
-                self.ancestor_lsn,
-                new_gc_cutoff,
-                self.initdb_lsn,
-                self.pg_version,
-            );
-
-            save_metadata(
-                self.conf,
-                self.timeline_id,
-                self.tenant_id,
-                &metadata,
-                false,
-            )?;
-
-            let layer_paths_to_upload = HashSet::new();
-
-            if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                storage_sync::schedule_layer_upload(
-                    self.tenant_id,
-                    self.timeline_id,
-                    layer_paths_to_upload,
-                    Some(metadata),
-                );
-            }
+            self.update_metadata_file(self.disk_consistent_lsn.load(), HashSet::new())?;
         }
 
         info!("GC starting");
