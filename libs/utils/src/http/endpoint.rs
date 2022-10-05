@@ -9,6 +9,7 @@ use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
+use tokio::task::JoinError;
 use tracing::info;
 
 use std::future::Future;
@@ -35,7 +36,13 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
 
-    let metrics = metrics::gather();
+    let metrics = tokio::task::spawn_blocking(move || {
+        // Currently we take a lot of mutexes while collecting metrics, so it's
+        // better to spawn a blocking task to avoid blocking the event loop.
+        metrics::gather()
+    })
+    .await
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
     encoder.encode(&metrics, &mut buffer).unwrap();
 
     let response = Response::builder()
