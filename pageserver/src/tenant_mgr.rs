@@ -596,6 +596,10 @@ fn collect_timelines_for_tenant(
     let timelines_dir = config.timelines_path(&tenant_id);
 
     let mut tenant_timelines = HashMap::new();
+    if !timelines_dir.as_path().is_dir() {
+        return Ok((tenant_id, tenant_timelines));
+    }
+
     for timelines_dir_entry in fs::read_dir(&timelines_dir)
         .with_context(|| format!("Failed to list timelines dir entry for tenant {tenant_id}"))?
     {
