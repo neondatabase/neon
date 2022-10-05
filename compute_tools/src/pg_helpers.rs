@@ -250,9 +250,36 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     // case we miss some events for some reason. Not strictly necessary, but
     // better safe than sorry.
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher = notify::recommended_watcher(move |res| {
+    let (mut watcher, rx): (Box<dyn Watcher>, _) = match notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
-    })?;
+    }) {
+        Ok(watcher) => (Box::new(watcher), rx),
+        Err(e) => {
+            match e.kind {
+                notify::ErrorKind::Io(os) if os.raw_os_error() == Some(38) => {
+                    // docker on m1 macs does not support recommended_watcher
+                    // but return "Function not implemented (os error 38)"
+                    // see https://github.com/notify-rs/notify/issues/423
+                    let (tx, rx) = std::sync::mpsc::channel();
+
+                    // let's poll it faster than what we check the results for (100ms)
+                    let config =
+                        notify::Config::default().with_poll_interval(Duration::from_millis(50));
+
+                    let watcher = notify::PollWatcher::new(
+                        move |res| {
+                            let _ = tx.send(res);
+                        },
+                        config,
+                    )?;
+
+                    (Box::new(watcher), rx)
+                }
+                _ => return Err(e.into()),
+            }
+        }
+    };
+
     watcher.watch(pgdata, RecursiveMode::NonRecursive)?;
 
     let started_at = Instant::now();
