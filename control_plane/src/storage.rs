@@ -176,9 +176,11 @@ impl PageServerNode {
         new_tenant_id: Option<TenantId>,
         new_timeline_id: Option<TimelineId>,
     ) -> anyhow::Result<TimelineId> {
-        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())?;
+        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())
+            .context("failed to create tenant")?;
         let initial_timeline_info =
-            self.timeline_create(initial_tenant_id, new_timeline_id, None, None)?;
+            self.timeline_create(initial_tenant_id, new_timeline_id, None, None)
+                .context("failed to create timeline")?;
         Ok(initial_timeline_info.timeline_id)
     }
 

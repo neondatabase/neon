@@ -164,6 +164,11 @@ def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
+@pytest.mark.parametrize("scale", get_scales_matrix())
+@pytest.mark.parametrize("duration", get_durations_matrix())
+def test_pgbench_init(neon_with_baseline: PgCompare, scale: int, duration: int):
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
+
 # Run the pgbench tests, and generate a flamegraph from it
 # This requires that the pageserver was built with the 'profiling' feature.
 #

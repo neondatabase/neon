@@ -107,7 +107,8 @@ class NeonCompare(PgCompare):
         # self.env.neon_cli.create_branch(branch_name, "empty", tenant_id=self.tenant)
         # self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
         self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
-        self._pg = self.env.postgres.create_start(branch_name, "main", self.tenant)
+        self._pg = self.env.postgres.create_start(
+            branch_name, "main", self.tenant, config_lines=["shared_buffers=2GB"])
 
         # Long-lived cursor, useful for flushing
         self.psconn = self.env.pageserver.connect()

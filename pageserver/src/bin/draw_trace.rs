@@ -1,10 +1,12 @@
 use clap::{App, Arg};
+use futures::TryFutureExt;
 use pageserver::{page_service::PagestreamFeMessage, repository::Key};
+
+use std::{collections::{BTreeMap, BTreeSet, HashMap}, ops::Range, path::PathBuf};
 use std::io::Write;
 use std::{
     fs::{read_dir, File},
     io::BufReader,
-    path::PathBuf,
     str::FromStr,
 };
 use svg_fmt::*;
@@ -13,6 +15,17 @@ use utils::{
     lsn::Lsn,
     pq_proto::{BeMessage, FeMessage},
 };
+
+fn analyze<T: Ord + Copy>(coords: Vec<T>) -> (usize, BTreeMap<T, usize>) {
+    let set: BTreeSet<T> = coords.into_iter().collect();
+
+    let mut map: BTreeMap<T, usize> = BTreeMap::new();
+    for (i, e) in set.iter().enumerate() {
+        map.insert(*e, i);
+    }
+
+    (set.len(), map)
+}
 
 fn main() -> anyhow::Result<()> {
     // TODO upgrade to struct macro arg parsing
@@ -27,6 +40,13 @@ fn main() -> anyhow::Result<()> {
 
     // (blkno, lsn)
     let mut dots = Vec::<(u32, Lsn)>::new();
+
+
+    let mut dump_file = File::create("dump.txt").expect("can't make file");
+    let mut deltas = HashMap::<i32, u32>::new();
+    let mut prev1: u32 = 0;
+    let mut prev2: u32 = 0;
+    let mut prev3: u32 = 0;
 
     println!("scanning trace ...");
     let traces_dir = PathBuf::from(arg_matches.value_of("traces_dir").unwrap());
@@ -58,24 +78,66 @@ fn main() -> anyhow::Result<()> {
                     match msg {
                         PagestreamFeMessage::Exists(_) => {}
                         PagestreamFeMessage::Nblocks(_) => {}
-                        PagestreamFeMessage::GetPage(req) => dots.push((req.blkno, req.lsn)),
+                        PagestreamFeMessage::GetPage(req) => {
+                            writeln!(&mut dump_file, "{} {} {}", req.rel, req.blkno, req.lsn)?;
+                            // dots.push((req.blkno, req.lsn));
+                            // HACK
+                            dots.push((req.blkno, Lsn::from(dots.len() as u64)));
+
+                            let delta1 = (req.blkno as i32) - (prev1 as i32);
+                            let delta2 = (req.blkno as i32) - (prev2 as i32);
+                            let delta3 = (req.blkno as i32) - (prev3 as i32);
+                            let mut delta = if i32::abs(delta1) < i32::abs(delta2) {
+                                delta1
+                            } else {
+                                delta2
+                            };
+                            if i32::abs(delta3) < i32::abs(delta) {
+                                delta = delta3;
+                            }
+
+                            prev3 = prev2;
+                            prev2 = prev1;
+                            prev1 = req.blkno;
+
+                            match deltas.get_mut(&delta) {
+                                Some(c) => {*c += 1;},
+                                None => {deltas.insert(delta, 1);},
+                            };
+
+                            if delta == 9 {
+                                println!("{} {} {} {}", dots.len(), req.rel, req.blkno, req.lsn);
+                            }
+                        },
                         PagestreamFeMessage::DbSize(_) => {}
                     };
 
                     // HACK
-                    if dots.len() > 100 {
-                        break;
-                    }
+                    // if dots.len() > 1000 {
+                        // break;
+                    // }
                 }
             }
         }
     }
 
+    let mut other = deltas.len();
+    deltas.retain(|_, count| *count > 3);
+    other -= deltas.len();
+    dbg!(other);
+    dbg!(deltas);
+
+    // Collect all coordinates
+    let mut keys: Vec<u32> = vec![];
+    let mut lsns: Vec<Lsn> = vec![];
+    for dot in &dots {
+        keys.push(dot.0);
+        lsns.push(dot.1);
+    }
+
     // Analyze
-    let blkno_max = (&dots).into_iter().map(|(blkno, _)| blkno).max().unwrap();
-    let blkno_min = (&dots).into_iter().map(|(blkno, _)| blkno).min().unwrap();
-    let lsn_max = (&dots).into_iter().map(|(_, lsn)| lsn).max().unwrap();
-    let lsn_min = (&dots).into_iter().map(|(_, lsn)| lsn).min().unwrap();
+    let (key_max, key_map) = analyze(keys);
+    let (lsn_max, lsn_map) = analyze(lsns);
 
     // Draw
     println!("drawing trace ...");
@@ -84,19 +146,21 @@ fn main() -> anyhow::Result<()> {
         &mut svg_file,
         "{}",
         BeginSvg {
-            w: (blkno_max - blkno_min + 1) as f32,
-            h: (lsn_max.0 - lsn_min.0 + 1) as f32,
+            w: (key_max + 1) as f32,
+            h: (lsn_max + 1) as f32,
         }
     )?;
-    for dot in &dots {
+    for (key, lsn) in &dots {
+        let key = key_map.get(&key).unwrap();
+        let lsn = lsn_map.get(&lsn).unwrap();
         writeln!(
             &mut svg_file,
             "    {}",
             rectangle(
-                (dot.0 - blkno_min) as f32,
-                (dot.1 .0 - lsn_min.0) as f32,
-                1.0,
-                1.0
+                *key as f32,
+                *lsn as f32,
+                10.0,
+                10.0
             )
             .fill(Fill::Color(red()))
             .stroke(Stroke::Color(black(), 0.0))

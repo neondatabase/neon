@@ -88,7 +88,7 @@ pub struct PagestreamNblocksRequest {
 pub struct PagestreamGetPageRequest {
     latest: bool,
     pub lsn: Lsn,
-    rel: RelTag,
+    pub rel: RelTag,
     pub blkno: u32,
 }
 

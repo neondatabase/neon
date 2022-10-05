@@ -264,12 +264,71 @@ pageserver_flush(void)
 	}
 }
 
+// Entry of the page_cache
+typedef struct
+{
+	// HACK Just xor of bytes lol
+	char request_hash;
+
+	// Points directly to a NeonResponse. We can't just own the
+	// NeonResponse because it's a "supertype", so it's not Sized.
+	StringInfo response;
+}            NeonRequestResponse;
+
+NeonRequestResponse page_cache[20];
+int page_cache_size = 0;
+int page_cache_head = 0;
+
 static NeonResponse *
 pageserver_call(NeonRequest * request)
 {
+	// Compute hash
+	char hash = 0;
+	StringInfoData req_buff;
+	req_buff = zm_pack_request(request);
+	for (int i = 0; i < req_buff.len; i++) {
+		hash ^= req_buff.data[i];
+	}
+	pfree(req_buff.data);
+
+	// If result is cached, memcpy and return
+	// for (int i = 0; i < page_cache_size; i++) {
+	// 	if (page_cache[i].request_hash == hash) {
+	// 		int len = page_cache[0].response->len;
+	// 		NeonResponse *resp = palloc0(len);
+	// 		// I'd rather Rc than memcpy, but this is not rust :(
+	// 		memcpy(resp, page_cache[0].response->data, len);
+	// 		return resp;
+	// 	}
+	// }
+
+	// Send request, get response
 	pageserver_send(request);
 	pageserver_flush();
-	return pageserver_receive();
+	NeonResponse *resp = pageserver_receive();
+
+	// Get length
+	int len = -1;
+	switch (resp->tag) {
+		case T_NeonExistsResponse: { len = sizeof(NeonExistsResponse); }
+		case T_NeonNblocksResponse: { len = sizeof(NeonNblocksResponse); }
+		case T_NeonGetPageResponse: { len = offsetof(NeonGetPageResponse, page) + BLCKSZ; }
+		case T_NeonDbSizeResponse: { len = sizeof(NeonDbSizeResponse); }
+		case T_NeonErrorResponse: { len = sizeof(NeonErrorResponse); }
+	}
+
+	// Cache result
+	// page_cache[page_cache_head].request_hash = hash;
+	// page_cache[page_cache_head].response->len = len;
+	// // TODO free old result
+	// page_cache[page_cache_head].response->data = palloc0(len);
+	// memcpy(page_cache[page_cache_head].response->data, resp, len);
+	// page_cache_head = (page_cache_head + 1) % 20;
+	// if (page_cache_size < 20) {
+	// 	page_cache_size += 1;
+	// }
+
+	return resp;
 }
 
 page_server_api api = {
