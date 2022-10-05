@@ -284,6 +284,7 @@ enum IndexPartVersion {
     // V2,
 }
 
+/// Non-derived implementation that sometimes puts the version field in the document.
 impl Serialize for IndexPart {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
