@@ -250,10 +250,10 @@ impl RemoteTimeline {
     }
 
     pub fn from_index_part(timeline_path: &Path, index_part: IndexPart) -> anyhow::Result<Self> {
-        let metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)?;
+        let metadata = TimelineMetadata::from_bytes(index_part.metadata_bytes())?;
         Ok(Self {
-            timeline_layers: to_local_paths(timeline_path, index_part.timeline_layers),
-            missing_layers: to_local_paths(timeline_path, index_part.missing_layers),
+            timeline_layers: to_local_paths(timeline_path, index_part.timeline_layers()),
+            missing_layers: to_local_paths(timeline_path, index_part.missing_files()),
             metadata,
             awaits_download: false,
         })
@@ -279,19 +279,14 @@ pub enum IndexPartVersion {
 
 /// Part of the remote index, corresponding to a certain timeline.
 /// Contains the data about all files in the timeline, present remotely and its metadata.
-#[serde_as]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct IndexPart {
-    timeline_layers: HashSet<RelativePath>,
-    /// Currently is not really used in pageserver,
-    /// present to manually keep track of the layer files that pageserver might never retrieve.
-    ///
-    /// Such "holes" might appear if any upload task was evicted on an error threshold:
-    /// the this layer will only be rescheduled for upload on pageserver restart.
-    missing_layers: HashSet<RelativePath>,
-    #[serde_as(as = "DisplayFromStr")]
-    disk_consistent_lsn: Lsn,
-    metadata_bytes: Vec<u8>,
+#[serde(tag = "version")]
+pub enum IndexPart {
+    #[serde(alias = "1")]
+    V1(IndexPartV1),
+    /// V2 uses the same IndexPartV1 as nothing changed except the envelope got a version.
+    #[serde(alias = "2")]
+    V2(IndexPartV1),
 }
 
 impl IndexPart {
@@ -304,16 +299,37 @@ impl IndexPart {
         disk_consistent_lsn: Lsn,
         metadata_bytes: Vec<u8>,
     ) -> Self {
-        Self {
+        Self::V2(IndexPartV1 {
             timeline_layers,
             missing_layers,
             disk_consistent_lsn,
             metadata_bytes,
+        })
+    }
+
+    pub fn timeline_layers(&self) -> &HashSet<RelativePath> {
+        match self {
+            Self::V1(v1) | Self::V2(v1) => &v1.timeline_layers,
         }
     }
 
+    // FIXME: this should probably be missing_layers()
     pub fn missing_files(&self) -> &HashSet<RelativePath> {
-        &self.missing_layers
+        match self {
+            Self::V1(v1) | Self::V2(v1) => &v1.missing_layers,
+        }
+    }
+
+    pub fn disk_consistent_lsn(&self) -> Lsn {
+        match self {
+            Self::V1(v1) | Self::V2(v1) => v1.disk_consistent_lsn,
+        }
+    }
+
+    pub fn metadata_bytes(&self) -> &[u8] {
+        match self {
+            Self::V1(v1) | Self::V2(v1) => &v1.metadata_bytes,
+        }
     }
 
     pub fn from_remote_timeline(
@@ -321,20 +337,35 @@ impl IndexPart {
         remote_timeline: RemoteTimeline,
     ) -> anyhow::Result<Self> {
         let metadata_bytes = remote_timeline.metadata.to_bytes()?;
-        Ok(Self {
-            timeline_layers: to_relative_paths(timeline_path, remote_timeline.timeline_layers)
+        Ok(Self::V2(IndexPartV1 {
+            timeline_layers: to_relative_paths(timeline_path, &remote_timeline.timeline_layers)
                 .context("Failed to convert timeline layers' paths to relative ones")?,
-            missing_layers: to_relative_paths(timeline_path, remote_timeline.missing_layers)
+            missing_layers: to_relative_paths(timeline_path, &remote_timeline.missing_layers)
                 .context("Failed to convert missing layers' paths to relative ones")?,
             disk_consistent_lsn: remote_timeline.metadata.disk_consistent_lsn(),
             metadata_bytes,
-        })
+        }))
     }
 }
 
-fn to_local_paths(
+#[serde_as]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct IndexPartV1 {
+    timeline_layers: HashSet<RelativePath>,
+    /// Currently is not really used in pageserver,
+    /// present to manually keep track of the layer files that pageserver might never retrieve.
+    ///
+    /// Such "holes" might appear if any upload task was evicted on an error threshold:
+    /// the this layer will only be rescheduled for upload on pageserver restart.
+    missing_layers: HashSet<RelativePath>,
+    #[serde_as(as = "DisplayFromStr")]
+    disk_consistent_lsn: Lsn,
+    metadata_bytes: Vec<u8>,
+}
+
+fn to_local_paths<'a>(
     timeline_path: &Path,
-    paths: impl IntoIterator<Item = RelativePath>,
+    paths: impl IntoIterator<Item = &'a RelativePath>,
 ) -> HashSet<PathBuf> {
     paths
         .into_iter()
@@ -342,9 +373,9 @@ fn to_local_paths(
         .collect()
 }
 
-fn to_relative_paths(
+fn to_relative_paths<'a>(
     timeline_path: &Path,
-    paths: impl IntoIterator<Item = PathBuf>,
+    paths: impl IntoIterator<Item = &'a PathBuf>,
 ) -> anyhow::Result<HashSet<RelativePath>> {
     paths
         .into_iter()
@@ -390,7 +421,7 @@ mod tests {
             .expect("Correct remote timeline should be convertible to index part");
 
         assert_eq!(
-            index_part.timeline_layers.iter().collect::<BTreeSet<_>>(),
+            index_part.timeline_layers().iter().collect::<BTreeSet<_>>(),
             BTreeSet::from([
                 &RelativePath("layer_1".to_string()),
                 &RelativePath("layer_2".to_string())
@@ -398,7 +429,7 @@ mod tests {
             "Index part should have all remote timeline layers after the conversion"
         );
         assert_eq!(
-            index_part.missing_layers.iter().collect::<BTreeSet<_>>(),
+            index_part.missing_files().iter().collect::<BTreeSet<_>>(),
             BTreeSet::from([
                 &RelativePath("missing_1".to_string()),
                 &RelativePath("missing_2".to_string())
@@ -406,12 +437,12 @@ mod tests {
             "Index part should have all missing remote timeline layers after the conversion"
         );
         assert_eq!(
-            index_part.disk_consistent_lsn,
+            index_part.disk_consistent_lsn(),
             metadata.disk_consistent_lsn(),
             "Index part should have disk consistent lsn from the timeline"
         );
         assert_eq!(
-            index_part.metadata_bytes,
+            index_part.metadata_bytes(),
             metadata
                 .to_bytes()
                 .expect("Failed to serialize correct metadata into bytes"),
@@ -539,12 +570,12 @@ mod tests {
         // the fake missing layer is just that, added to have non-Default::default missing_layers.
         let example = r#"{"timeline_layers":["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"],"missing_layers":["not_a_real_layer_but_adding_coverage"],"disk_consistent_lsn":"0/16960E8","metadata_bytes":[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
 
-        let expected = IndexPart {
+        let expected = IndexPart::V1(IndexPartV1 {
             timeline_layers: [RelativePath("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".to_owned())].into_iter().collect(),
             missing_layers: [RelativePath("not_a_real_layer_but_adding_coverage".to_owned())].into_iter().collect(),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: vec![113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        };
+        });
 
         let part = serde_json::from_str::<IndexPart>(example).unwrap();
         assert_eq!(part, expected);
