@@ -270,10 +270,10 @@ impl RemoteTimeline {
 #[derive(Serialize, Deserialize)]
 pub enum IndexPartVersion {
     /// First version as of 2022-10-04 a50e46f5, and earlier.
-    #[serde(alias = "1")]
+    #[serde(rename = "1")]
     V1,
     /// Second iteration added a version number to facilitate later versions.
-    #[serde(alias = "2")]
+    #[serde(rename = "2")]
     V2,
 }
 
@@ -281,7 +281,7 @@ pub enum IndexPartVersion {
 /// Contains the data about all files in the timeline, present remotely and its metadata.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IndexPart {
-    /// Without "version" field. Note, the serialized form will not transparently upgrade the type.
+    /// With or without a "version" field. Note, the serialized form will not transparently upgrade the type.
     V1 { inner: IndexPartV1, versioned: bool },
     /// V2 uses the same IndexPartV1 as nothing changed except the envelope got a version.
     V2(IndexPartV1),
@@ -293,12 +293,26 @@ impl Serialize for IndexPart {
         S: serde::Serializer,
     {
         use IndexPart::*;
+
+        #[derive(Serialize)]
+        struct Versioned<'a, I: Serialize> {
+            version: IndexPartVersion,
+            #[serde(flatten)]
+            inner: &'a I,
+        }
+
         match self {
-            V1 { inner, versioned } if *versioned => {
-                todo!("versioned")
+            V2(inner) => Versioned {
+                version: IndexPartVersion::V2,
+                inner,
             }
+            .serialize(serializer),
+            V1 { inner, versioned } if *versioned => Versioned {
+                version: IndexPartVersion::V1,
+                inner,
+            }
+            .serialize(serializer),
             V1 { inner, .. } => inner.serialize(serializer),
-            V2(inner) => todo!("versioned"),
         }
     }
 }
