@@ -266,8 +266,8 @@ impl RemoteTimeline {
 pub enum IndexPart {
     /// With or without a "version" field. Note, the serialized form will not transparently upgrade the type.
     V1 { inner: IndexPartV1, versioned: bool },
-    /// V2 uses the same IndexPartV1 as nothing changed except the envelope got a version.
-    V2(IndexPartV1),
+    // Later versions can be added as:
+    // V2(IndexPartV2),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -287,6 +287,7 @@ impl Serialize for IndexPart {
     {
         use IndexPart::*;
 
+        /// The envelope to produce the serialized version of optionally internally tagged document.
         #[derive(Serialize)]
         struct Versioned<'a, I: Serialize> {
             version: IndexPartVersion,
@@ -294,39 +295,40 @@ impl Serialize for IndexPart {
             inner: &'a I,
         }
 
-        match self {
-            V2(inner) => Versioned {
-                version: IndexPartVersion::V2,
-                inner,
-            }
-            .serialize(serializer),
+        let envelope = match self {
+            // V2(inner) => Versioned {
+            //     version: IndexPartVersion::V2,
+            //     inner,
+            // },
             V1 { inner, versioned } if *versioned => Versioned {
                 version: IndexPartVersion::V1,
                 inner,
-            }
-            .serialize(serializer),
-            V1 { inner, .. } => inner.serialize(serializer),
-        }
+            },
+            // unversioned V1 is the special case; it has no "version" internal tag, so we
+            // deserialize it without the envelope.
+            V1 { inner, .. } => return inner.serialize(serializer),
+        };
+
+        envelope.serialize(serializer)
     }
 }
 
 /// Non-derived implementation for supporting non-versioned documents.
 ///
-/// Initial implementation: <https://github.com/serde-rs/serde/issues/1221>
+/// Initial implementation from: <https://github.com/serde-rs/serde/issues/1221>
 impl<'de> Deserialize<'de> for IndexPart {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        // TODO: what is #[serde(field_identifier, ...)]?
         // first buffer whole subtree as serde_json::Value, as we don't really know if the "version" is present or not
         let v = serde_json::value::Value::deserialize(deserializer)?;
 
         Result::<_, D::Error>::Ok(
             match Option::deserialize(&v["version"]).map_err(serde::de::Error::custom)? {
-                Some(IndexPartVersion::V2) => {
-                    IndexPart::V2(IndexPartV1::deserialize(v).map_err(serde::de::Error::custom)?)
-                }
+                // Some(IndexPartVersion::V2) => {
+                //     IndexPart::V2(IndexPartV1::deserialize(v).map_err(serde::de::Error::custom)?)
+                // }
                 versioned @ Some(IndexPartVersion::V1) | versioned @ None => {
                     // understand and serialize version = "1", even though they should never be seen anywhere
                     IndexPart::V1 {
@@ -349,36 +351,40 @@ impl IndexPart {
         disk_consistent_lsn: Lsn,
         metadata_bytes: Vec<u8>,
     ) -> Self {
-        Self::V2(IndexPartV1 {
+        let inner = IndexPartV1 {
             timeline_layers,
             missing_layers,
             disk_consistent_lsn,
             metadata_bytes,
-        })
+        };
+        Self::V1 {
+            inner,
+            versioned: true,
+        }
     }
 
     pub fn timeline_layers(&self) -> &HashSet<RelativePath> {
         match self {
-            Self::V1 { inner: v1, .. } | Self::V2(v1) => &v1.timeline_layers,
+            Self::V1 { inner: v1, .. } => &v1.timeline_layers,
         }
     }
 
     // FIXME: this should probably be missing_layers()
     pub fn missing_files(&self) -> &HashSet<RelativePath> {
         match self {
-            Self::V1 { inner: v1, .. } | Self::V2(v1) => &v1.missing_layers,
+            Self::V1 { inner: v1, .. } => &v1.missing_layers,
         }
     }
 
     pub fn disk_consistent_lsn(&self) -> Lsn {
         match self {
-            Self::V1 { inner: v1, .. } | Self::V2(v1) => v1.disk_consistent_lsn,
+            Self::V1 { inner: v1, .. } => v1.disk_consistent_lsn,
         }
     }
 
     pub fn metadata_bytes(&self) -> &[u8] {
         match self {
-            Self::V1 { inner: v1, .. } | Self::V2(v1) => &v1.metadata_bytes,
+            Self::V1 { inner: v1, .. } => &v1.metadata_bytes,
         }
     }
 
@@ -387,14 +393,19 @@ impl IndexPart {
         remote_timeline: RemoteTimeline,
     ) -> anyhow::Result<Self> {
         let metadata_bytes = remote_timeline.metadata.to_bytes()?;
-        Ok(Self::V2(IndexPartV1 {
+        let inner = IndexPartV1 {
             timeline_layers: to_relative_paths(timeline_path, &remote_timeline.timeline_layers)
                 .context("Failed to convert timeline layers' paths to relative ones")?,
             missing_layers: to_relative_paths(timeline_path, &remote_timeline.missing_layers)
                 .context("Failed to convert missing layers' paths to relative ones")?,
             disk_consistent_lsn: remote_timeline.metadata.disk_consistent_lsn(),
             metadata_bytes,
-        }))
+        };
+        // create all new as versioned
+        Ok(Self::V1 {
+            inner,
+            versioned: true,
+        })
     }
 }
 
@@ -648,6 +659,7 @@ mod tests {
     #[test]
     fn versioned_v1_roundtrips() {
         // make sure that the deserialize->serialize produces the same input
+        // this is a property we would like to hold for all indexpart's
         let part = serde_json::from_str::<IndexPart>(VERSIONED_V1_INDEXPART).unwrap();
         let serialized = serde_json::to_string(&part).unwrap();
         assert_eq!(VERSIONED_V1_INDEXPART, &serialized);
