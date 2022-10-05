@@ -5,7 +5,7 @@
 
 ARG TAG=pinned
 # apparently, ARGs don't get replaced in RUN commands in kaniko
-# ARG POSTGIS_VERSION=3.3.0
+# ARG POSTGIS_VERSION=3.3.1
 # ARG PLV8_VERSION=3.1.4
 # ARG PG_VERSION=v15
 
@@ -47,9 +47,9 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
     apt install -y gdal-bin libgdal-dev libprotobuf-c-dev protobuf-c-compiler xsltproc
 
-RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.0.tar.gz && \
-    tar xvzf postgis-3.3.0.tar.gz && \
-    cd postgis-3.3.0 && \
+RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.1.tar.gz && \
+    tar xvzf postgis-3.3.1.tar.gz && \
+    cd postgis-3.3.1 && \
     ./autogen.sh && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     ./configure && \
