@@ -11,7 +11,7 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{
+use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
 use postgres::{Config, NoTls};
@@ -112,11 +112,15 @@ impl PageServerNode {
         create_tenant: Option<TenantId>,
         initial_timeline_id: Option<TimelineId>,
         config_overrides: &[&str],
+        pg_version: u32,
     ) -> anyhow::Result<TimelineId> {
         let id = format!("id={}", self.env.pageserver.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
-        let pg_distrib_dir_param =
-            format!("pg_distrib_dir='{}'", self.env.pg_distrib_dir.display());
+        let pg_distrib_dir_param = format!(
+            "pg_distrib_dir='{}'",
+            self.env.pg_distrib_dir_raw().display()
+        );
+
         let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
         let listen_http_addr_param = format!(
             "listen_http_addr='{}'",
@@ -159,7 +163,7 @@ impl PageServerNode {
 
         self.start_node(&init_config_overrides, &self.env.base_data_dir, true)?;
         let init_result = self
-            .try_init_timeline(create_tenant, initial_timeline_id)
+            .try_init_timeline(create_tenant, initial_timeline_id, pg_version)
             .context("Failed to create initial tenant and timeline for pageserver");
         match &init_result {
             Ok(initial_timeline_id) => {
@@ -175,12 +179,16 @@ impl PageServerNode {
         &self,
         new_tenant_id: Option<TenantId>,
         new_timeline_id: Option<TimelineId>,
+        pg_version: u32,
     ) -> anyhow::Result<TimelineId> {
-        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())
-            .context("failed to create tenant")?;
-        let initial_timeline_info =
-            self.timeline_create(initial_tenant_id, new_timeline_id, None, None)
-                .context("failed to create timeline")?;
+        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())?;
+        let initial_timeline_info = self.timeline_create(
+            initial_tenant_id,
+            new_timeline_id,
+            None,
+            None,
+            Some(pg_version),
+        )?;
         Ok(initial_timeline_info.timeline_id)
     }
 
@@ -504,6 +512,7 @@ impl PageServerNode {
         new_timeline_id: Option<TimelineId>,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
+        pg_version: Option<u32>,
     ) -> anyhow::Result<TimelineInfo> {
         self.http_request(
             Method::POST,
@@ -513,6 +522,7 @@ impl PageServerNode {
             new_timeline_id,
             ancestor_start_lsn,
             ancestor_timeline_id,
+            pg_version,
         })
         .send()?
         .error_from_body()?
@@ -542,6 +552,7 @@ impl PageServerNode {
         timeline_id: TimelineId,
         base: (Lsn, PathBuf),
         pg_wal: Option<(Lsn, PathBuf)>,
+        pg_version: u32,
     ) -> anyhow::Result<()> {
         let mut client = self.pg_connection_config.connect(NoTls).unwrap();
 
@@ -560,8 +571,9 @@ impl PageServerNode {
         };
 
         // Import base
-        let import_cmd =
-            format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+        let import_cmd = format!(
+            "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
+        );
         let mut writer = client.copy_in(&import_cmd)?;
         io::copy(&mut base_reader, &mut writer)?;
         writer.finish()?;

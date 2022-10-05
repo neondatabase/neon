@@ -33,10 +33,14 @@ use crate::task_mgr::TaskKind;
 
 /// Current storage format version
 ///
-/// This is embedded in the metadata file, and also in the header of all the
-/// layer files. If you make any backwards-incompatible changes to the storage
+/// This is embedded in the header of all the layer files.
+/// If you make any backwards-incompatible changes to the storage
 /// format, bump this!
+/// Note that TimelineMetadata uses its own version number to track
+/// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
+
+pub const DEFAULT_PG_VERSION: u32 = 14;
 
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
@@ -106,7 +110,7 @@ fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds
 }
 
 /// A newtype to store arbitrary data grouped by tenant and timeline ids.
-/// One could use [`utils::zid::TenantTimelineId`] for grouping, but that would
+/// One could use [`utils::id::TenantTimelineId`] for grouping, but that would
 /// not include the cases where a certain tenant has zero timelines.
 /// This is sometimes important: a tenant could be registered during initial load from FS,
 /// even if he has no timelines on disk.

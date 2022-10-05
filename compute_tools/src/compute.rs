@@ -258,14 +258,7 @@ impl ComputeNode {
             .spawn()
             .expect("cannot start postgres process");
 
-        // Try default Postgres port if it is not provided
-        let port = self
-            .spec
-            .cluster
-            .settings
-            .find("port")
-            .unwrap_or_else(|| "5432".to_string());
-        wait_for_postgres(&mut pg, &port, pgdata_path)?;
+        wait_for_postgres(&mut pg, pgdata_path)?;
 
         // If connection fails,
         // it may be the old node with `zenith_admin` superuser.

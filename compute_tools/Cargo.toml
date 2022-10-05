@@ -8,8 +8,10 @@ anyhow = "1.0"
 chrono = "0.4"
 clap = "3.0"
 env_logger = "0.9"
+futures = "0.3.13"
 hyper = { version = "0.14", features = ["full"] }
 log = { version = "0.4", features = ["std", "serde"] }
+notify = "5.0.0"
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }

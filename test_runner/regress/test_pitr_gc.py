@@ -1,6 +1,3 @@
-from contextlib import closing
-
-import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.types import TimelineId
@@ -54,13 +51,11 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
     log.info(f"LSN after 10000 rows: {debug_lsn} xid {debug_xid}")
 
     # run GC
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-            pscur.execute(f"compact {env.initial_tenant} {timeline}")
-            # perform aggressive GC. Data still should be kept because of the PITR setting.
-            pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
-            row = pscur.fetchone()
-            print_gc_result(row)
+    with env.pageserver.http_client() as pageserver_http:
+        pageserver_http.timeline_compact(env.initial_tenant, timeline)
+        # perform aggressive GC. Data still should be kept because of the PITR setting.
+        gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+        print_gc_result(gc_result)
 
     # Branch at the point where only 100 rows were inserted
     # It must have been preserved by PITR setting

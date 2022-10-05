@@ -21,7 +21,9 @@ pub fn start_background_loops(tenant_id: TenantId) {
         &format!("compactor for tenant {tenant_id}"),
         false,
         async move {
-            compaction_loop(tenant_id).await;
+            compaction_loop(tenant_id)
+                .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
+                .await;
             Ok(())
         },
     );
@@ -33,7 +35,9 @@ pub fn start_background_loops(tenant_id: TenantId) {
         &format!("garbage collector for tenant {tenant_id}"),
         false,
         async move {
-            gc_loop(tenant_id).await;
+            gc_loop(tenant_id)
+                .instrument(info_span!("gc_loop", tenant_id = %tenant_id))
+                .await;
             Ok(())
         },
     );
@@ -44,7 +48,7 @@ pub fn start_background_loops(tenant_id: TenantId) {
 ///
 async fn compaction_loop(tenant_id: TenantId) {
     let wait_duration = Duration::from_secs(2);
-    info!("starting compaction loop for {tenant_id}");
+    info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         loop {
@@ -52,7 +56,7 @@ async fn compaction_loop(tenant_id: TenantId) {
 
             let tenant = tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
-                    info!("received compaction cancellation request");
+                    info!("received cancellation request");
                     return;
                 },
                 tenant_wait_result = wait_for_active_tenant(tenant_id, wait_duration) => match tenant_wait_result {
@@ -73,7 +77,7 @@ async fn compaction_loop(tenant_id: TenantId) {
             // Sleep
             tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
-                    info!("received compaction cancellation request during idling");
+                    info!("received cancellation request during idling");
                     break ;
                 },
                 _ = tokio::time::sleep(sleep_duration) => {},
@@ -91,7 +95,7 @@ async fn compaction_loop(tenant_id: TenantId) {
 ///
 async fn gc_loop(tenant_id: TenantId) {
     let wait_duration = Duration::from_secs(2);
-    info!("starting gc loop for {tenant_id}");
+    info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         loop {
@@ -99,7 +103,7 @@ async fn gc_loop(tenant_id: TenantId) {
 
             let tenant = tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
-                    info!("received GC cancellation request");
+                    info!("received cancellation request");
                     return;
                 },
                 tenant_wait_result = wait_for_active_tenant(tenant_id, wait_duration) => match tenant_wait_result {
@@ -123,7 +127,7 @@ async fn gc_loop(tenant_id: TenantId) {
             // Sleep
             tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
-                    info!("received GC cancellation request during idling");
+                    info!("received cancellation request during idling");
                     break;
                 },
                 _ = tokio::time::sleep(sleep_duration) => {},

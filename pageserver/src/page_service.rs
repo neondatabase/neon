@@ -29,7 +29,7 @@ use utils::{
     lsn::Lsn,
     postgres_backend::AuthType,
     postgres_backend_async::{self, PostgresBackend},
-    pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
+    pq_proto::{BeMessage, FeMessage, RowDescriptor},
     simple_rcu::RcuReadGuard,
 };
 
@@ -46,9 +46,9 @@ use crate::tenant::Timeline;
 use crate::tenant_mgr;
 use crate::trace::Tracer;
 use crate::CheckpointConfig;
-use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 
-use postgres_ffi::v14::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi::to_pg_timestamp;
 use postgres_ffi::BLCKSZ;
 
 // Wrapped in libpq CopyData
@@ -569,12 +569,16 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         base_lsn: Lsn,
         _end_lsn: Lsn,
+        pg_version: u32,
     ) -> anyhow::Result<()> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let timeline = tenant_mgr::get_tenant(tenant_id, true)?
-            .create_empty_timeline(timeline_id, base_lsn)?;
+        let timeline = tenant_mgr::get_tenant(tenant_id, true)?.create_empty_timeline(
+            timeline_id,
+            base_lsn,
+            pg_version,
+        )?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -734,7 +738,7 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    #[instrument(skip(timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_rel_exists_request(
         &self,
         timeline: &Timeline,
@@ -751,7 +755,7 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_nblocks_request(
         &self,
         timeline: &Timeline,
@@ -768,7 +772,7 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(timeline, req), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
     async fn handle_db_size_request(
         &self,
         timeline: &Timeline,
@@ -788,7 +792,7 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(timeline, req), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
     async fn handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
@@ -1026,19 +1030,27 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // 1. Get start/end LSN from backup_manifest file
             // 2. Run:
             // cat my_backup/base.tar | psql -h $PAGESERVER \
-            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN"
+            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 4);
+            ensure!(params.len() == 5);
             let tenant_id = TenantId::from_str(params[0])?;
             let timeline_id = TimelineId::from_str(params[1])?;
             let base_lsn = Lsn::from_str(params[2])?;
             let end_lsn = Lsn::from_str(params[3])?;
+            let pg_version = u32::from_str(params[4])?;
 
             self.check_permission(Some(tenant_id))?;
 
             match self
-                .handle_import_basebackup(pgb, tenant_id, timeline_id, base_lsn, end_lsn)
+                .handle_import_basebackup(
+                    pgb,
+                    tenant_id,
+                    timeline_id,
+                    base_lsn,
+                    end_lsn,
+                    pg_version,
+                )
                 .await
             {
                 Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
@@ -1076,37 +1088,15 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("failpoints ") {
-            ensure!(fail::has_failpoints(), "Cannot manage failpoints because pageserver was compiled without failpoints support");
-
-            let (_, failpoints) = query_string.split_at("failpoints ".len());
-
-            for failpoint in failpoints.split(';') {
-                if let Some((name, actions)) = failpoint.split_once('=') {
-                    info!("cfg failpoint: {} {}", name, actions);
-
-                    // We recognize one extra "action" that's not natively recognized
-                    // by the failpoints crate: exit, to immediately kill the process
-                    if actions == "exit" {
-                        fail::cfg_callback(name, || {
-                            info!("Exit requested by failpoint");
-                            std::process::exit(1);
-                        })
-                        .unwrap();
-                    } else {
-                        fail::cfg(name, actions).unwrap();
-                    }
-                } else {
-                    bail!("Invalid failpoints format");
-                }
-            }
-            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("show ") {
             // show <tenant_id>
             let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(params.len() == 1, "invalid param number for config command");
             let tenant_id = TenantId::from_str(params[0])?;
+
+            self.check_permission(Some(tenant_id))?;
+
             let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
@@ -1143,91 +1133,6 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 Some(tenant.get_pitr_interval().as_secs().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("do_gc ") {
-            // Run GC immediately on given timeline.
-            // FIXME: This is just for tests. See test_runner/regress/test_gc.py.
-            // This probably should require special authentication or a global flag to
-            // enable, I don't think we want to or need to allow regular clients to invoke
-            // GC.
-
-            // do_gc <tenant_id> <timeline_id> <gc_horizon>
-            let re = Regex::new(r"^do_gc ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)([[:digit:]]+)?")
-                .unwrap();
-
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid do_gc: '{}'", query_string))?;
-
-            let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
-
-            let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
-
-            let gc_horizon: u64 = caps
-                .get(4)
-                .map(|h| h.as_str().parse())
-                .unwrap_or_else(|| Ok(tenant.get_gc_horizon()))?;
-
-            // Use tenant's pitr setting
-            let pitr = tenant.get_pitr_interval();
-            let result = tenant.gc_iteration(Some(timeline_id), gc_horizon, pitr, true)?;
-            pgb.write_message(&BeMessage::RowDescription(&[
-                RowDescriptor::int8_col(b"layers_total"),
-                RowDescriptor::int8_col(b"layers_needed_by_cutoff"),
-                RowDescriptor::int8_col(b"layers_needed_by_pitr"),
-                RowDescriptor::int8_col(b"layers_needed_by_branches"),
-                RowDescriptor::int8_col(b"layers_not_updated"),
-                RowDescriptor::int8_col(b"layers_removed"),
-                RowDescriptor::int8_col(b"elapsed"),
-            ]))?
-            .write_message(&BeMessage::DataRow(&[
-                Some(result.layers_total.to_string().as_bytes()),
-                Some(result.layers_needed_by_cutoff.to_string().as_bytes()),
-                Some(result.layers_needed_by_pitr.to_string().as_bytes()),
-                Some(result.layers_needed_by_branches.to_string().as_bytes()),
-                Some(result.layers_not_updated.to_string().as_bytes()),
-                Some(result.layers_removed.to_string().as_bytes()),
-                Some(result.elapsed.as_millis().to_string().as_bytes()),
-            ]))?
-            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("compact ") {
-            // Run compaction immediately on given timeline.
-            // FIXME This is just for tests. Don't expect this to be exposed to
-            // the users or the api.
-
-            // compact <tenant_id> <timeline_id>
-            let re = Regex::new(r"^compact ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)?").unwrap();
-
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("Invalid compact: '{}'", query_string))?;
-
-            let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = get_local_timeline(tenant_id, timeline_id)?;
-            timeline.compact()?;
-
-            pgb.write_message(&SINGLE_COL_ROWDESC)?
-                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("checkpoint ") {
-            // Run checkpoint immediately on given timeline.
-
-            // checkpoint <tenant_id> <timeline_id>
-            let re = Regex::new(r"^checkpoint ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)?").unwrap();
-
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid checkpoint command: '{}'", query_string))?;
-
-            let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = get_local_timeline(tenant_id, timeline_id)?;
-
-            // Checkpoint the timeline and also compact it (due to `CheckpointConfig::Forced`).
-            timeline.checkpoint(CheckpointConfig::Forced)?;
-
-            pgb.write_message(&SINGLE_COL_ROWDESC)?
-                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("get_lsn_by_timestamp ") {
             // Locate LSN of last transaction with timestamp less or equal than sppecified
             // TODO lazy static
@@ -1236,14 +1141,14 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let caps = re
                 .captures(query_string)
                 .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
-
             let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = get_local_timeline(tenant_id, timeline_id)?;
-
             let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
             let timestamp_pg = to_pg_timestamp(timestamp);
 
+            self.check_permission(Some(tenant_id))?;
+
+            let timeline = get_local_timeline(tenant_id, timeline_id)?;
             pgb.write_message(&BeMessage::RowDescription(&[RowDescriptor::text_col(
                 b"lsn",
             )]))?;

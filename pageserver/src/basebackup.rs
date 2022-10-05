@@ -25,10 +25,10 @@ use tracing::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::tenant::Timeline;
 
-use postgres_ffi::v14::pg_constants;
-use postgres_ffi::v14::xlog_utils::{generate_wal_segment, normalize_lsn, XLogFileName};
-use postgres_ffi::v14::{CheckPoint, ControlFileData};
+use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
 use postgres_ffi::TransactionId;
+use postgres_ffi::XLogFileName;
 use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
@@ -129,15 +129,15 @@ where
         // TODO include checksum
 
         // Create pgdata subdirs structure
-        for dir in pg_constants::PGDATA_SUBDIRS.iter() {
+        for dir in PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(*dir)?;
             self.ar.append(&header, &mut io::empty())?;
         }
 
         // Send empty config files.
-        for filepath in pg_constants::PGDATA_SPECIAL_FILES.iter() {
+        for filepath in PGDATA_SPECIAL_FILES.iter() {
             if *filepath == "pg_hba.conf" {
-                let data = pg_constants::PG_HBA.as_bytes();
+                let data = PG_HBA.as_bytes();
                 let header = new_tar_header(filepath, data.len() as u64)?;
                 self.ar.append(&header, data)?;
             } else {
@@ -267,16 +267,12 @@ where
             None
         };
 
-        // TODO pass this as a parameter
-        let pg_version = "14";
+        if spcnode == GLOBALTABLESPACE_OID {
+            let pg_version_str = self.timeline.pg_version.to_string();
+            let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
+            self.ar.append(&header, pg_version_str.as_bytes())?;
 
-        if spcnode == pg_constants::GLOBALTABLESPACE_OID {
-            let version_bytes = pg_version.as_bytes();
-            let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
-            self.ar.append(&header, version_bytes)?;
-
-            let header = new_tar_header("global/PG_VERSION", version_bytes.len() as u64)?;
-            self.ar.append(&header, version_bytes)?;
+            info!("timeline.pg_version {}", self.timeline.pg_version);
 
             if let Some(img) = relmap_img {
                 // filenode map for global tablespace
@@ -305,7 +301,7 @@ where
                 return Ok(());
             }
             // User defined tablespaces are not supported
-            ensure!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
+            ensure!(spcnode == DEFAULTTABLESPACE_OID);
 
             // Append dir path for each database
             let path = format!("base/{}", dbnode);
@@ -314,9 +310,10 @@ where
 
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
-                let version_bytes = pg_version.as_bytes();
-                let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-                self.ar.append(&header, version_bytes)?;
+
+                let pg_version_str = self.timeline.pg_version.to_string();
+                let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
+                self.ar.append(&header, pg_version_str.as_bytes())?;
 
                 let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
                 let header = new_tar_header(&relmap_path, img.len() as u64)?;
@@ -348,30 +345,6 @@ where
     // Also send zenith.signal file with extra bootstrap data.
     //
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
-        let checkpoint_bytes = self
-            .timeline
-            .get_checkpoint(self.lsn)
-            .context("failed to get checkpoint bytes")?;
-        let pg_control_bytes = self
-            .timeline
-            .get_control_file(self.lsn)
-            .context("failed get control bytes")?;
-        let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
-        let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
-
-        // Generate new pg_control needed for bootstrap
-        checkpoint.redo = normalize_lsn(self.lsn, WAL_SEGMENT_SIZE).0;
-
-        //reset some fields we don't want to preserve
-        //TODO Check this.
-        //We may need to determine the value from twophase data.
-        checkpoint.oldestActiveXid = 0;
-
-        //save new values in pg_control
-        pg_control.checkPoint = 0;
-        pg_control.checkPointCopy = checkpoint;
-        pg_control.state = pg_constants::DB_SHUTDOWNED;
-
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
@@ -388,8 +361,23 @@ where
             zenith_signal.as_bytes(),
         )?;
 
+        let checkpoint_bytes = self
+            .timeline
+            .get_checkpoint(self.lsn)
+            .context("failed to get checkpoint bytes")?;
+        let pg_control_bytes = self
+            .timeline
+            .get_control_file(self.lsn)
+            .context("failed get control bytes")?;
+
+        let (pg_control_bytes, system_identifier) = postgres_ffi::generate_pg_control(
+            &pg_control_bytes,
+            &checkpoint_bytes,
+            self.lsn,
+            self.timeline.pg_version,
+        )?;
+
         //send pg_control
-        let pg_control_bytes = pg_control.encode();
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
         self.ar.append(&header, &pg_control_bytes[..])?;
 
@@ -398,8 +386,10 @@ where
         let wal_file_name = XLogFileName(PG_TLI, segno, WAL_SEGMENT_SIZE);
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, WAL_SEGMENT_SIZE as u64)?;
-        let wal_seg = generate_wal_segment(segno, pg_control.system_identifier)
-            .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
+
+        let wal_seg =
+            postgres_ffi::generate_wal_segment(segno, system_identifier, self.timeline.pg_version)
+                .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
         ensure!(wal_seg.len() == WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())

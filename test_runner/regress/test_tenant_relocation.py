@@ -147,14 +147,13 @@ def populate_branch(
 
 
 def ensure_checkpoint(
-    pageserver_cur,
     pageserver_http: NeonPageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     current_lsn: Lsn,
 ):
     # run checkpoint manually to be sure that data landed in remote storage
-    pageserver_cur.execute(f"checkpoint {tenant_id} {timeline_id}")
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
     # wait until pageserver successfully uploaded a checkpoint to remote storage
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
@@ -324,22 +323,19 @@ def test_tenant_relocation(
     # this requirement introduces a problem
     # if user creates a branch during migration
     # it wont appear on the new pageserver
-    with pg_cur(env.pageserver) as cur:
-        ensure_checkpoint(
-            cur,
-            pageserver_http=pageserver_http,
-            tenant_id=tenant_id,
-            timeline_id=timeline_id_main,
-            current_lsn=current_lsn_main,
-        )
+    ensure_checkpoint(
+        pageserver_http=pageserver_http,
+        tenant_id=tenant_id,
+        timeline_id=timeline_id_main,
+        current_lsn=current_lsn_main,
+    )
 
-        ensure_checkpoint(
-            cur,
-            pageserver_http=pageserver_http,
-            tenant_id=tenant_id,
-            timeline_id=timeline_id_second,
-            current_lsn=current_lsn_second,
-        )
+    ensure_checkpoint(
+        pageserver_http=pageserver_http,
+        tenant_id=tenant_id,
+        timeline_id=timeline_id_second,
+        current_lsn=current_lsn_second,
+    )
 
     log.info("inititalizing new pageserver")
     # bootstrap second pageserver

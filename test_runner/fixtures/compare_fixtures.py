@@ -89,6 +89,7 @@ class NeonCompare(PgCompare):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
+        self.pageserver_http_client = self.env.pageserver.http_client()
 
         self.tenant, _ = self.env.neon_cli.create_tenant(
             conf={
@@ -110,10 +111,6 @@ class NeonCompare(PgCompare):
         self._pg = self.env.postgres.create_start(
             branch_name, "main", self.tenant, config_lines=["shared_buffers=2GB"])
 
-        # Long-lived cursor, useful for flushing
-        self.psconn = self.env.pageserver.connect()
-        self.pscur = self.psconn.cursor()
-
     @property
     def pg(self):
         return self._pg
@@ -127,10 +124,10 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
-        self.pscur.execute(f"do_gc {self.tenant} {self.timeline} 0")
+        self.pageserver_http_client.timeline_gc(self.env.initial_tenant, self.timeline, 0)
 
     def compact(self):
-        self.pscur.execute(f"compact {self.tenant} {self.timeline}")
+        self.pageserver_http_client.timeline_compact(self.env.initial_tenant, self.timeline)
 
     def report_peak_memory_use(self) -> None:
         self.zenbenchmark.record(

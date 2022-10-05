@@ -11,13 +11,14 @@ bstr = "0.2.17"
 bytes = { version = "1.0.1", features = ['serde'] }
 clap = "3.0"
 futures = "0.3.13"
+git-version = "0.3.5"
 hashbrown = "0.12"
 hex = "0.4.3"
 hmac = "0.12.1"
 hyper = "0.14"
 itertools = "0.10.3"
-once_cell = "1.13.0"
 md5 = "0.7.0"
+once_cell = "1.13.0"
 parking_lot = "0.12"
 pin-project-lite = "0.2.7"
 rand = "0.8.3"
@@ -35,13 +36,12 @@ tokio = { version = "1.17", features = ["macros"] }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 tokio-rustls = "0.23.0"
 url = "2.2.2"
-git-version = "0.3.5"
+uuid = { version = "0.8.2", features = ["v4", "serde"]}
+x509-parser = "0.13.2"
 
 utils = { path = "../libs/utils" }
 metrics = { path = "../libs/metrics" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
-
-x509-parser = "0.13.2"
 
 [dev-dependencies]
 rcgen = "0.8.14"

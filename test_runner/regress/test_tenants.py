@@ -1,4 +1,5 @@
 import os
+import shutil
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -7,8 +8,13 @@ from typing import List
 import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import PAGESERVER_PER_TENANT_METRICS, parse_metrics
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
-from fixtures.types import Lsn, TenantId
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    RemoteStorageKind,
+    available_remote_storages,
+)
+from fixtures.types import Lsn, TenantId, TimelineId
 from prometheus_client.samples import Sample
 
 
@@ -19,7 +25,8 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     )
     initial_tenant_dirs = set([d for d in tenants_dir.iterdir()])
 
-    neon_simple_env.pageserver.safe_psql("failpoints tenant-creation-before-tmp-rename=return")
+    pageserver_http = neon_simple_env.pageserver.http_client()
+    pageserver_http.configure_failpoints(("tenant-creation-before-tmp-rename", "return"))
     with pytest.raises(Exception, match="tenant-creation-before-tmp-rename"):
         _ = neon_simple_env.neon_cli.create_tenant()
 
@@ -200,3 +207,63 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
 
         post_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
         assert post_detach_samples == set()
+
+
+# Check that empty tenants work with or without the remote storage
+@pytest.mark.parametrize(
+    "remote_storage_kind", available_remote_storages() + [RemoteStorageKind.NOOP]
+)
+def test_pageserver_with_empty_tenants(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_pageserver_with_empty_tenants",
+    )
+
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+
+    tenant_without_timelines_dir = env.initial_tenant
+    log.info(
+        f"Tenant {tenant_without_timelines_dir} becomes broken: it abnormally looses tenants/ directory and is expected to be completely ignored when pageserver restarts"
+    )
+    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
+
+    tenant_with_empty_timelines_dir = client.tenant_create()
+    log.info(
+        f"Tenant {tenant_with_empty_timelines_dir} gets all of its timelines deleted: still should be functional"
+    )
+    temp_timelines = client.timeline_list(tenant_with_empty_timelines_dir)
+    for temp_timeline in temp_timelines:
+        client.timeline_delete(
+            tenant_with_empty_timelines_dir, TimelineId(temp_timeline["timeline_id"])
+        )
+    files_in_timelines_dir = sum(
+        1
+        for _p in Path.iterdir(
+            Path(env.repo_dir) / "tenants" / str(tenant_with_empty_timelines_dir) / "timelines"
+        )
+    )
+    assert (
+        files_in_timelines_dir == 0
+    ), f"Tenant {tenant_with_empty_timelines_dir} should have an empty timelines/ directory"
+
+    # Trigger timeline reinitialization after pageserver restart
+    env.postgres.stop_all()
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    client = env.pageserver.http_client()
+    tenants = client.tenant_list()
+
+    assert (
+        len(tenants) == 1
+    ), "Pageserver should attach only tenants with empty timelines/ dir on restart"
+    loaded_tenant = tenants[0]
+    assert loaded_tenant["id"] == str(
+        tenant_with_empty_timelines_dir
+    ), f"Tenant {tenant_with_empty_timelines_dir} should be loaded as the only one with tenants/ directory"
+    assert loaded_tenant["state"] == {
+        "Active": {"background_jobs_running": False}
+    }, "Empty tenant should be loaded and ready for timeline creation"

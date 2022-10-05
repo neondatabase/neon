@@ -25,4 +25,5 @@ postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d05
 wal_craft = { path = "wal_craft" }
 
 [build-dependencies]
-bindgen = "0.59.1"
+anyhow = "1.0"
+bindgen = "0.60.1"

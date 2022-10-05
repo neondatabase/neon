@@ -14,13 +14,13 @@ COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
 COPY --chown=nonroot vendor/postgres-v15 vendor/postgres-v15
 COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
+COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
 
 ENV BUILD_TYPE release
 RUN set -e \
     && mold -run make -j $(nproc) -s neon-pg-ext \
-    && rm -rf pg_install/v14/build \
-    && rm -rf pg_install/v15/build \
-    && tar -C pg_install/v14 -czf /home/nonroot/postgres_install.tar.gz .
+    && rm -rf pg_install/build \
+    && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
 
 # Build neon binaries
 FROM $REPOSITORY/$IMAGE:$TAG AS build
@@ -44,7 +44,7 @@ COPY . .
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
-&& mold -run cargo build --locked --release \
+&& mold -run cargo build --bin pageserver --bin safekeeper --bin proxy --locked --release \
     && cachepot -s
 
 # Build final image
@@ -67,8 +67,8 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver /usr
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy      /usr/local/bin
 
-# v14 is default for now
-COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/
+COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
+COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
@@ -77,7 +77,7 @@ RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
     && /usr/local/bin/pageserver -D /data/.neon/ --init \
        -c "id=1234" \
        -c "broker_endpoints=['http://etcd:2379']" \
-       -c "pg_distrib_dir='/usr/local'" \
+       -c "pg_distrib_dir='/usr/local/'" \
        -c "listen_pg_addr='0.0.0.0:6400'" \
        -c "listen_http_addr='0.0.0.0:9898'"
 

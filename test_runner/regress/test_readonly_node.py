@@ -106,6 +106,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
 # Similar test, but with more data, and we force checkpoints
 def test_timetravel(neon_simple_env: NeonEnv):
     env = neon_simple_env
+    pageserver_http_client = env.pageserver.http_client()
     env.neon_cli.create_branch("test_timetravel", "empty")
     pg = env.postgres.create_start("test_timetravel")
 
@@ -136,7 +137,7 @@ def test_timetravel(neon_simple_env: NeonEnv):
         wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
         # run checkpoint manually to force a new layer file
-        env.pageserver.safe_psql(f"checkpoint {tenant_id} {timeline_id}")
+        pageserver_http_client.timeline_checkpoint(tenant_id, timeline_id)
 
     ##### Restart pageserver
     env.postgres.stop_all()

@@ -24,12 +24,12 @@ use crate::tenant::{
     image_layer::{ImageLayer, ImageLayerWriter},
     inmemory_layer::InMemoryLayer,
     layer_map::{LayerMap, SearchResult},
-    metadata::{save_metadata, TimelineMetadata, METADATA_FILE_NAME},
+    metadata::{save_metadata, TimelineMetadata},
     par_fsync,
     storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
 };
 
-use crate::config::PageServerConf;
+use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::BlockNumber;
@@ -37,7 +37,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
 
-use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
+use postgres_ffi::to_pg_timestamp;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn, RecordLsn},
@@ -60,6 +60,8 @@ pub struct Timeline {
 
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
+
+    pub pg_version: u32,
 
     pub layers: RwLock<LayerMap>,
 
@@ -232,14 +234,16 @@ impl LogicalSize {
     }
 
     fn current_size(&self) -> anyhow::Result<CurrentLogicalSize> {
-        let size_increment = self.size_added_after_initial.load(AtomicOrdering::Acquire);
+        let size_increment: i64 = self.size_added_after_initial.load(AtomicOrdering::Acquire);
+        //                  ^^^ keep this type explicit so that the casts in this function break if
+        //                  we change the type.
         match self.initial_logical_size.get() {
             Some(initial_size) => {
                 let absolute_size_increment = u64::try_from(
                     size_increment
                         .checked_abs()
                         .with_context(|| format!("Size added after initial {size_increment} is not expected to be i64::MIN"))?,
-                ).with_context(|| format!("Failed to convert size increment {size_increment} to u64"))?;
+                    ).expect("casting nonnegative i64 to u64 should not fail");
 
                 if size_increment < 0 {
                     initial_size.checked_sub(absolute_size_increment)
@@ -249,11 +253,7 @@ impl LogicalSize {
                 .map(CurrentLogicalSize::Exact)
             }
             None => {
-                let non_negative_size_increment = if size_increment < 0 {
-                    0
-                } else {
-                    u64::try_from(size_increment).expect("not negative, cannot fail")
-                };
+                let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
                 Ok(CurrentLogicalSize::Approximate(non_negative_size_increment))
             }
         }
@@ -343,7 +343,9 @@ impl Timeline {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
                     Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
-                    Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
+                    Ordering::Greater => {
+                        unreachable!("the returned lsn should never be after the requested lsn")
+                    }
                 }
                 Some((cached_lsn, cached_img))
             }
@@ -535,6 +537,7 @@ impl Timeline {
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_layers: bool,
+        pg_version: u32,
     ) -> Timeline {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
@@ -543,6 +546,7 @@ impl Timeline {
             tenant_conf,
             timeline_id,
             tenant_id,
+            pg_version,
             layers: RwLock::new(LayerMap::default()),
 
             walredo_mgr,
@@ -623,7 +627,7 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
         let self_clone = Arc::clone(self);
-        let _ = spawn_connection_manager_task(
+        spawn_connection_manager_task(
             self.conf.broker_etcd_prefix.clone(),
             self_clone,
             walreceiver_connect_timeout,
@@ -724,10 +728,10 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn layer_removal_guard(&self) -> Result<MutexGuard<()>, anyhow::Error> {
+    pub fn layer_removal_guard(&self) -> anyhow::Result<MutexGuard<()>> {
         self.layer_removal_cs
             .try_lock()
-            .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
+            .map_err(|e| anyhow!("cannot lock compaction critical section {e}"))
     }
 
     /// Retrieve current logical size of the timeline.
@@ -1262,6 +1266,7 @@ impl Timeline {
                 self.ancestor_lsn,
                 *self.latest_gc_cutoff_lsn.read(),
                 self.initdb_lsn,
+                self.pg_version,
             );
 
             fail_point!("checkpoint-before-saving-metadata", |x| bail!(
@@ -1918,17 +1923,18 @@ impl Timeline {
 
         let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
 
+        let _enter =
+            info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff)
+                .entered();
+
         // Nothing to GC. Return early.
         let latest_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
         if latest_gc_cutoff >= new_gc_cutoff {
             info!(
-                "Nothing to GC for timeline {}: new_gc_cutoff_lsn {new_gc_cutoff}, latest_gc_cutoff_lsn {latest_gc_cutoff}",
-                self.timeline_id
+                "Nothing to GC: new_gc_cutoff_lsn {new_gc_cutoff}, latest_gc_cutoff_lsn {latest_gc_cutoff}",
             );
             return Ok(result);
         }
-
-        let _enter = info_span!("garbage collection", timeline = %self.timeline_id, tenant = %self.tenant_id, cutoff = %new_gc_cutoff).entered();
 
         // We need to ensure that no one tries to read page versions or create
         // branches at a point before latest_gc_cutoff_lsn. See branch_timeline()
@@ -2051,7 +2057,7 @@ impl Timeline {
                 l.filename().display(),
                 l.is_incremental(),
             );
-            layers_to_remove.push(Arc::clone(l));
+            layers_to_remove.push(Arc::clone(&l));
         }
 
         // Actually delete the layers from disk and remove them from the map.
@@ -2134,9 +2140,13 @@ impl Timeline {
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
-                let img =
-                    self.walredo_mgr
-                        .request_redo(key, request_lsn, base_img, data.records)?;
+                let img = self.walredo_mgr.request_redo(
+                    key,
+                    request_lsn,
+                    base_img,
+                    data.records,
+                    self.pg_version,
+                )?;
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();

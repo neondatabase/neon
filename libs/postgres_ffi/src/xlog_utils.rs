@@ -9,12 +9,13 @@
 
 use crc32c::crc32c_append;
 
+use super::super::waldecoder::WalStreamDecoder;
 use super::bindings::{
-    CheckPoint, FullTransactionId, TimeLineID, TimestampTz, XLogLongPageHeaderData,
-    XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
+    CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
+    XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
 };
-use super::pg_constants;
-use super::waldecoder::WalStreamDecoder;
+use super::PG_MAJORVERSION;
+use crate::pg_constants;
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
 use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
@@ -56,12 +57,10 @@ pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 /// in order to let CLOG_TRUNCATE mechanism correctly extend CLOG.
 const XID_CHECKPOINT_INTERVAL: u32 = 1024;
 
-#[allow(non_snake_case)]
 pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
     (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo
 }
 
-#[allow(non_snake_case)]
 pub fn XLogSegNoOffsetToRecPtr(
     segno: XLogSegNo,
     offset: u32,
@@ -70,7 +69,6 @@ pub fn XLogSegNoOffsetToRecPtr(
     segno * (wal_segsz_bytes as u64) + (offset as u64)
 }
 
-#[allow(non_snake_case)]
 pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize) -> String {
     format!(
         "{:>08X}{:>08X}{:>08X}",
@@ -80,7 +78,6 @@ pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize
     )
 }
 
-#[allow(non_snake_case)]
 pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
     let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
     let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
@@ -88,12 +85,10 @@ pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLin
     (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli)
 }
 
-#[allow(non_snake_case)]
 pub fn IsXLogFileName(fname: &str) -> bool {
     return fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit());
 }
 
-#[allow(non_snake_case)]
 pub fn IsPartialXLogFileName(fname: &str) -> bool {
     fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
 }
@@ -111,6 +106,30 @@ pub fn normalize_lsn(lsn: Lsn, seg_sz: usize) -> Lsn {
     } else {
         lsn.align()
     }
+}
+
+pub fn generate_pg_control(
+    pg_control_bytes: &[u8],
+    checkpoint_bytes: &[u8],
+    lsn: Lsn,
+) -> anyhow::Result<(Bytes, u64)> {
+    let mut pg_control = ControlFileData::decode(pg_control_bytes)?;
+    let mut checkpoint = CheckPoint::decode(checkpoint_bytes)?;
+
+    // Generate new pg_control needed for bootstrap
+    checkpoint.redo = normalize_lsn(lsn, WAL_SEGMENT_SIZE).0;
+
+    //reset some fields we don't want to preserve
+    //TODO Check this.
+    //We may need to determine the value from twophase data.
+    checkpoint.oldestActiveXid = 0;
+
+    //save new values in pg_control
+    pg_control.checkPoint = 0;
+    pg_control.checkPointCopy = checkpoint;
+    pg_control.state = DBState_DB_SHUTDOWNED;
+
+    Ok((pg_control.encode(), pg_control.system_identifier))
 }
 
 pub fn get_current_timestamp() -> TimestampTz {
@@ -144,7 +163,10 @@ pub fn find_end_of_wal(
     let mut result = start_lsn;
     let mut curr_lsn = start_lsn;
     let mut buf = [0u8; XLOG_BLCKSZ];
-    let mut decoder = WalStreamDecoder::new(start_lsn);
+    let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+    debug!("find_end_of_wal PG_VERSION: {}", pg_version);
+
+    let mut decoder = WalStreamDecoder::new(start_lsn, pg_version);
 
     // loop over segments
     loop {
@@ -154,7 +176,7 @@ pub fn find_end_of_wal(
         match open_wal_segment(&seg_file_path)? {
             None => {
                 // no more segments
-                info!(
+                debug!(
                     "find_end_of_wal reached end at {:?}, segment {:?} doesn't exist",
                     result, seg_file_path
                 );
@@ -177,7 +199,7 @@ pub fn find_end_of_wal(
                         match decoder.poll_decode() {
                             Ok(Some(record)) => result = record.0,
                             Err(e) => {
-                                info!(
+                                debug!(
                                     "find_end_of_wal reached end at {:?}, decode error: {:?}",
                                     result, e
                                 );
@@ -438,12 +460,15 @@ mod tests {
     fn test_end_of_wal<C: wal_craft::Crafter>(test_name: &str) {
         use wal_craft::*;
 
+        let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+
         // Craft some WAL
         let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
         let cfg = Conf {
-            pg_distrib_dir: top_path.join(format!("pg_install/{PG_MAJORVERSION}")),
+            pg_version,
+            pg_distrib_dir: top_path.join("pg_install"),
             datadir: top_path.join(format!("test_output/{}-{PG_MAJORVERSION}", test_name)),
         };
         if cfg.datadir.exists() {

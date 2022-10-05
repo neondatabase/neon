@@ -167,7 +167,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
         });
-    // migrate to hexing some zids
+    // migrate to hexing some ids
     } else if version == 2 {
         info!("reading safekeeper control file version {}", version);
         let oldstate = SafeKeeperStateV2::des(&buf[..buf.len()])?;
@@ -247,6 +247,18 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
         info!("setting timeline_start_lsn and local_start_lsn to Lsn(1)");
         oldstate.timeline_start_lsn = Lsn(1);
         oldstate.local_start_lsn = Lsn(1);
+
+        return Ok(oldstate);
+    } else if version == 6 {
+        info!("reading safekeeper control file version {}", version);
+        let mut oldstate = SafeKeeperState::des(&buf[..buf.len()])?;
+        if oldstate.server.pg_version != 0 {
+            return Ok(oldstate);
+        }
+
+        // set pg_version to the default v14
+        info!("setting pg_version to 140005");
+        oldstate.server.pg_version = 140005;
 
         return Ok(oldstate);
     }

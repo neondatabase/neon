@@ -38,7 +38,7 @@ endif
 # headers, the mtime of the headers are not changed when there have
 # been no changes to the files. Changing the mtime triggers an
 # unnecessary rebuild of 'postgres_ffi'.
-PG_CONFIGURE_OPTS += INSTALL='install -C'
+PG_CONFIGURE_OPTS += INSTALL='$(ROOT_PROJECT_DIR)/scripts/ninstall.sh -C'
 
 # Choose whether we should be silent or verbose
 CARGO_BUILD_FLAGS += --$(if $(filter s,$(MAKEFLAGS)),quiet,verbose)

@@ -18,7 +18,7 @@ use utils::{
     postgres_backend::AuthType,
 };
 
-use crate::local_env::LocalEnv;
+use crate::local_env::{LocalEnv, DEFAULT_PG_VERSION};
 use crate::postgresql_conf::PostgresConf;
 use crate::storage::PageServerNode;
 
@@ -81,6 +81,7 @@ impl ComputeControlPlane {
         timeline_id: TimelineId,
         lsn: Option<Lsn>,
         port: Option<u16>,
+        pg_version: u32,
     ) -> Result<Arc<PostgresNode>> {
         let port = port.unwrap_or_else(|| self.get_port());
         let node = Arc::new(PostgresNode {
@@ -93,6 +94,7 @@ impl ComputeControlPlane {
             lsn,
             tenant_id,
             uses_wal_proposer: false,
+            pg_version,
         });
 
         node.create_pgdata()?;
@@ -118,6 +120,7 @@ pub struct PostgresNode {
     pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
     pub tenant_id: TenantId,
     uses_wal_proposer: bool,
+    pg_version: u32,
 }
 
 impl PostgresNode {
@@ -152,6 +155,14 @@ impl PostgresNode {
         let tenant_id: TenantId = conf.parse_field("neon.tenant_id", &context)?;
         let uses_wal_proposer = conf.get("neon.safekeepers").is_some();
 
+        // Read postgres version from PG_VERSION file to determine which postgres version binary to use.
+        // If it doesn't exist, assume broken data directory and use default pg version.
+        let pg_version_path = entry.path().join("PG_VERSION");
+
+        let pg_version_str =
+            fs::read_to_string(pg_version_path).unwrap_or_else(|_| DEFAULT_PG_VERSION.to_string());
+        let pg_version = u32::from_str(&pg_version_str)?;
+
         // parse recovery_target_lsn, if any
         let recovery_target_lsn: Option<Lsn> =
             conf.parse_field_optional("recovery_target_lsn", &context)?;
@@ -167,17 +178,24 @@ impl PostgresNode {
             lsn: recovery_target_lsn,
             tenant_id,
             uses_wal_proposer,
+            pg_version,
         })
     }
 
-    fn sync_safekeepers(&self, auth_token: &Option<String>) -> Result<Lsn> {
-        let pg_path = self.env.pg_bin_dir().join("postgres");
+    fn sync_safekeepers(&self, auth_token: &Option<String>, pg_version: u32) -> Result<Lsn> {
+        let pg_path = self.env.pg_bin_dir(pg_version).join("postgres");
         let mut cmd = Command::new(&pg_path);
 
         cmd.arg("--sync-safekeepers")
             .env_clear()
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env(
+                "LD_LIBRARY_PATH",
+                self.env.pg_lib_dir(pg_version).to_str().unwrap(),
+            )
+            .env(
+                "DYLD_LIBRARY_PATH",
+                self.env.pg_lib_dir(pg_version).to_str().unwrap(),
+            )
             .env("PGDATA", self.pgdata().to_str().unwrap())
             .stdout(Stdio::piped())
             // Comment this to avoid capturing stderr (useful if command hangs)
@@ -259,8 +277,8 @@ impl PostgresNode {
             })
     }
 
-    // Connect to a page server, get base backup, and untar it to initialize a
-    // new data directory
+    // Write postgresql.conf with default configuration
+    // and PG_VERSION file to the data directory of a new node.
     fn setup_pg_conf(&self, auth_type: AuthType) -> Result<()> {
         let mut conf = PostgresConf::new();
         conf.append("max_wal_senders", "10");
@@ -357,6 +375,9 @@ impl PostgresNode {
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
         file.write_all(conf.to_string().as_bytes())?;
 
+        let mut file = File::create(self.pgdata().join("PG_VERSION"))?;
+        file.write_all(self.pg_version.to_string().as_bytes())?;
+
         Ok(())
     }
 
@@ -368,7 +389,7 @@ impl PostgresNode {
             // latest data from the pageserver. That is a bit clumsy but whole bootstrap
             // procedure evolves quite actively right now, so let's think about it again
             // when things would be more stable (TODO).
-            let lsn = self.sync_safekeepers(auth_token)?;
+            let lsn = self.sync_safekeepers(auth_token, self.pg_version)?;
             if lsn == Lsn(0) {
                 None
             } else {
@@ -401,7 +422,7 @@ impl PostgresNode {
     }
 
     fn pg_ctl(&self, args: &[&str], auth_token: &Option<String>) -> Result<()> {
-        let pg_ctl_path = self.env.pg_bin_dir().join("pg_ctl");
+        let pg_ctl_path = self.env.pg_bin_dir(self.pg_version).join("pg_ctl");
         let mut cmd = Command::new(pg_ctl_path);
         cmd.args(
             [
@@ -417,8 +438,14 @@ impl PostgresNode {
             .concat(),
         )
         .env_clear()
-        .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-        .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
+        .env(
+            "LD_LIBRARY_PATH",
+            self.env.pg_lib_dir(self.pg_version).to_str().unwrap(),
+        )
+        .env(
+            "DYLD_LIBRARY_PATH",
+            self.env.pg_lib_dir(self.pg_version).to_str().unwrap(),
+        );
         if let Some(token) = auth_token {
             cmd.env("ZENITH_AUTH_TOKEN", token);
         }

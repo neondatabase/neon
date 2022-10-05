@@ -8,14 +8,9 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
-use crate::config::PageServerConf;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
-use std::path::PathBuf;
 use std::time::Duration;
-use utils::id::TenantId;
-
-pub const TENANT_CONFIG_NAME: &str = "config";
 
 pub mod defaults {
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
@@ -222,12 +217,6 @@ impl TenantConf {
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
             trace_read_requests: false,
         }
-    }
-
-    /// Points to a place in pageserver's local directory,
-    /// where certain tenant's tenantconf file should be located.
-    pub fn path(conf: &'static PageServerConf, tenant_id: TenantId) -> PathBuf {
-        conf.tenant_path(&tenant_id).join(TENANT_CONFIG_NAME)
     }
 
     #[cfg(test)]

@@ -1,7 +1,6 @@
 import time
 from contextlib import closing
 
-import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -19,8 +18,8 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     f = env.neon_cli.pageserver_enabled_features()
 
     assert (
-        "failpoints" in f["features"]
-    ), "Build pageserver with --features=failpoints option to run this test"
+        "testing" in f["features"]
+    ), "Build pageserver with --features=testing option to run this test"
     neon_env_builder.start()
 
     # Create a branch for us
@@ -31,26 +30,28 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            with closing(env.pageserver.connect()) as psconn:
-                with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-                    # Create and initialize test table
-                    cur.execute("CREATE TABLE foo(x bigint)")
-                    cur.execute("INSERT INTO foo VALUES (generate_series(1,100000))")
+            with env.pageserver.http_client() as pageserver_http:
+                # Create and initialize test table
+                cur.execute("CREATE TABLE foo(x bigint)")
+                cur.execute("INSERT INTO foo VALUES (generate_series(1,100000))")
 
-                    # Sleep for some time to let checkpoint create image layers
-                    time.sleep(2)
+                # Sleep for some time to let checkpoint create image layers
+                time.sleep(2)
 
-                    # Configure failpoints
-                    pscur.execute(
-                        "failpoints flush-frozen-before-sync=sleep(2000);checkpoint-after-sync=exit"
-                    )
+                # Configure failpoints
+                pageserver_http.configure_failpoints(
+                    [
+                        ("flush-frozen-before-sync", "sleep(2000)"),
+                        ("checkpoint-after-sync", "exit"),
+                    ]
+                )
 
-                    # Do some updates until pageserver is crashed
-                    try:
-                        while True:
-                            cur.execute("update foo set x=x+1")
-                    except Exception as err:
-                        log.info(f"Expected server crash {err}")
+                # Do some updates until pageserver is crashed
+                try:
+                    while True:
+                        cur.execute("update foo set x=x+1")
+                except Exception as err:
+                    log.info(f"Expected server crash {err}")
 
     log.info("Wait before server restart")
     env.pageserver.stop()

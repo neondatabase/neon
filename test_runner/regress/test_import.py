@@ -96,6 +96,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
                 end_lsn,
                 "--wal-tarfile",
                 wal,
+                "--pg-version",
+                env.pg_version,
             ]
         )
 
@@ -248,6 +250,8 @@ def _import(
             str(lsn),
             "--base-tarfile",
             os.path.join(tar_output_file),
+            "--pg-version",
+            env.pg_version,
         ]
     )
 
@@ -270,8 +274,7 @@ def _import(
     assert os.path.getsize(tar_output_file) == os.path.getsize(new_tar_output_file)
 
     # Check that gc works
-    psconn = env.pageserver.connect()
-    pscur = psconn.cursor()
-    pscur.execute(f"do_gc {tenant} {timeline} 0")
+    pageserver_http = env.pageserver.http_client()
+    pageserver_http.timeline_gc(tenant, timeline, 0)
 
     return tar_output_file

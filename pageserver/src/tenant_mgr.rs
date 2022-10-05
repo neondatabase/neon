@@ -10,23 +10,21 @@ use std::sync::Arc;
 use anyhow::Context;
 use tracing::*;
 
-use remote_storage::{path_with_suffix_extension, GenericRemoteStorage};
+use remote_storage::GenericRemoteStorage;
 
-use crate::config::PageServerConf;
+use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::http::models::TenantInfo;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::{
-    ephemeral_file::is_ephemeral_file,
-    metadata::{TimelineMetadata, METADATA_FILE_NAME},
-    Tenant, TenantState,
+    ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
 };
-use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
 use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
 
-use utils::crashsafe_dir;
+use utils::crashsafe_dir::{self, path_with_suffix_extension};
 use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
@@ -109,6 +107,13 @@ pub fn init_tenant_mgr(
 /// Ignores other timelines that might be present for tenant, but were not passed as a parameter.
 /// Attempts to load as many entites as possible: if a certain timeline fails during the load, the tenant is marked as "Broken",
 /// and the load continues.
+///
+/// For successful tenant attach, it first has to have a `timelines/` subdirectory and a tenant config file that's loaded into memory successfully.
+/// If either of the conditions fails, the tenant will be added to memory with [`TenantState::Broken`] state, otherwise we start to load its timelines.
+/// Alternatively, tenant is considered loaded successfully, if it's already in pageserver's memory (i.e. was loaded already before).
+///
+/// Attach happens on startup and sucessful timeline downloads
+/// (some subset of timeline files, always including its metadata, after which the new one needs to be registered).
 pub fn attach_local_tenants(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
@@ -124,18 +129,20 @@ pub fn attach_local_tenants(
         );
         debug!("Timelines to attach: {local_timelines:?}");
 
-        let tenant = load_local_tenant(conf, tenant_id, remote_index);
-        {
-            match tenants_state::write_tenants().entry(tenant_id) {
-                hash_map::Entry::Occupied(_) => {
-                    error!("Cannot attach tenant {tenant_id}: there's already an entry in the tenant state");
-                    continue;
-                }
-                hash_map::Entry::Vacant(v) => {
-                    v.insert(Arc::clone(&tenant));
-                }
+        let mut tenants_accessor = tenants_state::write_tenants();
+        let tenant = match tenants_accessor.entry(tenant_id) {
+            hash_map::Entry::Occupied(o) => {
+                info!("Tenant {tenant_id} was found in pageserver's memory");
+                Arc::clone(o.get())
             }
-        }
+            hash_map::Entry::Vacant(v) => {
+                info!("Tenant {tenant_id} was not found in pageserver's memory, loading it");
+                let tenant = load_local_tenant(conf, tenant_id, remote_index);
+                v.insert(Arc::clone(&tenant));
+                tenant
+            }
+        };
+        drop(tenants_accessor);
 
         if tenant.current_state() == TenantState::Broken {
             warn!("Skipping timeline load for broken tenant {tenant_id}")
@@ -170,16 +177,28 @@ fn load_local_tenant(
         remote_index.clone(),
         conf.remote_storage_config.is_some(),
     ));
-    match Tenant::load_tenant_config(conf, tenant_id) {
-        Ok(tenant_conf) => {
-            tenant.update_tenant_config(tenant_conf);
-            tenant.activate(false);
-        }
-        Err(e) => {
-            error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
-            tenant.set_state(TenantState::Broken);
+
+    let tenant_timelines_dir = conf.timelines_path(&tenant_id);
+    if !tenant_timelines_dir.is_dir() {
+        error!(
+            "Tenant {} has no timelines directory at {}",
+            tenant_id,
+            tenant_timelines_dir.display()
+        );
+        tenant.set_state(TenantState::Broken);
+    } else {
+        match Tenant::load_tenant_config(conf, tenant_id) {
+            Ok(tenant_conf) => {
+                tenant.update_tenant_config(tenant_conf);
+                tenant.activate(false);
+            }
+            Err(e) => {
+                error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
+                tenant.set_state(TenantState::Broken);
+            }
         }
     }
+
     tenant
 }
 
@@ -246,7 +265,7 @@ fn create_tenant_files(
         &temporary_tenant_dir,
     )?;
     let temporary_tenant_config_path = rebase_directory(
-        &TenantConf::path(conf, tenant_id),
+        &conf.tenant_config_path(tenant_id),
         &target_tenant_directory,
         &temporary_tenant_dir,
     )?;
@@ -343,7 +362,7 @@ pub fn update_tenant_config(
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
     get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);
-    Tenant::persist_tenant_config(&TenantConf::path(conf, tenant_id), tenant_conf, false)?;
+    Tenant::persist_tenant_config(&conf.tenant_config_path(tenant_id), tenant_conf, false)?;
     Ok(())
 }
 
@@ -627,14 +646,10 @@ fn collect_timelines_for_tenant(
     }
 
     if tenant_timelines.is_empty() {
-        match remove_if_empty(&timelines_dir) {
-            Ok(true) => info!(
-                "Removed empty tenant timelines directory {}",
-                timelines_dir.display()
-            ),
-            Ok(false) => (),
-            Err(e) => error!("Failed to remove empty tenant timelines directory: {e:?}"),
-        }
+        // this is normal, we've removed all broken, empty and temporary timeline dirs
+        // but should allow the tenant to stay functional and allow creating new timelines
+        // on a restart, we require tenants to have the timelines dir, so leave it on disk
+        debug!("Tenant {tenant_id} has no timelines loaded");
     }
 
     Ok((tenant_id, tenant_timelines))

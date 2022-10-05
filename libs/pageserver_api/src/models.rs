@@ -7,7 +7,17 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::tenant::TenantState;
+/// A state of a tenant in pageserver's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TenantState {
+    /// Tenant is fully operational, its background jobs might be running or not.
+    Active { background_jobs_running: bool },
+    /// A tenant is recognized by pageserver, but not yet ready to operate:
+    /// e.g. not present locally and being downloaded or being read into memory from the file system.
+    Paused,
+    /// A tenant is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    Broken,
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -21,6 +31,7 @@ pub struct TimelineCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_start_lsn: Option<Lsn>,
+    pub pg_version: Option<u32>,
 }
 
 #[serde_as]
@@ -138,6 +149,7 @@ pub struct LocalTimelineInfo {
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
+    pub pg_version: u32,
 }
 
 #[serde_as]
@@ -160,4 +172,22 @@ pub struct TimelineInfo {
     pub timeline_id: TimelineId,
     pub local: Option<LocalTimelineInfo>,
     pub remote: Option<RemoteTimelineInfo>,
+}
+
+pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
+
+/// Information for configuring a single fail point
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FailpointConfig {
+    /// Name of the fail point
+    pub name: String,
+    /// List of actions to take, using the format described in `fail::cfg`
+    ///
+    /// We also support `actions = "exit"` to cause the fail point to immediately exit.
+    pub actions: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimelineGcRequest {
+    pub gc_horizon: Option<u64>,
 }

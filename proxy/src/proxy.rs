@@ -1,6 +1,6 @@
 use crate::auth;
 use crate::cancellation::{self, CancelMap};
-use crate::config::{AuthUrls, ProxyConfig, TlsConfig};
+use crate::config::{ProxyConfig, TlsConfig};
 use crate::stream::{MetricsStream, PqStream, Stream};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
@@ -99,6 +99,7 @@ async fn handle_client(
         let common_name = tls.and_then(|tls| tls.common_name.as_deref());
         let result = config
             .auth_backend
+            .as_ref()
             .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
             .transpose();
 
@@ -107,7 +108,7 @@ async fn handle_client(
 
     let client = Client::new(stream, creds, &params);
     cancel_map
-        .with_session(|session| client.connect_to_db(&config.auth_urls, session))
+        .with_session(|session| client.connect_to_db(session))
         .await
 }
 
@@ -179,7 +180,7 @@ struct Client<'a, S> {
     /// The underlying libpq protocol stream.
     stream: PqStream<S>,
     /// Client credentials that we care about.
-    creds: auth::BackendType<auth::ClientCredentials<'a>>,
+    creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
     /// KV-dictionary with PostgreSQL connection params.
     params: &'a StartupMessageParams,
 }
@@ -188,7 +189,7 @@ impl<'a, S> Client<'a, S> {
     /// Construct a new connection context.
     fn new(
         stream: PqStream<S>,
-        creds: auth::BackendType<auth::ClientCredentials<'a>>,
+        creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
     ) -> Self {
         Self {
@@ -201,19 +202,22 @@ impl<'a, S> Client<'a, S> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
-    async fn connect_to_db(
-        self,
-        urls: &AuthUrls,
-        session: cancellation::Session<'_>,
-    ) -> anyhow::Result<()> {
+    async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
         let Self {
             mut stream,
             creds,
             params,
         } = self;
 
+        let extra = auth::ConsoleReqExtra {
+            // Currently it's OK to generate a new UUID **here**, but
+            // it might be better to move this to `cancellation::Session`.
+            session_id: uuid::Uuid::new_v4(),
+            application_name: params.get("application_name"),
+        };
+
         // Authenticate and connect to a compute node.
-        let auth = creds.authenticate(urls, &mut stream).await;
+        let auth = creds.authenticate(&extra, &mut stream).await;
         let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
         let reported_auth_ok = node.reported_auth_ok;
 

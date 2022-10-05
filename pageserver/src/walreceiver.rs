@@ -31,7 +31,6 @@ use etcd_broker::Client;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use std::future::Future;
-use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::*;
 use url::Url;
@@ -88,37 +87,44 @@ pub fn is_etcd_client_initialized() -> bool {
 /// That may lead to certain events not being observed by the listener.
 #[derive(Debug)]
 pub struct TaskHandle<E> {
-    events_receiver: watch::Receiver<TaskEvent<E>>,
+    join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    events_receiver: watch::Receiver<TaskStateUpdate<E>>,
     cancellation: watch::Sender<()>,
 }
 
-#[derive(Debug, Clone)]
 pub enum TaskEvent<E> {
+    Update(TaskStateUpdate<E>),
+    End(anyhow::Result<()>),
+}
+
+#[derive(Debug, Clone)]
+pub enum TaskStateUpdate<E> {
+    Init,
     Started,
-    NewEvent(E),
-    End,
+    Progress(E),
 }
 
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
     pub fn spawn<Fut>(
-        task: impl FnOnce(Arc<watch::Sender<TaskEvent<E>>>, watch::Receiver<()>) -> Fut + Send + 'static,
+        task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, watch::Receiver<()>) -> Fut
+            + Send
+            + 'static,
     ) -> Self
     where
-        Fut: Future<Output = Result<(), String>> + Send,
-        E: Sync + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send,
+        E: Send + Sync + 'static,
     {
         let (cancellation, cancellation_receiver) = watch::channel(());
-        let (events_sender, events_receiver) = watch::channel(TaskEvent::Started);
-        let events_sender = Arc::new(events_sender);
+        let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
 
-        let sender = Arc::clone(&events_sender);
-        let _ = WALRECEIVER_RUNTIME.spawn(async move {
-            events_sender.send(TaskEvent::Started).ok();
-            task(sender, cancellation_receiver).await
+        let join_handle = WALRECEIVER_RUNTIME.spawn(async move {
+            events_sender.send(TaskStateUpdate::Started).ok();
+            task(events_sender, cancellation_receiver).await
         });
 
         TaskHandle {
+            join_handle: Some(join_handle),
             events_receiver,
             cancellation,
         }
@@ -126,15 +132,45 @@ impl<E: Clone> TaskHandle<E> {
 
     async fn next_task_event(&mut self) -> TaskEvent<E> {
         match self.events_receiver.changed().await {
-            Ok(()) => self.events_receiver.borrow().clone(),
-            Err(_task_channel_part_dropped) => TaskEvent::End,
+            Ok(()) => TaskEvent::Update((self.events_receiver.borrow()).clone()),
+            Err(_task_channel_part_dropped) => {
+                TaskEvent::End(match self.join_handle.take() {
+                    Some(jh) => {
+                        if !jh.is_finished() {
+                            warn!("sender is dropped while join handle is still alive");
+                        }
+
+                        jh.await
+                            .map_err(|e| anyhow::anyhow!("Failed to join task: {e}"))
+                            .and_then(|x| x)
+                    }
+                    None => {
+                        // Another option is to have an enum, join handle or result and give away the reference to it
+                        Err(anyhow::anyhow!("Task was joined more than once"))
+                    }
+                })
+            }
         }
     }
 
     /// Aborts current task, waiting for it to finish.
-    pub async fn shutdown(mut self) {
-        self.cancellation.send(()).ok();
-        // wait until the sender is dropped
-        while self.events_receiver.changed().await.is_ok() {}
+    pub async fn shutdown(self) {
+        match self.join_handle {
+            Some(jh) => {
+                self.cancellation.send(()).ok();
+                match jh.await {
+                    Ok(Ok(())) => debug!("Shutdown success"),
+                    Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
+                    Err(join_error) => {
+                        if join_error.is_cancelled() {
+                            error!("Shutdown task was cancelled");
+                        } else {
+                            error!("Shutdown task join error: {join_error}")
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
     }
 }

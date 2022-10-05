@@ -6,6 +6,9 @@ Prerequisites:
 - Correctly configured Python, see [`/docs/sourcetree.md`](/docs/sourcetree.md#using-python)
 - Neon and Postgres binaries
     - See the root [README.md](/README.md) for build directions
+      If you want to test tests with test-only APIs, you would need to add `--features testing` to Rust code build commands.
+      For convenience, repository cargo config contains `build_testing` alias, that serves as a subcommand, adding the required feature flags.
+      Usage example: `cargo build_testing --release` is equivalent to `cargo build --features testing --release`
     - Tests can be run from the git tree; or see the environment variables
       below to run from other directories.
 - The neon git repo, including the postgres submodule
@@ -53,10 +56,24 @@ If you want to run all tests that have the string "bench" in their names:
 
 `./scripts/pytest -k bench`
 
+To run tests in parellel we utilize `pytest-xdist` plugin. By default everything runs single threaded. Number of workers can be specified with `-n` argument:
+
+`./scripts/pytest -n4`
+
+By default performance tests are excluded. To run them explicitly pass performance tests selection to the script:
+
+`./scripts/pytest test_runner/performance`
+
 Useful environment variables:
 
 `NEON_BIN`: The directory where neon binaries can be found.
 `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
+Since pageserver supports several postgres versions, `POSTGRES_DISTRIB_DIR` must contain
+a subdirectory for each version with naming convention `v{PG_VERSION}/`.
+Inside that dir, a `bin/postgres` binary should be present.
+`DEFAULT_PG_VERSION`: The version of Postgres to use,
+This is used to construct full path to the postgres binaries.
+Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION="14"`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.

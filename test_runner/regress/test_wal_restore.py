@@ -26,11 +26,11 @@ def test_wal_restore(
     env.neon_cli.pageserver_stop()
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"
-    with VanillaPostgres(data_dir, PgBin(test_output_dir), port) as restored:
+    with VanillaPostgres(data_dir, PgBin(test_output_dir, env.pg_version), port) as restored:
         pg_bin.run_capture(
             [
                 os.path.join(base_dir, "libs/utils/scripts/restore_from_wal.sh"),
-                os.path.join(pg_distrib_dir, "bin"),
+                os.path.join(pg_distrib_dir, "v{}".format(env.pg_version), "bin"),
                 str(test_output_dir / "repo" / "safekeepers" / "sk1" / str(tenant_id) / "*"),
                 str(data_dir),
                 str(port),

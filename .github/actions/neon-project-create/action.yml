@@ -60,6 +60,7 @@ runs:
           --header "Authorization: Bearer ${API_KEY}" \
           --data "{
             \"project\": {
+              \"name\": \"Created by actions/neon-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
               \"platform_id\": \"aws\",
               \"region_id\": \"${REGION_ID}\",
               \"settings\": { }

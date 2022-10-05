@@ -11,7 +11,7 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:  '36 4 * * *' # run once a day, timezone is utc
+    - cron:  '0 3 * * *' # run once a day, timezone is utc
 
   workflow_dispatch: # adds ability to run this manually
     inputs:
@@ -19,8 +19,12 @@ on:
         description: 'Environment to run remote tests on (dev or staging)'
         required: false
       region_id:
-        description: 'Use a particular region. If empty the default one will be used'
-        false: true
+        description: 'Use a particular region. If not set the default region will be used'
+        required: false
+      save_perf_report:
+        type: boolean
+        description: 'Publish perf report or not. If not set, the report is published only for the main branch'
+        required: false
 
 defaults:
   run:
@@ -42,7 +46,8 @@ jobs:
     runs-on: [self-hosted, zenith-benchmarker]
 
     env:
-      POSTGRES_DISTRIB_DIR: "/usr/pgsql-14"
+      POSTGRES_DISTRIB_DIR: /tmp/pg_install
+      DEFAULT_PG_VERSION: 14
 
     steps:
     - name: Checkout zenith repo
@@ -67,7 +72,7 @@ jobs:
         echo Poetry
         poetry --version
         echo Pgbench
-        $POSTGRES_DISTRIB_DIR/bin/pgbench --version
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
 
     - name: Create Neon Project
       id: create-neon-project
@@ -136,17 +141,19 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: "10gb"
-      POSTGRES_DISTRIB_DIR: /usr
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: true
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
 
     strategy:
       fail-fast: false
       matrix:
-        # neon-captest: Run pgbench, reusing existing project
-        # neon-captest-new: Same, but on a freshly created project
-        platform: [ neon-captest, neon-captest-new, rds-aurora ]
+        # neon-captest-new: Run pgbench in a freshly created project
+        # neon-captest-reuse: Same, but reusing existing project
+        # neon-captest-prefetch: Same, with prefetching enabled (new project)
+        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch, rds-aurora ]
 
     runs-on: dev
     container:
@@ -158,13 +165,20 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    - name: Install Deps
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    - name: Add Postgres binaries to PATH
       run: |
-        sudo apt -y update
-        sudo apt install -y postgresql-14
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
     - name: Create Neon Project
-      if: matrix.platform == 'neon-captest-new'
+      if: matrix.platform != 'neon-captest-reuse'
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -175,17 +189,17 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest)
+          neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
-          neon-captest-new)
+          neon-captest-new | neon-captest-prefetch)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
             CONNSTR=${{ secrets.BENCHMARK_RDS_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest', 'neon-captest-new' or 'rds-aurora'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-prefetch' or 'rds-aurora'"
             exit 1
             ;;
         esac
@@ -195,6 +209,14 @@ jobs:
         psql ${CONNSTR} -c "SELECT version();"
       env:
         PLATFORM: ${{ matrix.platform }}
+
+    - name: Set database options
+      if: matrix.platform == 'neon-captest-prefetch'
+      run: |
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_seqscan_prefetch=on"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET seqscan_prefetch_buffers=10"
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -239,13 +261,14 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: Create Allure report
+      if: always()
       uses: ./.github/actions/allure-report
       with:
         action: generate
         build_type: ${{ env.BUILD_TYPE }}
 
     - name: Delete Neon Project
-      if: ${{ matrix.platform == 'neon-captest-new' && always() }}
+      if: ${{ matrix.platform != 'neon-captest-reuse' && always() }}
       uses: ./.github/actions/neon-project-delete
       with:
         environment: dev

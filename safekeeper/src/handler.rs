@@ -3,15 +3,15 @@
 
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 use crate::receive_wal::ReceiveWalConn;
-use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
+
 use crate::send_wal::ReplicationConn;
-use crate::timeline::{Timeline, TimelineTools};
-use crate::SafeKeeperConf;
+
+use crate::{GlobalTimelines, SafeKeeperConf};
 use anyhow::{bail, Context, Result};
 
 use postgres_ffi::PG_TLI;
 use regex::Regex;
-use std::sync::Arc;
+
 use tracing::info;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
@@ -27,7 +27,7 @@ pub struct SafekeeperPostgresHandler {
     pub appname: Option<String>,
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
-    pub timeline: Option<Arc<Timeline>>,
+    pub ttid: TenantTimelineId,
 }
 
 /// Parsed Postgres command.
@@ -101,30 +101,21 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             query_string, self.timeline_id
         );
 
-        let create = !(matches!(cmd, SafekeeperPostgresCommand::StartReplication { .. })
-            || matches!(cmd, SafekeeperPostgresCommand::IdentifySystem));
-
-        let tenant_id = self.tenant_id.context("tenant_id is required")?;
-        let timeline_id = self.timeline_id.context("timeline_id is required")?;
-        if self.timeline.is_none() {
-            self.timeline.set(
-                &self.conf,
-                TenantTimelineId::new(tenant_id, timeline_id),
-                create,
-            )?;
-        }
+        let tenant_id = self.tenant_id.context("tenantid is required")?;
+        let timeline_id = self.timeline_id.context("timelineid is required")?;
+        self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
 
         match cmd {
-            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb)
-                .run(self)
-                .context("failed to run ReceiveWalConn"),
-            SafekeeperPostgresCommand::StartReplication { start_lsn } => ReplicationConn::new(pgb)
-                .run(self, pgb, start_lsn)
-                .context("failed to run ReplicationConn"),
+            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb).run(self),
+            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
+                ReplicationConn::new(pgb).run(self, pgb, start_lsn)
+            }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
         }
-        .context(format!("timeline {timeline_id}"))?;
+        .context(format!(
+            "Failed to process query for timeline {timeline_id}"
+        ))?;
 
         Ok(())
     }
@@ -137,42 +128,26 @@ impl SafekeeperPostgresHandler {
             appname: None,
             tenant_id: None,
             timeline_id: None,
-            timeline: None,
+            ttid: TenantTimelineId::empty(),
         }
-    }
-
-    /// Shortcut for calling `process_msg` in the timeline.
-    pub fn process_safekeeper_msg(
-        &self,
-        msg: &ProposerAcceptorMessage,
-    ) -> Result<Option<AcceptorProposerMessage>> {
-        self.timeline
-            .get()
-            .process_msg(msg)
-            .context("failed to process ProposerAcceptorMessage")
     }
 
     ///
     /// Handle IDENTIFY_SYSTEM replication command
     ///
     fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<()> {
+        let tli = GlobalTimelines::get(self.ttid)?;
+
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn
-            self.timeline.get().get_end_of_wal()
+            tli.get_flush_lsn()
         } else {
             // other clients shouldn't get any uncommitted WAL
-            self.timeline.get().get_state().0.commit_lsn
+            tli.get_state().0.commit_lsn
         }
         .to_string();
 
-        let sysid = self
-            .timeline
-            .get()
-            .get_state()
-            .1
-            .server
-            .system_id
-            .to_string();
+        let sysid = tli.get_state().1.server.system_id.to_string();
         let lsn_bytes = lsn.as_bytes();
         let tli = PG_TLI.to_string();
         let tli_bytes = tli.as_bytes();

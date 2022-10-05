@@ -240,7 +240,6 @@ where
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::thread::sleep;
     use std::time::Duration;
 
     impl MonotonicCounter<i32> for i32 {
@@ -258,17 +257,19 @@ mod tests {
         let seq = Arc::new(SeqWait::new(0));
         let seq2 = Arc::clone(&seq);
         let seq3 = Arc::clone(&seq);
-        tokio::task::spawn(async move {
+        let jh1 = tokio::task::spawn(async move {
             seq2.wait_for(42).await.expect("wait_for 42");
             let old = seq2.advance(100);
             assert_eq!(old, 99);
-            seq2.wait_for(999).await.expect_err("no 999");
+            seq2.wait_for_timeout(999, Duration::from_millis(100))
+                .await
+                .expect_err("no 999");
         });
-        tokio::task::spawn(async move {
+        let jh2 = tokio::task::spawn(async move {
             seq3.wait_for(42).await.expect("wait_for 42");
             seq3.wait_for(0).await.expect("wait_for 0");
         });
-        sleep(Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let old = seq.advance(99);
         assert_eq!(old, 0);
         seq.wait_for(100).await.expect("wait_for 100");
@@ -277,6 +278,9 @@ mod tests {
         assert_eq!(seq.advance(98), 100);
         assert_eq!(seq.load(), 100);
 
+        jh1.await.unwrap();
+        jh2.await.unwrap();
+
         seq.shutdown();
     }
 
@@ -284,15 +288,18 @@ mod tests {
     async fn seqwait_timeout() {
         let seq = Arc::new(SeqWait::new(0));
         let seq2 = Arc::clone(&seq);
-        tokio::task::spawn(async move {
+        let jh = tokio::task::spawn(async move {
             let timeout = Duration::from_millis(1);
             let res = seq2.wait_for_timeout(42, timeout).await;
             assert_eq!(res, Err(SeqWaitError::Timeout));
         });
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         // This will attempt to wake, but nothing will happen
         // because the waiter already dropped its Receiver.
         let old = seq.advance(99);
-        assert_eq!(old, 0)
+        assert_eq!(old, 0);
+        jh.await.unwrap();
+
+        seq.shutdown();
     }
 }
