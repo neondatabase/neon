@@ -1538,25 +1538,23 @@ impl Timeline {
         let mut last_key: Option<Key> = None;
         if let Some(last_delta_layer) = latest_delta_layer {
             for (key, lsn, _) in last_delta_layer.key_iter(true) {
-                match &writer {
-                    Some(curr_writer) => {
-                        if curr_writer.size() > target_file_size {
-                            new_layers.push(writer.take().unwrap().finish(key)?);
-                            writer = None;
-                        }
-                    }
-                    _ => {
-                        // Create writer if not initiaized yet
-                        writer = Some(DeltaLayerWriter::new(
-                            self.conf,
-                            self.timeline_id,
-                            self.tenant_id,
-                            key,
-                            last_delta_layer.get_lsn_range().clone(),
-                        )?);
+                let value = self.get(key, lsn)?;
+                if let Some(curr_writer) = &writer {
+                    if curr_writer.size() > target_file_size {
+                        new_layers.push(writer.take().unwrap().finish(key)?);
+                        writer = None;
                     }
                 }
-                let value = self.get(key, lsn)?;
+                // Create writer if not initiaized yet
+                if writer.is_none() {
+                    writer = Some(DeltaLayerWriter::new(
+                        self.conf,
+                        self.timeline_id,
+                        self.tenant_id,
+                        key,
+                        last_delta_layer.get_lsn_range().clone(),
+                    )?);
+                }
                 writer
                     .as_mut()
                     .unwrap()
