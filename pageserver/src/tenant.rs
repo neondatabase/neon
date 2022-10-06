@@ -1741,7 +1741,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact()?;
+        tline.reconstruct()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
@@ -1749,7 +1749,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact()?;
+        tline.reconstruct()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
@@ -1757,7 +1757,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact()?;
+        tline.reconstruct()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
@@ -1765,7 +1765,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact()?;
+        tline.reconstruct()?;
 
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
@@ -1813,7 +1813,7 @@ mod tests {
 
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact()?;
+            tline.reconstruct()?;
             tline.gc()?;
         }
 
@@ -1883,7 +1883,7 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact()?;
+            tline.reconstruct()?;
             tline.gc()?;
         }
 
@@ -1962,7 +1962,7 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact()?;
+            tline.reconstruct()?;
             tline.gc()?;
         }
 

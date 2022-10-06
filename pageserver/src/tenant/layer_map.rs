@@ -276,11 +276,11 @@ impl LayerMap {
                 continue;
             }
             assert!(l.get_key_range().contains(&key));
-			/*
+            /*
             if !l.contains(&key)? {
                 continue;
             }
-			*/
+            */
             if l.get_lsn_range().start >= end_lsn {
                 info!(
                     "Candidate delta layer {}..{} is too new for lsn {}",
@@ -367,6 +367,7 @@ impl LayerMap {
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             if let Some(latest_layer) = &self.latest_delta_layer {
+				#[allow(clippy::vtable_address_comparisons)]
                 if Arc::ptr_eq(&layer, latest_layer) {
                     self.latest_delta_layer = None;
                 }

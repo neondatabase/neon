@@ -238,7 +238,7 @@ impl Layer for InMemoryLayer {
 
     fn contains(&self, key: &Key) -> Result<bool> {
         let inner = self.inner.read().unwrap();
-        Ok(inner.index.get(&key).is_some())
+        Ok(inner.index.get(key).is_some())
     }
 }
 

@@ -436,7 +436,7 @@ impl Layer for DeltaLayer {
             inner.index_root_blk,
             file,
         );
-        let search_key = DeltaKey::from_key_lsn(&key, Lsn(0));
+        let search_key = DeltaKey::from_key_lsn(key, Lsn(0));
         let mut found = false;
         reader.visit(
             &search_key.0,
