@@ -12,7 +12,6 @@
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{Stream, StreamExt};
-use regex::Regex;
 use std::io;
 use std::net::TcpListener;
 use std::str;
@@ -35,7 +34,6 @@ use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
-use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::task_mgr;
@@ -45,7 +43,6 @@ use crate::tenant_mgr;
 use crate::CheckpointConfig;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
-use postgres_ffi::to_pg_timestamp;
 use postgres_ffi::BLCKSZ;
 
 // Wrapped in libpq CopyData
@@ -1062,33 +1059,6 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 Some(tenant.get_pitr_interval().as_secs().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("get_lsn_by_timestamp ") {
-            // Locate LSN of last transaction with timestamp less or equal than sppecified
-            // TODO lazy static
-            let re = Regex::new(r"^get_lsn_by_timestamp ([[:xdigit:]]+) ([[:xdigit:]]+) '(.*)'$")
-                .unwrap();
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
-            let tenant_id = TenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timeline_id = TimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
-            let timestamp_pg = to_pg_timestamp(timestamp);
-
-            self.check_permission(Some(tenant_id))?;
-
-            let timeline = get_local_timeline(tenant_id, timeline_id)?;
-            pgb.write_message(&BeMessage::RowDescription(&[RowDescriptor::text_col(
-                b"lsn",
-            )]))?;
-            let result = match timeline.find_lsn_for_timestamp(timestamp_pg)? {
-                LsnForTimestamp::Present(lsn) => format!("{}", lsn),
-                LsnForTimestamp::Future(_lsn) => "future".into(),
-                LsnForTimestamp::Past(_lsn) => "past".into(),
-                LsnForTimestamp::NoData(_lsn) => "nodata".into(),
-            };
-            pgb.write_message(&BeMessage::DataRow(&[Some(result.as_bytes())]))?;
-            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             bail!("unknown command");
         }

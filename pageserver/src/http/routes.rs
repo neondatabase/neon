@@ -12,6 +12,7 @@ use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
     TimelineCreateRequest,
 };
+use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant::{TenantState, Timeline};
@@ -265,6 +266,23 @@ fn query_param_present(request: &Request<Body>, param: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn get_query_param(request: &Request<Body>, param_name: &str) -> Result<String, ApiError> {
+    request.uri().query().map_or(
+        Err(ApiError::BadRequest(anyhow!("empty query in request"))),
+        |v| {
+            url::form_urlencoded::parse(v.as_bytes())
+                .into_owned()
+                .find(|(k, _)| k == param_name)
+                .map_or(
+                    Err(ApiError::BadRequest(anyhow!(
+                        "no {param_name} specified in query parameters"
+                    ))),
+                    |(_, v)| Ok(v),
+                )
+        },
+    )
+}
+
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -327,6 +345,33 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             },
         )
     }
+}
+
+async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let timestamp_raw = get_query_param(&request, "timestamp")?;
+    let timestamp = humantime::parse_rfc3339(timestamp_raw.as_str())
+        .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
+        .map_err(ApiError::BadRequest)?;
+    let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
+
+    let timeline = tenant_mgr::get_tenant(tenant_id, true)
+        .and_then(|tenant| tenant.get_timeline(timeline_id))
+        .with_context(|| format!("No timeline {timeline_id} in repository for tenant {tenant_id}"))
+        .map_err(ApiError::NotFound)?;
+    let result = match timeline
+        .find_lsn_for_timestamp(timestamp_pg)
+        .map_err(ApiError::InternalServerError)?
+    {
+        LsnForTimestamp::Present(lsn) => format!("{}", lsn),
+        LsnForTimestamp::Future(_lsn) => "future".into(),
+        LsnForTimestamp::Past(_lsn) => "past".into(),
+        LsnForTimestamp::NoData(_lsn) => "nodata".into(),
+    };
+    json_response(StatusCode::OK, result)
 }
 
 // TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
@@ -907,6 +952,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/get_lsn_by_timestamp",
+            get_lsn_by_timestamp_handler,
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc",

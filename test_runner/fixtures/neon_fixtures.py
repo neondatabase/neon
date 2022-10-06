@@ -1136,6 +1136,19 @@ class NeonPageserverHttpClient(requests.Session):
         assert res_json is None
         return res_json
 
+    def timeline_get_lsn_by_timestamp(
+        self, tenant_id: TenantId, timeline_id: TimelineId, timestamp
+    ):
+        log.info(
+            f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}"
+        )
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp}",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
     def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
