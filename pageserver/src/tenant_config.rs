@@ -24,7 +24,7 @@ pub mod defaults {
     // This parameter determines L1 layer file size.
     pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
 
-    pub const DEFAULT_COMPACTION_PERIOD: &str = "1 s";
+    pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
