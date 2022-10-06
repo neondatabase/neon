@@ -1200,6 +1200,7 @@ class AbstractNeonCli(abc.ABC):
         arguments: List[str],
         extra_env_vars: Optional[Dict[str, str]] = None,
         check_return_code=True,
+        timeout=None,
     ) -> "subprocess.CompletedProcess[str]":
         """
         Run the command with the specified arguments.
@@ -1246,6 +1247,7 @@ class AbstractNeonCli(abc.ABC):
             universal_newlines=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=timeout,
         )
         if not res.returncode:
             log.info(f"Run success: {res.stdout}")
@@ -1617,6 +1619,14 @@ class WalCraft(AbstractNeonCli):
     def in_existing(self, type: str, connection: str) -> None:
         res = self.raw_cli(["in-existing", type, connection])
         res.check_returncode()
+
+
+class ComputeCtl(AbstractNeonCli):
+    """
+    A typed wrapper around the `compute_ctl` CLI tool.
+    """
+
+    COMMAND = "compute_ctl"
 
 
 class NeonPageserver(PgProtocol):
