@@ -589,7 +589,7 @@ impl Timeline {
             last_received_wal: Mutex::new(None),
             rel_size_cache: RwLock::new(HashMap::new()),
         };
-        result.repartition_threshold = result.get_checkpoint_distance() / 10;
+        result.repartition_threshold = result.get_checkpoint_distance() * 3;
         result
     }
 
@@ -1392,11 +1392,6 @@ impl Timeline {
                         None,
                     );
                 }
-
-                // 3. Reconstruct
-                let timer = self.metrics.reconstruct_time_histo.start_timer();
-                self.reconstruct_level0(target_file_size)?;
-                timer.stop_and_record();
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -1406,6 +1401,11 @@ impl Timeline {
                 error!("could not reconstruct, repartitioning keyspace failed: {err:?}");
             }
         };
+
+        // 3. Reconstruct
+        let timer = self.metrics.reconstruct_time_histo.start_timer();
+        self.reconstruct_level0(target_file_size)?;
+        timer.stop_and_record();
 
         Ok(())
     }

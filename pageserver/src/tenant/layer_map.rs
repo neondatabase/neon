@@ -336,6 +336,19 @@ impl LayerMap {
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.latest_delta_layer = Some(layer.clone());
+        } else if !layer.is_incremental() {
+            // If latest delta layer is followed by image layers
+            // then reset it, preventing generation of partial image layer
+            if let Some(latest_delta) = &self.latest_delta_layer {
+                // May be it is more correct to use contains() rather than inrestects
+                // but one delta layer can be covered by several image layers.
+                let kr1 = layer.get_key_range();
+                let kr2 = latest_delta.get_key_range();
+                if kr2.end > kr1.start && kr2.start < kr1.end {
+                    // if kr1.intersects(&kr2) {
+                    self.latest_delta_layer = None;
+                }
+            }
         }
         self.historic_layers.insert(LayerRTreeObject { layer });
         NUM_ONDISK_LAYERS.inc();
