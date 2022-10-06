@@ -1537,6 +1537,8 @@ impl Timeline {
         let mut new_layers = Vec::new();
         let mut last_key: Option<Key> = None;
         if let Some(last_delta_layer) = latest_delta_layer {
+			let end_lsn = last_delta_layer.get_lsn_range().end;
+			let lsn_range = end_lsn..end_lsn+1;
             for (key, lsn, _) in last_delta_layer.key_iter(true) {
                 let value = self.get(key, lsn)?;
                 if let Some(curr_writer) = &writer {
@@ -1552,13 +1554,13 @@ impl Timeline {
                         self.timeline_id,
                         self.tenant_id,
                         key,
-                        last_delta_layer.get_lsn_range().clone(),
+                        lsn_range.clone(),
                     )?);
                 }
                 writer
                     .as_mut()
                     .unwrap()
-                    .put_value(key, lsn, Value::Image(value))?;
+                    .put_value(key, end_lsn, Value::Image(value))?;
                 last_key = Some(key);
             }
         }

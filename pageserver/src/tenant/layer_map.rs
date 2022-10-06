@@ -276,9 +276,11 @@ impl LayerMap {
                 continue;
             }
             assert!(l.get_key_range().contains(&key));
+			/*
             if !l.contains(&key)? {
                 continue;
             }
+			*/
             if l.get_lsn_range().start >= end_lsn {
                 info!(
                     "Candidate delta layer {}..{} is too new for lsn {}",
