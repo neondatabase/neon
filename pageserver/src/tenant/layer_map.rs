@@ -367,7 +367,7 @@ impl LayerMap {
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             if let Some(latest_layer) = &self.latest_delta_layer {
-				#[allow(clippy::vtable_address_comparisons)]
+                #[allow(clippy::vtable_address_comparisons)]
                 if Arc::ptr_eq(&layer, latest_layer) {
                     self.latest_delta_layer = None;
                 }
