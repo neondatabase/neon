@@ -124,10 +124,10 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
-        self.pageserver_http_client.timeline_gc(self.env.initial_tenant, self.timeline, 0)
+        self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 
     def compact(self):
-        self.pageserver_http_client.timeline_compact(self.env.initial_tenant, self.timeline)
+        self.pageserver_http_client.timeline_compact(self.tenant, self.timeline)
 
     def report_peak_memory_use(self) -> None:
         self.zenbenchmark.record(

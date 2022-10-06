@@ -272,7 +272,8 @@ typedef struct
 
 	// Points directly to a NeonResponse. We can't just own the
 	// NeonResponse because it's a "supertype", so it's not Sized.
-	StringInfo response;
+	char* response;
+	int len;
 }            NeonRequestResponse;
 
 NeonRequestResponse page_cache[20];
@@ -285,13 +286,16 @@ pageserver_call(NeonRequest * request)
 	// Compute hash
 	char hash = 0;
 	StringInfoData req_buff;
-	req_buff = zm_pack_request(request);
+	req_buff = nm_pack_request(request);
 	for (int i = 0; i < req_buff.len; i++) {
 		hash ^= req_buff.data[i];
 	}
 	pfree(req_buff.data);
 
 	// If result is cached, memcpy and return
+	// HACK keeping this commented out until I see why updating the
+	//      cache causes segfault.
+	//
 	// for (int i = 0; i < page_cache_size; i++) {
 	// 	if (page_cache[i].request_hash == hash) {
 	// 		int len = page_cache[0].response->len;
@@ -318,15 +322,17 @@ pageserver_call(NeonRequest * request)
 	}
 
 	// Cache result
-	// page_cache[page_cache_head].request_hash = hash;
-	// page_cache[page_cache_head].response->len = len;
-	// // TODO free old result
-	// page_cache[page_cache_head].response->data = palloc0(len);
-	// memcpy(page_cache[page_cache_head].response->data, resp, len);
-	// page_cache_head = (page_cache_head + 1) % 20;
-	// if (page_cache_size < 20) {
-	// 	page_cache_size += 1;
-	// }
+	page_cache[page_cache_head].request_hash = hash;
+	if (page_cache_head < page_cache_size) {
+		pfree(page_cache[page_cache_head].response);
+	}
+	page_cache[page_cache_head].len = len;
+	page_cache[page_cache_head].response = palloc(len);
+	memcpy(page_cache[page_cache_head].response, resp, len);
+	page_cache_head = (page_cache_head + 1) % 20;
+	if (page_cache_size < 20) {
+		page_cache_size += 1;
+	}
 
 	return resp;
 }

@@ -61,7 +61,7 @@ impl ResponseErrorMessageExt for Response {
         let url = self.url().to_owned();
         Err(PageserverHttpError::Response(
             match self.json::<HttpErrorBody>() {
-                Ok(err_body) => format!("Error: {}", err_body.msg),
+                Ok(err_body) => format!("Response error: {}", err_body.msg),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             },
         ))
@@ -181,14 +181,15 @@ impl PageServerNode {
         new_timeline_id: Option<TimelineId>,
         pg_version: u32,
     ) -> anyhow::Result<TimelineId> {
-        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())?;
+        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())
+            .context("Failed to create tenant")?;
         let initial_timeline_info = self.timeline_create(
             initial_tenant_id,
             new_timeline_id,
             None,
             None,
             Some(pg_version),
-        )?;
+        ).context("Failed to create timeline")?;
         Ok(initial_timeline_info.timeline_id)
     }
 
