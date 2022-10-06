@@ -424,6 +424,30 @@ impl Layer for DeltaLayer {
 
         Ok(())
     }
+
+    fn contains(&self, key: &Key) -> Result<bool> {
+        // Open the file and lock the metadata in memory
+        let inner = self.load()?;
+
+        // Scan the page versions backwards, starting from `lsn`.
+        let file = inner.file.as_ref().unwrap();
+        let reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            inner.index_start_blk,
+            inner.index_root_blk,
+            file,
+        );
+        let search_key = DeltaKey::from_key_lsn(&key, Lsn(0));
+        let mut found = false;
+        reader.visit(
+            &search_key.0,
+            VisitDirection::Forwards,
+            |delta_key, _val| {
+                found = DeltaKey::extract_key_from_buf(delta_key) == *key;
+                false
+            },
+        )?;
+        Ok(found)
+    }
 }
 
 impl DeltaLayer {
@@ -899,32 +923,33 @@ impl<'a> DeltaKeyIter {
         );
 
         let mut all_keys: Vec<(DeltaKey, u64)> = Vec::new();
+        let mut last_pos = 0u64;
+        let mut last_delta: Option<DeltaKey> = None;
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
             |key, value| {
                 let blob_ref = BlobRef(value);
                 if !blob_ref.is_image() || !skip_images {
-                    let delta_key = DeltaKey::from_slice(key);
+                    let next_delta = DeltaKey::from_slice(key);
                     let pos = blob_ref.pos();
-                    if let Some(last) = all_keys.last_mut() {
-                        if last.0.key() == delta_key.key() {
+                    if let Some(prev_delta) = last_delta.take() {
+                        if prev_delta.key() == next_delta.key() {
+                            last_delta = Some(next_delta);
                             return true;
-                        } else {
-                            // subtract offset of new key BLOB and first blob of this key
-                            // to get total size if values associated with this key
-                            let first_pos = last.1;
-                            last.1 = pos - first_pos;
                         }
+                        all_keys.push((prev_delta, pos - last_pos));
                     }
-                    all_keys.push((delta_key, pos));
+                    last_delta = Some(next_delta);
+                    last_pos = pos;
                 }
                 true
             },
         )?;
-        if let Some(last) = all_keys.last_mut() {
+        if let Some(prev_delta) = last_delta.take() {
             // Last key occupies all space till end of layer
-            last.1 = std::fs::metadata(&file.file.path)?.len() - last.1;
+            let file_size = std::fs::metadata(&file.file.path)?.len();
+            all_keys.push((prev_delta, file_size - last_pos));
         }
         let iter = DeltaKeyIter {
             all_keys,

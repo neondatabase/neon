@@ -150,4 +150,7 @@ pub trait Layer: Send + Sync {
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
+
+    // Check if ayer contains particular key
+    fn contains(&self, key: &Key) -> Result<bool>;
 }
