@@ -95,6 +95,7 @@ fn main() -> anyhow::Result<()> {
                             if i32::abs(delta3) < i32::abs(delta) {
                                 delta = delta3;
                             }
+                            let delta = delta1;
 
                             prev3 = prev2;
                             prev2 = prev1;

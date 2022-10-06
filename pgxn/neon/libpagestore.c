@@ -276,7 +276,8 @@ typedef struct
 	int len;
 }            NeonRequestResponse;
 
-NeonRequestResponse page_cache[20];
+#define MAX_PAGE_CACHE_SIZE 50
+NeonRequestResponse page_cache[MAX_PAGE_CACHE_SIZE];
 int page_cache_size = 0;
 int page_cache_head = 0;
 
@@ -293,18 +294,16 @@ pageserver_call(NeonRequest * request)
 	pfree(req_buff.data);
 
 	// If result is cached, memcpy and return
-	// HACK keeping this commented out until I see why updating the
-	//      cache causes segfault.
-	//
-	// for (int i = 0; i < page_cache_size; i++) {
-	// 	if (page_cache[i].request_hash == hash) {
-	// 		int len = page_cache[0].response->len;
-	// 		NeonResponse *resp = palloc0(len);
-	// 		// I'd rather Rc than memcpy, but this is not rust :(
-	// 		memcpy(resp, page_cache[0].response->data, len);
-	// 		return resp;
-	// 	}
-	// }
+	for (int i = 0; i < page_cache_size; i++) {
+		if (page_cache[i].request_hash == hash) {
+			int len = page_cache[0].response->len;
+			NeonResponse *resp = palloc0(len);
+			// I'd rather Rc than memcpy, but this is not rust :(
+			memcpy(resp, page_cache[0].response->data, len);
+			elog(LOG, "cache hit !!!");
+			return resp;
+		}
+	}
 
 	// Send request, get response
 	pageserver_send(request);
@@ -327,10 +326,10 @@ pageserver_call(NeonRequest * request)
 		pfree(page_cache[page_cache_head].response);
 	}
 	page_cache[page_cache_head].len = len;
-	page_cache[page_cache_head].response = palloc(len);
+	page_cache[page_cache_head].response = MemoryContextAlloc(TopMemoryContext, len);
 	memcpy(page_cache[page_cache_head].response, resp, len);
-	page_cache_head = (page_cache_head + 1) % 20;
-	if (page_cache_size < 20) {
+	page_cache_head = (page_cache_head + 1) % MAX_PAGE_CACHE_SIZE;
+	if (page_cache_size < MAX_PAGE_CACHE_SIZE) {
 		page_cache_size += 1;
 	}
 
