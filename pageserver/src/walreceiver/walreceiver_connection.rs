@@ -12,6 +12,8 @@ use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
 use postgres::{SimpleQueryMessage, SimpleQueryRow};
+use postgres_ffi::v14::xlog_utils::normalize_lsn;
+use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
@@ -155,6 +157,14 @@ pub async fn handle_walreceiver_connection(
 
     // There might be some padding after the last full record, skip it.
     startpoint += startpoint.calc_padding(8u32);
+
+    // If the starting point is at a WAL page boundary, skip past the page header. We don't need the page headers
+    // for anything, and in some corner cases, the compute node might have never generated the WAL for page headers
+    //. That happens if you create a branch at page boundary: the start point of the branch is at the page boundary,
+    // but when the compute node first starts on the branch, we normalize the first REDO position to just after the page
+    // header (see generate_pg_control()), so the WAL for the page header is never streamed from the compute node
+    //  to the safekeepers.
+    startpoint = normalize_lsn(startpoint, WAL_SEGMENT_SIZE);
 
     info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
 
