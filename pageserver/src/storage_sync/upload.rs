@@ -69,8 +69,12 @@ pub(super) async fn upload_timeline_layers<'a>(
         .map(|meta| meta.disk_consistent_lsn());
 
     let already_uploaded_layers = remote_timeline
-        .map(|timeline| timeline.stored_files())
-        .cloned()
+        .map(|timeline| {
+            timeline
+                .stored_files()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        })
         .unwrap_or_default();
 
     let layers_to_upload = upload

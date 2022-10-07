@@ -219,7 +219,7 @@ pub(super) async fn download_timeline_layers<'a>(
 
     let layers_to_download = remote_timeline
         .stored_files()
-        .difference(&download.layers_to_skip)
+        .filter(|p| !download.layers_to_skip.contains(*p))
         .cloned()
         .collect::<Vec<_>>();
 
