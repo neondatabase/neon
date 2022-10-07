@@ -515,3 +515,18 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
 
     Ok(())
 }
+
+/// Create required system extensions
+#[instrument(skip_all)]
+pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+    if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+        if libs.contains("pg_stat_statements") {
+            // Create extension only if this compute really needs it
+            let query = "CREATE EXTENSION IF NOT EXISTS pg_stat_statements";
+            info!("creating system extensions with query: {}", query);
+            client.simple_query(query)?;
+        }
+    }
+
+    Ok(())
+}

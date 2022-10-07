@@ -33,6 +33,13 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             Response::new(Body::from(serde_json::to_string(&compute.metrics).unwrap()))
         }
 
+        // Collect Postgres current usage insights
+        (&Method::GET, "/insights") => {
+            info!("serving /insights GET request");
+            let insights = compute.collect_insights().await;
+            Response::new(Body::from(insights))
+        }
+
         (&Method::POST, "/check_writability") => {
             info!("serving /check_writability POST request");
             let res = crate::checker::check_writability(compute).await;
