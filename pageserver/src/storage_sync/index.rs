@@ -326,13 +326,21 @@ impl LayerFileMetadata {
 
 /// Part of the remote index, corresponding to a certain timeline.
 /// Contains the data about all files in the timeline, present remotely and its metadata.
+///
+/// This type needs to be backwards and forwards compatible. When changing the fields,
+/// remember to add a test case for the changed version.
 #[serde_as]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct IndexPart {
+    /// Debugging aid describing the version of this type.
     #[serde(default)]
     version: usize,
 
+    /// Each of the layers present on remote storage.
+    ///
+    /// Additional metadata can might exist in `layer_metadata`.
     timeline_layers: HashSet<RelativePath>,
+
     /// Currently is not really used in pageserver,
     /// present to manually keep track of the layer files that pageserver might never retrieve.
     ///
@@ -342,8 +350,8 @@ pub struct IndexPart {
 
     /// Per layer file metadata, which can be present for a present or missing layer file.
     ///
-    /// Older versions of `IndexPart` will not have this value or have only a part of metadata that
-    /// latest version stores.
+    /// Older versions of `IndexPart` will not have this property or have only a part of metadata
+    /// that latest version stores.
     #[serde(default)]
     layer_metadata: HashMap<RelativePath, IndexLayerMetadata>,
 
