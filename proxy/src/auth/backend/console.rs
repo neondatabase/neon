@@ -8,36 +8,20 @@ use crate::{
     http, scram,
     stream::PqStream,
 };
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::{error, info, info_span};
 
 const REQUEST_FAILED: &str = "Console request failed";
 
 #[derive(Debug, Error)]
-pub enum TransportError {
-    #[error("Console responded with a malformed JSON: {0}")]
-    BadResponse(#[from] serde_json::Error),
+#[error("{}", REQUEST_FAILED)]
+pub struct TransportError(#[from] std::io::Error);
 
-    /// HTTP status (other than 200) returned by the console.
-    #[error("Console responded with an HTTP status: {0}")]
-    HttpStatus(reqwest::StatusCode),
-
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
-
-impl UserFacingError for TransportError {
-    fn to_string_client(&self) -> String {
-        use TransportError::*;
-        match self {
-            HttpStatus(_) => self.to_string(),
-            _ => REQUEST_FAILED.to_owned(),
-        }
-    }
-}
+impl UserFacingError for TransportError {}
 
 // Helps eliminate graceless `.map_err` calls without introducing another ctor.
 impl From<reqwest::Error> for TransportError {
@@ -162,15 +146,19 @@ impl<'a> Api<'a> {
             ])
             .build()?;
 
-        info!(id = request_id, url = req.url().as_str(), "request");
-        let resp = self.endpoint.execute(req).await?;
-        if !resp.status().is_success() {
-            return Err(TransportError::HttpStatus(resp.status()).into());
-        }
+        let span = info_span!("http", id = request_id, url = req.url().as_str());
+        info!(parent: &span, "request auth info");
+        let msg = self
+            .endpoint
+            .checked_execute(req)
+            .and_then(|r| r.json::<GetRoleSecretResponse>())
+            .await
+            .map_err(|e| {
+                error!(parent: &span, "{e}");
+                e
+            })?;
 
-        let response: GetRoleSecretResponse = serde_json::from_str(&resp.text().await?)?;
-
-        scram::ServerSecret::parse(&response.role_secret)
+        scram::ServerSecret::parse(&msg.role_secret)
             .map(AuthInfo::Scram)
             .ok_or(GetAuthInfoError::BadSecret)
     }
@@ -189,17 +177,21 @@ impl<'a> Api<'a> {
             ])
             .build()?;
 
-        info!(id = request_id, url = req.url().as_str(), "request");
-        let resp = self.endpoint.execute(req).await?;
-        if !resp.status().is_success() {
-            return Err(TransportError::HttpStatus(resp.status()).into());
-        }
-
-        let response: GetWakeComputeResponse = serde_json::from_str(&resp.text().await?)?;
+        let span = info_span!("http", id = request_id, url = req.url().as_str());
+        info!(parent: &span, "request wake-up");
+        let msg = self
+            .endpoint
+            .checked_execute(req)
+            .and_then(|r| r.json::<GetWakeComputeResponse>())
+            .await
+            .map_err(|e| {
+                error!(parent: &span, "{e}");
+                e
+            })?;
 
         // Unfortunately, ownership won't let us use `Option::ok_or` here.
-        let (host, port) = match parse_host_port(&response.address) {
-            None => return Err(WakeComputeError::BadComputeAddress(response.address)),
+        let (host, port) = match parse_host_port(&msg.address) {
+            None => return Err(WakeComputeError::BadComputeAddress(msg.address)),
             Some(x) => x,
         };
 
