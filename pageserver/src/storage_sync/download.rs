@@ -9,26 +9,23 @@ use std::{
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
-use remote_storage::{
-    path_with_suffix_extension, Download, DownloadError, GenericRemoteStorage, RemoteStorage,
-};
+use remote_storage::{DownloadError, GenericRemoteStorage};
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
 };
 use tracing::{debug, error, info, warn};
 
-use crate::{
-    config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
+use crate::{config::PageServerConf, storage_sync::SyncTask, TEMP_FILE_SUFFIX};
+use utils::{
+    crashsafe_dir::path_with_suffix_extension,
+    id::{TenantId, TenantTimelineId, TimelineId},
 };
-use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use super::{
     index::{IndexPart, RemoteTimeline},
     LayersDownload, SyncData, SyncQueue,
 };
-
-pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
 // We collect timelines remotely available for each tenant
 // in case we failed to gather all index parts (due to an error)
@@ -36,14 +33,14 @@ pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 // When data is received succesfully without errors Present variant is used.
 pub enum TenantIndexParts {
     Poisoned {
-        present: HashMap<ZTimelineId, IndexPart>,
-        missing: HashSet<ZTimelineId>,
+        present: HashMap<TimelineId, IndexPart>,
+        missing: HashSet<TimelineId>,
     },
-    Present(HashMap<ZTimelineId, IndexPart>),
+    Present(HashMap<TimelineId, IndexPart>),
 }
 
 impl TenantIndexParts {
-    fn add_poisoned(&mut self, timeline_id: ZTimelineId) {
+    fn add_poisoned(&mut self, timeline_id: TimelineId) {
         match self {
             TenantIndexParts::Poisoned { missing, .. } => {
                 missing.insert(timeline_id);
@@ -67,9 +64,9 @@ impl Default for TenantIndexParts {
 pub async fn download_index_parts(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    keys: HashSet<ZTenantTimelineId>,
-) -> HashMap<ZTenantId, TenantIndexParts> {
-    let mut index_parts: HashMap<ZTenantId, TenantIndexParts> = HashMap::new();
+    keys: HashSet<TenantTimelineId>,
+) -> HashMap<TenantId, TenantIndexParts> {
+    let mut index_parts: HashMap<TenantId, TenantIndexParts> = HashMap::new();
 
     let mut part_downloads = keys
         .into_iter()
@@ -115,8 +112,8 @@ pub async fn download_index_parts(
 pub async fn gather_tenant_timelines_index_parts(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<HashMap<ZTimelineId, IndexPart>> {
+    tenant_id: TenantId,
+) -> anyhow::Result<HashMap<TimelineId, IndexPart>> {
     let tenant_path = conf.timelines_path(&tenant_id);
     let timeline_sync_ids = get_timeline_sync_ids(storage, &tenant_path, tenant_id)
         .await
@@ -138,12 +135,14 @@ pub async fn gather_tenant_timelines_index_parts(
 async fn download_index_part(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
 ) -> Result<IndexPart, DownloadError> {
-    let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
-        .with_file_name(IndexPart::FILE_NAME)
-        .with_extension(IndexPart::FILE_EXTENSION);
-    let mut index_part_download = download_storage_object(storage, &index_part_path).await?;
+    let index_part_path = conf
+        .metadata_path(sync_id.timeline_id, sync_id.tenant_id)
+        .with_file_name(IndexPart::FILE_NAME);
+    let mut index_part_download = storage
+        .download_storage_object(None, &index_part_path)
+        .await?;
 
     let mut index_part_bytes = Vec::new();
     io::copy(
@@ -199,7 +198,7 @@ pub(super) async fn download_timeline_layers<'a>(
     storage: &'a GenericRemoteStorage,
     sync_queue: &'a SyncQueue,
     remote_timeline: Option<&'a RemoteTimeline>,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     mut download_data: SyncData<LayersDownload>,
 ) -> DownloadedTimeline {
     let remote_timeline = match remote_timeline {
@@ -234,11 +233,11 @@ pub(super) async fn download_timeline_layers<'a>(
 
     let mut download_tasks = layers_to_download
         .into_iter()
-        .map(|layer_desination_path| async move {
-            if layer_desination_path.exists() {
+        .map(|layer_destination_path| async move {
+            if layer_destination_path.exists() {
                 debug!(
                     "Layer already exists locally, skipping download: {}",
-                    layer_desination_path.display()
+                    layer_destination_path.display()
                 );
             } else {
                 // Perform a rename inspired by durable_rename from file_utils.c.
@@ -252,7 +251,7 @@ pub(super) async fn download_timeline_layers<'a>(
                 // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
                 // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
                 let temp_file_path =
-                    path_with_suffix_extension(&layer_desination_path, TEMP_DOWNLOAD_EXTENSION);
+                    path_with_suffix_extension(&layer_destination_path, TEMP_FILE_SUFFIX);
 
                 let mut destination_file =
                     fs::File::create(&temp_file_path).await.with_context(|| {
@@ -262,7 +261,7 @@ pub(super) async fn download_timeline_layers<'a>(
                         )
                     })?;
 
-                let mut layer_download = download_storage_object(storage, &layer_desination_path)
+                let mut layer_download = storage.download_storage_object(None, &layer_destination_path)
                     .await
                     .with_context(|| {
                         format!(
@@ -284,9 +283,9 @@ pub(super) async fn download_timeline_layers<'a>(
                 // that have not yet completed. To ensure that a file is closed immediately when it is dropped,
                 // you should call flush before dropping it.
                 //
-                // From the tokio code I see that it waits for pending operations to complete. There shouldt be any because
-                // we assume that `destination_file` file is fully written. I e there is no pending .write(...).await operations.
-                // But for additional safety lets check/wait for any pending operations.
+                // From the tokio code I see that it waits for pending operations to complete. There shouldn't be any because
+                // we assume that `destination_file` file is fully written. I.e there is no pending .write(...).await operations.
+                // But for additional safety let's check/wait for any pending operations.
                 destination_file.flush().await.with_context(|| {
                     format!(
                         "failed to flush source file at {}",
@@ -307,16 +306,16 @@ pub(super) async fn download_timeline_layers<'a>(
                     anyhow::bail!("remote-storage-download-pre-rename failpoint triggered")
                 });
 
-                fs::rename(&temp_file_path, &layer_desination_path).await?;
+                fs::rename(&temp_file_path, &layer_destination_path).await?;
 
-                fsync_path(&layer_desination_path).await.with_context(|| {
+                fsync_path(&layer_destination_path).await.with_context(|| {
                     format!(
                         "Cannot fsync layer destination path {}",
-                        layer_desination_path.display(),
+                        layer_destination_path.display(),
                     )
                 })?;
             }
-            Ok::<_, anyhow::Error>(layer_desination_path)
+            Ok::<_, anyhow::Error>(layer_destination_path)
         })
         .collect::<FuturesUnordered<_>>();
 
@@ -337,7 +336,7 @@ pub(super) async fn download_timeline_layers<'a>(
     }
 
     // fsync timeline directory which is a parent directory for downloaded files
-    let ZTenantTimelineId {
+    let TenantTimelineId {
         tenant_id,
         timeline_id,
     } = &sync_id;
@@ -365,104 +364,11 @@ pub(super) async fn download_timeline_layers<'a>(
     }
 }
 
-async fn download_storage_object(
-    storage: &GenericRemoteStorage,
-    to_path: &Path,
-) -> Result<Download, DownloadError> {
-    async fn do_download_storage_object<P, S>(
-        storage: &S,
-        to_path: &Path,
-    ) -> Result<Download, DownloadError>
-    where
-        P: std::fmt::Debug + Send + Sync + 'static,
-        S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-    {
-        let remote_object_path = storage
-            .remote_object_id(to_path)
-            .with_context(|| {
-                format!(
-                    "Failed to get the storage path for target local path '{}'",
-                    to_path.display()
-                )
-            })
-            .map_err(DownloadError::BadInput)?;
-
-        storage.download(&remote_object_path).await
-    }
-
-    match storage {
-        GenericRemoteStorage::Local(storage) => do_download_storage_object(storage, to_path).await,
-        GenericRemoteStorage::S3(storage) => do_download_storage_object(storage, to_path).await,
-    }
-}
-
 async fn get_timeline_sync_ids(
     storage: &GenericRemoteStorage,
     tenant_path: &Path,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<HashSet<ZTenantTimelineId>> {
-    let timeline_ids: Vec<ZTimelineId> = match storage {
-        GenericRemoteStorage::Local(storage) => list_prefixes(storage, tenant_path)
-            .await?
-            .into_iter()
-            .map(|timeline_directory_path| {
-                timeline_directory_path
-                    .file_stem()
-                    .with_context(|| {
-                        format!(
-                            "Failed to get timeline id string from file '{}'",
-                            timeline_directory_path.display()
-                        )
-                    })?
-                    .to_string_lossy()
-                    .as_ref()
-                    .parse()
-                    .with_context(|| {
-                        format!(
-                            "failed to parse directory name '{}' as timeline id",
-                            timeline_directory_path.display()
-                        )
-                    })
-            })
-            .collect::<anyhow::Result<_>>(),
-        GenericRemoteStorage::S3(storage) => list_prefixes(storage, tenant_path)
-            .await?
-            .into_iter()
-            .map(|s3_path| {
-                s3_path
-                    .object_name()
-                    .with_context(|| {
-                        format!("Failed to get object name out of S3 path {s3_path:?}")
-                    })?
-                    .parse()
-                    .with_context(|| {
-                        format!("failed to parse object name '{s3_path:?}' as timeline id")
-                    })
-            })
-            .collect::<anyhow::Result<_>>(),
-    }
-    .with_context(|| {
-        format!("Tenant {tenant_id} has at least one incorrect timeline subdirectory")
-    })?;
-
-    if timeline_ids.is_empty() {
-        anyhow::bail!("no timelines found on the remote storage for tenant {tenant_id}")
-    }
-
-    Ok(timeline_ids
-        .into_iter()
-        .map(|timeline_id| ZTenantTimelineId {
-            tenant_id,
-            timeline_id,
-        })
-        .collect())
-}
-
-async fn list_prefixes<P, S>(storage: &S, tenant_path: &Path) -> anyhow::Result<Vec<P>>
-where
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+    tenant_id: TenantId,
+) -> anyhow::Result<HashSet<TenantTimelineId>> {
     let tenant_storage_path = storage.remote_object_id(tenant_path).with_context(|| {
         format!(
             "Failed to get tenant storage path for local path '{}'",
@@ -470,14 +376,37 @@ where
         )
     })?;
 
-    storage
+    let timelines = storage
         .list_prefixes(Some(&tenant_storage_path))
         .await
         .with_context(|| {
             format!(
                 "Failed to list tenant storage path {tenant_storage_path:?} to get remote timelines to download"
             )
-        })
+        })?;
+
+    if timelines.is_empty() {
+        anyhow::bail!("no timelines found on the remote storage")
+    }
+
+    let mut sync_ids = HashSet::new();
+
+    for timeline_remote_storage_key in timelines {
+        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
+            anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
+        })?;
+
+        let timeline_id: TimelineId = object_name.parse().with_context(|| {
+            format!("failed to parse object name into timeline id '{object_name}'")
+        })?;
+
+        sync_ids.insert(TenantTimelineId {
+            tenant_id,
+            timeline_id,
+        });
+    }
+
+    Ok(sync_ids)
 }
 
 async fn fsync_path(path: impl AsRef<Path>) -> Result<(), io::Error> {
@@ -489,6 +418,7 @@ mod tests {
     use std::{
         collections::{BTreeSet, HashSet},
         num::NonZeroUsize,
+        path::PathBuf,
     };
 
     use remote_storage::{LocalFs, RemoteStorage};
@@ -496,23 +426,23 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
-        layered_repository::repo_harness::{RepoHarness, TIMELINE_ID},
         storage_sync::{
             index::RelativePath,
             test_utils::{create_local_timeline, dummy_metadata},
         },
+        tenant::harness::{TenantHarness, TIMELINE_ID},
     };
 
     use super::*;
 
     #[tokio::test]
     async fn download_timeline() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("download_timeline")?;
+        let harness = TenantHarness::create("download_timeline")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
 
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "layer_to_skip", "layer_to_keep_locally"];
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -524,7 +454,8 @@ mod tests {
             create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
 
         for local_path in timeline_upload.layers_to_upload {
-            let remote_path = local_storage.remote_object_id(&local_path)?;
+            let remote_path =
+                local_storage.resolve_in_storage(&storage.remote_object_id(&local_path)?)?;
             let remote_parent_dir = remote_path.parent().unwrap();
             if !remote_parent_dir.exists() {
                 fs::create_dir_all(&remote_parent_dir).await?;
@@ -607,10 +538,10 @@ mod tests {
 
     #[tokio::test]
     async fn download_timeline_negatives() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("download_timeline_negatives")?;
+        let harness = TenantHarness::create("download_timeline_negatives")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -666,10 +597,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_index_part() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("test_download_index_part")?;
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let harness = TenantHarness::create("test_download_index_part")?;
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -690,13 +621,14 @@ mod tests {
             metadata.to_bytes()?,
         );
 
-        let local_index_part_path =
-            metadata_path(harness.conf, sync_id.timeline_id, sync_id.tenant_id)
-                .with_file_name(IndexPart::FILE_NAME)
-                .with_extension(IndexPart::FILE_EXTENSION);
-        let storage_path = local_storage.remote_object_id(&local_index_part_path)?;
-        fs::create_dir_all(storage_path.parent().unwrap()).await?;
-        fs::write(&storage_path, serde_json::to_vec(&index_part)?).await?;
+        let local_index_part_path = harness
+            .conf
+            .metadata_path(sync_id.timeline_id, sync_id.tenant_id)
+            .with_file_name(IndexPart::FILE_NAME);
+        let index_part_remote_id = local_storage.remote_object_id(&local_index_part_path)?;
+        let index_part_local_path = PathBuf::from(index_part_remote_id.to_string());
+        fs::create_dir_all(index_part_local_path.parent().unwrap()).await?;
+        fs::write(&index_part_local_path, serde_json::to_vec(&index_part)?).await?;
 
         let downloaded_index_part = download_index_part(harness.conf, &storage, sync_id).await?;
 

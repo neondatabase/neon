@@ -30,23 +30,17 @@
 #include "walproposer.h"
 #include "walproposer_utils.h"
 
-
 #define PageStoreTrace DEBUG5
 
 #define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag, \
-		(errmsg(NEON_TAG fmt, ## __VA_ARGS__), \
-		 errhidestmt(true), errhidecontext(true)))
+#define neon_log(tag, fmt, ...) ereport(tag,                                  \
+										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
+										 errhidestmt(true), errhidecontext(true)))
 
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
 
 char	   *page_server_connstring_raw;
-
-static ZenithResponse *pageserver_call(ZenithRequest *request);
-page_server_api api = {
-	.request = pageserver_call
-};
 
 static void
 pageserver_connect()
@@ -70,7 +64,7 @@ pageserver_connect()
 				 errdetail_internal("%s", msg)));
 	}
 
-	query = psprintf("pagestream %s %s", zenith_tenant, zenith_timeline);
+	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
 	ret = PQsendQuery(pageserver_conn, query);
 	if (ret != 1)
 	{
@@ -154,66 +148,94 @@ retry:
 }
 
 
-static ZenithResponse *
-pageserver_call(ZenithRequest *request)
+static void
+pageserver_disconnect(void)
+{
+	/*
+	 * If anything goes wrong while we were sending a request, it's not clear
+	 * what state the connection is in. For example, if we sent the request
+	 * but didn't receive a response yet, we might receive the response some
+	 * time later after we have already sent a new unrelated request. Close
+	 * the connection to avoid getting confused.
+	 */
+	if (connected)
+	{
+		neon_log(LOG, "dropping connection to page server due to error");
+		PQfinish(pageserver_conn);
+		pageserver_conn = NULL;
+		connected = false;
+	}
+}
+
+static void
+pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
+
+	/* If the connection was lost for some reason, reconnect */
+	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
+	{
+		PQfinish(pageserver_conn);
+		pageserver_conn = NULL;
+		connected = false;
+	}
+
+	if (!connected)
+		pageserver_connect();
+
+	req_buff = nm_pack_request(request);
+
+	/*
+	 * Send request.
+	 *
+	 * In principle, this could block if the output buffer is full, and we
+	 * should use async mode and check for interrupts while waiting. In
+	 * practice, our requests are small enough to always fit in the output and
+	 * TCP buffer.
+	 */
+	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+	{
+		char	   *msg = PQerrorMessage(pageserver_conn);
+
+		pageserver_disconnect();
+		neon_log(ERROR, "failed to send page request: %s", msg);
+	}
+	pfree(req_buff.data);
+
+	if (message_level_is_interesting(PageStoreTrace))
+	{
+		char	   *msg = nm_to_string((NeonMessage *) request);
+
+		neon_log(PageStoreTrace, "sent request: %s", msg);
+		pfree(msg);
+	}
+}
+
+static NeonResponse *
+pageserver_receive(void)
+{
 	StringInfoData resp_buff;
-	ZenithResponse *resp;
+	NeonResponse *resp;
 
 	PG_TRY();
 	{
-		/* If the connection was lost for some reason, reconnect */
-		if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
-		{
-			PQfinish(pageserver_conn);
-			pageserver_conn = NULL;
-			connected = false;
-		}
-
-		if (!connected)
-			pageserver_connect();
-
-		req_buff = zm_pack_request(request);
-
-		/*
-		 * Send request.
-		 *
-		 * In principle, this could block if the output buffer is full, and we
-		 * should use async mode and check for interrupts while waiting. In
-		 * practice, our requests are small enough to always fit in the output
-		 * and TCP buffer.
-		 */
-		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0 || PQflush(pageserver_conn))
-		{
-			neon_log(ERROR, "failed to send page request: %s",
-					 PQerrorMessage(pageserver_conn));
-		}
-		pfree(req_buff.data);
-
-		if (message_level_is_interesting(PageStoreTrace))
-		{
-			char	   *msg = zm_to_string((ZenithMessage *) request);
-
-			neon_log(PageStoreTrace, "sent request: %s", msg);
-			pfree(msg);
-		}
-
 		/* read response */
 		resp_buff.len = call_PQgetCopyData(pageserver_conn, &resp_buff.data);
 		resp_buff.cursor = 0;
 
-		if (resp_buff.len == -1)
-			neon_log(ERROR, "end of COPY");
-		else if (resp_buff.len == -2)
-			neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
-
-		resp = zm_unpack_response(&resp_buff);
+		if (resp_buff.len < 0)
+		{
+			if (resp_buff.len == -1)
+				neon_log(ERROR, "end of COPY");
+			else if (resp_buff.len == -2)
+				neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
+		}
+		resp = nm_unpack_response(&resp_buff);
 		PQfreemem(resp_buff.data);
 
 		if (message_level_is_interesting(PageStoreTrace))
 		{
-			char	   *msg = zm_to_string((ZenithMessage *) resp);
+			char	   *msg = nm_to_string((NeonMessage *) resp);
 
 			neon_log(PageStoreTrace, "got response: %s", msg);
 			pfree(msg);
@@ -221,34 +243,48 @@ pageserver_call(ZenithRequest *request)
 	}
 	PG_CATCH();
 	{
-		/*
-		 * If anything goes wrong while we were sending a request, it's not
-		 * clear what state the connection is in. For example, if we sent the
-		 * request but didn't receive a response yet, we might receive the
-		 * response some time later after we have already sent a new unrelated
-		 * request. Close the connection to avoid getting confused.
-		 */
-		if (connected)
-		{
-			neon_log(LOG, "dropping connection to page server due to error");
-			PQfinish(pageserver_conn);
-			pageserver_conn = NULL;
-			connected = false;
-		}
+		pageserver_disconnect();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	return (ZenithResponse *) resp;
+	return (NeonResponse *) resp;
 }
 
 
-static bool
-check_zenith_id(char **newval, void **extra, GucSource source)
+static void
+pageserver_flush(void)
 {
-	uint8		zid[16];
+	if (PQflush(pageserver_conn))
+	{
+		char	   *msg = PQerrorMessage(pageserver_conn);
 
-	return **newval == '\0' || HexDecodeString(zid, *newval, 16);
+		pageserver_disconnect();
+		neon_log(ERROR, "failed to flush page requests: %s", msg);
+	}
+}
+
+static NeonResponse *
+pageserver_call(NeonRequest * request)
+{
+	pageserver_send(request);
+	pageserver_flush();
+	return pageserver_receive();
+}
+
+page_server_api api = {
+	.request = pageserver_call,
+	.send = pageserver_send,
+	.flush = pageserver_flush,
+	.receive = pageserver_receive
+};
+
+static bool
+check_neon_id(char **newval, void **extra, GucSource source)
+{
+	uint8		id[16];
+
+	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
 static char *
@@ -366,22 +402,22 @@ pg_init_libpagestore(void)
 							   NULL, NULL, NULL);
 
 	DefineCustomStringVariable("neon.timeline_id",
-							   "Zenith timelineid the server is running on",
+							   "Neon timeline_id the server is running on",
 							   NULL,
-							   &zenith_timeline,
+							   &neon_timeline,
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
-							   check_zenith_id, NULL, NULL);
+							   check_neon_id, NULL, NULL);
 
 	DefineCustomStringVariable("neon.tenant_id",
-							   "Neon tenantid the server is running on",
+							   "Neon tenant_id the server is running on",
 							   NULL,
-							   &zenith_tenant,
+							   &neon_tenant,
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
-							   check_zenith_id, NULL, NULL);
+							   check_neon_id, NULL, NULL);
 
 	DefineCustomBoolVariable("neon.wal_redo",
 							 "start in wal-redo mode",
@@ -413,8 +449,8 @@ pg_init_libpagestore(void)
 	page_server_connstring = substitute_pageserver_password(page_server_connstring_raw);
 
 	/* Is there more correct way to pass CustomGUC to postgres code? */
-	zenith_timeline_walproposer = zenith_timeline;
-	zenith_tenant_walproposer = zenith_tenant;
+	neon_timeline_walproposer = neon_timeline;
+	neon_tenant_walproposer = neon_tenant;
 
 	if (wal_redo)
 	{
@@ -425,8 +461,8 @@ pg_init_libpagestore(void)
 	else if (page_server_connstring && page_server_connstring[0])
 	{
 		neon_log(PageStoreTrace, "set neon_smgr hook");
-		smgr_hook = smgr_zenith;
-		smgr_init_hook = smgr_init_zenith;
-		dbsize_hook = zenith_dbsize;
+		smgr_hook = smgr_neon;
+		smgr_init_hook = smgr_init_neon;
+		dbsize_hook = neon_dbsize;
 	}
 }

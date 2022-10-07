@@ -1,7 +1,7 @@
-import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.types import Lsn, TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -9,13 +9,6 @@ from fixtures.utils import print_gc_result, query_scalar
 # Create a couple of branches off the main branch, at a historical point in time.
 #
 def test_branch_behind(neon_env_builder: NeonEnvBuilder):
-
-    # Use safekeeper in this test to avoid a subtle race condition.
-    # Without safekeeper, walreceiver reconnection can stuck
-    # because of IO deadlock.
-    #
-    # See https://github.com/neondatabase/neon/issues/1068
-    neon_env_builder.num_safekeepers = 1
     # Disable pitr, because here we want to test branch creation after GC
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
@@ -27,13 +20,13 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
 
     main_cur = pgmain.connect().cursor()
 
-    timeline = query_scalar(main_cur, "SHOW neon.timeline_id")
+    timeline = TimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
 
     # Create table, and insert the first 100 rows
     main_cur.execute("CREATE TABLE foo (t text)")
 
     # keep some early lsn to test branch creation on out of date lsn
-    gced_lsn = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
+    gced_lsn = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
 
     main_cur.execute(
         """
@@ -42,7 +35,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
             FROM generate_series(1, 100) g
     """
     )
-    lsn_a = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
+    lsn_a = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
     log.info(f"LSN after 100 rows: {lsn_a}")
 
     # Insert some more rows. (This generates enough WAL to fill a few segments.)
@@ -53,7 +46,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
             FROM generate_series(1, 200000) g
     """
     )
-    lsn_b = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
+    lsn_b = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
     log.info(f"LSN after 200100 rows: {lsn_b}")
 
     # Branch at the point where only 100 rows were inserted
@@ -69,7 +62,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
             FROM generate_series(1, 200000) g
     """
     )
-    lsn_c = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
+    lsn_c = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
 
     log.info(f"LSN after 400100 rows: {lsn_c}")
 
@@ -96,29 +89,27 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
 
     # branch at segment boundary
     env.neon_cli.create_branch(
-        "test_branch_segment_boundary", "test_branch_behind", ancestor_start_lsn="0/3000000"
+        "test_branch_segment_boundary", "test_branch_behind", ancestor_start_lsn=Lsn("0/3000000")
     )
     pg = env.postgres.create_start("test_branch_segment_boundary")
     assert pg.safe_psql("SELECT 1")[0][0] == 1
 
     # branch at pre-initdb lsn
-    with pytest.raises(Exception, match="invalid branch start lsn"):
-        env.neon_cli.create_branch("test_branch_preinitdb", ancestor_start_lsn="0/42")
+    with pytest.raises(Exception, match="invalid branch start lsn: .*"):
+        env.neon_cli.create_branch("test_branch_preinitdb", ancestor_start_lsn=Lsn("0/42"))
 
     # branch at pre-ancestor lsn
     with pytest.raises(Exception, match="less than timeline ancestor lsn"):
         env.neon_cli.create_branch(
-            "test_branch_preinitdb", "test_branch_behind", ancestor_start_lsn="0/42"
+            "test_branch_preinitdb", "test_branch_behind", ancestor_start_lsn=Lsn("0/42")
         )
 
     # check that we cannot create branch based on garbage collected data
-    with env.pageserver.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-        # call gc to advace latest_gc_cutoff_lsn
-        pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
-        row = pscur.fetchone()
-        print_gc_result(row)
+    with env.pageserver.http_client() as pageserver_http:
+        gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+        print_gc_result(gc_result)
 
-    with pytest.raises(Exception, match="invalid branch start lsn"):
+    with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
         env.neon_cli.create_branch(
             "test_branch_create_fail", "test_branch_behind", ancestor_start_lsn=gced_lsn

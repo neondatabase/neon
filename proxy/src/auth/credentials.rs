@@ -54,13 +54,10 @@ impl<'a> ClientCredentials<'a> {
         let dbname = get_param("database")?;
 
         // Project name might be passed via PG's command-line options.
-        let project_a = params.options_raw().and_then(|options| {
-            for opt in options {
-                if let Some(value) = opt.strip_prefix("project=") {
-                    return Some(Cow::Borrowed(value));
-                }
-            }
-            None
+        let project_a = params.options_raw().and_then(|mut options| {
+            options
+                .find_map(|opt| opt.strip_prefix("project="))
+                .map(Cow::Borrowed)
         });
 
         // Alternative project name is in fact a subdomain from SNI.

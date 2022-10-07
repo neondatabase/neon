@@ -3,21 +3,21 @@
 
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 use crate::receive_wal::ReceiveWalConn;
-use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
+
 use crate::send_wal::ReplicationConn;
-use crate::timeline::{Timeline, TimelineTools};
-use crate::SafeKeeperConf;
+
+use crate::{GlobalTimelines, SafeKeeperConf};
 use anyhow::{bail, Context, Result};
 
 use postgres_ffi::PG_TLI;
 use regex::Regex;
-use std::sync::Arc;
+
 use tracing::info;
 use utils::{
+    id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
     postgres_backend::{self, PostgresBackend},
     pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID},
-    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 /// Safekeeper handler of postgres commands
@@ -25,9 +25,9 @@ pub struct SafekeeperPostgresHandler {
     pub conf: SafeKeeperConf,
     /// assigned application name
     pub appname: Option<String>,
-    pub ztenantid: Option<ZTenantId>,
-    pub ztimelineid: Option<ZTimelineId>,
-    pub timeline: Option<Arc<Timeline>>,
+    pub tenant_id: Option<TenantId>,
+    pub timeline_id: Option<TimelineId>,
+    pub ttid: TenantTimelineId,
 }
 
 /// Parsed Postgres command.
@@ -63,17 +63,20 @@ fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
 }
 
 impl postgres_backend::Handler for SafekeeperPostgresHandler {
-    // ztenant id and ztimeline id are passed in connection string params
+    // tenant_id and timeline_id are passed in connection string params
     fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupPacket) -> Result<()> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(options) = params.options_raw() {
                 for opt in options {
+                    // FIXME `ztenantid` and `ztimelineid` left for compatibility during deploy,
+                    // remove these after the PR gets deployed:
+                    // https://github.com/neondatabase/neon/pull/2433#discussion_r970005064
                     match opt.split_once('=') {
-                        Some(("ztenantid", value)) => {
-                            self.ztenantid = Some(value.parse()?);
+                        Some(("ztenantid", value)) | Some(("tenant_id", value)) => {
+                            self.tenant_id = Some(value.parse()?);
                         }
-                        Some(("ztimelineid", value)) => {
-                            self.ztimelineid = Some(value.parse()?);
+                        Some(("ztimelineid", value)) | Some(("timeline_id", value)) => {
+                            self.timeline_id = Some(value.parse()?);
                         }
                         _ => continue,
                     }
@@ -95,33 +98,24 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
         info!(
             "got query {:?} in timeline {:?}",
-            query_string, self.ztimelineid
+            query_string, self.timeline_id
         );
 
-        let create = !(matches!(cmd, SafekeeperPostgresCommand::StartReplication { .. })
-            || matches!(cmd, SafekeeperPostgresCommand::IdentifySystem));
-
-        let tenantid = self.ztenantid.context("tenantid is required")?;
-        let timelineid = self.ztimelineid.context("timelineid is required")?;
-        if self.timeline.is_none() {
-            self.timeline.set(
-                &self.conf,
-                ZTenantTimelineId::new(tenantid, timelineid),
-                create,
-            )?;
-        }
+        let tenant_id = self.tenant_id.context("tenantid is required")?;
+        let timeline_id = self.timeline_id.context("timelineid is required")?;
+        self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
 
         match cmd {
-            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb)
-                .run(self)
-                .context("failed to run ReceiveWalConn"),
-            SafekeeperPostgresCommand::StartReplication { start_lsn } => ReplicationConn::new(pgb)
-                .run(self, pgb, start_lsn)
-                .context("failed to run ReplicationConn"),
+            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb).run(self),
+            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
+                ReplicationConn::new(pgb).run(self, pgb, start_lsn)
+            }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
         }
-        .context(format!("timeline {timelineid}"))?;
+        .context(format!(
+            "Failed to process query for timeline {timeline_id}"
+        ))?;
 
         Ok(())
     }
@@ -132,44 +126,28 @@ impl SafekeeperPostgresHandler {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
-            ztenantid: None,
-            ztimelineid: None,
-            timeline: None,
+            tenant_id: None,
+            timeline_id: None,
+            ttid: TenantTimelineId::empty(),
         }
-    }
-
-    /// Shortcut for calling `process_msg` in the timeline.
-    pub fn process_safekeeper_msg(
-        &self,
-        msg: &ProposerAcceptorMessage,
-    ) -> Result<Option<AcceptorProposerMessage>> {
-        self.timeline
-            .get()
-            .process_msg(msg)
-            .context("failed to process ProposerAcceptorMessage")
     }
 
     ///
     /// Handle IDENTIFY_SYSTEM replication command
     ///
     fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<()> {
+        let tli = GlobalTimelines::get(self.ttid)?;
+
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn
-            self.timeline.get().get_end_of_wal()
+            tli.get_flush_lsn()
         } else {
             // other clients shouldn't get any uncommitted WAL
-            self.timeline.get().get_state().0.commit_lsn
+            tli.get_state().0.commit_lsn
         }
         .to_string();
 
-        let sysid = self
-            .timeline
-            .get()
-            .get_state()
-            .1
-            .server
-            .system_id
-            .to_string();
+        let sysid = tli.get_state().1.server.system_id.to_string();
         let lsn_bytes = lsn.as_bytes();
         let tli = PG_TLI.to_string();
         let tli_bytes = tli.as_bytes();

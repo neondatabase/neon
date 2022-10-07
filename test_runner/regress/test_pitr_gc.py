@@ -1,8 +1,6 @@
-from contextlib import closing
-
-import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.types import TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -11,8 +9,6 @@ from fixtures.utils import print_gc_result, query_scalar
 # Insert some data, run GC and create a branch in the past.
 #
 def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
-
-    neon_env_builder.num_safekeepers = 1
     # Set pitr interval such that we need to keep the data
     neon_env_builder.pageserver_config_override = (
         "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"
@@ -24,7 +20,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
-    timeline = query_scalar(main_cur, "SHOW neon.timeline_id")
+    timeline = TimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
 
     # Create table
     main_cur.execute("CREATE TABLE foo (t text)")
@@ -55,13 +51,11 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
     log.info(f"LSN after 10000 rows: {debug_lsn} xid {debug_xid}")
 
     # run GC
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-            pscur.execute(f"compact {env.initial_tenant.hex} {timeline}")
-            # perform aggressive GC. Data still should be kept because of the PITR setting.
-            pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
-            row = pscur.fetchone()
-            print_gc_result(row)
+    with env.pageserver.http_client() as pageserver_http:
+        pageserver_http.timeline_compact(env.initial_tenant, timeline)
+        # perform aggressive GC. Data still should be kept because of the PITR setting.
+        gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+        print_gc_result(gc_result)
 
     # Branch at the point where only 100 rows were inserted
     # It must have been preserved by PITR setting

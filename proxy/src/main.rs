@@ -20,10 +20,10 @@ mod url;
 mod waiters;
 
 use anyhow::{bail, Context};
-use clap::{App, Arg};
+use clap::{self, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
-use std::{future::Future, net::SocketAddr};
+use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use utils::project_git_version;
 
@@ -38,7 +38,7 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("Neon proxy/router")
+    let arg_matches = clap::App::new("Neon proxy/router")
         .version(GIT_VERSION)
         .arg(
             Arg::new("proxy")
@@ -52,8 +52,8 @@ async fn main() -> anyhow::Result<()> {
             Arg::new("auth-backend")
                 .long("auth-backend")
                 .takes_value(true)
-                .help("Possible values: legacy | console | postgres | link")
-                .default_value("legacy"),
+                .possible_values(["console", "postgres", "link"])
+                .default_value("link"),
         )
         .arg(
             Arg::new("mgmt")
@@ -118,19 +118,30 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
 
-    let auth_urls = config::AuthUrls {
-        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
-        auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
+    let auth_backend = match arg_matches.value_of("auth-backend").unwrap() {
+        "console" => {
+            let url = arg_matches.value_of("auth-endpoint").unwrap().parse()?;
+            let endpoint = http::Endpoint::new(url, reqwest::Client::new());
+            auth::BackendType::Console(Cow::Owned(endpoint), ())
+        }
+        "postgres" => {
+            let url = arg_matches.value_of("auth-endpoint").unwrap().parse()?;
+            auth::BackendType::Postgres(Cow::Owned(url), ())
+        }
+        "link" => {
+            let url = arg_matches.value_of("uri").unwrap().parse()?;
+            auth::BackendType::Link(Cow::Owned(url))
+        }
+        other => bail!("unsupported auth backend: {other}"),
     };
 
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
-        auth_backend: arg_matches.value_of("auth-backend").unwrap().parse()?,
-        auth_urls,
+        auth_backend,
     }));
 
     println!("Version: {GIT_VERSION}");
-    println!("Authentication backend: {:?}", config.auth_backend);
+    println!("Authentication backend: {}", config.auth_backend);
 
     // Check that we can bind to address before further initialization
     println!("Starting http on {}", http_address);
@@ -143,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
     let tasks = [
-        tokio::spawn(http::thread_main(http_listener)),
+        tokio::spawn(http::server::thread_main(http_listener)),
         tokio::spawn(proxy::thread_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
     ]

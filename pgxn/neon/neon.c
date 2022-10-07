@@ -28,8 +28,8 @@
 PG_MODULE_MAGIC;
 void		_PG_init(void);
 
-
-void		_PG_init(void)
+void
+_PG_init(void)
 {
 	pg_init_libpagestore();
 	pg_init_libpqwalproposer();
@@ -40,6 +40,7 @@ void		_PG_init(void)
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
+PG_FUNCTION_INFO_V1(backpressure_throttling_time);
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)
@@ -54,13 +55,12 @@ pg_cluster_size(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(size);
 }
 
-
 Datum
 backpressure_lsns(PG_FUNCTION_ARGS)
 {
-	XLogRecPtr writePtr;
-	XLogRecPtr flushPtr;
-	XLogRecPtr applyPtr;
+	XLogRecPtr	writePtr;
+	XLogRecPtr	flushPtr;
+	XLogRecPtr	applyPtr;
 	Datum		values[3];
 	bool		nulls[3];
 	TupleDesc	tupdesc;
@@ -79,4 +79,10 @@ backpressure_lsns(PG_FUNCTION_ARGS)
 	values[2] = LSNGetDatum(applyPtr);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+Datum
+backpressure_throttling_time(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_UINT64(BackpressureThrottlingTime());
 }

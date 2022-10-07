@@ -14,11 +14,9 @@ pub mod simple_rcu;
 /// append only ordered map implemented with a Vec
 pub mod vec_map;
 
-// Async version of SeqWait. Currently unused.
-// pub mod seqwait_async;
-
 pub mod bin_ser;
 pub mod postgres_backend;
+pub mod postgres_backend_async;
 pub mod pq_proto;
 
 // dealing with connstring parsing and handy access to it's parts
@@ -31,7 +29,7 @@ pub mod crashsafe_dir;
 pub mod auth;
 
 // utility functions and helper traits for unified unique id generation/serialization etc.
-pub mod zid;
+pub mod id;
 // http endpoint utils
 pub mod http;
 

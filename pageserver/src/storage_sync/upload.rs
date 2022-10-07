@@ -1,42 +1,27 @@
 //! Timeline synchronization logic to compress and upload to the remote storage all new timeline files from the checkpoints.
 
-use std::{
-    fmt::Debug,
-    path::{Path, PathBuf},
-};
+use std::{fmt::Debug, path::PathBuf};
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
-use once_cell::sync::Lazy;
-use remote_storage::{GenericRemoteStorage, RemoteStorage};
+use remote_storage::GenericRemoteStorage;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
 
-use utils::zid::ZTenantTimelineId;
+use utils::id::TenantTimelineId;
 
 use super::{
     index::{IndexPart, RemoteTimeline},
     LayersUpload, SyncData, SyncQueue,
 };
-use crate::{
-    config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
-};
-use metrics::{register_int_counter_vec, IntCounterVec};
-
-static NO_LAYERS_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_remote_storage_no_layers_uploads_total",
-        "Number of skipped uploads due to no layers",
-        &["tenant_id", "timeline_id"],
-    )
-    .expect("failed to register pageserver no layers upload vec")
-});
+use crate::metrics::NO_LAYERS_UPLOAD;
+use crate::{config::PageServerConf, storage_sync::SyncTask};
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     index_part: IndexPart,
 ) -> anyhow::Result<()> {
     let index_part_bytes = serde_json::to_vec(&index_part)
@@ -44,10 +29,15 @@ pub(super) async fn upload_index_part(
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-    let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
-        .with_file_name(IndexPart::FILE_NAME)
-        .with_extension(IndexPart::FILE_EXTENSION);
-    upload_storage_object(storage, index_part_bytes, index_part_size, &index_part_path)
+    let index_part_path = conf
+        .metadata_path(sync_id.timeline_id, sync_id.tenant_id)
+        .with_file_name(IndexPart::FILE_NAME);
+    storage
+        .upload_storage_object(
+            Box::new(index_part_bytes),
+            index_part_size,
+            &index_part_path,
+        )
         .await
         .with_context(|| format!("Failed to upload index part for '{sync_id}'"))
 }
@@ -69,7 +59,7 @@ pub(super) async fn upload_timeline_layers<'a>(
     storage: &'a GenericRemoteStorage,
     sync_queue: &SyncQueue,
     remote_timeline: Option<&'a RemoteTimeline>,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     mut upload_data: SyncData<LayersUpload>,
 ) -> UploadedTimeline {
     let upload = &mut upload_data.data;
@@ -131,7 +121,8 @@ pub(super) async fn upload_timeline_layers<'a>(
                 .map_err(UploadError::Other)?
                 .len() as usize;
 
-            match upload_storage_object(storage, source_file, source_size, &source_path)
+            match storage
+                .upload_storage_object(Box::new(source_file), source_size, &source_path)
                 .await
                 .with_context(|| format!("Failed to upload layer file for {sync_id}"))
             {
@@ -161,7 +152,7 @@ pub(super) async fn upload_timeline_layers<'a>(
                         // We have run the upload sync task, but the file we wanted to upload is gone.
                         // This is "fine" due the asynchronous nature of the sync loop: it only reacts to events and might need to
                         // retry the upload tasks, if S3 or network is down: but during this time, pageserver might still operate and
-                        // run compaction/gc threads, removing redundant files from disk.
+                        // run compaction/gc tasks, removing redundant files from disk.
                         // It's not good to pause GC/compaction because of those and we would rather skip such uploads.
                         //
                         // Yet absence of such files might also mean that the timeline metadata file was updated (GC moves the Lsn forward, for instance).
@@ -193,51 +184,6 @@ pub(super) async fn upload_timeline_layers<'a>(
     }
 }
 
-async fn upload_storage_object(
-    storage: &GenericRemoteStorage,
-    from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
-    from_size_bytes: usize,
-    from_path: &Path,
-) -> anyhow::Result<()> {
-    async fn do_upload_storage_object<P, S>(
-        storage: &S,
-        from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
-        from_size_bytes: usize,
-        from_path: &Path,
-    ) -> anyhow::Result<()>
-    where
-        P: std::fmt::Debug + Send + Sync + 'static,
-        S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-    {
-        let target_storage_path = storage.remote_object_id(from_path).with_context(|| {
-            format!(
-                "Failed to get the storage path for source local path '{}'",
-                from_path.display()
-            )
-        })?;
-
-        storage
-            .upload(from, from_size_bytes, &target_storage_path, None)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to upload from '{}' to storage path '{:?}'",
-                    from_path.display(),
-                    target_storage_path
-                )
-            })
-    }
-
-    match storage {
-        GenericRemoteStorage::Local(storage) => {
-            do_upload_storage_object(storage, from, from_size_bytes, from_path).await
-        }
-        GenericRemoteStorage::S3(storage) => {
-            do_upload_storage_object(storage, from, from_size_bytes, from_path).await
-        }
-    }
-}
-
 enum UploadError {
     MissingLocalFile(PathBuf, anyhow::Error),
     Other(anyhow::Error),
@@ -255,24 +201,24 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
-        layered_repository::repo_harness::{RepoHarness, TIMELINE_ID},
         storage_sync::{
             index::RelativePath,
             test_utils::{create_local_timeline, dummy_metadata},
         },
+        tenant::harness::{TenantHarness, TIMELINE_ID},
     };
 
     use super::{upload_index_part, *};
 
     #[tokio::test]
     async fn regular_layer_upload() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("regular_layer_upload")?;
+        let harness = TenantHarness::create("regular_layer_upload")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a", "b"];
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
-            tempdir()?.path().to_owned(),
+        let storage = GenericRemoteStorage::new(LocalFs::new(
+            tempdir()?.path().to_path_buf(),
             harness.conf.workdir.clone(),
         )?);
         let local_storage = storage.as_local().unwrap();
@@ -354,12 +300,12 @@ mod tests {
     // Currently, GC can run between upload retries, removing local layers scheduled for upload. Test this scenario.
     #[tokio::test]
     async fn layer_upload_after_local_fs_update() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("layer_upload_after_local_fs_update")?;
+        let harness = TenantHarness::create("layer_upload_after_local_fs_update")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a1", "b1"];
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -449,10 +395,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_index_part() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("test_upload_index_part")?;
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let harness = TenantHarness::create("test_upload_index_part")?;
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -488,20 +434,13 @@ mod tests {
 
         let index_part_path = storage_files.first().unwrap();
         assert_eq!(
-            index_part_path.file_stem().and_then(|name| name.to_str()),
+            index_part_path.object_name(),
             Some(IndexPart::FILE_NAME),
             "Remote index part should have the correct name"
         );
-        assert_eq!(
-            index_part_path
-                .extension()
-                .and_then(|extension| extension.to_str()),
-            Some(IndexPart::FILE_EXTENSION),
-            "Remote index part should have the correct extension"
-        );
-
-        let remote_index_part: IndexPart =
-            serde_json::from_slice(&fs::read(&index_part_path).await?)?;
+        let remote_index_part: IndexPart = serde_json::from_slice(
+            &fs::read(local_storage.resolve_in_storage(index_part_path)?).await?,
+        )?;
         assert_eq!(
             index_part, remote_index_part,
             "Remote index part should match the local one"

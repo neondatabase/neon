@@ -1,11 +1,10 @@
 # It's possible to run any regular test with the local fs remote storage via
-# env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
+# env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import os
 import shutil
 import time
 from pathlib import Path
-from uuid import UUID
 
 import pytest
 from fixtures.log_helper import log
@@ -18,7 +17,8 @@ from fixtures.neon_fixtures import (
     wait_for_upload,
     wait_until,
 )
-from fixtures.utils import lsn_from_hex, query_scalar
+from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import query_scalar
 
 
 #
@@ -57,12 +57,13 @@ def test_remote_storage_backup_and_restore(
 
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     checkpoint_numbers = range(1, 3)
 
@@ -74,17 +75,17 @@ def test_remote_storage_backup_and_restore(
                 INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
             """
             )
-            current_lsn = lsn_from_hex(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
-        wait_for_last_record_lsn(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
+        wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
         # run checkpoint manually to be sure that data landed in remote storage
-        env.pageserver.safe_psql(f"checkpoint {tenant_id} {timeline_id}")
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
         log.info(f"waiting for checkpoint {checkpoint_number} upload")
         # wait until pageserver successfully uploaded a checkpoint to remote storage
-        wait_for_upload(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
+        wait_for_upload(client, tenant_id, timeline_id, current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     ##### Stop the first pageserver instance, erase all its data
@@ -99,18 +100,18 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # Introduce failpoint in download
-    env.pageserver.safe_psql("failpoints remote-storage-download-pre-rename=return")
+    pageserver_http.configure_failpoints(("remote-storage-download-pre-rename", "return"))
 
-    client.tenant_attach(UUID(tenant_id))
+    client.tenant_attach(tenant_id)
 
     # is there a better way to assert that failpoint triggered?
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
     with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
-        client.tenant_attach(UUID(tenant_id))
+        client.tenant_attach(tenant_id)
 
-    detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
+    detail = client.timeline_detail(tenant_id, timeline_id)
     log.info("Timeline detail with active failpoint: %s", detail)
     assert detail["local"] is None
     assert detail["remote"]["awaits_download"]
@@ -119,20 +120,20 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.stop()
     env.pageserver.start()
 
-    client.tenant_attach(UUID(tenant_id))
+    client.tenant_attach(tenant_id)
 
     log.info("waiting for timeline redownload")
     wait_until(
         number_of_iterations=20,
         interval=1,
-        func=lambda: assert_timeline_local(client, UUID(tenant_id), UUID(timeline_id)),
+        func=lambda: assert_timeline_local(client, tenant_id, timeline_id),
     )
 
-    detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
+    detail = client.timeline_detail(tenant_id, timeline_id)
     assert detail["local"] is not None
     log.info("Timeline detail after attach completed: %s", detail)
     assert (
-        lsn_from_hex(detail["local"]["last_record_lsn"]) >= current_lsn
+        Lsn(detail["local"]["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
     assert not detail["remote"]["awaits_download"]
 

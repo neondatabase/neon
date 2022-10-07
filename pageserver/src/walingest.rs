@@ -1,5 +1,5 @@
 //!
-//! Parse PostgreSQL WAL records and store them in a zenith Timeline.
+//! Parse PostgreSQL WAL records and store them in a neon Timeline.
 //!
 //! The pipeline for ingesting WAL looks like this:
 //!
@@ -9,7 +9,7 @@
 //! and decodes it to individual WAL records. It feeds the WAL records
 //! to WalIngest, which parses them and stores them in the Repository.
 //!
-//! The zenith Repository can store page versions in two formats: as
+//! The neon Repository can store page versions in two formats: as
 //! page images, or a WAL records. WalIngest::ingest_record() extracts
 //! page images out of some WAL records, but most it stores as WAL
 //! records. If a WAL record modifies multiple pages, WalIngest
@@ -30,12 +30,13 @@ use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
-use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
+use crate::tenant::Timeline;
 use crate::walrecord::*;
+use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
-use postgres_ffi::v14::pg_constants;
 use postgres_ffi::v14::xlog_utils::*;
 use postgres_ffi::v14::CheckPoint;
 use postgres_ffi::TransactionId;
@@ -82,7 +83,8 @@ impl<'a> WalIngest<'a> {
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
         modification.lsn = lsn;
-        decode_wal_record(recdata, decoded).context("failed decoding wal record")?;
+        decode_wal_record(recdata, decoded, self.timeline.pg_version)
+            .context("failed decoding wal record")?;
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -113,18 +115,49 @@ impl<'a> WalIngest<'a> {
             let truncate = XlSmgrTruncate::decode(&mut buf);
             self.ingest_xlog_smgr_truncate(modification, &truncate)?;
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
-            if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_DBASE_CREATE
-            {
-                let createdb = XlCreateDatabase::decode(&mut buf);
-                self.ingest_xlog_dbase_create(modification, &createdb)?;
-            } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_DBASE_DROP
-            {
-                let dropdb = XlDropDatabase::decode(&mut buf);
-                for tablespace_id in dropdb.tablespace_ids {
-                    trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                    modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+            debug!(
+                "handle RM_DBASE_ID for Postgres version {:?}",
+                self.timeline.pg_version
+            );
+            if self.timeline.pg_version == 14 {
+                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE
+                {
+                    let createdb = XlCreateDatabase::decode(&mut buf);
+                    debug!("XLOG_DBASE_CREATE v14");
+
+                    self.ingest_xlog_dbase_create(modification, &createdb)?;
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v14::bindings::XLOG_DBASE_DROP
+                {
+                    let dropdb = XlDropDatabase::decode(&mut buf);
+                    for tablespace_id in dropdb.tablespace_ids {
+                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                        modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+                    }
+                }
+            } else if self.timeline.pg_version == 15 {
+                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG
+                {
+                    debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY
+                {
+                    // The XLOG record was renamed between v14 and v15,
+                    // but the record format is the same.
+                    // So we can reuse XlCreateDatabase here.
+                    debug!("XLOG_DBASE_CREATE_FILE_COPY");
+                    let createdb = XlCreateDatabase::decode(&mut buf);
+                    self.ingest_xlog_dbase_create(modification, &createdb)?;
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v15::bindings::XLOG_DBASE_DROP
+                {
+                    let dropdb = XlDropDatabase::decode(&mut buf);
+                    for tablespace_id in dropdb.tablespace_ids {
+                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                        modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+                    }
                 }
             }
         } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
@@ -291,7 +324,7 @@ impl<'a> WalIngest<'a> {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
         // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0
+            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, self.timeline.pg_version)?
         {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;
@@ -315,7 +348,7 @@ impl<'a> WalIngest<'a> {
             assert_eq!(image.len(), BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
         } else {
-            let rec = ZenithWalRecord::Postgres {
+            let rec = NeonWalRecord::Postgres {
                 will_init: blk.will_init || blk.apply_image,
                 rec: decoded.record.clone(),
             };
@@ -392,7 +425,7 @@ impl<'a> WalIngest<'a> {
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
             let vm_rel = RelTag {
-                forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                forknum: VISIBILITYMAP_FORKNUM,
                 spcnode: decoded.blocks[0].rnode_spcnode,
                 dbnode: decoded.blocks[0].rnode_dbnode,
                 relnode: decoded.blocks[0].rnode_relnode,
@@ -428,7 +461,7 @@ impl<'a> WalIngest<'a> {
                         modification,
                         vm_rel,
                         new_vm_blk.unwrap(),
-                        ZenithWalRecord::ClearVisibilityMapFlags {
+                        NeonWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
                             old_heap_blkno,
                             flags: pg_constants::VISIBILITYMAP_VALID_BITS,
@@ -442,7 +475,7 @@ impl<'a> WalIngest<'a> {
                             modification,
                             vm_rel,
                             new_vm_blk,
-                            ZenithWalRecord::ClearVisibilityMapFlags {
+                            NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno,
                                 old_heap_blkno: None,
                                 flags: pg_constants::VISIBILITYMAP_VALID_BITS,
@@ -454,7 +487,7 @@ impl<'a> WalIngest<'a> {
                             modification,
                             vm_rel,
                             old_vm_blk,
-                            ZenithWalRecord::ClearVisibilityMapFlags {
+                            NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno: None,
                                 old_heap_blkno,
                                 flags: pg_constants::VISIBILITYMAP_VALID_BITS,
@@ -504,7 +537,7 @@ impl<'a> WalIngest<'a> {
             assert_eq!(src_rel.spcnode, src_tablespace_id);
             assert_eq!(src_rel.dbnode, src_db_id);
 
-            let nblocks = modification.tline.get_rel_size(src_rel, req_lsn)?;
+            let nblocks = modification.tline.get_rel_size(src_rel, req_lsn, true)?;
             let dst_rel = RelTag {
                 spcnode: tablespace_id,
                 dbnode: db_id,
@@ -521,7 +554,7 @@ impl<'a> WalIngest<'a> {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn)?;
+                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true)?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
             }
@@ -568,7 +601,7 @@ impl<'a> WalIngest<'a> {
                 spcnode,
                 dbnode,
                 relnode,
-                forknum: pg_constants::MAIN_FORKNUM,
+                forknum: MAIN_FORKNUM,
             };
             self.put_rel_truncation(modification, rel, rec.blkno)?;
         }
@@ -577,7 +610,7 @@ impl<'a> WalIngest<'a> {
                 spcnode,
                 dbnode,
                 relnode,
-                forknum: pg_constants::FSM_FORKNUM,
+                forknum: FSM_FORKNUM,
             };
 
             // FIXME: 'blkno' stored in the WAL record is the new size of the
@@ -600,7 +633,7 @@ impl<'a> WalIngest<'a> {
                 spcnode,
                 dbnode,
                 relnode,
-                forknum: pg_constants::VISIBILITYMAP_FORKNUM,
+                forknum: VISIBILITYMAP_FORKNUM,
             };
 
             // FIXME: Like with the FSM above, the logic to truncate the VM
@@ -642,12 +675,12 @@ impl<'a> WalIngest<'a> {
                     segno,
                     rpageno,
                     if is_commit {
-                        ZenithWalRecord::ClogSetCommitted {
+                        NeonWalRecord::ClogSetCommitted {
                             xids: page_xids,
                             timestamp: parsed.xact_time,
                         }
                     } else {
-                        ZenithWalRecord::ClogSetAborted { xids: page_xids }
+                        NeonWalRecord::ClogSetAborted { xids: page_xids }
                     },
                 )?;
                 page_xids = Vec::new();
@@ -662,17 +695,17 @@ impl<'a> WalIngest<'a> {
             segno,
             rpageno,
             if is_commit {
-                ZenithWalRecord::ClogSetCommitted {
+                NeonWalRecord::ClogSetCommitted {
                     xids: page_xids,
                     timestamp: parsed.xact_time,
                 }
             } else {
-                ZenithWalRecord::ClogSetAborted { xids: page_xids }
+                NeonWalRecord::ClogSetAborted { xids: page_xids }
             },
         )?;
 
         for xnode in &parsed.xnodes {
-            for forknum in pg_constants::MAIN_FORKNUM..=pg_constants::VISIBILITYMAP_FORKNUM {
+            for forknum in MAIN_FORKNUM..=VISIBILITYMAP_FORKNUM {
                 let rel = RelTag {
                     forknum,
                     spcnode: xnode.spcnode,
@@ -680,7 +713,7 @@ impl<'a> WalIngest<'a> {
                     relnode: xnode.relnode,
                 };
                 let last_lsn = self.timeline.get_last_record_lsn();
-                if modification.tline.get_rel_exists(rel, last_lsn)? {
+                if modification.tline.get_rel_exists(rel, last_lsn, true)? {
                     self.put_rel_drop(modification, rel)?;
                 }
             }
@@ -760,7 +793,7 @@ impl<'a> WalIngest<'a> {
             SlruKind::MultiXactOffsets,
             segno,
             rpageno,
-            ZenithWalRecord::MultixactOffsetCreate {
+            NeonWalRecord::MultixactOffsetCreate {
                 mid: xlrec.mid,
                 moff: xlrec.moff,
             },
@@ -794,7 +827,7 @@ impl<'a> WalIngest<'a> {
                 SlruKind::MultiXactMembers,
                 pageno / pg_constants::SLRU_PAGES_PER_SEGMENT,
                 pageno % pg_constants::SLRU_PAGES_PER_SEGMENT,
-                ZenithWalRecord::MultixactMembersCreate {
+                NeonWalRecord::MultixactMembersCreate {
                     moff: offset,
                     members: this_page_members,
                 },
@@ -901,7 +934,7 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification,
         rel: RelTag,
         blknum: BlockNumber,
-        rec: ZenithWalRecord,
+        rec: NeonWalRecord,
     ) -> Result<()> {
         self.handle_rel_extend(modification, rel, blknum)?;
         modification.put_rel_wal_record(rel, blknum, rec)?;
@@ -924,10 +957,10 @@ impl<'a> WalIngest<'a> {
     }
 
     fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> Result<BlockNumber> {
-        let nblocks = if !self.timeline.get_rel_exists(rel, lsn)? {
+        let nblocks = if !self.timeline.get_rel_exists(rel, lsn, true)? {
             0
         } else {
-            self.timeline.get_rel_size(rel, lsn)?
+            self.timeline.get_rel_size(rel, lsn, true)?
         };
         Ok(nblocks)
     }
@@ -943,12 +976,12 @@ impl<'a> WalIngest<'a> {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let old_nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
+        let old_nblocks = if !self.timeline.get_rel_exists(rel, last_lsn, true)? {
             // create it with 0 size initially, the logic below will extend it
             modification.put_rel_creation(rel, 0)?;
             0
         } else {
-            self.timeline.get_rel_size(rel, last_lsn)?
+            self.timeline.get_rel_size(rel, last_lsn, true)?
         };
 
         if new_nblocks > old_nblocks {
@@ -1022,18 +1055,17 @@ impl<'a> WalIngest<'a> {
     }
 }
 
-///
-/// Tests that should work the same with any Repository/Timeline implementation.
-///
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::repo_harness::*;
-    use crate::layered_repository::Timeline;
     use crate::pgdatadir_mapping::create_test_timeline;
+    use crate::tenant::harness::*;
+    use crate::tenant::Timeline;
     use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
+
+    use crate::DEFAULT_PG_VERSION;
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
@@ -1061,8 +1093,8 @@ mod tests {
 
     #[test]
     fn test_relsize() -> Result<()> {
-        let repo = RepoHarness::create("test_relsize")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_relsize")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1082,43 +1114,43 @@ mod tests {
         assert_current_logical_size(&*tline, Lsn(0x50));
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10)).is_err());
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10), false)?, false);
+        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10), false).is_err());
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, 1);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50))?, 3);
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, 1);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, 3);
 
         // Check page contents at each LSN
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false)?,
             TEST_IMG("foo blk 0 at 2")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false)?,
             TEST_IMG("foo blk 0 at 3")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false)?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false)?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)?,
             TEST_IMG("foo blk 1 at 4")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1129,20 +1161,20 @@ mod tests {
         assert_current_logical_size(&*tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60))?, 2);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60), false)?, 2);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false)?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         // should still see the truncated block with older LSN
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50))?, 3);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, 3);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1150,19 +1182,19 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x68));
         walingest.put_rel_truncation(&mut m, TESTREL_A, 0)?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x68))?, 0);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x68), false)?, 0);
 
         // Extend from 0 to 2 blocks, leaving a gap
         let mut m = tline.begin_modification(Lsn(0x70));
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"))?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70))?, 2);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70), false)?, 2);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false)?,
             ZERO_PAGE
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false)?,
             TEST_IMG("foo blk 1")
         );
 
@@ -1170,15 +1202,15 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x80));
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"))?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, 1501);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80), false)?, 1501);
         for blk in 2..1500 {
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80))?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false)?,
                 ZERO_PAGE
             );
         }
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false)?,
             TEST_IMG("foo blk 1500")
         );
 
@@ -1189,8 +1221,8 @@ mod tests {
     // and then created it again within the same layer.
     #[test]
     fn test_drop_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_drop_extend")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_drop_extend")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1198,8 +1230,8 @@ mod tests {
         m.commit()?;
 
         // Check that rel exists and size is correct
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, 1);
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, 1);
 
         // Drop rel
         let mut m = tline.begin_modification(Lsn(0x30));
@@ -1207,10 +1239,10 @@ mod tests {
         m.commit()?;
 
         // Check that rel is not visible anymore
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30), false)?, false);
 
         // FIXME: should fail
-        //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x30))?.is_none());
+        //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x30), false)?.is_none());
 
         // Re-create it
         let mut m = tline.begin_modification(Lsn(0x40));
@@ -1218,8 +1250,8 @@ mod tests {
         m.commit()?;
 
         // Check that rel exists and size is correct
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x40))?, 1);
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40), false)?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x40), false)?, 1);
 
         Ok(())
     }
@@ -1229,8 +1261,8 @@ mod tests {
     // and then extended it again within the same layer.
     #[test]
     fn test_truncate_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_truncate_extend")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_truncate_extend")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1243,18 +1275,18 @@ mod tests {
         m.commit()?;
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10)).is_err());
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10), false)?, false);
+        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10), false).is_err());
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, relsize);
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, relsize);
 
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn)?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false)?,
                 TEST_IMG(&data)
             );
         }
@@ -1266,24 +1298,24 @@ mod tests {
         m.commit()?;
 
         // Check reported size and contents after truncation
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60))?, 1);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60), false)?, 1);
 
         for blkno in 0..1 {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60))?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false)?,
                 TEST_IMG(&data)
             );
         }
 
         // should still see all blocks with older LSN
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50))?, relsize);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, relsize);
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50))?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false)?,
                 TEST_IMG(&data)
             );
         }
@@ -1298,14 +1330,14 @@ mod tests {
         }
         m.commit()?;
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, relsize);
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80), false)?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80), false)?, relsize);
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x80);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80))?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false)?,
                 TEST_IMG(&data)
             );
         }
@@ -1317,8 +1349,8 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[test]
     fn test_large_rel() -> Result<()> {
-        let repo = RepoHarness::create("test_large_rel")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_large_rel")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;
@@ -1332,14 +1364,17 @@ mod tests {
 
         assert_current_logical_size(&*tline, Lsn(lsn));
 
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE + 1);
+        assert_eq!(
+            tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
+            RELSEG_SIZE + 1
+        );
 
         // Truncate one block
         lsn += 0x10;
         let mut m = tline.begin_modification(Lsn(lsn));
         walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE)?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?, RELSEG_SIZE);
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate another block
@@ -1347,7 +1382,10 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(lsn));
         walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1)?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE - 1);
+        assert_eq!(
+            tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
+            RELSEG_SIZE - 1
+        );
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate to 1500, and then truncate all the way down to 0, one block at a time
@@ -1359,7 +1397,7 @@ mod tests {
             walingest.put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber)?;
             m.commit()?;
             assert_eq!(
-                tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
+                tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
                 size as BlockNumber
             );
 

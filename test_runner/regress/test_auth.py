@@ -1,8 +1,8 @@
 from contextlib import closing
-from uuid import uuid4
 
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserverApiException
+from fixtures.types import TenantId
 
 
 def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
@@ -11,9 +11,9 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
 
     ps = env.pageserver
 
-    tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant.hex)
+    tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant)
     tenant_http_client = env.pageserver.http_client(tenant_token)
-    invalid_tenant_token = env.auth_keys.generate_tenant_token(uuid4().hex)
+    invalid_tenant_token = env.auth_keys.generate_tenant_token(TenantId.generate())
     invalid_tenant_http_client = env.pageserver.http_client(invalid_tenant_token)
 
     management_token = env.auth_keys.generate_management_token()
@@ -56,14 +56,12 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         tenant_http_client.tenant_create()
 
 
-@pytest.mark.parametrize("with_safekeepers", [False, True])
-def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder, with_safekeepers: bool):
+def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
-    if with_safekeepers:
-        neon_env_builder.num_safekeepers = 3
+    neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    branch = f"test_compute_auth_to_pageserver{with_safekeepers}"
+    branch = "test_compute_auth_to_pageserver"
     env.neon_cli.create_branch(branch)
     pg = env.postgres.create_start(branch)
 

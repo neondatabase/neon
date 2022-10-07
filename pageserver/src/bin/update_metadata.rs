@@ -3,7 +3,7 @@
 //! A handy tool for debugging, that's all.
 use anyhow::Result;
 use clap::{App, Arg};
-use pageserver::layered_repository::metadata::TimelineMetadata;
+use pageserver::tenant::metadata::TimelineMetadata;
 use std::path::PathBuf;
 use std::str::FromStr;
 use utils::{lsn::Lsn, project_git_version};
@@ -11,7 +11,7 @@ use utils::{lsn::Lsn, project_git_version};
 project_git_version!(GIT_VERSION);
 
 fn main() -> Result<()> {
-    let arg_matches = App::new("Zenith update metadata utility")
+    let arg_matches = App::new("Neon update metadata utility")
         .about("Dump or update metadata file")
         .version(GIT_VERSION)
         .arg(
@@ -50,6 +50,7 @@ fn main() -> Result<()> {
             meta.ancestor_lsn(),
             meta.latest_gc_cutoff_lsn(),
             meta.initdb_lsn(),
+            meta.pg_version(),
         );
         update_meta = true;
     }
@@ -62,6 +63,7 @@ fn main() -> Result<()> {
             meta.ancestor_lsn(),
             meta.latest_gc_cutoff_lsn(),
             meta.initdb_lsn(),
+            meta.pg_version(),
         );
         update_meta = true;
     }

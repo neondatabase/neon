@@ -5,7 +5,6 @@ import subprocess
 import threading
 from contextlib import closing, contextmanager
 from typing import Any, Dict, Optional, Tuple
-from uuid import UUID
 
 import pytest
 from fixtures.log_helper import log
@@ -25,7 +24,8 @@ from fixtures.neon_fixtures import (
     wait_for_upload,
     wait_until,
 )
-from fixtures.utils import lsn_from_hex, lsn_to_hex, subprocess_capture
+from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import query_scalar, subprocess_capture
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -113,19 +113,21 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
 
 def populate_branch(
     pg: Postgres,
-    tenant_id: UUID,
+    tenant_id: TenantId,
     ps_http: NeonPageserverHttpClient,
     create_table: bool,
     expected_sum: Optional[int],
-) -> Tuple[UUID, int]:
+) -> Tuple[TimelineId, Lsn]:
     # insert some data
     with pg_cur(pg) as cur:
         cur.execute("SHOW neon.timeline_id")
-        timeline_id = UUID(cur.fetchone()[0])
-        log.info("timeline to relocate %s", timeline_id.hex)
+        timeline_id = TimelineId(cur.fetchone()[0])
+        log.info("timeline to relocate %s", timeline_id)
 
-        cur.execute("SELECT pg_current_wal_flush_lsn()")
-        log.info("pg_current_wal_flush_lsn() %s", lsn_from_hex(cur.fetchone()[0]))
+        log.info(
+            "pg_current_wal_flush_lsn(): %s",
+            Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()")),
+        )
         log.info(
             "timeline detail %s",
             ps_http.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id),
@@ -139,21 +141,19 @@ def populate_branch(
         if expected_sum is not None:
             cur.execute("SELECT sum(key) FROM t")
             assert cur.fetchone() == (expected_sum,)
-        cur.execute("SELECT pg_current_wal_flush_lsn()")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
-        current_lsn = lsn_from_hex(cur.fetchone()[0])
         return timeline_id, current_lsn
 
 
 def ensure_checkpoint(
-    pageserver_cur,
     pageserver_http: NeonPageserverHttpClient,
-    tenant_id: UUID,
-    timeline_id: UUID,
-    current_lsn: int,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    current_lsn: Lsn,
 ):
     # run checkpoint manually to be sure that data landed in remote storage
-    pageserver_cur.execute(f"checkpoint {tenant_id.hex} {timeline_id.hex}")
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
     # wait until pageserver successfully uploaded a checkpoint to remote storage
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
@@ -161,29 +161,33 @@ def ensure_checkpoint(
 
 def check_timeline_attached(
     new_pageserver_http_client: NeonPageserverHttpClient,
-    tenant_id: UUID,
-    timeline_id: UUID,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     old_timeline_detail: Dict[str, Any],
-    old_current_lsn: int,
+    old_current_lsn: Lsn,
 ):
     # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
     new_timeline_detail = assert_timeline_local(new_pageserver_http_client, tenant_id, timeline_id)
 
     # when load is active these checks can break because lsns are not static
-    # so lets check with some margin
+    # so let's check with some margin
     assert_abs_margin_ratio(
-        lsn_from_hex(new_timeline_detail["local"]["disk_consistent_lsn"]),
-        lsn_from_hex(old_timeline_detail["local"]["disk_consistent_lsn"]),
+        int(Lsn(new_timeline_detail["local"]["disk_consistent_lsn"])),
+        int(Lsn(old_timeline_detail["local"]["disk_consistent_lsn"])),
         0.03,
     )
 
     assert_abs_margin_ratio(
-        lsn_from_hex(new_timeline_detail["local"]["disk_consistent_lsn"]), old_current_lsn, 0.03
+        int(Lsn(new_timeline_detail["local"]["disk_consistent_lsn"])), int(old_current_lsn), 0.03
     )
 
 
 def switch_pg_to_new_pageserver(
-    env: NeonEnv, pg: Postgres, new_pageserver_port: int, tenant_id: UUID, timeline_id: UUID
+    env: NeonEnv,
+    pg: Postgres,
+    new_pageserver_port: int,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
 ) -> pathlib.Path:
     pg.stop()
 
@@ -195,7 +199,7 @@ def switch_pg_to_new_pageserver(
     pg.start()
 
     timeline_to_detach_local_path = (
-        env.repo_dir / "tenants" / tenant_id.hex / "timelines" / timeline_id.hex
+        env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
     )
     files_before_detach = os.listdir(timeline_to_detach_local_path)
     assert (
@@ -260,7 +264,7 @@ def test_tenant_relocation(
     pageserver_http = env.pageserver.http_client()
 
     tenant_id, initial_timeline_id = env.neon_cli.create_tenant(
-        UUID("74ee8b079a0e437eb0afea7d26a07209")
+        TenantId("74ee8b079a0e437eb0afea7d26a07209")
     )
     log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, initial_timeline_id)
 
@@ -280,7 +284,7 @@ def test_tenant_relocation(
     env.neon_cli.create_branch(
         new_branch_name="test_tenant_relocation_second",
         ancestor_branch_name="test_tenant_relocation_main",
-        ancestor_start_lsn=lsn_to_hex(current_lsn_main),
+        ancestor_start_lsn=current_lsn_main,
         tenant_id=tenant_id,
     )
     pg_second = env.postgres.create_start(
@@ -319,22 +323,19 @@ def test_tenant_relocation(
     # this requirement introduces a problem
     # if user creates a branch during migration
     # it wont appear on the new pageserver
-    with pg_cur(env.pageserver) as cur:
-        ensure_checkpoint(
-            cur,
-            pageserver_http=pageserver_http,
-            tenant_id=tenant_id,
-            timeline_id=timeline_id_main,
-            current_lsn=current_lsn_main,
-        )
+    ensure_checkpoint(
+        pageserver_http=pageserver_http,
+        tenant_id=tenant_id,
+        timeline_id=timeline_id_main,
+        current_lsn=current_lsn_main,
+    )
 
-        ensure_checkpoint(
-            cur,
-            pageserver_http=pageserver_http,
-            tenant_id=tenant_id,
-            timeline_id=timeline_id_second,
-            current_lsn=current_lsn_second,
-        )
+    ensure_checkpoint(
+        pageserver_http=pageserver_http,
+        tenant_id=tenant_id,
+        timeline_id=timeline_id_second,
+        current_lsn=current_lsn_second,
+    )
 
     log.info("inititalizing new pageserver")
     # bootstrap second pageserver
@@ -365,7 +366,7 @@ def test_tenant_relocation(
                 "python",
                 os.path.join(base_dir, "scripts/export_import_between_pageservers.py"),
                 "--tenant-id",
-                tenant_id.hex,
+                str(tenant_id),
                 "--from-host",
                 "localhost",
                 "--from-http-port",

@@ -8,6 +8,7 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
     pg_distrib_dir,
 )
+from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar, subprocess_capture
 
 num_rows = 1000
@@ -17,8 +18,6 @@ num_rows = 1000
 def test_fullbackup(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, port_distributor: PortDistributor
 ):
-
-    neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_fullbackup")
@@ -26,7 +25,7 @@ def test_fullbackup(
     log.info("postgres is running on 'test_fullbackup' branch")
 
     with pgmain.cursor() as cur:
-        timeline = query_scalar(cur, "SHOW neon.timeline_id")
+        timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
         # data loading may take a while, so increase statement timeout
         cur.execute("SET statement_timeout='300s'")
@@ -36,7 +35,7 @@ def test_fullbackup(
         )
         cur.execute("CHECKPOINT")
 
-        lsn = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
+        lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_insert_lsn()"))
         log.info(f"start_backup_lsn = {lsn}")
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
@@ -46,7 +45,7 @@ def test_fullbackup(
     # Get and unpack fullbackup from pageserver
     restored_dir_path = env.repo_dir / "restored_datadir"
     os.mkdir(restored_dir_path, 0o750)
-    query = f"fullbackup {env.initial_tenant.hex} {timeline} {lsn}"
+    query = f"fullbackup {env.initial_tenant} {timeline} {lsn}"
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     tar_output_file = result_basepath + ".stdout"

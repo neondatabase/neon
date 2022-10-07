@@ -15,21 +15,25 @@ use toml_edit;
 use toml_edit::{Document, Item};
 use url::Url;
 use utils::{
+    id::{NodeId, TenantId, TimelineId},
     postgres_backend::AuthType,
-    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
-use crate::layered_repository::TIMELINES_SEGMENT_NAME;
+use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
+
+/// The name of the metadata file pageserver creates per timeline.
+pub const METADATA_FILE_NAME: &str = "metadata";
+const TENANT_CONFIG_NAME: &str = "config";
 
 pub mod defaults {
     use crate::tenant_config::defaults::*;
     use const_format::formatcp;
 
-    pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
-    pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
-    pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
-    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
+    pub use pageserver_api::{
+        DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
+        DEFAULT_PG_LISTEN_PORT,
+    };
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -205,7 +209,7 @@ impl Default for PageServerConfigBuilder {
             workdir: Set(PathBuf::new()),
             pg_distrib_dir: Set(env::current_dir()
                 .expect("cannot access current directory")
-                .join("tmp_install")),
+                .join("pg_install")),
             auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
@@ -342,28 +346,57 @@ impl PageServerConf {
         self.workdir.join("tenants")
     }
 
-    pub fn tenant_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenants_path().join(tenantid.to_string())
+    pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenants_path().join(tenant_id.to_string())
     }
 
-    pub fn timelines_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenant_path(tenantid).join(TIMELINES_SEGMENT_NAME)
+    /// Points to a place in pageserver's local directory,
+    /// where certain tenant's tenantconf file should be located.
+    pub fn tenant_config_path(&self, tenant_id: TenantId) -> PathBuf {
+        self.tenant_path(&tenant_id).join(TENANT_CONFIG_NAME)
     }
 
-    pub fn timeline_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
-        self.timelines_path(tenantid).join(timelineid.to_string())
+    pub fn timelines_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
+    }
+
+    pub fn timeline_path(&self, timeline_id: &TimelineId, tenant_id: &TenantId) -> PathBuf {
+        self.timelines_path(tenant_id).join(timeline_id.to_string())
+    }
+
+    /// Points to a place in pageserver's local directory,
+    /// where certain timeline's metadata file should be located.
+    pub fn metadata_path(&self, timeline_id: TimelineId, tenant_id: TenantId) -> PathBuf {
+        self.timeline_path(&timeline_id, &tenant_id)
+            .join(METADATA_FILE_NAME)
     }
 
     //
     // Postgres distribution paths
     //
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> PathBuf {
+        let path = self.pg_distrib_dir.clone();
 
-    pub fn pg_bin_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("bin")
+        match pg_version {
+            14 => path.join(format!("v{pg_version}")),
+            15 => path.join(format!("v{pg_version}")),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
     }
 
-    pub fn pg_lib_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("lib")
+    pub fn pg_bin_dir(&self, pg_version: u32) -> PathBuf {
+        match pg_version {
+            14 => self.pg_distrib_dir(pg_version).join("bin"),
+            15 => self.pg_distrib_dir(pg_version).join("bin"),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
+    }
+    pub fn pg_lib_dir(&self, pg_version: u32) -> PathBuf {
+        match pg_version {
+            14 => self.pg_distrib_dir(pg_version).join("lib"),
+            15 => self.pg_distrib_dir(pg_version).join("lib"),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
     }
 
     /// Parse a configuration file (pageserver.toml) into a PageServerConf struct,
@@ -419,7 +452,7 @@ impl PageServerConf {
 
         let mut conf = builder.build().context("invalid config")?;
 
-        if conf.auth_type == AuthType::ZenithJWT {
+        if conf.auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
                 .auth_validation_public_key_path
                 .get_or_insert_with(|| workdir.join("auth_public_key.pem"));
@@ -429,13 +462,6 @@ impl PageServerConf {
                     "Can't find auth_validation_public_key at '{}'",
                     auth_validation_public_key_path.display()
                 )
-            );
-        }
-
-        if !conf.pg_distrib_dir.join("bin/postgres").exists() {
-            bail!(
-                "Can't find postgres binary at {}",
-                conf.pg_distrib_dir.display()
             );
         }
 
@@ -608,6 +634,7 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::*;
+    use crate::DEFAULT_PG_VERSION;
 
     const ALL_BASE_VALUES_TOML: &str = r#"
 # Initial configuration file created by 'pageserver --init'
@@ -847,8 +874,9 @@ broker_endpoints = ['{broker_endpoint}']
         fs::create_dir_all(&workdir)?;
 
         let pg_distrib_dir = tempdir_path.join("pg_distrib");
-        fs::create_dir_all(&pg_distrib_dir)?;
-        let postgres_bin_dir = pg_distrib_dir.join("bin");
+        let pg_distrib_dir_versioned = pg_distrib_dir.join(format!("v{DEFAULT_PG_VERSION}"));
+        fs::create_dir_all(&pg_distrib_dir_versioned)?;
+        let postgres_bin_dir = pg_distrib_dir_versioned.join("bin");
         fs::create_dir_all(&postgres_bin_dir)?;
         fs::write(postgres_bin_dir.join("postgres"), "I'm postgres, trust me")?;
 

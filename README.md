@@ -25,6 +25,7 @@ Pageserver consists of:
 - WAL receiver - service that receives WAL from WAL service and stores it in the repository.
 - Page service - service that communicates with compute nodes and responds with pages from the repository.
 - WAL redo - service that builds pages from base images and WAL records on Page service request
+
 ## Running local installation
 
 
@@ -68,6 +69,17 @@ brew install libpq
 brew link --force libpq
 ```
 
+#### Rustc version
+
+The project uses [rust toolchain file](./rust-toolchain.toml) to define the version it's built with in CI for testing and local builds.
+
+This file is automatically picked up by [`rustup`](https://rust-lang.github.io/rustup/overrides.html#the-toolchain-file) that installs (if absent) and uses the toolchain version pinned in the file.
+
+rustup users who want to build with another toolchain can use [`rustup override`](https://rust-lang.github.io/rustup/overrides.html#directory-overrides) command to set a specific toolchain for the project's directory.
+
+non-rustup users most probably are not getting the same toolchain automatically from the file, so are responsible to manually verify their toolchain matches the version in the file.
+Newer rustc versions most probably will work fine, yet older ones might not be supported due to some new features used by the project or the crates.
+
 #### Building on Linux
 
 1. Build neon and patched postgres
@@ -77,9 +89,9 @@ brew link --force libpq
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 
-# The preferred and default is to make a debug build. This will create a 
-# demonstrably slower build than a release build. If you want to use a release
-# build, utilize "BUILD_TYPE=release make -j`nproc`" 
+# The preferred and default is to make a debug build. This will create a
+# demonstrably slower build than a release build. For a release build,
+# use "BUILD_TYPE=release make -j`nproc`"
 
 make -j`nproc`
 ```
@@ -93,15 +105,15 @@ make -j`nproc`
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 
-# The preferred and default is to make a debug build. This will create a 
-# demonstrably slower build than a release build. If you want to use a release
-# build, utilize "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`" 
+# The preferred and default is to make a debug build. This will create a
+# demonstrably slower build than a release build. For a release build,
+# use "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`"
 
 make -j`sysctl -n hw.logicalcpu`
 ```
 
 #### Dependency installation notes
-To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
+To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `pg_install/bin` and `pg_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
 Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (requires [poetry](https://python-poetry.org/)) in the project directory.
@@ -113,16 +125,18 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 # Create repository in .neon with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/neon_local init
-initializing tenantid 9ef87a5bf0d92544f6fafeeb3239695c
-created initial timeline de200bd42b49cc1814412c7e592dd6e9 timeline.lsn 0/16B5A50
-initial timeline de200bd42b49cc1814412c7e592dd6e9 created
-pageserver init succeeded
+Starting pageserver at '127.0.0.1:64000' in '.neon'
+
+Pageserver started
+Successfully initialized timeline 7dd0907914ac399ff3be45fb252bfdb7
+Stopping pageserver gracefully...done!
 
 # start pageserver and safekeeper
 > ./target/debug/neon_local start
+Starting etcd broker using /usr/bin/etcd
 Starting pageserver at '127.0.0.1:64000' in '.neon'
+
 Pageserver started
-initializing for sk 1 for 7676
 Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'
 Safekeeper started
 
@@ -208,7 +222,12 @@ Ensure your dependencies are installed as described [here](https://github.com/ne
 
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
-make # builds also postgres and installs it to ./tmp_install
+
+# either:
+CARGO_BUILD_FLAGS="--features=testing" make
+# or:
+make debug
+
 ./scripts/pytest
 ```
 

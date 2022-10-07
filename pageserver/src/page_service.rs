@@ -11,38 +11,38 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use once_cell::sync::Lazy;
-use regex::Regex;
-use std::io::{self, Read};
+use futures::{Stream, StreamExt};
+use std::io;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio_util::io::StreamReader;
+use tokio_util::io::SyncIoBridge;
 use tracing::*;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
+    id::{TenantId, TimelineId},
     lsn::Lsn,
-    postgres_backend::{self, is_socket_read_timed_out, AuthType, PostgresBackend},
-    pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
+    postgres_backend::AuthType,
+    postgres_backend_async::{self, PostgresBackend},
+    pq_proto::{BeMessage, FeMessage, RowDescriptor},
     simple_rcu::RcuReadGuard,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
-use crate::layered_repository::Timeline;
-use crate::pgdatadir_mapping::LsnForTimestamp;
+use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
+use crate::task_mgr;
+use crate::task_mgr::TaskKind;
+use crate::tenant::Timeline;
 use crate::tenant_mgr;
-use crate::thread_mgr;
-use crate::thread_mgr::ThreadKind;
 use crate::CheckpointConfig;
-use metrics::{register_histogram_vec, HistogramVec};
-use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 
-use postgres_ffi::v14::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
 // Wrapped in libpq CopyData
@@ -120,7 +120,7 @@ impl PagestreamFeMessage {
     fn parse(mut body: Bytes) -> anyhow::Result<PagestreamFeMessage> {
         // TODO these gets can fail
 
-        // these correspond to the ZenithMessageTag enum in pagestore_client.h
+        // these correspond to the NeonMessageTag enum in pagestore_client.h
         //
         // TODO: consider using protobuf or serde bincode for less error prone
         // serialization.
@@ -202,93 +202,49 @@ impl PagestreamBeMessage {
     }
 }
 
-/// Implements Read for the server side of CopyIn
-struct CopyInReader<'a> {
-    pgb: &'a mut PostgresBackend,
+fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + '_ {
+    async_stream::try_stream! {
+        loop {
+            let msg = tokio::select! {
+                biased;
 
-    /// Overflow buffer for bytes sent in CopyData messages
-    /// that the reader (caller of read) hasn't asked for yet.
-    /// TODO use BytesMut?
-    buf: Vec<u8>,
+                _ = task_mgr::shutdown_watcher() => {
+                    // We were requested to shut down.
+                    let msg = format!("pageserver is shutting down");
+                    let _ = pgb.write_message(&BeMessage::ErrorResponse(&msg));
+                    Err(anyhow::anyhow!(msg))
+                }
 
-    /// Bytes before `buf_begin` are considered as dropped.
-    /// This allows us to implement O(1) pop_front on Vec<u8>.
-    /// The Vec won't grow large because we only add to it
-    /// when it's empty.
-    buf_begin: usize,
-}
+                msg = pgb.read_message() => { msg }
+            };
 
-impl<'a> CopyInReader<'a> {
-    // NOTE: pgb should be in copy in state already
-    fn new(pgb: &'a mut PostgresBackend) -> Self {
-        Self {
-            pgb,
-            buf: Vec::<_>::new(),
-            buf_begin: 0,
-        }
-    }
-}
-
-impl<'a> Drop for CopyInReader<'a> {
-    fn drop(&mut self) {
-        // Finalize copy protocol so that self.pgb can be reused
-        // TODO instead, maybe take ownership of pgb and give it back at the end
-        let mut buf: Vec<u8> = vec![];
-        let _ = self.read_to_end(&mut buf);
-    }
-}
-
-impl<'a> Read for CopyInReader<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        while !thread_mgr::is_shutdown_requested() {
-            // Return from buffer if nonempty
-            if self.buf_begin < self.buf.len() {
-                let bytes_to_read = std::cmp::min(buf.len(), self.buf.len() - self.buf_begin);
-                buf[..bytes_to_read].copy_from_slice(&self.buf[self.buf_begin..][..bytes_to_read]);
-                self.buf_begin += bytes_to_read;
-                return Ok(bytes_to_read);
-            }
-
-            // Delete garbage
-            self.buf.clear();
-            self.buf_begin = 0;
-
-            // Wait for client to send CopyData bytes
-            match self.pgb.read_message() {
+            match msg {
                 Ok(Some(message)) => {
                     let copy_data_bytes = match message {
                         FeMessage::CopyData(bytes) => bytes,
-                        FeMessage::CopyDone => return Ok(0),
+                        FeMessage::CopyDone => { break },
                         FeMessage::Sync => continue,
                         m => {
                             let msg = format!("unexpected message {:?}", m);
-                            self.pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
-                            return Err(io::Error::new(io::ErrorKind::Other, msg));
+                            pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
+                            Err(io::Error::new(io::ErrorKind::Other, msg))?;
+                            break;
                         }
                     };
 
-                    // Return as much as we can, saving the rest in self.buf
-                    let mut reader = copy_data_bytes.reader();
-                    let bytes_read = reader.read(buf)?;
-                    reader.read_to_end(&mut self.buf)?;
-                    return Ok(bytes_read);
+                    yield copy_data_bytes;
                 }
                 Ok(None) => {
                     let msg = "client closed connection";
-                    self.pgb.write_message(&BeMessage::ErrorResponse(msg))?;
-                    return Err(io::Error::new(io::ErrorKind::Other, msg));
+                    pgb.write_message(&BeMessage::ErrorResponse(msg))?;
+                    pgb.flush().await?;
+                    Err(io::Error::new(io::ErrorKind::Other, msg))?;
                 }
                 Err(e) => {
-                    if !is_socket_read_timed_out(&e) {
-                        return Err(io::Error::new(io::ErrorKind::Other, e));
-                    }
+                    Err(io::Error::new(io::ErrorKind::Other, e))?;
                 }
-            }
+            };
         }
-
-        // Shutting down
-        let msg = "Importer thread was shut down";
-        Err(io::Error::new(io::ErrorKind::Other, msg))
     }
 }
 
@@ -297,61 +253,49 @@ impl<'a> Read for CopyInReader<'a> {
 ///
 /// Main loop of the page service.
 ///
-/// Listens for connections, and launches a new handler thread for each.
+/// Listens for connections, and launches a new handler task for each.
 ///
-pub fn thread_main(
+pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
-    let basic_rt = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()?;
-
-    let tokio_listener = {
-        let _guard = basic_rt.enter();
-        tokio::net::TcpListener::from_std(listener)
-    }?;
+    let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
 
     // Wait for a new connection to arrive, or for server shutdown.
-    while let Some(res) = basic_rt.block_on(async {
-        let shutdown_watcher = thread_mgr::shutdown_watcher();
-        tokio::select! {
-            biased;
+    while let Some(res) = tokio::select! {
+        biased;
 
-            _ = shutdown_watcher => {
-                // We were requested to shut down.
-                None
-            }
-
-            res = tokio_listener.accept() => {
-                Some(res)
-            }
+        _ = task_mgr::shutdown_watcher() => {
+            // We were requested to shut down.
+            None
         }
-    }) {
+
+        res = tokio_listener.accept() => {
+            Some(res)
+        }
+    } {
         match res {
             Ok((socket, peer_addr)) => {
-                // Connection established. Spawn a new thread to handle it.
+                // Connection established. Spawn a new task to handle it.
                 debug!("accepted connection from {}", peer_addr);
                 let local_auth = auth.clone();
 
-                // PageRequestHandler threads are not associated with any particular
-                // timeline in the thread manager. In practice most connections will
+                // PageRequestHandler tasks are not associated with any particular
+                // timeline in the task manager. In practice most connections will
                 // only deal with a particular timeline, but we don't know which one
                 // yet.
-                if let Err(err) = thread_mgr::spawn(
-                    ThreadKind::PageRequestHandler,
+                task_mgr::spawn(
+                    &tokio::runtime::Handle::current(),
+                    TaskKind::PageRequestHandler,
                     None,
                     None,
-                    "serving Page Service thread",
+                    "serving compute connection task",
                     false,
-                    move || page_service_conn_main(conf, local_auth, socket, auth_type),
-                ) {
-                    // Thread creation failed. Log the error and continue.
-                    error!("could not spawn page service thread: {:?}", err);
-                }
+                    page_service_conn_main(conf, local_auth, socket, auth_type),
+                );
             }
             Err(err) => {
                 // accept() failed. Log the error, and loop back to retry on next connection.
@@ -365,37 +309,32 @@ pub fn thread_main(
     Ok(())
 }
 
-fn page_service_conn_main(
+async fn page_service_conn_main(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
 ) -> anyhow::Result<()> {
-    // Immediately increment the gauge, then create a job to decrement it on thread exit.
+    // Immediately increment the gauge, then create a job to decrement it on task exit.
     // One of the pros of `defer!` is that this will *most probably*
     // get called, even in presence of panics.
-    let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
+    let gauge = LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
     gauge.inc();
     scopeguard::defer! {
         gauge.dec();
     }
-
-    // We use Tokio to accept the connection, but the rest of the code works with a
-    // regular socket. Convert.
-    let socket = socket
-        .into_std()
-        .context("could not convert tokio::net:TcpStream to std::net::TcpStream")?;
-    socket
-        .set_nonblocking(false)
-        .context("could not put socket to blocking mode")?;
 
     socket
         .set_nodelay(true)
         .context("could not set TCP_NODELAY")?;
 
     let mut conn_handler = PageServerHandler::new(conf, auth);
-    let pgbackend = PostgresBackend::new(socket, auth_type, None, true)?;
-    match pgbackend.run(&mut conn_handler) {
+    let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
+
+    let result = pgbackend
+        .run(&mut conn_handler, task_mgr::shutdown_watcher)
+        .await;
+    match result {
         Ok(()) => {
             // we've been requested to shut down
             Ok(())
@@ -420,30 +359,45 @@ fn page_service_conn_main(
     }
 }
 
+struct PageRequestMetrics {
+    get_rel_exists: metrics::Histogram,
+    get_rel_size: metrics::Histogram,
+    get_page_at_lsn: metrics::Histogram,
+    get_db_size: metrics::Histogram,
+}
+
+impl PageRequestMetrics {
+    fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+        let tenant_id = tenant_id.to_string();
+        let timeline_id = timeline_id.to_string();
+
+        let get_rel_exists =
+            SMGR_QUERY_TIME.with_label_values(&["get_rel_exists", &tenant_id, &timeline_id]);
+
+        let get_rel_size =
+            SMGR_QUERY_TIME.with_label_values(&["get_rel_size", &tenant_id, &timeline_id]);
+
+        let get_page_at_lsn =
+            SMGR_QUERY_TIME.with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id]);
+
+        let get_db_size =
+            SMGR_QUERY_TIME.with_label_values(&["get_db_size", &tenant_id, &timeline_id]);
+
+        Self {
+            get_rel_exists,
+            get_rel_size,
+            get_page_at_lsn,
+            get_db_size,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PageServerHandler {
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 }
-
-const TIME_BUCKETS: &[f64] = &[
-    0.00001, // 1/100000 s
-    0.0001, 0.00015, 0.0002, 0.00025, 0.0003, 0.00035, 0.0005, 0.00075, // 1/10000 s
-    0.001, 0.0025, 0.005, 0.0075, // 1/1000 s
-    0.01, 0.0125, 0.015, 0.025, 0.05, // 1/100 s
-    0.1,  // 1/10 s
-];
-
-static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_smgr_query_seconds",
-        "Time spent on smgr query handling",
-        &["smgr_query_type", "tenant_id", "timeline_id"],
-        TIME_BUCKETS.into()
-    )
-    .expect("failed to define a metric")
-});
 
 impl PageServerHandler {
     pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
@@ -454,107 +408,103 @@ impl PageServerHandler {
         }
     }
 
-    fn handle_pagerequests(
+    #[instrument(skip(self, pgb))]
+    async fn handle_pagerequests(
         &self,
         pgb: &mut PostgresBackend,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
-        let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
-
         // NOTE: pagerequests handler exits when connection is closed,
         //       so there is no need to reset the association
-        thread_mgr::associate_with(Some(tenantid), Some(timelineid));
+        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         // Check that the timeline exists
-        let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-            .context("Cannot load local timeline")?;
+        let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
-        /* switch client to COPYBOTH */
+        // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
+        pgb.flush().await?;
 
-        while !thread_mgr::is_shutdown_requested() {
-            let msg = pgb.read_message();
+        let metrics = PageRequestMetrics::new(&tenant_id, &timeline_id);
 
-            let profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
-            match msg {
-                Ok(message) => {
-                    if let Some(message) = message {
-                        trace!("query: {:?}", message);
+        loop {
+            let msg = tokio::select! {
+                biased;
 
-                        let copy_data_bytes = match message {
-                            FeMessage::CopyData(bytes) => bytes,
-                            _ => continue,
-                        };
-
-                        let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
-                        let tenant_id = tenantid.to_string();
-                        let timeline_id = timelineid.to_string();
-
-                        let response = match zenith_fe_msg {
-                            PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_rel_exists", &tenant_id, &timeline_id])
-                                .observe_closure_duration(|| {
-                                    self.handle_get_rel_exists_request(&timeline, &req)
-                                }),
-                            PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_rel_size", &tenant_id, &timeline_id])
-                                .observe_closure_duration(|| {
-                                    self.handle_get_nblocks_request(&timeline, &req)
-                                }),
-                            PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id])
-                                .observe_closure_duration(|| {
-                                    self.handle_get_page_at_lsn_request(&timeline, &req)
-                                }),
-                            PagestreamFeMessage::DbSize(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_db_size", &tenant_id, &timeline_id])
-                                .observe_closure_duration(|| {
-                                    self.handle_db_size_request(&timeline, &req)
-                                }),
-                        };
-
-                        let response = response.unwrap_or_else(|e| {
-                            // print the all details to the log with {:#}, but for the client the
-                            // error message is enough
-                            error!("error reading relation or page version: {:?}", e);
-                            PagestreamBeMessage::Error(PagestreamErrorResponse {
-                                message: e.to_string(),
-                            })
-                        });
-
-                        pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
-                    } else {
-                        break;
-                    }
+                _ = task_mgr::shutdown_watcher() => {
+                    // We were requested to shut down.
+                    info!("shutdown request received in page handler");
+                    break;
                 }
-                Err(e) => {
-                    if !is_socket_read_timed_out(&e) {
-                        return Err(e);
-                    }
+
+                msg = pgb.read_message() => { msg }
+            };
+
+            let copy_data_bytes = match msg? {
+                Some(FeMessage::CopyData(bytes)) => bytes,
+                Some(m) => {
+                    bail!("unexpected message: {m:?} during COPY");
                 }
-            }
-            drop(profiling_guard);
+                None => break, // client disconnected
+            };
+
+            trace!("query: {copy_data_bytes:?}");
+
+            let neon_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+
+            let response = match neon_fe_msg {
+                PagestreamFeMessage::Exists(req) => {
+                    let _timer = metrics.get_rel_exists.start_timer();
+                    self.handle_get_rel_exists_request(&timeline, &req).await
+                }
+                PagestreamFeMessage::Nblocks(req) => {
+                    let _timer = metrics.get_rel_size.start_timer();
+                    self.handle_get_nblocks_request(&timeline, &req).await
+                }
+                PagestreamFeMessage::GetPage(req) => {
+                    let _timer = metrics.get_page_at_lsn.start_timer();
+                    self.handle_get_page_at_lsn_request(&timeline, &req).await
+                }
+                PagestreamFeMessage::DbSize(req) => {
+                    let _timer = metrics.get_db_size.start_timer();
+                    self.handle_db_size_request(&timeline, &req).await
+                }
+            };
+
+            let response = response.unwrap_or_else(|e| {
+                // print the all details to the log with {:#}, but for the client the
+                // error message is enough
+                error!("error reading relation or page version: {:?}", e);
+                PagestreamBeMessage::Error(PagestreamErrorResponse {
+                    message: e.to_string(),
+                })
+            });
+
+            pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
+            pgb.flush().await?;
         }
         Ok(())
     }
 
-    fn handle_import_basebackup(
+    #[instrument(skip(self, pgb))]
+    async fn handle_import_basebackup(
         &self,
         pgb: &mut PostgresBackend,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         base_lsn: Lsn,
         _end_lsn: Lsn,
+        pg_version: u32,
     ) -> anyhow::Result<()> {
-        thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
-        let _enter =
-            info_span!("import basebackup", timeline = %timeline_id, tenant = %tenant_id).entered();
-
+        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let timeline = repo.create_empty_timeline(timeline_id, base_lsn)?;
+        let timeline = tenant_mgr::get_tenant(tenant_id, true)?.create_empty_timeline(
+            timeline_id,
+            base_lsn,
+            pg_version,
+        )?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -569,8 +519,24 @@ impl PageServerHandler {
         // Import basebackup provided via CopyData
         info!("importing basebackup");
         pgb.write_message(&BeMessage::CopyInResponse)?;
-        let reader = CopyInReader::new(pgb);
-        import_basebackup_from_tar(&*timeline, reader, base_lsn)?;
+        pgb.flush().await?;
+
+        // import_basebackup_from_tar() is not async, mainly because the Tar crate
+        // it uses is not async. So we need to jump through some hoops:
+        // - convert the input from client connection to a synchronous Read
+        // - use block_in_place()
+        let mut copyin_stream = Box::pin(copyin_stream(pgb));
+        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
+        tokio::task::block_in_place(|| import_basebackup_from_tar(&timeline, reader, base_lsn))?;
+
+        // Drain the rest of the Copy data
+        let mut bytes_after_tar = 0;
+        while let Some(bytes) = copyin_stream.next().await {
+            bytes_after_tar += bytes?.len();
+        }
+        if bytes_after_tar > 0 {
+            warn!("ignored {bytes_after_tar} unexpected bytes after the tar archive");
+        }
 
         // TODO check checksum
         // Meanwhile you can verify client-side by taking fullbackup
@@ -582,24 +548,24 @@ impl PageServerHandler {
         info!("flushing layers");
         timeline.checkpoint(CheckpointConfig::Flush)?;
 
+        timeline.launch_wal_receiver()?;
+
         info!("done");
         Ok(())
     }
 
-    fn handle_import_wal(
+    #[instrument(skip(self, pgb))]
+    async fn handle_import_wal(
         &self,
         pgb: &mut PostgresBackend,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         start_lsn: Lsn,
         end_lsn: Lsn,
     ) -> anyhow::Result<()> {
-        thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
-        let _enter =
-            info_span!("import wal", timeline = %timeline_id, tenant = %tenant_id).entered();
+        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let timeline = repo.get_timeline_load(timeline_id)?;
+        let timeline = get_local_timeline(tenant_id, timeline_id)?;
         ensure!(timeline.get_last_record_lsn() == start_lsn);
 
         // TODO leave clean state on error. For now you can use detach to clean
@@ -608,8 +574,22 @@ impl PageServerHandler {
         // Import wal provided via CopyData
         info!("importing wal");
         pgb.write_message(&BeMessage::CopyInResponse)?;
-        let reader = CopyInReader::new(pgb);
-        import_wal_from_tar(&*timeline, reader, start_lsn, end_lsn)?;
+        pgb.flush().await?;
+        let mut copyin_stream = Box::pin(copyin_stream(pgb));
+        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
+        tokio::task::block_in_place(|| {
+            import_wal_from_tar(&*timeline, reader, start_lsn, end_lsn)
+        })?;
+        info!("wal import complete");
+
+        // Drain the rest of the Copy data
+        let mut bytes_after_tar = 0;
+        while let Some(bytes) = copyin_stream.next().await {
+            bytes_after_tar += bytes?.len();
+        }
+        if bytes_after_tar > 0 {
+            warn!("ignored {bytes_after_tar} unexpected bytes after the tar archive");
+        }
 
         // TODO Does it make sense to overshoot?
         ensure!(timeline.get_last_record_lsn() >= end_lsn);
@@ -636,7 +616,7 @@ impl PageServerHandler {
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
-    fn wait_or_get_last_lsn(
+    async fn wait_or_get_last_lsn(
         timeline: &Timeline,
         mut lsn: Lsn,
         latest: bool,
@@ -664,7 +644,7 @@ impl PageServerHandler {
             if lsn <= last_record_lsn {
                 lsn = last_record_lsn;
             } else {
-                timeline.wait_lsn(lsn)?;
+                timeline.wait_lsn(lsn).await?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
@@ -674,7 +654,7 @@ impl PageServerHandler {
             if lsn == Lsn(0) {
                 bail!("invalid LSN(0) in request");
             }
-            timeline.wait_lsn(lsn)?;
+            timeline.wait_lsn(lsn).await?;
         }
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
@@ -684,49 +664,52 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    fn handle_get_rel_exists_request(
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    async fn handle_get_rel_exists_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
-        let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
-
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+            .await?;
 
-        let exists = timeline.get_rel_exists(req.rel, lsn)?;
+        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
         }))
     }
 
-    fn handle_get_nblocks_request(
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    async fn handle_get_nblocks_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
-        let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+            .await?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn)?;
+        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
         }))
     }
 
-    fn handle_db_size_request(
+    #[instrument(skip(self, timeline, req), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
+    async fn handle_db_size_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
     ) -> Result<PagestreamBeMessage> {
-        let _enter = info_span!("get_db_size", dbnode = %req.dbnode, req_lsn = %req.lsn).entered();
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+            .await?;
 
-        let total_blocks = timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
+        let total_blocks =
+            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)?;
 
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -735,15 +718,15 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_page_at_lsn_request(
+    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
+    async fn handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
-        let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)
-            .entered();
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+            .await?;
         /*
         // Add a 1s delay to some requests. The delay helps the requests to
         // hit the race condition from github issue #1047 more easily.
@@ -752,31 +735,35 @@ impl PageServerHandler {
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
         */
-        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn)?;
+
+        // FIXME: this profiling now happens at different place than it used to. The
+        // current profiling is based on a thread-local variable, so it doesn't work
+        // across awaits
+        let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
+        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
     }
 
-    fn handle_basebackup_request(
+    #[instrument(skip(self, pgb))]
+    async fn handle_basebackup_request(
         &self,
         pgb: &mut PostgresBackend,
-        timelineid: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
-        tenantid: ZTenantId,
         full_backup: bool,
     ) -> anyhow::Result<()> {
-        let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
-        let _enter = span.enter();
-        info!("starting");
-
         // check that the timeline exists
-        let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-            .context("Cannot load local timeline")?;
+        let timeline = get_local_timeline(tenant_id, timeline_id)?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
+            // Backup was requested at a particular LSN. Wait for it to arrive.
+            info!("waiting for {}", lsn);
+            timeline.wait_lsn(lsn).await?;
             timeline
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;
@@ -784,25 +771,29 @@ impl PageServerHandler {
 
         // switch client to COPYOUT
         pgb.write_message(&BeMessage::CopyOutResponse)?;
+        pgb.flush().await?;
 
         /* Send a tarball of the latest layer on the timeline */
-        {
-            let mut writer = CopyDataSink { pgb };
-
+        let mut writer = CopyDataSink {
+            pgb,
+            rt: tokio::runtime::Handle::current(),
+        };
+        tokio::task::block_in_place(|| {
             let basebackup =
                 basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
-            span.record("lsn", &basebackup.lsn.to_string().as_str());
-            basebackup.send_tarball()?;
-        }
+            tracing::Span::current().record("lsn", &basebackup.lsn.to_string().as_str());
+            basebackup.send_tarball()
+        })?;
         pgb.write_message(&BeMessage::CopyDone)?;
-        info!("done");
+        pgb.flush().await?;
+        info!("basebackup complete");
 
         Ok(())
     }
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenantid: Option<ZTenantId>) -> Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<()> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -814,17 +805,18 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        auth::check_permission(claims, tenantid)
+        auth::check_permission(claims, tenant_id)
     }
 }
 
-impl postgres_backend::Handler for PageServerHandler {
+#[async_trait::async_trait]
+impl postgres_backend_async::Handler for PageServerHandler {
     fn check_auth_jwt(
         &mut self,
         _pgb: &mut PostgresBackend,
         jwt_response: &[u8],
     ) -> anyhow::Result<()> {
-        // this unwrap is never triggered, because check_auth_jwt only called when auth_type is ZenithJWT
+        // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
             .auth
@@ -840,7 +832,7 @@ impl postgres_backend::Handler for PageServerHandler {
         }
 
         info!(
-            "jwt auth succeeded for scope: {:#?} by tenantid: {:?}",
+            "jwt auth succeeded for scope: {:#?} by tenant id: {:?}",
             data.claims.scope, data.claims.tenant_id,
         );
 
@@ -848,11 +840,7 @@ impl postgres_backend::Handler for PageServerHandler {
         Ok(())
     }
 
-    fn is_shutdown_requested(&self) -> bool {
-        thread_mgr::is_shutdown_requested()
-    }
-
-    fn process_query(
+    async fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
@@ -866,12 +854,13 @@ impl postgres_backend::Handler for PageServerHandler {
                 params.len() == 2,
                 "invalid param number for pagestream command"
             );
-            let tenantid = ZTenantId::from_str(params[0])?;
-            let timelineid = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
 
-            self.check_permission(Some(tenantid))?;
+            self.check_permission(Some(tenant_id))?;
 
-            self.handle_pagerequests(pgb, timelineid, tenantid)?;
+            self.handle_pagerequests(pgb, tenant_id, timeline_id)
+                .await?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
@@ -881,10 +870,10 @@ impl postgres_backend::Handler for PageServerHandler {
                 "invalid param number for basebackup command"
             );
 
-            let tenantid = ZTenantId::from_str(params[0])?;
-            let timelineid = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
 
-            self.check_permission(Some(tenantid))?;
+            self.check_permission(Some(tenant_id))?;
 
             let lsn = if params.len() == 3 {
                 Some(Lsn::from_str(params[2])?)
@@ -893,8 +882,9 @@ impl postgres_backend::Handler for PageServerHandler {
             };
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, timelineid, lsn, None, tenantid, false)?;
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, None, false)
+                .await?;
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
         // return pair of prev_lsn and last_lsn
         else if query_string.starts_with("get_last_record_rlsn ") {
@@ -906,20 +896,19 @@ impl postgres_backend::Handler for PageServerHandler {
                 "invalid param number for get_last_record_rlsn command"
             );
 
-            let tenantid = ZTenantId::from_str(params[0])?;
-            let timelineid = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
 
-            self.check_permission(Some(tenantid))?;
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
+            self.check_permission(Some(tenant_id))?;
+            let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
-            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+            pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::text_col(b"prev_lsn"),
                 RowDescriptor::text_col(b"last_lsn"),
             ]))?
-            .write_message_noflush(&BeMessage::DataRow(&[
+            .write_message(&BeMessage::DataRow(&[
                 Some(end_of_timeline.prev.to_string().as_bytes()),
                 Some(end_of_timeline.last.to_string().as_bytes()),
             ]))?
@@ -935,8 +924,8 @@ impl postgres_backend::Handler for PageServerHandler {
                 "invalid param number for fullbackup command"
             );
 
-            let tenantid = ZTenantId::from_str(params[0])?;
-            let timelineid = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
 
             // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
@@ -950,11 +939,12 @@ impl postgres_backend::Handler for PageServerHandler {
                 None
             };
 
-            self.check_permission(Some(tenantid))?;
+            self.check_permission(Some(tenant_id))?;
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, timelineid, lsn, prev_lsn, tenantid, true)?;
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, prev_lsn, true)
+                .await?;
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
             // Assumes the tenant already exists on this pageserver.
@@ -966,22 +956,33 @@ impl postgres_backend::Handler for PageServerHandler {
             // 1. Get start/end LSN from backup_manifest file
             // 2. Run:
             // cat my_backup/base.tar | psql -h $PAGESERVER \
-            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN"
+            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 4);
-            let tenant = ZTenantId::from_str(params[0])?;
-            let timeline = ZTimelineId::from_str(params[1])?;
+            ensure!(params.len() == 5);
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
             let base_lsn = Lsn::from_str(params[2])?;
             let end_lsn = Lsn::from_str(params[3])?;
+            let pg_version = u32::from_str(params[4])?;
 
-            self.check_permission(Some(tenant))?;
+            self.check_permission(Some(tenant_id))?;
 
-            match self.handle_import_basebackup(pgb, tenant, timeline, base_lsn, end_lsn) {
-                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
+            match self
+                .handle_import_basebackup(
+                    pgb,
+                    tenant_id,
+                    timeline_id,
+                    base_lsn,
+                    end_lsn,
+                    pg_version,
+                )
+                .await
+            {
+                Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
                 Err(e) => {
                     error!("error importing base backup between {base_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?
+                    pgb.write_message(&BeMessage::ErrorResponse(&e.to_string()))?
                 }
             };
         } else if query_string.starts_with("import wal ") {
@@ -992,57 +993,38 @@ impl postgres_backend::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("import wal ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             ensure!(params.len() == 4);
-            let tenant = ZTenantId::from_str(params[0])?;
-            let timeline = ZTimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])?;
+            let timeline_id = TimelineId::from_str(params[1])?;
             let start_lsn = Lsn::from_str(params[2])?;
             let end_lsn = Lsn::from_str(params[3])?;
 
-            self.check_permission(Some(tenant))?;
+            self.check_permission(Some(tenant_id))?;
 
-            match self.handle_import_wal(pgb, tenant, timeline, start_lsn, end_lsn) {
-                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
+            match self
+                .handle_import_wal(pgb, tenant_id, timeline_id, start_lsn, end_lsn)
+                .await
+            {
+                Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
                 Err(e) => {
                     error!("error importing WAL between {start_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?
+                    pgb.write_message(&BeMessage::ErrorResponse(&e.to_string()))?
                 }
             };
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("failpoints ") {
-            ensure!(fail::has_failpoints(), "Cannot manage failpoints because pageserver was compiled without failpoints support");
-
-            let (_, failpoints) = query_string.split_at("failpoints ".len());
-
-            for failpoint in failpoints.split(';') {
-                if let Some((name, actions)) = failpoint.split_once('=') {
-                    info!("cfg failpoint: {} {}", name, actions);
-
-                    // We recognize one extra "action" that's not natively recognized
-                    // by the failpoints crate: exit, to immediately kill the process
-                    if actions == "exit" {
-                        fail::cfg_callback(name, || {
-                            info!("Exit requested by failpoint");
-                            std::process::exit(1);
-                        })
-                        .unwrap();
-                    } else {
-                        fail::cfg(name, actions).unwrap();
-                    }
-                } else {
-                    bail!("Invalid failpoints format");
-                }
-            }
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("show ") {
             // show <tenant_id>
             let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(params.len() == 1, "invalid param number for config command");
-            let tenantid = ZTenantId::from_str(params[0])?;
-            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+            let tenant_id = TenantId::from_str(params[0])?;
+
+            self.check_permission(Some(tenant_id))?;
+
+            let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+            pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
                 RowDescriptor::int8_col(b"compaction_target_size"),
@@ -1053,152 +1035,40 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"image_creation_threshold"),
                 RowDescriptor::int8_col(b"pitr_interval"),
             ]))?
-            .write_message_noflush(&BeMessage::DataRow(&[
-                Some(repo.get_checkpoint_distance().to_string().as_bytes()),
+            .write_message(&BeMessage::DataRow(&[
+                Some(tenant.get_checkpoint_distance().to_string().as_bytes()),
                 Some(
-                    repo.get_checkpoint_timeout()
+                    tenant
+                        .get_checkpoint_timeout()
                         .as_secs()
                         .to_string()
                         .as_bytes(),
                 ),
-                Some(repo.get_compaction_target_size().to_string().as_bytes()),
+                Some(tenant.get_compaction_target_size().to_string().as_bytes()),
                 Some(
-                    repo.get_compaction_period()
+                    tenant
+                        .get_compaction_period()
                         .as_secs()
                         .to_string()
                         .as_bytes(),
                 ),
-                Some(repo.get_compaction_threshold().to_string().as_bytes()),
-                Some(repo.get_gc_horizon().to_string().as_bytes()),
-                Some(repo.get_gc_period().as_secs().to_string().as_bytes()),
-                Some(repo.get_image_creation_threshold().to_string().as_bytes()),
-                Some(repo.get_pitr_interval().as_secs().to_string().as_bytes()),
+                Some(tenant.get_compaction_threshold().to_string().as_bytes()),
+                Some(tenant.get_gc_horizon().to_string().as_bytes()),
+                Some(tenant.get_gc_period().as_secs().to_string().as_bytes()),
+                Some(tenant.get_image_creation_threshold().to_string().as_bytes()),
+                Some(tenant.get_pitr_interval().as_secs().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("do_gc ") {
-            // Run GC immediately on given timeline.
-            // FIXME: This is just for tests. See test_runner/regress/test_gc.py.
-            // This probably should require special authentication or a global flag to
-            // enable, I don't think we want to or need to allow regular clients to invoke
-            // GC.
-
-            // do_gc <tenant_id> <timeline_id> <gc_horizon>
-            let re = Regex::new(r"^do_gc ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)([[:digit:]]+)?")
-                .unwrap();
-
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid do_gc: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-
-            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-
-            let gc_horizon: u64 = caps
-                .get(4)
-                .map(|h| h.as_str().parse())
-                .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
-
-            // Use tenant's pitr setting
-            let pitr = repo.get_pitr_interval();
-            let result = repo.gc_iteration(Some(timelineid), gc_horizon, pitr, true)?;
-            pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                RowDescriptor::int8_col(b"layers_total"),
-                RowDescriptor::int8_col(b"layers_needed_by_cutoff"),
-                RowDescriptor::int8_col(b"layers_needed_by_pitr"),
-                RowDescriptor::int8_col(b"layers_needed_by_branches"),
-                RowDescriptor::int8_col(b"layers_not_updated"),
-                RowDescriptor::int8_col(b"layers_removed"),
-                RowDescriptor::int8_col(b"elapsed"),
-            ]))?
-            .write_message_noflush(&BeMessage::DataRow(&[
-                Some(result.layers_total.to_string().as_bytes()),
-                Some(result.layers_needed_by_cutoff.to_string().as_bytes()),
-                Some(result.layers_needed_by_pitr.to_string().as_bytes()),
-                Some(result.layers_needed_by_branches.to_string().as_bytes()),
-                Some(result.layers_not_updated.to_string().as_bytes()),
-                Some(result.layers_removed.to_string().as_bytes()),
-                Some(result.elapsed.as_millis().to_string().as_bytes()),
-            ]))?
-            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("compact ") {
-            // Run compaction immediately on given timeline.
-            // FIXME This is just for tests. Don't expect this to be exposed to
-            // the users or the api.
-
-            // compact <tenant_id> <timeline_id>
-            let re = Regex::new(r"^compact ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)?").unwrap();
-
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("Invalid compact: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Couldn't load timeline")?;
-            timeline.compact()?;
-
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("checkpoint ") {
-            // Run checkpoint immediately on given timeline.
-
-            // checkpoint <tenant_id> <timeline_id>
-            let re = Regex::new(r"^checkpoint ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)?").unwrap();
-
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid checkpoint command: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
-
-            // Checkpoint the timeline and also compact it (due to `CheckpointConfig::Forced`).
-            timeline.checkpoint(CheckpointConfig::Forced)?;
-
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("get_lsn_by_timestamp ") {
-            // Locate LSN of last transaction with timestamp less or equal than sppecified
-            // TODO lazy static
-            let re = Regex::new(r"^get_lsn_by_timestamp ([[:xdigit:]]+) ([[:xdigit:]]+) '(.*)'$")
-                .unwrap();
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
-
-            let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
-            let timestamp_pg = to_pg_timestamp(timestamp);
-
-            pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
-                b"lsn",
-            )]))?;
-            let result = match timeline.find_lsn_for_timestamp(timestamp_pg)? {
-                LsnForTimestamp::Present(lsn) => format!("{}", lsn),
-                LsnForTimestamp::Future(_lsn) => "future".into(),
-                LsnForTimestamp::Past(_lsn) => "past".into(),
-                LsnForTimestamp::NoData(_lsn) => "nodata".into(),
-            };
-            pgb.write_message_noflush(&BeMessage::DataRow(&[Some(result.as_bytes())]))?;
-            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             bail!("unknown command");
         }
 
-        pgb.flush()?;
-
         Ok(())
     }
+}
+
+fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
+    tenant_mgr::get_tenant(tenant_id, true).and_then(|tenant| tenant.get_timeline(timeline_id))
 }
 
 ///
@@ -1207,6 +1077,7 @@ impl postgres_backend::Handler for PageServerHandler {
 ///
 struct CopyDataSink<'a> {
     pgb: &'a mut PostgresBackend,
+    rt: tokio::runtime::Handle,
 }
 
 impl<'a> io::Write for CopyDataSink<'a> {
@@ -1218,6 +1089,7 @@ impl<'a> io::Write for CopyDataSink<'a> {
         // FIXME: flush isn't really required, but makes it easier
         // to view in wireshark
         self.pgb.write_message(&BeMessage::CopyData(data))?;
+        self.rt.block_on(self.pgb.flush())?;
         trace!("CopyData sent for {} bytes!", data.len());
 
         Ok(data.len())

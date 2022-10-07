@@ -1,6 +1,6 @@
 //!
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
-//! a zenith Timeline.
+//! a neon Timeline.
 //!
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -11,17 +11,19 @@ use bytes::Bytes;
 use tracing::*;
 use walkdir::WalkDir;
 
-use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
+use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
-use postgres_ffi::v14::relfile_utils::*;
-use postgres_ffi::v14::waldecoder::*;
-use postgres_ffi::v14::xlog_utils::*;
-use postgres_ffi::v14::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
+use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::*;
+use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::ControlFileData;
+use postgres_ffi::DBState_DB_SHUTDOWNED;
 use postgres_ffi::Oid;
-use postgres_ffi::BLCKSZ;
+use postgres_ffi::XLogFileName;
+use postgres_ffi::{BLCKSZ, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
 // Returns checkpoint LSN from controlfile
@@ -236,17 +238,17 @@ fn import_slru<Reader: Read>(
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
 fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) -> Result<()> {
-    let mut waldecoder = WalStreamDecoder::new(startpoint);
+    let mut waldecoder = WalStreamDecoder::new(startpoint, tline.pg_version);
 
-    let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-    let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
+    let mut segno = startpoint.segment_number(WAL_SEGMENT_SIZE);
+    let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
     let mut walingest = WalIngest::new(tline, startpoint)?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
-        let filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
+        let filename = XLogFileName(1, segno, WAL_SEGMENT_SIZE);
         let mut buf = Vec::new();
 
         // Read local file
@@ -265,7 +267,7 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
         }
 
         let nread = file.read_to_end(&mut buf)?;
-        if nread != pg_constants::WAL_SEGMENT_SIZE - offset as usize {
+        if nread != WAL_SEGMENT_SIZE - offset as usize {
             // Maybe allow this for .partial files?
             error!("read only {} bytes from WAL file", nread);
         }
@@ -354,9 +356,9 @@ pub fn import_wal_from_tar<Reader: Read>(
     end_lsn: Lsn,
 ) -> Result<()> {
     // Set up walingest mutable state
-    let mut waldecoder = WalStreamDecoder::new(start_lsn);
-    let mut segno = start_lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-    let mut offset = start_lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
+    let mut waldecoder = WalStreamDecoder::new(start_lsn, tline.pg_version);
+    let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
+    let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
     let mut walingest = WalIngest::new(tline, start_lsn)?;
 
@@ -373,7 +375,7 @@ pub fn import_wal_from_tar<Reader: Read>(
             match header.entry_type() {
                 tar::EntryType::Regular => {
                     // FIXME: assume postgresql tli 1 for now
-                    let expected_filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
+                    let expected_filename = XLogFileName(1, segno, WAL_SEGMENT_SIZE);
                     let file_name = file_path
                         .file_name()
                         .expect("missing wal filename")
@@ -439,7 +441,7 @@ fn import_file<Reader: Read>(
     len: usize,
 ) -> Result<Option<ControlFileData>> {
     if file_path.starts_with("global") {
-        let spcnode = pg_constants::GLOBALTABLESPACE_OID;
+        let spcnode = postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
         match file_path
@@ -467,7 +469,7 @@ fn import_file<Reader: Read>(
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
-                debug!("ignored");
+                debug!("ignored PG_VERSION file");
             }
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, reader, len)?;
@@ -495,7 +497,7 @@ fn import_file<Reader: Read>(
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
-                debug!("ignored");
+                debug!("ignored PG_VERSION file");
             }
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, reader, len)?;

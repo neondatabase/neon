@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
-use utils::zid::{NodeId, ZTenantId, ZTenantTimelineId};
+use utils::id::{NodeId, TenantId, TenantTimelineId};
 
 pub mod broker;
 pub mod control_file;
@@ -23,15 +23,17 @@ pub mod wal_backup;
 pub mod wal_service;
 pub mod wal_storage;
 
+mod timelines_global_map;
+pub use timelines_global_map::GlobalTimelines;
+
 pub mod defaults {
-    use const_format::formatcp;
     use std::time::Duration;
 
-    pub const DEFAULT_PG_LISTEN_PORT: u16 = 5454;
-    pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
+    pub use safekeeper_api::{
+        DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
+        DEFAULT_PG_LISTEN_PORT,
+    };
 
-    pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 7676;
-    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
     pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(10);
     pub const DEFAULT_WAL_BACKUP_RUNTIME_THREADS: usize = 8;
 }
@@ -61,13 +63,13 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &ZTenantId) -> PathBuf {
+    pub fn tenant_dir(&self, tenant_id: &TenantId) -> PathBuf {
         self.workdir.join(tenant_id.to_string())
     }
 
-    pub fn timeline_dir(&self, zttid: &ZTenantTimelineId) -> PathBuf {
-        self.tenant_dir(&zttid.tenant_id)
-            .join(zttid.timeline_id.to_string())
+    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> PathBuf {
+        self.tenant_dir(&ttid.tenant_id)
+            .join(ttid.timeline_id.to_string())
     }
 }
 

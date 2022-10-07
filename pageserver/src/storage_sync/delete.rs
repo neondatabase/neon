@@ -7,17 +7,17 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tracing::{debug, error, info};
 
 use crate::storage_sync::{SyncQueue, SyncTask};
-use remote_storage::{GenericRemoteStorage, RemoteStorage};
-use utils::zid::ZTenantTimelineId;
+use remote_storage::GenericRemoteStorage;
+use utils::id::TenantTimelineId;
 
 use super::{LayersDeletion, SyncData};
 
 /// Attempts to remove the timleline layers from the remote storage.
 /// If the task had not adjusted the metadata before, the deletion will fail.
-pub(super) async fn delete_timeline_layers<'a>(
-    storage: &'a GenericRemoteStorage,
+pub(super) async fn delete_timeline_layers(
+    storage: &GenericRemoteStorage,
     sync_queue: &SyncQueue,
-    sync_id: ZTenantTimelineId,
+    sync_id: TenantTimelineId,
     mut delete_data: SyncData<LayersDeletion>,
 ) -> bool {
     if !delete_data.data.deletion_registered {
@@ -43,14 +43,7 @@ pub(super) async fn delete_timeline_layers<'a>(
     let mut delete_tasks = layers_to_delete
         .into_iter()
         .map(|local_layer_path| async {
-            match match storage {
-                GenericRemoteStorage::Local(storage) => {
-                    remove_storage_object(storage, &local_layer_path).await
-                }
-                GenericRemoteStorage::S3(storage) => {
-                    remove_storage_object(storage, &local_layer_path).await
-                }
-            } {
+            match remove_storage_object(storage, &local_layer_path).await {
                 Ok(()) => Ok(local_layer_path),
                 Err(e) => Err((e, local_layer_path)),
             }
@@ -88,11 +81,10 @@ pub(super) async fn delete_timeline_layers<'a>(
     errored
 }
 
-async fn remove_storage_object<P, S>(storage: &S, local_layer_path: &Path) -> anyhow::Result<()>
-where
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+async fn remove_storage_object(
+    storage: &GenericRemoteStorage,
+    local_layer_path: &Path,
+) -> anyhow::Result<()> {
     let storage_path = storage
         .remote_object_id(local_layer_path)
         .with_context(|| {
@@ -120,8 +112,8 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
-        layered_repository::repo_harness::{RepoHarness, TIMELINE_ID},
         storage_sync::test_utils::{create_local_timeline, dummy_metadata},
+        tenant::harness::{TenantHarness, TIMELINE_ID},
     };
     use remote_storage::{LocalFs, RemoteStorage};
 
@@ -129,10 +121,10 @@ mod tests {
 
     #[tokio::test]
     async fn delete_timeline_negative() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("delete_timeline_negative")?;
+        let harness = TenantHarness::create("delete_timeline_negative")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_path_buf(),
             harness.conf.workdir.clone(),
         )?);
@@ -162,12 +154,12 @@ mod tests {
 
     #[tokio::test]
     async fn delete_timeline() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("delete_timeline")?;
+        let harness = TenantHarness::create("delete_timeline")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
 
-        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let sync_id = TenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "c", "d"];
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_path_buf(),
             harness.conf.workdir.clone(),
         )?);
@@ -180,7 +172,8 @@ mod tests {
         let timeline_upload =
             create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
         for local_path in timeline_upload.layers_to_upload {
-            let remote_path = local_storage.remote_object_id(&local_path)?;
+            let remote_path =
+                local_storage.resolve_in_storage(&local_storage.remote_object_id(&local_path)?)?;
             let remote_parent_dir = remote_path.parent().unwrap();
             if !remote_parent_dir.exists() {
                 fs::create_dir_all(&remote_parent_dir).await?;

@@ -1,22 +1,105 @@
-//! This module exports metrics for all active timelines.
+//! Global safekeeper mertics and per-timeline safekeeper metrics.
 
 use std::time::{Instant, SystemTime};
 
+use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_WRITE_SECONDS_BUCKETS};
+use anyhow::Result;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericGaugeVec, Opts},
     proto::MetricFamily,
     Gauge, IntGaugeVec,
 };
-use postgres_ffi::v14::xlog_utils::XLogSegNo;
-use utils::{lsn::Lsn, zid::ZTenantTimelineId};
+use once_cell::sync::Lazy;
+use postgres_ffi::XLogSegNo;
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     safekeeper::{SafeKeeperState, SafekeeperMemState},
-    timeline::{GlobalTimelines, ReplicaState},
+    timeline::ReplicaState,
+    GlobalTimelines,
 };
 
+// Global metrics across all timelines.
+pub static WRITE_WAL_BYTES: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_write_wal_bytes",
+        "Bytes written to WAL in a single request",
+        vec![
+            1.0,
+            10.0,
+            100.0,
+            1024.0,
+            8192.0,
+            128.0 * 1024.0,
+            1024.0 * 1024.0,
+            10.0 * 1024.0 * 1024.0
+        ]
+    )
+    .expect("Failed to register safekeeper_write_wal_bytes histogram")
+});
+pub static WRITE_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_write_wal_seconds",
+        "Seconds spent writing and syncing WAL to a disk in a single request",
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_write_wal_seconds histogram")
+});
+pub static FLUSH_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_flush_wal_seconds",
+        "Seconds spent syncing WAL to a disk",
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_flush_wal_seconds histogram")
+});
+pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_persist_control_file_seconds",
+        "Seconds to persist and sync control file",
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec")
+});
+
+/// Metrics for WalStorage in a single timeline.
+#[derive(Clone, Default)]
+pub struct WalStorageMetrics {
+    /// How much bytes were written in total.
+    write_wal_bytes: u64,
+    /// How much time spent writing WAL to disk, waiting for write(2).
+    write_wal_seconds: f64,
+    /// How much time spent syncing WAL to disk, waiting for fsync(2).
+    flush_wal_seconds: f64,
+}
+
+impl WalStorageMetrics {
+    pub fn observe_write_bytes(&mut self, bytes: usize) {
+        self.write_wal_bytes += bytes as u64;
+        WRITE_WAL_BYTES.observe(bytes as f64);
+    }
+
+    pub fn observe_write_seconds(&mut self, seconds: f64) {
+        self.write_wal_seconds += seconds;
+        WRITE_WAL_SECONDS.observe(seconds);
+    }
+
+    pub fn observe_flush_seconds(&mut self, seconds: f64) {
+        self.flush_wal_seconds += seconds;
+        FLUSH_WAL_SECONDS.observe(seconds);
+    }
+}
+
+/// Accepts a closure that returns a result, and returns the duration of the closure.
+pub fn time_io_closure(closure: impl FnOnce() -> Result<()>) -> Result<f64> {
+    let start = std::time::Instant::now();
+    closure()?;
+    Ok(start.elapsed().as_secs_f64())
+}
+
+/// Metrics for a single timeline.
 pub struct FullTimelineInfo {
-    pub zttid: ZTenantTimelineId,
+    pub ttid: TenantTimelineId,
     pub replicas: Vec<ReplicaState>,
     pub wal_backup_active: bool,
     pub timeline_is_active: bool,
@@ -28,8 +111,11 @@ pub struct FullTimelineInfo {
     pub persisted_state: SafeKeeperState,
 
     pub flush_lsn: Lsn,
+
+    pub wal_storage: WalStorageMetrics,
 }
 
+/// Collects metrics for all active timelines.
 pub struct TimelineCollector {
     descs: Vec<Desc>,
     commit_lsn: GenericGaugeVec<AtomicU64>,
@@ -45,7 +131,11 @@ pub struct TimelineCollector {
     connected_computes: IntGaugeVec,
     disk_usage: GenericGaugeVec<AtomicU64>,
     acceptor_term: GenericGaugeVec<AtomicU64>,
+    written_wal_bytes: GenericGaugeVec<AtomicU64>,
+    written_wal_seconds: GaugeVec,
+    flushed_wal_seconds: GaugeVec,
     collect_timeline_metrics: Gauge,
+    timelines_count: IntGauge,
 }
 
 impl Default for TimelineCollector {
@@ -185,12 +275,49 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(acceptor_term.desc().into_iter().cloned());
 
+        let written_wal_bytes = GenericGaugeVec::new(
+            Opts::new(
+                "safekeeper_written_wal_bytes_total",
+                "Number of WAL bytes written to disk, grouped by timeline",
+            ),
+            &["tenant_id", "timeline_id"],
+        )
+        .unwrap();
+        descs.extend(written_wal_bytes.desc().into_iter().cloned());
+
+        let written_wal_seconds = GaugeVec::new(
+            Opts::new(
+                "safekeeper_written_wal_seconds_total",
+                "Total time spent in write(2) writing WAL to disk, grouped by timeline",
+            ),
+            &["tenant_id", "timeline_id"],
+        )
+        .unwrap();
+        descs.extend(written_wal_seconds.desc().into_iter().cloned());
+
+        let flushed_wal_seconds = GaugeVec::new(
+            Opts::new(
+                "safekeeper_flushed_wal_seconds_total",
+                "Total time spent in fsync(2) flushing WAL to disk, grouped by timeline",
+            ),
+            &["tenant_id", "timeline_id"],
+        )
+        .unwrap();
+        descs.extend(flushed_wal_seconds.desc().into_iter().cloned());
+
         let collect_timeline_metrics = Gauge::new(
             "safekeeper_collect_timeline_metrics_seconds",
             "Time spent collecting timeline metrics, including obtaining mutex lock for all timelines",
         )
         .unwrap();
         descs.extend(collect_timeline_metrics.desc().into_iter().cloned());
+
+        let timelines_count = IntGauge::new(
+            "safekeeper_timelines",
+            "Total number of timelines loaded in-memory",
+        )
+        .unwrap();
+        descs.extend(timelines_count.desc().into_iter().cloned());
 
         TimelineCollector {
             descs,
@@ -207,7 +334,11 @@ impl TimelineCollector {
             connected_computes,
             disk_usage,
             acceptor_term,
+            written_wal_bytes,
+            written_wal_seconds,
+            flushed_wal_seconds,
             collect_timeline_metrics,
+            timelines_count,
         }
     }
 }
@@ -234,12 +365,22 @@ impl Collector for TimelineCollector {
         self.connected_computes.reset();
         self.disk_usage.reset();
         self.acceptor_term.reset();
+        self.written_wal_bytes.reset();
+        self.written_wal_seconds.reset();
+        self.flushed_wal_seconds.reset();
 
-        let timelines = GlobalTimelines::active_timelines_metrics();
+        let timelines = GlobalTimelines::get_all();
+        let timelines_count = timelines.len();
 
-        for tli in timelines {
-            let tenant_id = tli.zttid.tenant_id.to_string();
-            let timeline_id = tli.zttid.timeline_id.to_string();
+        for arc_tli in timelines {
+            let tli = arc_tli.info_for_metrics();
+            if tli.is_none() {
+                continue;
+            }
+            let tli = tli.unwrap();
+
+            let tenant_id = tli.ttid.tenant_id.to_string();
+            let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
 
             let mut most_advanced: Option<utils::pq_proto::ReplicationFeedback> = None;
@@ -285,6 +426,15 @@ impl Collector for TimelineCollector {
             self.acceptor_term
                 .with_label_values(labels)
                 .set(tli.persisted_state.acceptor_state.term as u64);
+            self.written_wal_bytes
+                .with_label_values(labels)
+                .set(tli.wal_storage.write_wal_bytes);
+            self.written_wal_seconds
+                .with_label_values(labels)
+                .set(tli.wal_storage.write_wal_seconds);
+            self.flushed_wal_seconds
+                .with_label_values(labels)
+                .set(tli.wal_storage.flush_wal_seconds);
 
             if let Some(feedback) = most_advanced {
                 self.feedback_ps_write_lsn
@@ -325,11 +475,18 @@ impl Collector for TimelineCollector {
         mfs.extend(self.connected_computes.collect());
         mfs.extend(self.disk_usage.collect());
         mfs.extend(self.acceptor_term.collect());
+        mfs.extend(self.written_wal_bytes.collect());
+        mfs.extend(self.written_wal_seconds.collect());
+        mfs.extend(self.flushed_wal_seconds.collect());
 
         // report time it took to collect all info
         let elapsed = start_collecting.elapsed().as_secs_f64();
         self.collect_timeline_metrics.set(elapsed);
         mfs.extend(self.collect_timeline_metrics.collect());
+
+        // report total number of timelines
+        self.timelines_count.set(timelines_count as i64);
+        mfs.extend(self.timelines_count.collect());
 
         mfs
     }

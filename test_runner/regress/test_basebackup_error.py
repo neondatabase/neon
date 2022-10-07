@@ -9,9 +9,10 @@ from fixtures.neon_fixtures import NeonEnv
 def test_basebackup_error(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_basebackup_error", "empty")
+    pageserver_http = env.pageserver.http_client()
 
     # Introduce failpoint
-    env.pageserver.safe_psql("failpoints basebackup-before-control-file=return")
+    pageserver_http.configure_failpoints(("basebackup-before-control-file", "return"))
 
     with pytest.raises(Exception, match="basebackup-before-control-file"):
         env.postgres.create_start("test_basebackup_error")
