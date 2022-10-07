@@ -256,34 +256,25 @@ impl RemoteTimeline {
     pub fn from_index_part(timeline_path: &Path, index_part: IndexPart) -> anyhow::Result<Self> {
         let metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)?;
         let default_metadata = &IndexLayerMetadata::default();
+
+        let find_metadata = |path: &RelativePath| -> LayerFileMetadata {
+            index_part
+                .layer_metadata
+                .get(path)
+                .unwrap_or(default_metadata)
+                .into()
+        };
+
         Ok(Self {
             timeline_layers: index_part
                 .timeline_layers
                 .iter()
-                .map(|path| {
-                    (
-                        path.as_path(timeline_path),
-                        index_part
-                            .layer_metadata
-                            .get(path)
-                            .unwrap_or(default_metadata)
-                            .into(),
-                    )
-                })
+                .map(|path| (path.as_path(timeline_path), find_metadata(path)))
                 .collect(),
             missing_layers: index_part
                 .missing_layers
                 .iter()
-                .map(|path| {
-                    (
-                        path.as_path(timeline_path),
-                        index_part
-                            .layer_metadata
-                            .get(path)
-                            .unwrap_or(default_metadata)
-                            .into(),
-                    )
-                })
+                .map(|path| (path.as_path(timeline_path), find_metadata(path)))
                 .collect(),
             metadata,
             awaits_download: false,
@@ -400,31 +391,23 @@ impl IndexPart {
 
         let mut missing_layers = HashSet::new();
 
-        for res in remote_timeline
-            .missing_layers
-            .iter()
-            .map(|(p, m)| Ok((RelativePath::new(timeline_path, p)?, m.into())))
-        {
-            let (rel_path, metadata) =
-                res.context("Failed to convert missing layers' paths to relative ones")?;
-
-            layer_metadata.insert(rel_path.clone(), metadata);
-            missing_layers.insert(rel_path);
-        }
+        separate_paths_and_metadata(
+            timeline_path,
+            &remote_timeline.missing_layers,
+            &mut missing_layers,
+            &mut layer_metadata,
+        )
+        .context("Failed to convert missing layers' paths to relative ones")?;
 
         let mut timeline_layers = HashSet::new();
 
-        for res in remote_timeline
-            .timeline_layers
-            .iter()
-            .map(|(p, m)| Ok((RelativePath::new(timeline_path, p)?, m.into())))
-        {
-            let (rel_path, metadata) =
-                res.context("Failed to convert timeline layers' paths to relative ones")?;
-
-            layer_metadata.insert(rel_path.clone(), metadata);
-            timeline_layers.insert(rel_path);
-        }
+        separate_paths_and_metadata(
+            timeline_path,
+            &remote_timeline.timeline_layers,
+            &mut timeline_layers,
+            &mut layer_metadata,
+        )
+        .context("Failed to convert timeline layers' paths to relative ones")?;
 
         Ok(Self {
             version: Self::LATEST_VERSION,
@@ -449,6 +432,22 @@ impl From<&'_ LayerFileMetadata> for IndexLayerMetadata {
             file_size: other.file_size,
         }
     }
+}
+
+fn separate_paths_and_metadata(
+    timeline_path: &Path,
+    input: &HashMap<PathBuf, LayerFileMetadata>,
+    output: &mut HashSet<RelativePath>,
+    layer_metadata: &mut HashMap<RelativePath, IndexLayerMetadata>,
+) -> anyhow::Result<()> {
+    for (path, metadata) in input {
+        let rel_path = RelativePath::new(timeline_path, path)?;
+        let metadata = IndexLayerMetadata::from(metadata);
+
+        layer_metadata.insert(rel_path.clone(), metadata);
+        output.insert(rel_path);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
