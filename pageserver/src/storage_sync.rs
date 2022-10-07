@@ -188,7 +188,7 @@ static SYNC_QUEUE: OnceCell<SyncQueue> = OnceCell::new();
 
 /// A timeline status to share with pageserver's sync counterpart,
 /// after comparing local and remote timeline state.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum LocalTimelineInitStatus {
     /// The timeline has every remote layer present locally.
     /// There could be some layers requiring uploading,
@@ -311,7 +311,7 @@ impl SyncQueue {
 
 /// A task to run in the async download/upload loop.
 /// Limited by the number of retries, after certain threshold the failing task gets evicted and the timeline disabled.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum SyncTask {
     /// A checkpoint outcome with possible local file updates that need actualization in the remote storage.
     /// Not necessary more fresh than the one already uploaded.
@@ -1657,5 +1657,106 @@ mod tests {
             1,
             "Should have one task left out of the batch"
         );
+    }
+
+    mod local_and_remote_comparisons {
+        use super::*;
+
+        #[test]
+        fn ready() {
+            let mut new_sync_tasks = VecDeque::default();
+            let sync_id = TenantTimelineId::generate();
+            let local_metadata = dummy_metadata(0x02.into());
+            let local_files = HashSet::from([(PathBuf::from("first_file"))]);
+            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
+            remote_entry.add_timeline_layers([PathBuf::from("first_file")]);
+
+            let (status, sync_needed) = compare_local_and_remote_timeline(
+                &mut new_sync_tasks,
+                sync_id,
+                local_metadata.clone(),
+                local_files,
+                &remote_entry,
+            );
+
+            assert_eq!(
+                status,
+                LocalTimelineInitStatus::LocallyComplete(local_metadata)
+            );
+            assert_eq!(sync_needed, false);
+
+            assert!(new_sync_tasks.is_empty(), "{:?}", new_sync_tasks);
+        }
+
+        #[test]
+        fn needs_download() {
+            let mut new_sync_tasks = VecDeque::default();
+            let sync_id = TenantTimelineId::generate();
+            let local_metadata = dummy_metadata(0x02.into());
+            let local_files = HashSet::from([]);
+            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
+            remote_entry.add_timeline_layers([PathBuf::from("first_file")]);
+
+            let (status, sync_needed) = compare_local_and_remote_timeline(
+                &mut new_sync_tasks,
+                sync_id,
+                local_metadata.clone(),
+                local_files.clone(),
+                &remote_entry,
+            );
+
+            assert_eq!(status, LocalTimelineInitStatus::NeedsSync);
+            assert_eq!(sync_needed, true);
+
+            let new_sync_tasks = new_sync_tasks.into_iter().collect::<Vec<_>>();
+
+            assert_eq!(
+                &new_sync_tasks,
+                &[(
+                    sync_id,
+                    SyncTask::download(LayersDownload {
+                        layers_to_skip: local_files
+                    })
+                )]
+            );
+        }
+
+        #[test]
+        fn needs_upload() {
+            let mut new_sync_tasks = VecDeque::default();
+            let sync_id = TenantTimelineId::generate();
+            let local_metadata = dummy_metadata(0x02.into());
+            let local_files = HashSet::from([PathBuf::from("first_file")]);
+            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
+            remote_entry.add_timeline_layers([]);
+
+            let (status, sync_needed) = compare_local_and_remote_timeline(
+                &mut new_sync_tasks,
+                sync_id,
+                local_metadata.clone(),
+                local_files.clone(),
+                &remote_entry,
+            );
+
+            assert_eq!(
+                status,
+                LocalTimelineInitStatus::LocallyComplete(local_metadata.clone())
+            );
+            assert_eq!(sync_needed, false);
+
+            let new_sync_tasks = new_sync_tasks.into_iter().collect::<Vec<_>>();
+
+            assert_eq!(
+                &new_sync_tasks,
+                &[(
+                    sync_id,
+                    SyncTask::upload(LayersUpload {
+                        layers_to_upload: local_files,
+                        uploaded_layers: HashSet::new(),
+                        metadata: Some(local_metadata),
+                    })
+                )]
+            );
+        }
     }
 }
