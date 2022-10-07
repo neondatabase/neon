@@ -25,6 +25,7 @@ use config::ProxyConfig;
 use futures::FutureExt;
 use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
+use tracing::info;
 use utils::project_git_version;
 
 project_git_version!(GIT_VERSION);
@@ -38,6 +39,11 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_ansi(atty::is(atty::Stream::Stdout))
+        .with_target(false)
+        .init();
+
     let arg_matches = clap::App::new("Neon proxy/router")
         .version(GIT_VERSION)
         .arg(
@@ -140,22 +146,22 @@ async fn main() -> anyhow::Result<()> {
         auth_backend,
     }));
 
-    println!("Version: {GIT_VERSION}");
-    println!("Authentication backend: {}", config.auth_backend);
+    info!("Version: {GIT_VERSION}");
+    info!("Authentication backend: {}", config.auth_backend);
 
     // Check that we can bind to address before further initialization
-    println!("Starting http on {}", http_address);
+    info!("Starting http on {http_address}");
     let http_listener = TcpListener::bind(http_address).await?.into_std()?;
 
-    println!("Starting mgmt on {}", mgmt_address);
+    info!("Starting mgmt on {mgmt_address}");
     let mgmt_listener = TcpListener::bind(mgmt_address).await?.into_std()?;
 
-    println!("Starting proxy on {}", proxy_address);
+    info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
     let tasks = [
-        tokio::spawn(http::server::thread_main(http_listener)),
-        tokio::spawn(proxy::thread_main(config, proxy_listener)),
+        tokio::spawn(http::server::task_main(http_listener)),
+        tokio::spawn(proxy::task_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
     ]
     .map(flatten_err);

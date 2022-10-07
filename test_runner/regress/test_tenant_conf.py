@@ -54,7 +54,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 for i in {
                     "checkpoint_distance": 10000,
                     "compaction_target_size": 1048576,
-                    "compaction_period": 1,
+                    "compaction_period": 20,
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
                     "gc_period": 100,
@@ -74,7 +74,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 for i in {
                     "checkpoint_distance": 20000,
                     "compaction_target_size": 1048576,
-                    "compaction_period": 1,
+                    "compaction_period": 20,
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
                     "gc_period": 30,
@@ -102,7 +102,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 for i in {
                     "checkpoint_distance": 15000,
                     "compaction_target_size": 1048576,
-                    "compaction_period": 1,
+                    "compaction_period": 20,
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
                     "gc_period": 80,
@@ -125,7 +125,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 for i in {
                     "checkpoint_distance": 15000,
                     "compaction_target_size": 1048576,
-                    "compaction_period": 1,
+                    "compaction_period": 20,
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
                     "gc_period": 80,

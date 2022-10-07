@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio_postgres::{CancelToken, NoTls};
+use tracing::info;
 use utils::pq_proto::CancelKeyData;
 
 /// Enables serving `CancelRequest`s.
@@ -18,8 +19,9 @@ impl CancelMap {
             .lock()
             .get(&key)
             .and_then(|x| x.clone())
-            .with_context(|| format!("unknown session: {:?}", key))?;
+            .with_context(|| format!("query cancellation key not found: {key}"))?;
 
+        info!("cancelling query per user's request using key {key}");
         cancel_closure.try_cancel_query().await
     }
 
@@ -41,14 +43,16 @@ impl CancelMap {
         self.0
             .lock()
             .try_insert(key, None)
-            .map_err(|_| anyhow!("session already exists: {:?}", key))?;
+            .map_err(|_| anyhow!("query cancellation key already exists: {key}"))?;
 
         // This will guarantee that the session gets dropped
         // as soon as the future is finished.
         scopeguard::defer! {
             self.0.lock().remove(&key);
+            info!("dropped query cancellation key {key}");
         }
 
+        info!("registered new query cancellation key {key}");
         let session = Session::new(key, self);
         f(session).await
     }
@@ -102,10 +106,13 @@ impl<'a> Session<'a> {
     fn new(key: CancelKeyData, cancel_map: &'a CancelMap) -> Self {
         Self { key, cancel_map }
     }
+}
 
+impl Session<'_> {
     /// Store the cancel token for the given session.
     /// This enables query cancellation in [`crate::proxy::handshake`].
     pub fn enable_query_cancellation(self, cancel_closure: CancelClosure) -> CancelKeyData {
+        info!("enabling query cancellation for this session");
         self.cancel_map
             .0
             .lock()

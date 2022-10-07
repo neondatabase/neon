@@ -8,6 +8,7 @@ use metrics::{register_int_counter, IntCounter};
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{error, info, info_span, Instrument};
 use utils::pq_proto::{BeMessage as Be, *};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
@@ -43,17 +44,17 @@ where
     F: std::future::Future<Output = anyhow::Result<R>>,
 {
     future.await.map_err(|err| {
-        println!("error: {}", err);
+        error!("{err}");
         err
     })
 }
 
-pub async fn thread_main(
+pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
-        println!("proxy has shut down");
+        info!("proxy has shut down");
     }
 
     // When set for the server socket, the keepalive setting
@@ -63,22 +64,29 @@ pub async fn thread_main(
     let cancel_map = Arc::new(CancelMap::default());
     loop {
         let (socket, peer_addr) = listener.accept().await?;
-        println!("accepted connection from {}", peer_addr);
+        info!("accepted connection from {peer_addr}");
 
+        let session_id = uuid::Uuid::new_v4();
         let cancel_map = Arc::clone(&cancel_map);
-        tokio::spawn(log_error(async move {
-            socket
-                .set_nodelay(true)
-                .context("failed to set socket option")?;
+        tokio::spawn(
+            log_error(async move {
+                info!("spawned a task for {peer_addr}");
 
-            handle_client(config, &cancel_map, socket).await
-        }));
+                socket
+                    .set_nodelay(true)
+                    .context("failed to set socket option")?;
+
+                handle_client(config, &cancel_map, session_id, socket).await
+            })
+            .instrument(info_span!("client", session = format_args!("{session_id}"))),
+        );
     }
 }
 
 async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
+    session_id: uuid::Uuid,
     stream: impl AsyncRead + AsyncWrite + Unpin + Send,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
@@ -88,7 +96,8 @@ async fn handle_client(
     }
 
     let tls = config.tls_config.as_ref();
-    let (mut stream, params) = match handshake(stream, tls, cancel_map).await? {
+    let do_handshake = handshake(stream, tls, cancel_map).instrument(info_span!("handshake"));
+    let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
     };
@@ -106,7 +115,7 @@ async fn handle_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params);
+    let client = Client::new(stream, creds, &params, session_id);
     cancel_map
         .with_session(|session| client.connect_to_db(session))
         .await
@@ -127,7 +136,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
         let msg = stream.read_startup_packet().await?;
-        println!("got message: {:?}", msg);
+        info!("received {msg:?}");
 
         use FeStartupPacket::*;
         match msg {
@@ -164,11 +173,13 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     stream.throw_error_str(ERR_INSECURE_CONNECTION).await?;
                 }
 
+                info!(session_type = "normal", "successful handshake");
                 break Ok(Some((stream, params)));
             }
             CancelRequest(cancel_key_data) => {
                 cancel_map.cancel_session(cancel_key_data).await?;
 
+                info!(session_type = "cancellation", "successful handshake");
                 break Ok(None);
             }
         }
@@ -183,6 +194,8 @@ struct Client<'a, S> {
     creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
     /// KV-dictionary with PostgreSQL connection params.
     params: &'a StartupMessageParams,
+    /// Unique connection ID.
+    session_id: uuid::Uuid,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -191,11 +204,13 @@ impl<'a, S> Client<'a, S> {
         stream: PqStream<S>,
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
+        session_id: uuid::Uuid,
     ) -> Self {
         Self {
             stream,
             creds,
             params,
+            session_id,
         }
     }
 }
@@ -207,17 +222,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             mut stream,
             creds,
             params,
+            session_id,
         } = self;
 
         let extra = auth::ConsoleReqExtra {
-            // Currently it's OK to generate a new UUID **here**, but
-            // it might be better to move this to `cancellation::Session`.
-            session_id: uuid::Uuid::new_v4(),
+            session_id, // aka this connection's id
             application_name: params.get("application_name"),
         };
 
         // Authenticate and connect to a compute node.
-        let auth = creds.authenticate(&extra, &mut stream).await;
+        let auth = creds
+            .authenticate(&extra, &mut stream)
+            .instrument(info_span!("auth"))
+            .await;
+
         let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
         let reported_auth_ok = node.reported_auth_ok;
 
@@ -251,6 +269,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         }
 
         // Starting from here we only proxy the client's traffic.
+        info!("performing the proxy pass...");
         let mut db = MetricsStream::new(db.stream, inc_proxied);
         let mut client = MetricsStream::new(stream.into_inner(), inc_proxied);
         let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;

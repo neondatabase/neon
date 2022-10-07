@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::info;
 
 const REQUEST_FAILED: &str = "Console request failed";
 
@@ -148,10 +149,11 @@ impl<'a> Api<'a> {
     }
 
     async fn get_auth_info(&self) -> Result<AuthInfo, GetAuthInfoError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
         let req = self
             .endpoint
             .get("proxy_get_role_secret")
-            .header("X-Request-ID", uuid::Uuid::new_v4().to_string())
+            .header("X-Request-ID", &request_id)
             .query(&[("session_id", self.extra.session_id)])
             .query(&[
                 ("application_name", self.extra.application_name),
@@ -160,9 +162,7 @@ impl<'a> Api<'a> {
             ])
             .build()?;
 
-        // TODO: use a proper logger
-        println!("cplane request: {}", req.url());
-
+        info!(id = request_id, url = req.url().as_str(), "request");
         let resp = self.endpoint.execute(req).await?;
         if !resp.status().is_success() {
             return Err(TransportError::HttpStatus(resp.status()).into());
@@ -177,10 +177,11 @@ impl<'a> Api<'a> {
 
     /// Wake up the compute node and return the corresponding connection info.
     pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg, WakeComputeError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
         let req = self
             .endpoint
             .get("proxy_wake_compute")
-            .header("X-Request-ID", uuid::Uuid::new_v4().to_string())
+            .header("X-Request-ID", &request_id)
             .query(&[("session_id", self.extra.session_id)])
             .query(&[
                 ("application_name", self.extra.application_name),
@@ -188,9 +189,7 @@ impl<'a> Api<'a> {
             ])
             .build()?;
 
-        // TODO: use a proper logger
-        println!("cplane request: {}", req.url());
-
+        info!(id = request_id, url = req.url().as_str(), "request");
         let resp = self.endpoint.execute(req).await?;
         if !resp.status().is_success() {
             return Err(TransportError::HttpStatus(resp.status()).into());
@@ -227,15 +226,18 @@ where
     GetAuthInfo: Future<Output = Result<AuthInfo, GetAuthInfoError>>,
     WakeCompute: Future<Output = Result<ComputeConnCfg, WakeComputeError>>,
 {
+    info!("fetching user's authentication info");
     let auth_info = get_auth_info(endpoint).await?;
 
     let flow = AuthFlow::new(client);
     let scram_keys = match auth_info {
         AuthInfo::Md5(_) => {
             // TODO: decide if we should support MD5 in api v2
+            info!("auth endpoint chooses MD5");
             return Err(auth::AuthError::bad_auth_method("MD5"));
         }
         AuthInfo::Scram(secret) => {
+            info!("auth endpoint chooses SCRAM");
             let scram = auth::Scram(&secret);
             Some(compute::ScramKeys {
                 client_key: flow.begin(scram).await?.authenticate().await?.as_bytes(),
