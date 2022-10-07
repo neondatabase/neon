@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use hyper::{Body, Request, Response, StatusCode};
 use std::net::TcpListener;
+use tracing::info;
 use utils::http::{endpoint, error::ApiError, json::json_response, RouterBuilder, RouterService};
 
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -12,9 +13,9 @@ fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
     router.get("/v1/status", status_handler)
 }
 
-pub async fn thread_main(http_listener: TcpListener) -> anyhow::Result<()> {
+pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<()> {
     scopeguard::defer! {
-        println!("http has shut down");
+        info!("http has shut down");
     }
 
     let service = || RouterService::new(make_router().build()?);

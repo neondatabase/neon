@@ -2452,6 +2452,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "atty",
  "base64",
  "bstr",
  "bytes",
@@ -2485,6 +2486,8 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "utils",
  "uuid",

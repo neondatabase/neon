@@ -3,6 +3,7 @@
 use crate::error::UserFacingError;
 use std::borrow::Cow;
 use thiserror::Error;
+use tracing::info;
 use utils::pq_proto::StartupMessageParams;
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
@@ -81,6 +82,13 @@ impl<'a> ClientCredentials<'a> {
             }),
         }
         .transpose()?;
+
+        info!(
+            user = user,
+            dbname = dbname,
+            project = project.as_deref(),
+            "credentials"
+        );
 
         Ok(Self {
             user,

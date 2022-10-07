@@ -5,6 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
+use tracing::{error, info};
 use utils::{
     postgres_backend::{self, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
@@ -19,7 +20,7 @@ use utils::{
 ///
 pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
     scopeguard::defer! {
-        println!("mgmt has shut down");
+        info!("mgmt has shut down");
     }
 
     listener
@@ -27,14 +28,14 @@ pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
         .context("failed to set listener to blocking")?;
     loop {
         let (socket, peer_addr) = listener.accept().context("failed to accept a new client")?;
-        println!("accepted connection from {}", peer_addr);
+        info!("accepted connection from {peer_addr}");
         socket
             .set_nodelay(true)
             .context("failed to set client socket option")?;
 
         thread::spawn(move || {
             if let Err(err) = handle_connection(socket) {
-                println!("error: {}", err);
+                error!("{err}");
             }
         });
     }
@@ -102,14 +103,14 @@ impl postgres_backend::Handler for MgmtHandler {
         let res = try_process_query(pgb, query_string);
         // intercept and log error message
         if res.is_err() {
-            println!("Mgmt query failed: #{:?}", res);
+            error!("mgmt query failed: {res:?}");
         }
         res
     }
 }
 
 fn try_process_query(pgb: &mut PostgresBackend, query_string: &str) -> anyhow::Result<()> {
-    println!("Got mgmt query [redacted]"); // Content contains password, don't print it
+    info!("got mgmt query [redacted]"); // Content contains password, don't print it
 
     let resp: PsqlSessionResponse = serde_json::from_str(query_string)?;
 

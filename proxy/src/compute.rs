@@ -5,6 +5,7 @@ use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::NoTls;
+use tracing::{error, info};
 use utils::pq_proto::StartupMessageParams;
 
 #[derive(Debug, Error)]
@@ -54,6 +55,7 @@ impl NodeInfo {
         use tokio_postgres::config::Host;
 
         let connect_once = |host, port| {
+            info!("trying to connect to a compute node at {host}:{port}");
             TcpStream::connect((host, port)).and_then(|socket| async {
                 let socket_addr = socket.peer_addr()?;
                 // This prevents load balancer from severing the connection.
@@ -72,7 +74,11 @@ impl NodeInfo {
         if ports.len() > 1 && ports.len() != hosts.len() {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("couldn't connect: bad compute config, ports and hosts entries' count does not match: {:?}", self.config),
+                format!(
+                    "couldn't connect: bad compute config, \
+                        ports and hosts entries' count does not match: {:?}",
+                    self.config
+                ),
             ));
         }
 
@@ -88,7 +94,7 @@ impl NodeInfo {
                 Ok(socket) => return Ok(socket),
                 Err(err) => {
                     // We can't throw an error here, as there might be more hosts to try.
-                    println!("failed to connect to compute `{host}:{port}`: {err}");
+                    error!("failed to connect to a compute node at {host}:{port}: {err}");
                     connection_error = Some(err);
                 }
             }
@@ -160,8 +166,8 @@ impl NodeInfo {
             .ok_or(ConnectionError::FailedToFetchPgVersion)?
             .into();
 
+        info!("connected to user's compute node at {socket_addr}");
         let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
-
         let db = PostgresConnection { stream, version };
 
         Ok((db, cancel_closure))
