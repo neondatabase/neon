@@ -1,7 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use remote_storage::GenericRemoteStorage;
 
 use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::http::models::TenantInfo;
-use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
+use crate::storage_sync::index::{LayerFileMetadata, RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::{
@@ -104,7 +104,7 @@ pub fn init_tenant_mgr(
                 if let TenantAttachData::Ready(t) = new_timeline_values {
                     for (timeline_id, old_value) in old_values {
                         if let LocalTimelineInitStatus::LocallyComplete(metadata) = old_value {
-                            t.insert(timeline_id, (metadata, HashSet::new()));
+                            t.insert(timeline_id, (metadata, HashMap::new()));
                         }
                     }
                 }
@@ -483,7 +483,7 @@ pub fn list_tenant_info(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
 
 #[derive(Debug)]
 pub enum TenantAttachData {
-    Ready(HashMap<TimelineId, (TimelineMetadata, HashSet<PathBuf>)>),
+    Ready(HashMap<TimelineId, (TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>)>),
     Broken(anyhow::Error),
 }
 /// Attempts to collect information about all tenant and timelines, existing on the local FS.
@@ -690,8 +690,12 @@ fn collect_timelines_for_tenant(
 //  NOTE: ephemeral files are excluded from the list
 fn collect_timeline_files(
     timeline_dir: &Path,
-) -> anyhow::Result<(TimelineId, TimelineMetadata, HashSet<PathBuf>)> {
-    let mut timeline_files = HashSet::new();
+) -> anyhow::Result<(
+    TimelineId,
+    TimelineMetadata,
+    HashMap<PathBuf, LayerFileMetadata>,
+)> {
+    let mut timeline_files = HashMap::new();
     let mut timeline_metadata_path = None;
 
     let timeline_id = timeline_dir
@@ -719,7 +723,8 @@ fn collect_timeline_files(
                     )
                 })?;
             } else {
-                timeline_files.insert(entry_path);
+                let metadata = LayerFileMetadata::for_collected_file(&entry_path)?;
+                timeline_files.insert(entry_path, metadata);
             }
         }
     }
