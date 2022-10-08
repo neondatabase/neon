@@ -1094,12 +1094,22 @@ impl Tenant {
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
 /// to get bootstrap data for timeline initialization.
-fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path, pg_version: u32) -> Result<()> {
-    info!("running initdb in {}... ", initdbpath.display());
+fn run_initdb(
+    conf: &'static PageServerConf,
+    initdb_target_dir: &Path,
+    pg_version: u32,
+) -> Result<()> {
+    let initdb_bin_path = conf.pg_bin_dir(pg_version).join("initdb");
+    let initdb_lib_dir = conf.pg_lib_dir(pg_version);
+    info!(
+        "running {} in {}, libdir: {}",
+        initdb_bin_path.display(),
+        initdb_target_dir.display(),
+        initdb_lib_dir.display(),
+    );
 
-    let initdb_path = conf.pg_bin_dir(pg_version).join("initdb");
-    let initdb_output = Command::new(initdb_path)
-        .args(&["-D", &initdbpath.to_string_lossy()])
+    let initdb_output = Command::new(initdb_bin_path)
+        .args(&["-D", &initdb_target_dir.to_string_lossy()])
         .args(&["-U", &conf.superuser])
         .args(&["-E", "utf8"])
         .arg("--no-instructions")
@@ -1107,8 +1117,8 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path, pg_version: u32)
         // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
-        .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
-        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+        .env("LD_LIBRARY_PATH", &initdb_lib_dir)
+        .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
         .stdout(Stdio::null())
         .output()
         .context("failed to execute initdb")?;
