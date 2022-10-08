@@ -31,11 +31,20 @@ use utils::{
 
 project_git_version!(GIT_VERSION);
 
+const FEATURES: &[&str] = &[
+    #[cfg(feature = "testing")]
+    "testing",
+    #[cfg(feature = "fail/failpoints")]
+    "fail/failpoints",
+    #[cfg(feature = "profiling")]
+    "profiling",
+];
+
 fn version() -> String {
     format!(
-        "{GIT_VERSION} profiling:{} failpoints:{}",
-        cfg!(feature = "profiling"),
-        fail::has_failpoints()
+        "{GIT_VERSION} failpoints: {}, features: {:?}",
+        fail::has_failpoints(),
+        FEATURES,
     )
 }
 
@@ -86,13 +95,7 @@ fn main() -> anyhow::Result<()> {
         .get_matches();
 
     if arg_matches.is_present("enabled-features") {
-        let features: &[&str] = &[
-            #[cfg(feature = "testing")]
-            "testing",
-            #[cfg(feature = "profiling")]
-            "profiling",
-        ];
-        println!("{{\"features\": {features:?} }}");
+        println!("{{\"features\": {FEATURES:?} }}");
         return Ok(());
     }
 
