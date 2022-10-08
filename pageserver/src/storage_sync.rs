@@ -169,9 +169,14 @@ use self::{
     upload::{upload_index_part, upload_timeline_layers, UploadedTimeline},
 };
 use crate::{
-    config::PageServerConf, exponential_backoff, storage_sync::index::RemoteIndex, task_mgr,
-    task_mgr::TaskKind, task_mgr::BACKGROUND_RUNTIME, tenant::metadata::TimelineMetadata,
-    tenant_mgr::attach_local_tenants,
+    config::PageServerConf,
+    exponential_backoff,
+    storage_sync::index::RemoteIndex,
+    task_mgr,
+    task_mgr::TaskKind,
+    task_mgr::BACKGROUND_RUNTIME,
+    tenant::metadata::TimelineMetadata,
+    tenant_mgr::{attach_local_tenants, IsTenantLoaded},
 };
 use crate::{
     metrics::{IMAGE_SYNC_TIME, REMAINING_SYNC_ITEMS, REMOTE_INDEX_UPLOAD},
@@ -735,7 +740,7 @@ async fn storage_sync_loop(
                     }
                     drop(index_accessor);
                     // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
-                    attach_local_tenants(conf, &index, timelines_to_attach);
+                    attach_local_tenants(conf, &index, IsTenantLoaded::Yes(timelines_to_attach));
                 }
             }
             ControlFlow::Break(()) => {
