@@ -784,7 +784,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     json_response(StatusCode::OK, ())
 }
 
-#[cfg(any(feature = "testing", feature = "failpoints"))]
+#[cfg(feature = "testing")]
 async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     if !fail::has_failpoints() {
         return Err(ApiError::BadRequest(anyhow!(
