@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
                     Arg::new("disk_consistent_lsn")
                         .long("disk_consistent_lsn")
                         .takes_value(true)
-                        .help("Replace disk constistent Lsn"),
+                        .help("Replace disk consistent Lsn"),
                 )
                 .arg(
                     Arg::new("prev_record_lsn")
