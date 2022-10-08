@@ -556,7 +556,7 @@ impl DeltaLayer {
 
     /// Create a DeltaLayer struct representing an existing file on disk.
     ///
-    /// This variant is only used for debugging purposes, by the 'dump_layerfile' binary.
+    /// This variant is only used for debugging purposes, by the 'pageserver_binutils' binary.
     pub fn new_for_path<F>(path: &Path, file: F) -> Result<Self>
     where
         F: FileExt,
