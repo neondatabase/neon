@@ -1,11 +1,5 @@
-import random
-import threading
-import time
-from typing import List
-
 import pytest
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, Postgres
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 from performance.test_perf_pgbench import get_scales_matrix
 
 
@@ -14,8 +8,7 @@ from performance.test_perf_pgbench import get_scales_matrix
 # This test set fail point after at the end of GC and checks
 # that pageserver normally restarts after it
 @pytest.mark.parametrize("scale", get_scales_matrix(10))
-def test_gc_cutoff(neon_env_builder: NeonEnvBuilder,
-                   pg_bin: PgBin, scale: int):
+def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, scale: int):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
@@ -39,7 +32,7 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder,
     for i in range(10):
         try:
             pg_bin.run_capture(["pgbench", "-T100", connstr])
-        except:
+        except Exception:
             env.pageserver.stop()
             env.pageserver.start()
             pageserver_http.configure_failpoints(("gc-before-save-metadata", "return"))
