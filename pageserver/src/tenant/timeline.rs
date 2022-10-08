@@ -2077,6 +2077,18 @@ impl Timeline {
             result.layers_removed += 1;
         }
 
+        info!(
+            "GC completed removing {} layers, cuttof {}",
+            result.layers_removed, new_gc_cutoff
+        );
+        if result.layers_removed != 0 {
+            fail_point!("gc-before-save-metadata", |_| {
+                info!("Abnormaly terinate pageserver at gc-before-save-metadata fail point");
+                std::process::abort();
+            });
+            return Ok(result);
+        }
+
         if self.upload_layers.load(atomic::Ordering::Relaxed) {
             storage_sync::schedule_layer_delete(
                 self.tenant_id,
