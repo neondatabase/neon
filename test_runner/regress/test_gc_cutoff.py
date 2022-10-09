@@ -29,7 +29,7 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, scale: int):
 
     pageserver_http.configure_failpoints(("gc-before-save-metadata", "return"))
 
-    for i in range(10):
+    for i in range(5):
         try:
             pg_bin.run_capture(["pgbench", "-T100", connstr])
         except Exception:
