@@ -10,6 +10,8 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use fail::FailScenario;
+use metrics::set_build_info_metric;
+
 use pageserver::{
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service, profiling, task_mgr,
@@ -358,6 +360,8 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
             page_service::libpq_listener_main(conf, auth, pageserver_listener, conf.auth_type).await
         },
     );
+
+    set_build_info_metric(GIT_VERSION);
 
     // All started up! Now just sit and wait for shutdown signal.
     signals.handle(|signal| match signal {

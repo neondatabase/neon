@@ -17,6 +17,7 @@ use toml_edit::Document;
 use tracing::*;
 use url::{ParseError, Url};
 
+use metrics::set_build_info_metric;
 use safekeeper::broker;
 use safekeeper::control_file;
 use safekeeper::defaults::{
@@ -363,6 +364,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
             })?,
     );
 
+    set_build_info_metric(GIT_VERSION);
     // TODO: put more thoughts into handling of failed threads
     // We probably should restart them.
 
