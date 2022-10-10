@@ -386,7 +386,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         }
         return json_response(StatusCode::ACCEPTED, ());
     }
-    // no tenant in the index, release the lock to make the potentially lengthy download opetation
+    // no tenant in the index, release the lock to make the potentially lengthy download operation
     drop(index_accessor);
 
     // download index parts for every tenant timeline

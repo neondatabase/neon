@@ -465,7 +465,7 @@ struct LayersUpload {
 /// A timeline download task.
 /// Does not contain the file list to download, to allow other
 /// parts of the pageserer code to schedule the task
-/// without using the remote index or any other ways to list the remote timleine files.
+/// without using the remote index or any other ways to list the remote timeline files.
 /// Skips the files that are already downloaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LayersDownload {
