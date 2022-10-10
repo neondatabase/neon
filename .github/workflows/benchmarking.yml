@@ -46,7 +46,7 @@ jobs:
     runs-on: [self-hosted, zenith-benchmarker]
 
     env:
-      POSTGRES_DISTRIB_DIR: /tmp/pg_install
+      POSTGRES_DISTRIB_DIR: /usr/pgsql
       DEFAULT_PG_VERSION: 14
 
     steps:
