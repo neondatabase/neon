@@ -1771,7 +1771,7 @@ mod tests {
                     sync_id,
                     SyncTask::upload(LayersUpload {
                         layers_to_upload: local_files.keys().cloned().collect(),
-                        uploaded_layers: Default::default(),
+                        uploaded_layers: HashMap::default(),
                         metadata: Some(local_metadata),
                     })
                 )]

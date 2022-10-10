@@ -371,7 +371,7 @@ impl IndexPart {
             timeline_layers,
             missing_layers,
             // TODO: for tests this could be easily set
-            layer_metadata: Default::default(),
+            layer_metadata: HashMap::default(),
             disk_consistent_lsn,
             metadata_bytes,
         }
