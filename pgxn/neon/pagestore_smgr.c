@@ -1130,6 +1130,9 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 				pfree(resp);
 				return;
 			}
+			else
+				elog(DEBUG1, "Reject prefetch resonse because request LSN=%X/%X > max(%X/%X, %X/%X)",
+					 LSN_FORMAT_ARGS(request_lsn),  LSN_FORMAT_ARGS(prefetch_lsn),  LSN_FORMAT_ARGS(PageGetLSN(page)));
 		}
 		pfree(resp);
 	}
@@ -1155,6 +1158,8 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 				request.rnode = prefetch_requests[i].rnode;
 				request.forknum = prefetch_requests[i].forkNum;
 				request.blkno = prefetch_requests[i].blockNum;
+				if (request_latest)
+					request.req.lsn = GetLastWrittenLSN(request.rnode, request.forknum, request.blkno);
 				prefetch_responses[i] = prefetch_requests[i];
 				page_server->send((NeonRequest *) & request);
 			}
