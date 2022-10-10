@@ -1961,6 +1961,11 @@ class NeonProxy(PgProtocol):
     def _wait_until_ready(self):
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
 
+    def get_metrics(self) -> str:
+        request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
+        request_result.raise_for_status()
+        return request_result.text
+
     def __enter__(self):
         return self
 
