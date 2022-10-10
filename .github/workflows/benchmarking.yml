@@ -72,7 +72,7 @@ jobs:
         echo Poetry
         poetry --version
         echo Pgbench
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+        pgbench --version
 
     - name: Create Neon Project
       id: create-neon-project
