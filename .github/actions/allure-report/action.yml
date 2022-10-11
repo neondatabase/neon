@@ -47,7 +47,7 @@ runs:
         else
           key=branch-$(echo ${GITHUB_REF#refs/heads/} | tr -c "[:alnum:]._-" "-")
         fi
-        echo "::set-output name=KEY::${key}"
+        echo "KEY=${key}" >> $GITHUB_OUTPUT
 
     - uses: actions/setup-java@v3
       if: ${{ inputs.action == 'generate' }}
@@ -186,7 +186,7 @@ runs:
         aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
-        echo "::set-output name=report-url::${REPORT_URL}"
+        echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
     - name: Release Allure lock
       if: ${{ inputs.action == 'generate' && always() }}

@@ -34,7 +34,7 @@ runs:
         S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX%$GITHUB_RUN_ATTEMPT} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
         if [ -z "${S3_KEY}" ]; then
           if [ "${SKIP_IF_DOES_NOT_EXIST}" = "true" ]; then
-            echo '::set-output name=SKIPPED::true'
+            echo 'SKIPPED=true' >> $GITHUB_OUTPUT
             exit 0
           else
             echo 2>&1 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
@@ -42,7 +42,7 @@ runs:
           fi
         fi
 
-        echo '::set-output name=SKIPPED::false'
+        echo 'SKIPPED=false' >> $GITHUB_OUTPUT
 
         mkdir -p $(dirname $ARCHIVE)
         time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} ${ARCHIVE}
