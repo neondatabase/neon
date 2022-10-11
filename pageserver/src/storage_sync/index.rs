@@ -259,10 +259,10 @@ impl RemoteTimeline {
         let metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)?;
         let default_metadata = &IndexLayerMetadata::default();
 
-        let find_metadata = |path: &RelativePath| -> LayerFileMetadata {
+        let find_metadata = |key: &RelativePath| -> LayerFileMetadata {
             index_part
                 .layer_metadata
-                .get(path)
+                .get(key)
                 .unwrap_or(default_metadata)
                 .into()
         };
@@ -271,12 +271,12 @@ impl RemoteTimeline {
             timeline_layers: index_part
                 .timeline_layers
                 .iter()
-                .map(|path| (path.as_path(timeline_path), find_metadata(path)))
+                .map(|layer_path| (layer_path.as_path(timeline_path), find_metadata(layer_path)))
                 .collect(),
             missing_layers: index_part
                 .missing_layers
                 .iter()
-                .map(|path| (path.as_path(timeline_path), find_metadata(path)))
+                .map(|layer_path| (layer_path.as_path(timeline_path), find_metadata(layer_path)))
                 .collect(),
             metadata,
             awaits_download: false,
