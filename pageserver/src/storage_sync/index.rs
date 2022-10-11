@@ -222,8 +222,8 @@ pub struct RemoteTimeline {
 impl RemoteTimeline {
     pub fn new(metadata: TimelineMetadata) -> Self {
         Self {
-            timeline_layers: Default::default(),
-            missing_layers: Default::default(),
+            timeline_layers: HashMap::default(),
+            missing_layers: HashMap::default(),
             metadata,
             awaits_download: false,
         }
@@ -682,7 +682,7 @@ mod tests {
             version: 0,
             timeline_layers: [RelativePath("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".to_owned())].into_iter().collect(),
             missing_layers: [RelativePath("not_a_real_layer_but_adding_coverage".to_owned())].into_iter().collect(),
-            layer_metadata: Default::default(),
+            layer_metadata: HashMap::default(),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: SHARED_TIMELINE_METADATA.to_owned(),
         };
