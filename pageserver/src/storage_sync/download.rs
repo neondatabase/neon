@@ -453,9 +453,9 @@ mod tests {
         let timeline_upload =
             create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
 
-        for local_path in timeline_upload.layers_to_upload {
+        for local_path in timeline_upload.layers_to_upload.keys() {
             let remote_path =
-                local_storage.resolve_in_storage(&storage.remote_object_id(&local_path)?)?;
+                local_storage.resolve_in_storage(&storage.remote_object_id(local_path)?)?;
             let remote_parent_dir = remote_path.parent().unwrap();
             if !remote_parent_dir.exists() {
                 fs::create_dir_all(&remote_parent_dir).await?;
@@ -473,11 +473,19 @@ mod tests {
 
         let mut remote_timeline = RemoteTimeline::new(metadata.clone());
         remote_timeline.awaits_download = true;
-        remote_timeline.add_timeline_layers(
-            layer_files
-                .iter()
-                .map(|layer| local_timeline_path.join(layer)),
-        );
+        remote_timeline.add_timeline_layers(layer_files.iter().map(|layer| {
+            let layer_path = local_timeline_path.join(layer);
+
+            // this could had also been LayerFileMetadata::default(), but since in this test we
+            // don't do the merge operation done by storage_sync::download_timeline_data, it would
+            // not be merged back to timeline.
+            let metadata_from_upload = timeline_upload
+                .layers_to_upload
+                .get(&layer_path)
+                .expect("layer must exist in previously uploaded paths")
+                .to_owned();
+            (layer_path, metadata_from_upload)
+        }));
 
         let download_data = match download_timeline_layers(
             harness.conf,

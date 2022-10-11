@@ -427,7 +427,7 @@ impl SyncTaskBatch {
                             .extend(new_delete.data.deleted_layers.iter().cloned());
                     }
                     if let Some(batch_upload) = &mut self.upload {
-                        let not_deleted = |layer: &PathBuf| {
+                        let not_deleted = |layer: &PathBuf, _: &mut LayerFileMetadata| {
                             !new_delete.data.layers_to_delete.contains(layer)
                                 && !new_delete.data.deleted_layers.contains(layer)
                         };
@@ -455,10 +455,10 @@ impl SyncTaskBatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LayersUpload {
     /// Layer file path in the pageserver workdir, that were added for the corresponding checkpoint.
-    layers_to_upload: HashSet<PathBuf>,
+    layers_to_upload: HashMap<PathBuf, LayerFileMetadata>,
     /// Already uploaded layers. Used to store the data about the uploads between task retries
     /// and to record the data into the remote index after the task got completed or evicted.
-    uploaded_layers: HashSet<PathBuf>,
+    uploaded_layers: HashMap<PathBuf, LayerFileMetadata>,
     metadata: Option<TimelineMetadata>,
 }
 
@@ -491,7 +491,7 @@ struct LayersDeletion {
 pub fn schedule_layer_upload(
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    layers_to_upload: HashSet<PathBuf>,
+    layers_to_upload: HashMap<PathBuf, LayerFileMetadata>,
     metadata: Option<TimelineMetadata>,
 ) {
     let sync_queue = match SYNC_QUEUE.get() {
@@ -508,7 +508,7 @@ pub fn schedule_layer_upload(
         },
         SyncTask::upload(LayersUpload {
             layers_to_upload,
-            uploaded_layers: HashSet::new(),
+            uploaded_layers: HashMap::new(),
             metadata,
         }),
     );
@@ -1195,11 +1195,18 @@ async fn update_remote_data(
                         }
                         if upload_failed {
                             existing_entry.add_upload_failures(
-                                uploaded_data.layers_to_upload.iter().cloned(),
+                                uploaded_data
+                                    .layers_to_upload
+                                    .iter()
+                                    .map(|(k, v)| (k.to_owned(), v.to_owned())),
                             );
                         } else {
-                            existing_entry
-                                .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
+                            existing_entry.add_timeline_layers(
+                                uploaded_data
+                                    .uploaded_layers
+                                    .iter()
+                                    .map(|(k, v)| (k.to_owned(), v.to_owned())),
+                            );
                         }
                     }
                     RemoteDataUpdate::Delete(layers_to_remove) => {
@@ -1219,11 +1226,19 @@ async fn update_remote_data(
                     };
                     let mut new_remote_timeline = RemoteTimeline::new(new_metadata.clone());
                     if upload_failed {
-                        new_remote_timeline
-                            .add_upload_failures(uploaded_data.layers_to_upload.iter().cloned());
+                        new_remote_timeline.add_upload_failures(
+                            uploaded_data
+                                .layers_to_upload
+                                .iter()
+                                .map(|(k, v)| (k.to_owned(), v.to_owned())),
+                        );
                     } else {
-                        new_remote_timeline
-                            .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
+                        new_remote_timeline.add_timeline_layers(
+                            uploaded_data
+                                .uploaded_layers
+                                .iter()
+                                .map(|(k, v)| (k.to_owned(), v.to_owned())),
+                        );
                     }
 
                     index_accessor.add_timeline_entry(sync_id, new_remote_timeline.clone());
@@ -1323,8 +1338,8 @@ fn schedule_first_sync_tasks(
                 new_sync_tasks.push_back((
                     sync_id,
                     SyncTask::upload(LayersUpload {
-                        layers_to_upload: local_files.keys().cloned().collect(),
-                        uploaded_layers: HashSet::new(),
+                        layers_to_upload: local_files,
+                        uploaded_layers: HashMap::new(),
                         metadata: Some(local_metadata.clone()),
                     }),
                 ));
@@ -1360,8 +1375,7 @@ fn compare_local_and_remote_timeline(
 
     let have_downloadable = remote_files
         .iter()
-        .filter(|&&remote_file| !local_files.contains_key(remote_file))
-        .any(|_| true);
+        .any(|&remote_file| !local_files.contains_key(remote_file));
 
     let (initial_timeline_status, awaits_download) = if have_downloadable {
         new_sync_tasks.push_back((
@@ -1383,17 +1397,22 @@ fn compare_local_and_remote_timeline(
     };
 
     let layers_to_upload = local_files
-        .keys()
-        .filter(|local_file| !remote_files.contains(local_file))
-        .cloned()
-        .collect::<HashSet<_>>();
+        .iter()
+        .filter_map(|(local_file, metadata)| {
+            if !remote_files.contains(local_file) {
+                Some((local_file.to_owned(), metadata.to_owned()))
+            } else {
+                None
+            }
+        })
+        .collect::<HashMap<_, _>>();
 
     if !layers_to_upload.is_empty() {
         new_sync_tasks.push_back((
             sync_id,
             SyncTask::upload(LayersUpload {
                 layers_to_upload,
-                uploaded_layers: HashSet::new(),
+                uploaded_layers: HashMap::new(),
                 metadata: Some(local_metadata),
             }),
         ));
@@ -1449,11 +1468,12 @@ mod test_utils {
         let timeline_path = harness.timeline_path(&timeline_id);
         fs::create_dir_all(&timeline_path).await?;
 
-        let mut layers_to_upload = HashSet::with_capacity(filenames.len());
+        let mut layers_to_upload = HashMap::with_capacity(filenames.len());
         for &file in filenames {
             let file_path = timeline_path.join(file);
             fs::write(&file_path, dummy_contents(file).into_bytes()).await?;
-            layers_to_upload.insert(file_path);
+            let metadata = LayerFileMetadata::new(file_path.metadata()?.len());
+            layers_to_upload.insert(file_path, metadata);
         }
 
         fs::write(
@@ -1464,7 +1484,7 @@ mod test_utils {
 
         Ok(LayersUpload {
             layers_to_upload,
-            uploaded_layers: HashSet::new(),
+            uploaded_layers: HashMap::new(),
             metadata: Some(metadata),
         })
     }
@@ -1523,8 +1543,8 @@ mod tests {
             layers_to_skip: HashSet::from([PathBuf::from("sk")]),
         });
         let upload_task = SyncTask::upload(LayersUpload {
-            layers_to_upload: HashSet::from([PathBuf::from("up")]),
-            uploaded_layers: HashSet::from([PathBuf::from("upl")]),
+            layers_to_upload: HashMap::from([(PathBuf::from("up"), LayerFileMetadata::new(123))]),
+            uploaded_layers: HashMap::from([(PathBuf::from("upl"), LayerFileMetadata::new(123))]),
             metadata: Some(dummy_metadata(Lsn(2))),
         });
         let delete_task = SyncTask::delete(LayersDeletion {
@@ -1572,8 +1592,8 @@ mod tests {
             layers_to_skip: HashSet::from([PathBuf::from("sk")]),
         };
         let upload = LayersUpload {
-            layers_to_upload: HashSet::from([PathBuf::from("up")]),
-            uploaded_layers: HashSet::from([PathBuf::from("upl")]),
+            layers_to_upload: HashMap::from([(PathBuf::from("up"), LayerFileMetadata::new(123))]),
+            uploaded_layers: HashMap::from([(PathBuf::from("upl"), LayerFileMetadata::new(123))]),
             metadata: Some(dummy_metadata(Lsn(2))),
         };
         let delete = LayersDeletion {
@@ -1692,7 +1712,8 @@ mod tests {
             let local_files =
                 HashMap::from([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
             let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
-            remote_entry.add_timeline_layers([PathBuf::from("first_file")]);
+            remote_entry
+                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
 
             let (status, sync_needed) = compare_local_and_remote_timeline(
                 &mut new_sync_tasks,
@@ -1718,7 +1739,8 @@ mod tests {
             let local_metadata = dummy_metadata(0x02.into());
             let local_files = HashMap::default();
             let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
-            remote_entry.add_timeline_layers([PathBuf::from("first_file")]);
+            remote_entry
+                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
 
             let (status, sync_needed) = compare_local_and_remote_timeline(
                 &mut new_sync_tasks,
@@ -1775,8 +1797,8 @@ mod tests {
                 &[(
                     sync_id,
                     SyncTask::upload(LayersUpload {
-                        layers_to_upload: local_files.keys().cloned().collect(),
-                        uploaded_layers: HashSet::default(),
+                        layers_to_upload: local_files,
+                        uploaded_layers: HashMap::default(),
                         metadata: Some(local_metadata),
                     })
                 )]
