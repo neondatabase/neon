@@ -1483,7 +1483,6 @@ impl Timeline {
     ) -> Result<HashMap<PathBuf, LayerFileMetadata>> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
-        let mut layer_paths_to_upload = HashMap::new();
         for partition in partitioning.parts.iter() {
             if force || self.time_for_new_image_layer(partition, lsn)? {
                 let img_range =
@@ -1505,7 +1504,6 @@ impl Timeline {
                     }
                 }
                 let image_layer = image_layer_writer.finish()?;
-                layer_paths_to_upload.insert(image_layer.path(), LayerFileMetadata::default());
                 image_layers.push(image_layer);
             }
         }
@@ -1519,19 +1517,23 @@ impl Timeline {
         //
         // Compaction creates multiple image layers. It would be better to create them all
         // and fsync them all in parallel.
-        let mut all_paths = Vec::from_iter(layer_paths_to_upload.keys().cloned());
-        all_paths.push(self.conf.timeline_path(&self.timeline_id, &self.tenant_id));
+        let all_paths = image_layers
+            .iter()
+            .map(|layer| layer.path())
+            .chain(std::iter::once(
+                self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
+            ))
+            .collect::<Vec<_>>();
         par_fsync::par_fsync(&all_paths)?;
+
+        let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
         let mut layers = self.layers.write().unwrap();
         for l in image_layers {
             let path = l.path();
             let metadata = path.metadata()?;
 
-            layer_paths_to_upload
-                .get_mut(&path)
-                .expect("should have image_paths_to_upload for each new layer")
-                .with_file_size(metadata.len());
+            layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
 
             self.metrics.current_physical_size_gauge.add(metadata.len());
             layers.insert_historic(Arc::new(l));

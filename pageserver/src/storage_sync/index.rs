@@ -312,16 +312,6 @@ impl LayerFileMetadata {
         self.file_size
     }
 
-    /// Overwrites the stored file size for this layer file.
-    pub(crate) fn with_file_size(&mut self, file_size: u64) -> &mut Self {
-        if let Some(prev_file_size) = self.file_size {
-            debug_assert_eq!(prev_file_size, file_size);
-            // it is much more common that the size is not yet set, when building the metadata
-        }
-        self.file_size = Some(file_size);
-        self
-    }
-
     // FIXME: this is ambigious, better to get rid of it from the start; when file hashes get
     // recorded it most likely cannot be done here but needs a background task.
     pub(crate) fn for_collected_file(p: &std::path::Path) -> anyhow::Result<Self> {
