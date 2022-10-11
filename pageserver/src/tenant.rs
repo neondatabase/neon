@@ -144,12 +144,12 @@ impl Tenant {
 
     /// Lists timelines the tenant contains.
     /// Up to tenant's implementation to omit certain timelines that ar not considered ready for use.
-    pub fn list_timelines(&self) -> Vec<(TimelineId, Arc<Timeline>)> {
+    pub fn list_timelines(&self) -> Vec<Arc<Timeline>> {
         self.timelines
             .lock()
             .unwrap()
-            .iter()
-            .map(|(timeline_id, timeline_entry)| (*timeline_id, Arc::clone(timeline_entry)))
+            .values()
+            .map(Arc::clone)
             .collect()
     }
 
