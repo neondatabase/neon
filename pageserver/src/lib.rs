@@ -119,32 +119,6 @@ impl<T> TenantTimelineValues<T> {
     fn new() -> Self {
         Self(HashMap::new())
     }
-
-    fn with_capacity(capacity: usize) -> Self {
-        Self(HashMap::with_capacity(capacity))
-    }
-
-    /// A convenience method to map certain values and omit some of them, if needed.
-    /// Tenants that won't have any timeline entries due to the filtering, will still be preserved
-    /// in the structure.
-    fn filter_map<F, NewT>(self, map: F) -> TenantTimelineValues<NewT>
-    where
-        F: Fn(T) -> Option<NewT>,
-    {
-        let capacity = self.0.len();
-        self.0.into_iter().fold(
-            TenantTimelineValues::<NewT>::with_capacity(capacity),
-            |mut new_values, (tenant_id, old_values)| {
-                let new_timeline_values = new_values.0.entry(tenant_id).or_default();
-                for (timeline_id, old_value) in old_values {
-                    if let Some(new_value) = map(old_value) {
-                        new_timeline_values.insert(timeline_id, new_value);
-                    }
-                }
-                new_values
-            },
-        )
-    }
 }
 
 /// A suffix to be used during file sync from the remote storage,
@@ -179,37 +153,5 @@ mod backoff_defaults_tests {
             DEFAULT_MAX_BACKOFF_SECONDS,
             "Given big enough of retries, backoff should reach its allowed max value"
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::tenant::harness::TIMELINE_ID;
-
-    use super::*;
-
-    #[test]
-    fn tenant_timeline_value_mapping() {
-        let first_tenant = TenantId::generate();
-        let second_tenant = TenantId::generate();
-        assert_ne!(first_tenant, second_tenant);
-
-        let mut initial = TenantTimelineValues::new();
-        initial
-            .0
-            .entry(first_tenant)
-            .or_default()
-            .insert(TIMELINE_ID, "test_value");
-        let _ = initial.0.entry(second_tenant).or_default();
-        assert_eq!(initial.0.len(), 2, "Should have entries for both tenants");
-
-        let filtered = initial.filter_map(|_| None::<&str>).0;
-        assert_eq!(
-            filtered.len(),
-            2,
-            "Should have entries for both tenants even after filtering away all entries"
-        );
-        assert!(filtered.contains_key(&first_tenant));
-        assert!(filtered.contains_key(&second_tenant));
     }
 }
