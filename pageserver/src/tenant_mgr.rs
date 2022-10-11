@@ -677,7 +677,9 @@ fn collect_timeline_files(
         fs::read_dir(&timeline_dir).context("Failed to list timeline dir contents")?;
     for entry in timeline_dir_entries {
         let entry_path = entry.context("Failed to list timeline dir entry")?.path();
-        if entry_path.is_file() {
+        let metadata = entry_path.metadata()?;
+
+        if metadata.is_file() {
             if entry_path.file_name().and_then(OsStr::to_str) == Some(METADATA_FILE_NAME) {
                 timeline_metadata_path = Some(entry_path);
             } else if is_ephemeral_file(&entry_path.file_name().unwrap().to_string_lossy()) {
@@ -692,8 +694,8 @@ fn collect_timeline_files(
                     )
                 })?;
             } else {
-                let metadata = LayerFileMetadata::for_collected_file(&entry_path)?;
-                timeline_files.insert(entry_path, metadata);
+                let layer_metadata = LayerFileMetadata::new(metadata.len());
+                timeline_files.insert(entry_path, layer_metadata);
             }
         }
     }
