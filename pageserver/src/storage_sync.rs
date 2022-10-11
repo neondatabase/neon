@@ -1333,7 +1333,7 @@ fn schedule_first_sync_tasks(
                 new_sync_tasks.push_back((
                     sync_id,
                     SyncTask::upload(LayersUpload {
-                        layers_to_upload: local_files.clone(),
+                        layers_to_upload: local_files,
                         uploaded_layers: HashMap::new(),
                         metadata: Some(local_metadata.clone()),
                     }),
@@ -1793,7 +1793,7 @@ mod tests {
                 &[(
                     sync_id,
                     SyncTask::upload(LayersUpload {
-                        layers_to_upload: local_files.clone(),
+                        layers_to_upload: local_files,
                         uploaded_layers: HashMap::default(),
                         metadata: Some(local_metadata),
                     })
