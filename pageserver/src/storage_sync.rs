@@ -1370,8 +1370,7 @@ fn compare_local_and_remote_timeline(
 
     let have_downloadable = remote_files
         .iter()
-        .filter(|&&remote_file| !local_files.contains_key(remote_file))
-        .any(|_| true);
+        .any(|&remote_file| !local_files.contains_key(remote_file));
 
     let (initial_timeline_status, awaits_download) = if have_downloadable {
         new_sync_tasks.push_back((
