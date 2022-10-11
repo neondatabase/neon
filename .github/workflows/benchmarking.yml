@@ -178,7 +178,7 @@ jobs:
         echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
     - name: Create Neon Project
-      if: matrix.platform != 'neon-captest-reuse'
+      if: contains(fromJson('["neon-captest-new", "neon-captest-prefetch"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -268,7 +268,7 @@ jobs:
         build_type: ${{ env.BUILD_TYPE }}
 
     - name: Delete Neon Project
-      if: ${{ matrix.platform != 'neon-captest-reuse' && always() }}
+      if: ${{ steps.create-neon-project.outputs.project_id && always() }}
       uses: ./.github/actions/neon-project-delete
       with:
         environment: dev
