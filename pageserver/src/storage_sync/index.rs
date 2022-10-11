@@ -492,18 +492,12 @@ mod tests {
         );
         let remote_timeline = RemoteTimeline {
             timeline_layers: HashMap::from([
-                (timeline_path.join("layer_1"), LayerFileMetadata::default()),
-                (timeline_path.join("layer_2"), LayerFileMetadata::default()),
+                (timeline_path.join("layer_1"), LayerFileMetadata::new(1)),
+                (timeline_path.join("layer_2"), LayerFileMetadata::new(2)),
             ]),
             missing_layers: HashMap::from([
-                (
-                    timeline_path.join("missing_1"),
-                    LayerFileMetadata::default(),
-                ),
-                (
-                    timeline_path.join("missing_2"),
-                    LayerFileMetadata::default(),
-                ),
+                (timeline_path.join("missing_1"), LayerFileMetadata::new(3)),
+                (timeline_path.join("missing_2"), LayerFileMetadata::new(4)),
             ]),
             metadata: metadata.clone(),
             awaits_download: false,
@@ -626,18 +620,12 @@ mod tests {
             &timeline_path,
             RemoteTimeline {
                 timeline_layers: HashMap::from([
-                    (PathBuf::from("bad_path"), LayerFileMetadata::default()),
-                    (timeline_path.join("layer_2"), LayerFileMetadata::default()),
+                    (PathBuf::from("bad_path"), LayerFileMetadata::new(1)),
+                    (timeline_path.join("layer_2"), LayerFileMetadata::new(2)),
                 ]),
                 missing_layers: HashMap::from([
-                    (
-                        timeline_path.join("missing_1"),
-                        LayerFileMetadata::default(),
-                    ),
-                    (
-                        timeline_path.join("missing_2"),
-                        LayerFileMetadata::default(),
-                    ),
+                    (timeline_path.join("missing_1"), LayerFileMetadata::new(3)),
+                    (timeline_path.join("missing_2"), LayerFileMetadata::new(4)),
                 ]),
                 metadata: metadata.clone(),
                 awaits_download: false,
@@ -649,15 +637,12 @@ mod tests {
             &timeline_path,
             RemoteTimeline {
                 timeline_layers: HashMap::from([
-                    (timeline_path.join("layer_1"), LayerFileMetadata::default()),
-                    (timeline_path.join("layer_2"), LayerFileMetadata::default()),
+                    (timeline_path.join("layer_1"), LayerFileMetadata::new(1)),
+                    (timeline_path.join("layer_2"), LayerFileMetadata::new(2)),
                 ]),
                 missing_layers: HashMap::from([
-                    (PathBuf::from("bad_path"), LayerFileMetadata::default()),
-                    (
-                        timeline_path.join("missing_2"),
-                        LayerFileMetadata::default(),
-                    ),
+                    (PathBuf::from("bad_path"), LayerFileMetadata::new(3)),
+                    (timeline_path.join("missing_2"), LayerFileMetadata::new(4)),
                 ]),
                 metadata,
                 awaits_download: false,
