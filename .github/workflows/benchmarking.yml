@@ -232,33 +232,33 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
-    - name: Benchmark simple-update
-      uses: ./.github/actions/run-python-test-set
-      with:
-        build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance
-        run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
-      env:
-        PLATFORM: ${{ matrix.platform }}
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+    # - name: Benchmark simple-update
+    #   uses: ./.github/actions/run-python-test-set
+    #   with:
+    #     build_type: ${{ env.BUILD_TYPE }}
+    #     test_selection: performance
+    #     run_in_parallel: false
+    #     save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+    #     extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
+    #   env:
+    #     PLATFORM: ${{ matrix.platform }}
+    #     BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+    #     VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+    #     PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
-    - name: Benchmark select-only
-      uses: ./.github/actions/run-python-test-set
-      with:
-        build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance
-        run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
-      env:
-        PLATFORM: ${{ matrix.platform }}
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+    # - name: Benchmark select-only
+    #   uses: ./.github/actions/run-python-test-set
+    #   with:
+    #     build_type: ${{ env.BUILD_TYPE }}
+    #     test_selection: performance
+    #     run_in_parallel: false
+    #     save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+    #     extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
+    #   env:
+    #     PLATFORM: ${{ matrix.platform }}
+    #     BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+    #     VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+    #     PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: Create Allure report
       if: always()
