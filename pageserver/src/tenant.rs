@@ -346,7 +346,7 @@ impl Tenant {
 
         ensure!(
             !children_exist,
-            "Cannot detach timeline which has child timelines"
+            "Cannot delete timeline which has child timelines"
         );
         let timeline_entry = match timelines.entry(timeline_id) {
             Entry::Occupied(e) => e,
