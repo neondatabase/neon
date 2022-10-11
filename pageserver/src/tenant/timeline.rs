@@ -475,10 +475,6 @@ impl Timeline {
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
-    ///
-    /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
-    /// is a generic type in this trait. But that doesn't currently work in
-    /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
     pub fn writer(&self) -> TimelineWriter<'_> {
         TimelineWriter {
             tl: self,
