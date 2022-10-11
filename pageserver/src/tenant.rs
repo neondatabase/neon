@@ -153,8 +153,9 @@ impl Tenant {
             .collect()
     }
 
-    /// Create a new, empty timeline. The caller is responsible for loading data into it
-    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
+    /// This is used to create the initial 'main' timeline during bootstrapping,
+    /// or when importing a new base backup. The caller is expected to load an
+    /// initial image of the datadir to the new timeline after this.
     pub fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -906,6 +907,7 @@ impl Tenant {
         Ok(totals)
     }
 
+    /// Branch an existing timeline
     fn branch_timeline(
         &self,
         src: TimelineId,
@@ -981,7 +983,7 @@ impl Tenant {
             dst_prev,
             Some(src),
             start_lsn,
-            *src_timeline.latest_gc_cutoff_lsn.read(),
+            *src_timeline.latest_gc_cutoff_lsn.read(), // FIXME: should we hold onto this guard longer?
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
