@@ -23,6 +23,7 @@ use anyhow::{bail, Context};
 use clap::{self, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
+use metrics::set_build_info_metric;
 use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use tracing::info;
@@ -166,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
     ]
     .map(flatten_err);
 
+    set_build_info_metric(GIT_VERSION);
     // This will block until all tasks have completed.
     // Furthermore, the first one to fail will cancel the rest.
     let _: Vec<()> = futures::future::try_join_all(tasks).await?;
