@@ -145,9 +145,9 @@ fn list_local_timelines(
     let timelines = tenant.list_timelines();
 
     let mut local_timeline_info = Vec::with_capacity(timelines.len());
-    for (timeline_id, repository_timeline) in timelines {
+    for repository_timeline in timelines {
         local_timeline_info.push((
-            timeline_id,
+            repository_timeline.timeline_id,
             local_timeline_info_from_timeline(
                 &repository_timeline,
                 include_non_incremental_logical_size,
@@ -218,7 +218,8 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
 
     let mut response_data = Vec::with_capacity(timelines.len());
-    for (timeline_id, timeline) in timelines {
+    for timeline in timelines {
+        let timeline_id = timeline.timeline_id;
         let local = match local_timeline_info_from_timeline(
             &timeline,
             include_non_incremental_logical_size,
