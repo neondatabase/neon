@@ -32,7 +32,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     ps_http = env.pageserver.http_client()
     with pytest.raises(
-        NeonPageserverApiException, match="Cannot detach timeline which has child timelines"
+        NeonPageserverApiException, match="Cannot delete timeline which has child timelines"
     ):
 
         timeline_path = (
