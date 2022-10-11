@@ -311,15 +311,6 @@ impl LayerFileMetadata {
     pub fn file_size(&self) -> Option<u64> {
         self.file_size
     }
-
-    // FIXME: this is ambigious, better to get rid of it from the start; when file hashes get
-    // recorded it most likely cannot be done here but needs a background task.
-    pub(crate) fn for_collected_file(p: &std::path::Path) -> anyhow::Result<Self> {
-        let m = std::fs::metadata(p)
-            .with_context(|| format!("Failed to read layer file metadata: {p:?}"))?;
-        let file_size = Some(m.len());
-        Ok(LayerFileMetadata { file_size })
-    }
 }
 
 /// Part of the remote index, corresponding to a certain timeline.
