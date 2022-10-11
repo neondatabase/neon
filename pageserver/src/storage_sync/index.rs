@@ -229,16 +229,18 @@ impl RemoteTimeline {
         }
     }
 
-    pub fn add_timeline_layers(&mut self, new_layers: impl IntoIterator<Item = PathBuf>) {
-        // FIXME
-        self.timeline_layers
-            .extend(new_layers.into_iter().map(|p| (p, Default::default())));
+    pub fn add_timeline_layers(
+        &mut self,
+        new_layers: impl IntoIterator<Item = (PathBuf, LayerFileMetadata)>,
+    ) {
+        self.timeline_layers.extend(new_layers);
     }
 
-    pub fn add_upload_failures(&mut self, upload_failures: impl IntoIterator<Item = PathBuf>) {
-        // FIXME
-        self.missing_layers
-            .extend(upload_failures.into_iter().map(|p| (p, Default::default())));
+    pub fn add_upload_failures(
+        &mut self,
+        upload_failures: impl IntoIterator<Item = (PathBuf, LayerFileMetadata)>,
+    ) {
+        self.missing_layers.extend(upload_failures);
     }
 
     pub fn remove_layers(&mut self, layers_to_remove: &HashSet<PathBuf>) {
@@ -286,6 +288,7 @@ impl RemoteTimeline {
 ///
 /// Fields have to be `Option`s because remote [`IndexPart`]'s can be from different version, which
 /// might have less or more metadata depending if upgrading or rolling back an upgrade.
+// FIXME: move to parent module?
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LayerFileMetadata {
     file_size: Option<u64>,
@@ -307,6 +310,22 @@ impl LayerFileMetadata {
         }
     }
 
+    pub fn file_size(&self) -> Option<u64> {
+        self.file_size
+    }
+
+    /// Overwrites the stored file size for this layer file.
+    pub fn with_file_size(&mut self, file_size: u64) -> &mut Self {
+        if let Some(prev_file_size) = self.file_size {
+            debug_assert_eq!(prev_file_size, file_size);
+            // it is much more common that the size is not yet set, when building the metadata
+        }
+        self.file_size = Some(file_size);
+        self
+    }
+
+    // FIXME: this is ambigious, better to get rid of it from the start; when file hashes get
+    // recorded it most likely cannot be done here but needs a background task.
     pub fn for_collected_file(p: &std::path::Path) -> anyhow::Result<Self> {
         let m = std::fs::metadata(p)
             .with_context(|| format!("Failed to read layer file metadata: {p:?}"))?;
@@ -473,12 +492,18 @@ mod tests {
         );
         let remote_timeline = RemoteTimeline {
             timeline_layers: HashMap::from([
-                (timeline_path.join("layer_1"), Default::default()),
-                (timeline_path.join("layer_2"), Default::default()),
+                (timeline_path.join("layer_1"), LayerFileMetadata::default()),
+                (timeline_path.join("layer_2"), LayerFileMetadata::default()),
             ]),
             missing_layers: HashMap::from([
-                (timeline_path.join("missing_1"), Default::default()),
-                (timeline_path.join("missing_2"), Default::default()),
+                (
+                    timeline_path.join("missing_1"),
+                    LayerFileMetadata::default(),
+                ),
+                (
+                    timeline_path.join("missing_2"),
+                    LayerFileMetadata::default(),
+                ),
             ]),
             metadata: metadata.clone(),
             awaits_download: false,
@@ -601,12 +626,18 @@ mod tests {
             &timeline_path,
             RemoteTimeline {
                 timeline_layers: HashMap::from([
-                    (PathBuf::from("bad_path"), Default::default()),
-                    (timeline_path.join("layer_2"), Default::default()),
+                    (PathBuf::from("bad_path"), LayerFileMetadata::default()),
+                    (timeline_path.join("layer_2"), LayerFileMetadata::default()),
                 ]),
                 missing_layers: HashMap::from([
-                    (timeline_path.join("missing_1"), Default::default()),
-                    (timeline_path.join("missing_2"), Default::default()),
+                    (
+                        timeline_path.join("missing_1"),
+                        LayerFileMetadata::default(),
+                    ),
+                    (
+                        timeline_path.join("missing_2"),
+                        LayerFileMetadata::default(),
+                    ),
                 ]),
                 metadata: metadata.clone(),
                 awaits_download: false,
@@ -618,12 +649,15 @@ mod tests {
             &timeline_path,
             RemoteTimeline {
                 timeline_layers: HashMap::from([
-                    (timeline_path.join("layer_1"), Default::default()),
-                    (timeline_path.join("layer_2"), Default::default()),
+                    (timeline_path.join("layer_1"), LayerFileMetadata::default()),
+                    (timeline_path.join("layer_2"), LayerFileMetadata::default()),
                 ]),
                 missing_layers: HashMap::from([
-                    (PathBuf::from("bad_path"), Default::default()),
-                    (timeline_path.join("missing_2"), Default::default()),
+                    (PathBuf::from("bad_path"), LayerFileMetadata::default()),
+                    (
+                        timeline_path.join("missing_2"),
+                        LayerFileMetadata::default(),
+                    ),
                 ]),
                 metadata,
                 awaits_download: false,

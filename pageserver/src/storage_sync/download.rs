@@ -427,7 +427,7 @@ mod tests {
 
     use crate::{
         storage_sync::{
-            index::RelativePath,
+            index::{LayerFileMetadata, RelativePath},
             test_utils::{create_local_timeline, dummy_metadata},
         },
         tenant::harness::{TenantHarness, TIMELINE_ID},
@@ -453,7 +453,7 @@ mod tests {
         let timeline_upload =
             create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
 
-        for local_path in timeline_upload.layers_to_upload {
+        for (local_path, _metadata) in timeline_upload.layers_to_upload {
             let remote_path =
                 local_storage.resolve_in_storage(&storage.remote_object_id(&local_path)?)?;
             let remote_parent_dir = remote_path.parent().unwrap();
@@ -473,11 +473,12 @@ mod tests {
 
         let mut remote_timeline = RemoteTimeline::new(metadata.clone());
         remote_timeline.awaits_download = true;
-        remote_timeline.add_timeline_layers(
-            layer_files
-                .iter()
-                .map(|layer| local_timeline_path.join(layer)),
-        );
+        remote_timeline.add_timeline_layers(layer_files.iter().enumerate().map(|(i, layer)| {
+            (
+                local_timeline_path.join(layer),
+                LayerFileMetadata::new(i as u64),
+            )
+        }));
 
         let download_data = match download_timeline_layers(
             harness.conf,
