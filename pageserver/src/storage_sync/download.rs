@@ -16,7 +16,11 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::{config::PageServerConf, storage_sync::SyncTask, TEMP_FILE_SUFFIX};
+use crate::{
+    config::PageServerConf,
+    storage_sync::{index::LayerFileMetadata, SyncTask},
+    TEMP_FILE_SUFFIX,
+};
 use utils::{
     crashsafe_dir::path_with_suffix_extension,
     id::{TenantId, TenantTimelineId, TimelineId},
@@ -219,9 +223,9 @@ pub(super) async fn download_timeline_layers<'a>(
 
     let layers_to_download = remote_timeline
         .stored_files()
-        .filter_map(|(layer_path, _metadata)| {
+        .filter_map(|(layer_path, metadata)| {
             if !download.layers_to_skip.contains(layer_path) {
-                Some(layer_path.to_owned())
+                Some((layer_path.to_owned(), metadata.to_owned()))
             } else {
                 None
             }
@@ -238,89 +242,124 @@ pub(super) async fn download_timeline_layers<'a>(
 
     let mut download_tasks = layers_to_download
         .into_iter()
-        .map(|layer_destination_path| async move {
-            if layer_destination_path.exists() {
-                debug!(
-                    "Layer already exists locally, skipping download: {}",
-                    layer_destination_path.display()
-                );
-            } else {
-                // Perform a rename inspired by durable_rename from file_utils.c.
-                // The sequence:
-                //     write(tmp)
-                //     fsync(tmp)
-                //     rename(tmp, new)
-                //     fsync(new)
-                //     fsync(parent)
-                // For more context about durable_rename check this email from postgres mailing list:
-                // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
-                // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
-                let temp_file_path =
-                    path_with_suffix_extension(&layer_destination_path, TEMP_FILE_SUFFIX);
+        .map(|(layer_destination_path, metadata)| async move {
 
-                let mut destination_file =
-                    fs::File::create(&temp_file_path).await.with_context(|| {
-                        format!(
-                            "Failed to create a destination file for layer '{}'",
-                            temp_file_path.display()
-                        )
-                    })?;
+            match layer_destination_path.metadata() {
+                Ok(m) if m.is_file() => {
+                    // the file is from earlier round when we failed after renaming it as
+                    // destination
+                    let verified = if let Some(expected) = metadata.file_size() {
+                        m.len() == expected
+                    } else {
+                        // behaviour before recording metadata was to accept any existing
+                        true
+                    };
 
-                let mut layer_download = storage.download_storage_object(None, &layer_destination_path)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to initiate the download the layer for {sync_id} into file '{}'",
-                            temp_file_path.display()
-                        )
-                    })?;
-                io::copy(&mut layer_download.download_stream, &mut destination_file)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to download the layer for {sync_id} into file '{}'",
-                            temp_file_path.display()
-                        )
-                    })?;
-
-                // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
-                // A file will not be closed immediately when it goes out of scope if there are any IO operations
-                // that have not yet completed. To ensure that a file is closed immediately when it is dropped,
-                // you should call flush before dropping it.
-                //
-                // From the tokio code I see that it waits for pending operations to complete. There shouldn't be any because
-                // we assume that `destination_file` file is fully written. I.e there is no pending .write(...).await operations.
-                // But for additional safety let's check/wait for any pending operations.
-                destination_file.flush().await.with_context(|| {
-                    format!(
-                        "failed to flush source file at {}",
-                        temp_file_path.display()
-                    )
-                })?;
-
-                // not using sync_data because it can lose file size update
-                destination_file.sync_all().await.with_context(|| {
-                    format!(
-                        "failed to fsync source file at {}",
-                        temp_file_path.display()
-                    )
-                })?;
-                drop(destination_file);
-
-                fail::fail_point!("remote-storage-download-pre-rename", |_| {
-                    anyhow::bail!("remote-storage-download-pre-rename failpoint triggered")
-                });
-
-                fs::rename(&temp_file_path, &layer_destination_path).await?;
-
-                fsync_path(&layer_destination_path).await.with_context(|| {
-                    format!(
-                        "Cannot fsync layer destination path {}",
-                        layer_destination_path.display(),
-                    )
-                })?;
+                    if verified {
+                        debug!(
+                            "Layer already exists locally, skipping download: {}",
+                            layer_destination_path.display()
+                        );
+                        return Ok((layer_destination_path, LayerFileMetadata::new(m.len())))
+                    }
+                }
+                Ok(_) | Err(_) => {
+                    // behave as the file didn't exist
+                }
             }
-            Ok::<_, anyhow::Error>(layer_destination_path)
+
+            // Perform a rename inspired by durable_rename from file_utils.c.
+            // The sequence:
+            //     write(tmp)
+            //     fsync(tmp)
+            //     rename(tmp, new)
+            //     fsync(new)
+            //     fsync(parent)
+            // For more context about durable_rename check this email from postgres mailing list:
+            // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
+            // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
+            let temp_file_path =
+                path_with_suffix_extension(&layer_destination_path, TEMP_FILE_SUFFIX);
+
+            // TODO: this doesn't use the cached fd for some reason?
+            let mut destination_file =
+                fs::File::create(&temp_file_path).await.with_context(|| {
+                    format!(
+                        "Failed to create a destination file for layer '{}'",
+                        temp_file_path.display()
+                    )
+                })?;
+
+            let mut layer_download = storage.download_storage_object(None, &layer_destination_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to initiate the download the layer for {sync_id} into file '{}'",
+                        temp_file_path.display()
+                    )
+                })?;
+
+            // TODO: with a wrapper AsyncWrite to calculate the sha2-256 for each chunk we'd
+            // get the checksum as well.
+            let bytes_amount = io::copy(&mut layer_download.download_stream, &mut destination_file)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to download the layer for {sync_id} into file '{}'",
+                        temp_file_path.display()
+                    )
+                })?;
+
+            // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
+            // A file will not be closed immediately when it goes out of scope if there are any IO operations
+            // that have not yet completed. To ensure that a file is closed immediately when it is dropped,
+            // you should call flush before dropping it.
+            //
+            // From the tokio code I see that it waits for pending operations to complete. There shouldn't be any because
+            // we assume that `destination_file` file is fully written. I.e there is no pending .write(...).await operations.
+            // But for additional safety let's check/wait for any pending operations.
+            destination_file.flush().await.with_context(|| {
+                format!(
+                    "failed to flush source file at {}",
+                    temp_file_path.display()
+                )
+            })?;
+
+            match metadata.file_size() {
+                Some(expected) if expected != bytes_amount => {
+                    anyhow::bail!(
+                        "According to layer file metadata should had downloaded {expected} bytes but downloaded {bytes_amount} bytes into file '{}'",
+                        temp_file_path.display()
+                    );
+                },
+                Some(_) | None => {
+                    // matches, or upgrading from an earlier IndexPart version
+                }
+            }
+
+            // not using sync_data because it can lose file size update
+            destination_file.sync_all().await.with_context(|| {
+                format!(
+                    "failed to fsync source file at {}",
+                    temp_file_path.display()
+                )
+            })?;
+            drop(destination_file);
+
+            fail::fail_point!("remote-storage-download-pre-rename", |_| {
+                anyhow::bail!("remote-storage-download-pre-rename failpoint triggered")
+            });
+
+            fs::rename(&temp_file_path, &layer_destination_path).await?;
+
+            fsync_path(&layer_destination_path).await.with_context(|| {
+                format!(
+                    "Cannot fsync layer destination path {}",
+                    layer_destination_path.display(),
+                )
+            })?;
+
+            Ok::<_, anyhow::Error>((layer_destination_path, LayerFileMetadata::new(bytes_amount)))
         })
         .collect::<FuturesUnordered<_>>();
 
@@ -329,9 +368,11 @@ pub(super) async fn download_timeline_layers<'a>(
     let mut undo = HashSet::new();
     while let Some(download_result) = download_tasks.next().await {
         match download_result {
-            Ok(downloaded_path) => {
+            Ok((downloaded_path, metadata)) => {
                 undo.insert(downloaded_path.clone());
-                download.layers_to_skip.insert(downloaded_path);
+                download.layers_to_skip.insert(downloaded_path.clone());
+                // TODO: what if the key existed already
+                download.gathered_metadata.insert(downloaded_path, metadata);
             }
             Err(e) => {
                 errors_happened = true;
@@ -354,6 +395,8 @@ pub(super) async fn download_timeline_layers<'a>(
         );
         for item in undo {
             download.layers_to_skip.remove(&item);
+            // intentionally don't clear the gathered_metadata because it exists for fsync_path
+            // failure on parent directory
         }
         errors_happened = true;
     }
