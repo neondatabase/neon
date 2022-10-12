@@ -24,7 +24,7 @@
 use anyhow::Context;
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
-use postgres_ffi::{page_is_new, page_set_lsn};
+use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
@@ -612,20 +612,18 @@ impl<'a> WalIngest<'a> {
                 forknum: FSM_FORKNUM,
             };
 
-            // FIXME: 'blkno' stored in the WAL record is the new size of the
-            // heap. The formula for calculating the new size of the FSM is
-            // pretty complicated (see FreeSpaceMapPrepareTruncateRel() in
-            // PostgreSQL), and we should also clear bits in the tail FSM block,
-            // and update the upper level FSM pages. None of that has been
-            // implemented. What we do instead, is always just truncate the FSM
-            // to zero blocks. That's bad for performance, but safe. (The FSM
-            // isn't needed for correctness, so we could also leave garbage in
-            // it. Seems more tidy to zap it away.)
-            if rec.blkno != 0 {
-                info!("Partial truncation of FSM is not supported");
+            let fsm_logical_page_no = rec.blkno / pg_constants::SLOTS_PER_FSM_PAGE;
+            let mut fsm_physical_page_no = fsm_logical_to_physical(fsm_logical_page_no);
+            if rec.blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
+                // Tail of last remaining FSM page has to be zeroed.
+                // We are not doing it here: there should be FPI wal-record for this page stored sometimes laters
+                fsm_physical_page_no += 1;
             }
-            let num_fsm_blocks = 0;
-            self.put_rel_truncation(modification, rel, num_fsm_blocks)?;
+            let nblocks = self.get_relsize(rel, modification.lsn)?;
+            if nblocks > fsm_physical_page_no {
+                // check if something to do: FSM is larger than truncate position
+                self.put_rel_truncation(modification, rel, fsm_physical_page_no)?;
+            }
         }
         if (rec.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
             let rel = RelTag {
@@ -635,16 +633,17 @@ impl<'a> WalIngest<'a> {
                 forknum: VISIBILITYMAP_FORKNUM,
             };
 
-            // FIXME: Like with the FSM above, the logic to truncate the VM
-            // correctly has not been implemented. Just zap it away completely,
-            // always. Unlike the FSM, the VM must never have bits incorrectly
-            // set. From a correctness point of view, it's always OK to clear
-            // bits or remove it altogether, though.
-            if rec.blkno != 0 {
-                info!("Partial truncation of VM is not supported");
+            let mut vm_page_no = rec.blkno / pg_constants::VM_HEAPBLOCKS_PER_PAGE;
+            if rec.blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
+                // Tail of last remaining vm page has to be zeroed.
+                // We are not doing it here: there should be FPI wal-record for this page stored sometimes laters
+                vm_page_no += 1;
             }
-            let num_vm_blocks = 0;
-            self.put_rel_truncation(modification, rel, num_vm_blocks)?;
+            let nblocks = self.get_relsize(rel, modification.lsn)?;
+            if nblocks > vm_page_no {
+                // check if something to do: VM is larger than truncate position
+                self.put_rel_truncation(modification, rel, vm_page_no)?;
+            }
         }
         Ok(())
     }
