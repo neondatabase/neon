@@ -311,7 +311,8 @@ impl RemoteTimeline {
 ///
 /// Fields have to be `Option`s because remote [`IndexPart`]'s can be from different version, which
 /// might have less or more metadata depending if upgrading or rolling back an upgrade.
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(test, derive(Default))]
 pub struct LayerFileMetadata {
     file_size: Option<u64>,
 }
