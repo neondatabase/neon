@@ -222,6 +222,8 @@ impl SafeKeeperState {
         ttid: &TenantTimelineId,
         server_info: ServerInfo,
         peers: Vec<NodeId>,
+        commit_lsn: Lsn,
+        local_start_lsn: Lsn,
     ) -> SafeKeeperState {
         SafeKeeperState {
             tenant_id: ttid.tenant_id,
@@ -233,10 +235,10 @@ impl SafeKeeperState {
             server: server_info,
             proposer_uuid: [0; 16],
             timeline_start_lsn: Lsn(0),
-            local_start_lsn: Lsn(0),
-            commit_lsn: Lsn(0),
-            backup_lsn: Lsn::INVALID,
-            peer_horizon_lsn: Lsn(0),
+            local_start_lsn,
+            commit_lsn,
+            backup_lsn: local_start_lsn,
+            peer_horizon_lsn: local_start_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(peers.iter().map(|p| (*p, PeerInfo::new())).collect()),
         }
@@ -252,6 +254,8 @@ impl SafeKeeperState {
                 wal_seg_size: 0,
             },
             vec![],
+            Lsn::INVALID,
+            Lsn::INVALID,
         )
     }
 }
@@ -740,7 +744,8 @@ where
                     "setting timeline_start_lsn to {:?}",
                     state.timeline_start_lsn
                 );
-
+            }
+            if state.local_start_lsn == Lsn(0) {
                 state.local_start_lsn = msg.start_streaming_at;
                 info!("setting local_start_lsn to {:?}", state.local_start_lsn);
             }

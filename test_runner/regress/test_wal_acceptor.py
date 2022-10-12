@@ -1,6 +1,7 @@
 import os
 import pathlib
 import random
+import shutil
 import signal
 import subprocess
 import sys
@@ -8,6 +9,7 @@ import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -371,51 +373,48 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     )
 
     # wait till first segment is removed on all safekeepers
+    wait(
+        lambda first_segments=first_segments: all(not os.path.exists(p) for p in first_segments),
+        "first segment get removed",
+    )
+
+
+# Wait for something, defined as f() returning True, raising error if this
+# doesn't happen without timeout seconds.
+def wait(f, desc, timeout=30):
     started_at = time.time()
     while True:
-        if all(not os.path.exists(p) for p in first_segments):
+        if f():
             break
         elapsed = time.time() - started_at
-        if elapsed > 20:
-            raise RuntimeError(f"timed out waiting {elapsed:.0f}s for first segment get removed")
+        if elapsed > timeout:
+            raise RuntimeError(f"timed out waiting {elapsed:.0f}s for {desc}")
         time.sleep(0.5)
 
 
-def wait_segment_offload(tenant_id, timeline_id, live_sk, seg_end: Lsn):
-    started_at = time.time()
-    http_cli = live_sk.http_client()
-    while True:
-        tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-        log.info(f"live sk status is {tli_status}")
-
-        if tli_status.backup_lsn >= seg_end:
-            break
-        elapsed = time.time() - started_at
-        if elapsed > 30:
-            raise RuntimeError(
-                f"timed out waiting {elapsed:.0f}s for segment ending at {seg_end} get offloaded"
-            )
-        time.sleep(0.5)
-
-
-def wait_wal_trim(tenant_id, timeline_id, sk, target_size_mb):
-    started_at = time.time()
+def is_segment_offloaded(
+    sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, seg_end: Lsn
+):
     http_cli = sk.http_client()
-    while True:
-        tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-        sk_wal_size = get_dir_size(os.path.join(sk.data_dir(), str(tenant_id), str(timeline_id)))
-        sk_wal_size_mb = sk_wal_size / 1024 / 1024
-        log.info(f"Safekeeper id={sk.id} wal_size={sk_wal_size_mb:.2f}MB status={tli_status}")
+    tli_status = http_cli.timeline_status(tenant_id, timeline_id)
+    log.info(f"sk status is {tli_status}")
+    return tli_status.backup_lsn >= seg_end
 
-        if sk_wal_size_mb <= target_size_mb:
-            break
 
-        elapsed = time.time() - started_at
-        if elapsed > 20:
-            raise RuntimeError(
-                f"timed out waiting {elapsed:.0f}s for sk_id={sk.id} to trim WAL to {target_size_mb:.2f}MB, current size is {sk_wal_size_mb:.2f}MB"
-            )
-        time.sleep(0.5)
+def is_flush_lsn_caught_up(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn):
+    http_cli = sk.http_client()
+    tli_status = http_cli.timeline_status(tenant_id, timeline_id)
+    log.info(f"sk status is {tli_status}")
+    return tli_status.flush_lsn >= lsn
+
+
+def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, target_size_mb):
+    http_cli = sk.http_client()
+    tli_status = http_cli.timeline_status(tenant_id, timeline_id)
+    sk_wal_size = get_dir_size(os.path.join(sk.data_dir(), str(tenant_id), str(timeline_id)))
+    sk_wal_size_mb = sk_wal_size / 1024 / 1024
+    log.info(f"Safekeeper id={sk.id} wal_size={sk_wal_size_mb:.2f}MB status={tli_status}")
+    return sk_wal_size_mb <= target_size_mb
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
@@ -451,7 +450,10 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
         cur.execute("insert into t select generate_series(1,250000), 'payload'")
         live_sk = [sk for sk in env.safekeepers if sk != victim][0]
 
-        wait_segment_offload(tenant_id, timeline_id, live_sk, seg_end)
+        wait(
+            partial(is_segment_offloaded, live_sk, tenant_id, timeline_id, seg_end),
+            f"segment ending at {seg_end} get offloaded",
+        )
 
         victim.start()
 
@@ -463,7 +465,11 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("insert into t select generate_series(1,250000), 'payload'")
-    wait_segment_offload(tenant_id, timeline_id, env.safekeepers[1], Lsn("0/5000000"))
+    seg_end = Lsn("0/5000000")
+    wait(
+        partial(is_segment_offloaded, env.safekeepers[1], tenant_id, timeline_id, seg_end),
+        f"segment ending at {seg_end} get offloaded",
+    )
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
@@ -494,37 +500,71 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
             cur.execute("insert into t values (1, 'payload')")
             expected_sum += 1
 
-            offloaded_seg_end = [Lsn("0/3000000")]
-            for seg_end in offloaded_seg_end:
-                # roughly fills two segments
-                cur.execute("insert into t select generate_series(1,500000), 'payload'")
-                expected_sum += 500000 * 500001 // 2
+            offloaded_seg_end = Lsn("0/3000000")
+            # roughly fills two segments
+            cur.execute("insert into t select generate_series(1,500000), 'payload'")
+            expected_sum += 500000 * 500001 // 2
 
-                assert query_scalar(cur, "select sum(key) from t") == expected_sum
+            assert query_scalar(cur, "select sum(key) from t") == expected_sum
 
-                for sk in env.safekeepers:
-                    wait_segment_offload(tenant_id, timeline_id, sk, seg_end)
+            for sk in env.safekeepers:
+                wait(
+                    partial(is_segment_offloaded, sk, tenant_id, timeline_id, offloaded_seg_end),
+                    f"segment ending at {offloaded_seg_end} get offloaded",
+                )
 
             # advance remote_consistent_lsn to trigger WAL trimming
             # this LSN should be less than commit_lsn, so timeline will be active=true in safekeepers, to push etcd updates
             env.safekeepers[0].http_client().record_safekeeper_info(
-                tenant_id, timeline_id, {"remote_consistent_lsn": str(offloaded_seg_end[-1])}
+                tenant_id, timeline_id, {"remote_consistent_lsn": str(offloaded_seg_end)}
             )
+
+            last_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
             for sk in env.safekeepers:
                 # require WAL to be trimmed, so no more than one segment is left on disk
-                wait_wal_trim(tenant_id, timeline_id, sk, 16 * 1.5)
-
-            last_lsn = query_scalar(cur, "SELECT pg_current_wal_flush_lsn()")
+                target_size_mb = 16 * 1.5
+                wait(
+                    partial(is_wal_trimmed, sk, tenant_id, timeline_id, target_size_mb),
+                    f"sk_id={sk.id} to trim WAL to {target_size_mb:.2f}MB",
+                )
+                # wait till everyone puts data up to last_lsn on disk, we are
+                # going to recreate state on safekeepers claiming they have data till last_lsn.
+                wait(
+                    partial(is_flush_lsn_caught_up, sk, tenant_id, timeline_id, last_lsn),
+                    f"sk_id={sk.id} to flush {last_lsn}",
+                )
 
     ps_cli = env.pageserver.http_client()
-    pageserver_lsn = ps_cli.timeline_detail(tenant_id, timeline_id)["local"]["last_record_lsn"]
-    lag = Lsn(last_lsn) - Lsn(pageserver_lsn)
+    pageserver_lsn = Lsn(ps_cli.timeline_detail(tenant_id, timeline_id)["local"]["last_record_lsn"])
+    lag = last_lsn - pageserver_lsn
     log.info(
         f"Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb"
     )
 
     pg.stop_and_destroy()
+
+    # Also delete and manually create timeline on safekeepers -- this tests
+    # scenario of manual recovery on different set of safekeepers.
+
+    # save the last (partial) file to put it back after recreation; others will be fetched from s3
+    sk = env.safekeepers[0]
+    tli_dir = Path(sk.data_dir()) / str(tenant_id) / str(timeline_id)
+    f_partial = Path([f for f in os.listdir(tli_dir) if f.endswith(".partial")][0])
+    f_partial_path = tli_dir / f_partial
+    f_partial_saved = Path(sk.data_dir()) / f_partial.name
+    f_partial_path.rename(f_partial_saved)
+
+    pg_version = sk.http_client().timeline_status(tenant_id, timeline_id).pg_version
+
+    for sk in env.safekeepers:
+        cli = sk.http_client()
+        cli.timeline_delete_force(tenant_id, timeline_id)
+        cli.timeline_create(tenant_id, timeline_id, pg_version, last_lsn)
+        f_partial_path = (
+            Path(sk.data_dir()) / str(tenant_id) / str(timeline_id) / f_partial_saved.name
+        )
+        shutil.copy(f_partial_saved, f_partial_path)
 
     # recreate timeline on pageserver from scratch
     ps_cli.timeline_delete(tenant_id, timeline_id)
@@ -539,10 +579,12 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         if elapsed > wait_lsn_timeout:
             raise RuntimeError("Timed out waiting for WAL redo")
 
-        pageserver_lsn = env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)[
-            "local"
-        ]["last_record_lsn"]
-        lag = Lsn(last_lsn) - Lsn(pageserver_lsn)
+        pageserver_lsn = Lsn(
+            env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["local"][
+                "last_record_lsn"
+            ]
+        )
+        lag = last_lsn - pageserver_lsn
 
         if time.time() > last_debug_print + 10 or lag <= 0:
             last_debug_print = time.time()

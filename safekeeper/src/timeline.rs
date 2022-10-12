@@ -107,6 +107,14 @@ impl SharedState {
             bail!(TimelineError::UninitialinzedPgVersion(*ttid));
         }
 
+        if state.commit_lsn < state.local_start_lsn {
+            bail!(
+                "commit_lsn {} is higher than local_start_lsn {}",
+                state.commit_lsn,
+                state.local_start_lsn
+            );
+        }
+
         // We don't want to write anything to disk, because we may have existing timeline there.
         // These functions should not change anything on disk.
         let control_store = control_file::FileStorage::create_new(ttid, conf, state)?;
@@ -286,7 +294,7 @@ pub struct Timeline {
     /// Sending here asks for wal backup launcher attention (start/stop
     /// offloading). Sending ttid instead of concrete command allows to do
     /// sending without timeline lock.
-    wal_backup_launcher_tx: Sender<TenantTimelineId>,
+    pub wal_backup_launcher_tx: Sender<TenantTimelineId>,
 
     /// Used to broadcast commit_lsn updates to all background jobs.
     commit_lsn_watch_tx: watch::Sender<Lsn>,
@@ -339,10 +347,12 @@ impl Timeline {
         ttid: TenantTimelineId,
         wal_backup_launcher_tx: Sender<TenantTimelineId>,
         server_info: ServerInfo,
+        commit_lsn: Lsn,
+        local_start_lsn: Lsn,
     ) -> Result<Timeline> {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) = watch::channel(Lsn::INVALID);
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
-        let state = SafeKeeperState::new(&ttid, server_info, vec![]);
+        let state = SafeKeeperState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
         Ok(Timeline {
             ttid,
@@ -381,6 +391,7 @@ impl Timeline {
         match || -> Result<()> {
             shared_state.sk.persist()?;
             // TODO: add more initialization steps here
+            shared_state.update_status(self.ttid);
             Ok(())
         }() {
             Ok(_) => Ok(()),
