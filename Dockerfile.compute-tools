@@ -20,7 +20,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 COPY . .
 
 RUN set -e \
-    && mold -run cargo build -p compute_tools --release \
+    && mold -run cargo build -p compute_tools --locked --release \
     && cachepot -s
 
 # Final image that only has one binary

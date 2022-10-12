@@ -1,7 +1,7 @@
 //! Client authentication mechanisms.
 
 pub mod backend;
-pub use backend::{BackendType, DatabaseInfo};
+pub use backend::{BackendType, ConsoleReqExtra, DatabaseInfo};
 
 mod credentials;
 pub use credentials::ClientCredentials;
@@ -22,10 +22,6 @@ pub type Result<T> = std::result::Result<T, AuthError>;
 /// Common authentication error.
 #[derive(Debug, Error)]
 pub enum AuthErrorImpl {
-    // This will be dropped in the future.
-    #[error(transparent)]
-    Legacy(#[from] backend::LegacyAuthError),
-
     #[error(transparent)]
     Link(#[from] backend::LinkAuthError),
 
@@ -46,9 +42,9 @@ pub enum AuthErrorImpl {
     MalformedPassword(&'static str),
 
     #[error(
-        "Project name is not specified. \
+        "Project ID is not specified. \
         Either please upgrade the postgres client library (libpq) for SNI support \
-        or pass the project name as a parameter: '&options=project%3D<project-name>'. \
+        or pass the project ID (first part of the domain name) as a parameter: '?options=project%3D<project-id>'. \
         See more at https://neon.tech/sni"
     )]
     MissingProjectName,
@@ -78,7 +74,6 @@ impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
         use AuthErrorImpl::*;
         match self.0.as_ref() {
-            Legacy(e) => e.to_string_client(),
             Link(e) => e.to_string_client(),
             GetAuthInfo(e) => e.to_string_client(),
             WakeCompute(e) => e.to_string_client(),

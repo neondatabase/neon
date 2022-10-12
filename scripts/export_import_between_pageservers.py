@@ -80,11 +80,13 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
 class PgBin:
     """A helper class for executing postgres binaries"""
 
-    def __init__(self, log_dir: Path, pg_distrib_dir):
+    def __init__(self, log_dir: Path, pg_distrib_dir, pg_version):
         self.log_dir = log_dir
-        self.pg_bin_path = os.path.join(str(pg_distrib_dir), "bin")
+        self.pg_bin_path = os.path.join(str(pg_distrib_dir), "v{}".format(pg_version), "bin")
         self.env = os.environ.copy()
-        self.env["LD_LIBRARY_PATH"] = os.path.join(str(pg_distrib_dir), "lib")
+        self.env["LD_LIBRARY_PATH"] = os.path.join(
+            str(pg_distrib_dir), "v{}".format(pg_version), "lib"
+        )
 
     def _fixpath(self, command: List[str]):
         if "/" not in command[0]:
@@ -470,9 +472,10 @@ def import_timeline(
     last_lsn,
     prev_lsn,
     tar_filename,
+    pg_version,
 ):
     # Import timelines to new pageserver
-    import_cmd = f"import basebackup {tenant_id} {timeline_id} {last_lsn} {last_lsn}"
+    import_cmd = f"import basebackup {tenant_id} {timeline_id} {last_lsn} {last_lsn} {pg_version}"
     full_cmd = rf"""cat {tar_filename} | {psql_path} {pageserver_connstr} -c '{import_cmd}' """
 
     stderr_filename2 = os.path.join(args.work_dir, f"import_{tenant_id}_{timeline_id}.stderr")
@@ -483,7 +486,7 @@ def import_timeline(
     with open(stdout_filename, "w") as stdout_f:
         with open(stderr_filename2, "w") as stderr_f:
             print(f"(capturing output to {stdout_filename})")
-            pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
+            pg_bin = PgBin(args.work_dir, args.pg_distrib_dir, pg_version)
             subprocess.run(
                 full_cmd,
                 stdout=stdout_f,
@@ -502,7 +505,15 @@ def import_timeline(
 
 
 def export_timeline(
-    args, psql_path, pageserver_connstr, tenant_id, timeline_id, last_lsn, prev_lsn, tar_filename
+    args,
+    psql_path,
+    pageserver_connstr,
+    tenant_id,
+    timeline_id,
+    last_lsn,
+    prev_lsn,
+    tar_filename,
+    pg_version,
 ):
     # Choose filenames
     incomplete_filename = tar_filename + ".incomplete"
@@ -517,13 +528,13 @@ def export_timeline(
     with open(incomplete_filename, "w") as stdout_f:
         with open(stderr_filename, "w") as stderr_f:
             print(f"(capturing output to {incomplete_filename})")
-            pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
+            pg_bin = PgBin(args.work_dir, args.pg_distrib_dir, pg_version)
             subprocess.run(
                 cmd, stdout=stdout_f, stderr=stderr_f, env=pg_bin._build_env(None), check=True
             )
 
     # Add missing rels
-    pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
+    pg_bin = PgBin(args.work_dir, args.pg_distrib_dir, pg_version)
     add_missing_rels(incomplete_filename, tar_filename, args.work_dir, pg_bin)
 
     # Log more info
@@ -532,7 +543,8 @@ def export_timeline(
 
 
 def main(args: argparse.Namespace):
-    psql_path = str(Path(args.pg_distrib_dir) / "bin" / "psql")
+    # any psql version will do here. use current DEFAULT_PG_VERSION = 14
+    psql_path = str(Path(args.pg_distrib_dir) / "v14" / "bin" / "psql")
 
     old_pageserver_host = args.old_pageserver_host
     new_pageserver_host = args.new_pageserver_host
@@ -565,6 +577,8 @@ def main(args: argparse.Namespace):
                 args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar"
             )
 
+            pg_version = timeline["local"]["pg_version"]
+
             # Export timeline from old pageserver
             if args.only_import is False:
                 last_lsn, prev_lsn = get_rlsn(
@@ -581,6 +595,7 @@ def main(args: argparse.Namespace):
                     last_lsn,
                     prev_lsn,
                     tar_filename,
+                    pg_version,
                 )
 
             # Import into new pageserver
@@ -594,6 +609,7 @@ def main(args: argparse.Namespace):
                 last_lsn,
                 prev_lsn,
                 tar_filename,
+                pg_version,
             )
 
             # Re-export and compare
@@ -607,6 +623,7 @@ def main(args: argparse.Namespace):
                 last_lsn,
                 prev_lsn,
                 re_export_filename,
+                pg_version,
             )
 
             # Check the size is the same
@@ -693,8 +710,8 @@ if __name__ == "__main__":
         "--psql-path",
         dest="psql_path",
         required=False,
-        default="/usr/local/bin/psql",
-        help="Path to the psql binary. Default: /usr/local/bin/psql",
+        default="/usr/local/v14/bin/psql",
+        help="Path to the psql binary. Default: /usr/local/v14/bin/psql",
     )
     parser.add_argument(
         "--only-import",

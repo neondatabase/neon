@@ -2,13 +2,14 @@
 //! with the "START_REPLICATION" message.
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::timeline::{ReplicaState, Timeline, TimelineTools};
+use crate::timeline::{ReplicaState, Timeline};
 use crate::wal_storage::WalReader;
+use crate::GlobalTimelines;
 use anyhow::{bail, Context, Result};
 
-use postgres_ffi::v14::xlog_utils::{get_current_timestamp, TimestampTz, MAX_SEND_SIZE};
-
 use bytes::Bytes;
+use postgres_ffi::get_current_timestamp;
+use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::net::Shutdown;
@@ -30,13 +31,13 @@ use utils::{
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
 const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
-// zenith extension of replication protocol
+// neon extension of replication protocol
 const NEON_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 
 type FullTransactionId = u64;
 
 /// Hot standby feedback received from replica
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct HotStandbyFeedback {
     pub ts: TimestampTz,
     pub xmin: FullTransactionId,
@@ -54,7 +55,7 @@ impl HotStandbyFeedback {
 }
 
 /// Standby status update
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StandbyReply {
     pub write_lsn: Lsn, // last lsn received by pageserver
     pub flush_lsn: Lsn, // pageserver's disk consistent lSN
@@ -105,7 +106,7 @@ impl ReplicationConn {
             match &msg {
                 FeMessage::CopyData(m) => {
                     // There's three possible data messages that the client is supposed to send here:
-                    // `HotStandbyFeedback` and `StandbyStatusUpdate` and `ZenithStandbyFeedback`.
+                    // `HotStandbyFeedback` and `StandbyStatusUpdate` and `NeonStandbyFeedback`.
 
                     match m.first().cloned() {
                         Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
@@ -165,12 +166,14 @@ impl ReplicationConn {
         pgb: &mut PostgresBackend,
         mut start_pos: Lsn,
     ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap()).entered();
+        let _enter = info_span!("WAL sender", timeline = %spg.timeline_id.unwrap()).entered();
+
+        let tli = GlobalTimelines::get(spg.ttid)?;
 
         // spawn the background thread which receives HotStandbyFeedback messages.
-        let bg_timeline = Arc::clone(spg.timeline.get());
+        let bg_timeline = Arc::clone(&tli);
         let bg_stream_in = self.stream_in.take().unwrap();
-        let bg_timeline_id = spg.ztimelineid.unwrap();
+        let bg_timeline_id = spg.timeline_id.unwrap();
 
         let state = ReplicaState::new();
         // This replica_id is used below to check if it's time to stop replication.
@@ -201,11 +204,8 @@ impl ReplicationConn {
             .build()?;
 
         runtime.block_on(async move {
-            let (inmem_state, persisted_state) = spg.timeline.get().get_state();
+            let (inmem_state, persisted_state) = tli.get_state();
             // add persisted_state.timeline_start_lsn == Lsn(0) check
-            if persisted_state.server.wal_seg_size == 0 {
-                bail!("Cannot start replication before connecting to walproposer");
-            }
 
             // Walproposer gets special handling: safekeeper must give proposer all
             // local WAL till the end, whether committed or not (walproposer will
@@ -217,7 +217,7 @@ impl ReplicationConn {
             // on this safekeeper itself. That's ok as (old) proposer will never be
             // able to commit such WAL.
             let stop_pos: Option<Lsn> = if spg.is_walproposer_recovery() {
-                let wal_end = spg.timeline.get().get_end_of_wal();
+                let wal_end = tli.get_flush_lsn();
                 Some(wal_end)
             } else {
                 None
@@ -231,7 +231,7 @@ impl ReplicationConn {
             let mut end_pos = stop_pos.unwrap_or(inmem_state.commit_lsn);
 
             let mut wal_reader = WalReader::new(
-                spg.conf.timeline_dir(&spg.timeline.get().zttid),
+                spg.conf.timeline_dir(&tli.ttid),
                 &persisted_state,
                 start_pos,
                 spg.conf.wal_backup_enabled,
@@ -241,7 +241,7 @@ impl ReplicationConn {
             let mut send_buf = vec![0u8; MAX_SEND_SIZE];
 
             // watcher for commit_lsn updates
-            let mut commit_lsn_watch_rx = spg.timeline.get().get_commit_lsn_watch_rx();
+            let mut commit_lsn_watch_rx = tli.get_commit_lsn_watch_rx();
 
             loop {
                 if let Some(stop_pos) = stop_pos {
@@ -258,7 +258,7 @@ impl ReplicationConn {
                     } else {
                         // TODO: also check once in a while whether we are walsender
                         // to right pageserver.
-                        if spg.timeline.get().stop_walsender(replica_id)? {
+                        if tli.should_walsender_stop(replica_id) {
                             // Shut down, timeline is suspended.
                             // TODO create proper error type for this
                             bail!("end streaming to {:?}", spg.appname);

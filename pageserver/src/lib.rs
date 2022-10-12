@@ -3,7 +3,7 @@ pub mod config;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
-pub mod layered_repository;
+pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
@@ -11,42 +11,38 @@ pub mod profiling;
 pub mod reltag;
 pub mod repository;
 pub mod storage_sync;
+pub mod task_mgr;
+pub mod tenant;
 pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_tasks;
-pub mod thread_mgr;
-pub mod timelines;
 pub mod virtual_file;
 pub mod walingest;
 pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
 
-use once_cell::sync::Lazy;
-use tracing::info;
+use std::collections::HashMap;
 
-use crate::thread_mgr::ThreadKind;
-use metrics::{register_int_gauge_vec, IntGaugeVec};
+use tracing::info;
+use utils::id::{TenantId, TimelineId};
+
+use crate::task_mgr::TaskKind;
 
 /// Current storage format version
 ///
-/// This is embedded in the metadata file, and also in the header of all the
-/// layer files. If you make any backwards-incompatible changes to the storage
+/// This is embedded in the header of all the layer files.
+/// If you make any backwards-incompatible changes to the storage
 /// format, bump this!
+/// Note that TimelineMetadata uses its own version number to track
+/// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
+
+pub const DEFAULT_PG_VERSION: u32 = 14;
 
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
-
-static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_live_connections",
-        "Number of live network connections",
-        &["pageserver_connection_kind"]
-    )
-    .expect("failed to define a metric")
-});
 
 pub const LOG_FILE_NAME: &str = "pageserver.log";
 
@@ -59,30 +55,31 @@ pub enum CheckpointConfig {
     Forced,
 }
 
-pub fn shutdown_pageserver(exit_code: i32) {
-    // Shut down the libpq endpoint thread. This prevents new connections from
+pub async fn shutdown_pageserver(exit_code: i32) {
+    // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
-    thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
+    task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None).await;
 
-    // Shut down any page service threads.
-    thread_mgr::shutdown_threads(Some(ThreadKind::PageRequestHandler), None, None);
+    // Shut down any page service tasks.
+    task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None).await;
 
     // Shut down all the tenants. This flushes everything to disk and kills
-    // the checkpoint and GC threads.
-    tenant_mgr::shutdown_all_tenants();
+    // the checkpoint and GC tasks.
+    tenant_mgr::shutdown_all_tenants().await;
 
     // Stop syncing with remote storage.
     //
-    // FIXME: Does this wait for the sync thread to finish syncing what's queued up?
+    // FIXME: Does this wait for the sync tasks to finish syncing what's queued up?
     // Should it?
-    thread_mgr::shutdown_threads(Some(ThreadKind::StorageSync), None, None);
+    task_mgr::shutdown_tasks(Some(TaskKind::StorageSync), None, None).await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
-    thread_mgr::shutdown_threads(Some(ThreadKind::HttpEndpointListener), None, None);
+    // FIXME: We should probably stop accepting commands like attach/detach earlier.
+    task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None).await;
 
     // There should be nothing left, but let's be sure
-    thread_mgr::shutdown_threads(None, None, None);
+    task_mgr::shutdown_tasks(None, None, None).await;
 
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
@@ -109,6 +106,50 @@ fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds
         (1.0 + base_increment).powf(f64::from(n)).min(max_seconds)
     }
 }
+
+/// A newtype to store arbitrary data grouped by tenant and timeline ids.
+/// One could use [`utils::id::TenantTimelineId`] for grouping, but that would
+/// not include the cases where a certain tenant has zero timelines.
+/// This is sometimes important: a tenant could be registered during initial load from FS,
+/// even if he has no timelines on disk.
+#[derive(Debug)]
+pub struct TenantTimelineValues<T>(HashMap<TenantId, HashMap<TimelineId, T>>);
+
+impl<T> TenantTimelineValues<T> {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self(HashMap::with_capacity(capacity))
+    }
+
+    /// A convenience method to map certain values and omit some of them, if needed.
+    /// Tenants that won't have any timeline entries due to the filtering, will still be preserved
+    /// in the structure.
+    fn filter_map<F, NewT>(self, map: F) -> TenantTimelineValues<NewT>
+    where
+        F: Fn(T) -> Option<NewT>,
+    {
+        let capacity = self.0.len();
+        self.0.into_iter().fold(
+            TenantTimelineValues::<NewT>::with_capacity(capacity),
+            |mut new_values, (tenant_id, old_values)| {
+                let new_timeline_values = new_values.0.entry(tenant_id).or_default();
+                for (timeline_id, old_value) in old_values {
+                    if let Some(new_value) = map(old_value) {
+                        new_timeline_values.insert(timeline_id, new_value);
+                    }
+                }
+                new_values
+            },
+        )
+    }
+}
+
+/// A suffix to be used during file sync from the remote storage,
+/// to ensure that we do not leave corrupted files that pretend to be layers.
+const TEMP_FILE_SUFFIX: &str = "___temp";
 
 #[cfg(test)]
 mod backoff_defaults_tests {
@@ -138,5 +179,37 @@ mod backoff_defaults_tests {
             DEFAULT_MAX_BACKOFF_SECONDS,
             "Given big enough of retries, backoff should reach its allowed max value"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tenant::harness::TIMELINE_ID;
+
+    use super::*;
+
+    #[test]
+    fn tenant_timeline_value_mapping() {
+        let first_tenant = TenantId::generate();
+        let second_tenant = TenantId::generate();
+        assert_ne!(first_tenant, second_tenant);
+
+        let mut initial = TenantTimelineValues::new();
+        initial
+            .0
+            .entry(first_tenant)
+            .or_default()
+            .insert(TIMELINE_ID, "test_value");
+        let _ = initial.0.entry(second_tenant).or_default();
+        assert_eq!(initial.0.len(), 2, "Should have entries for both tenants");
+
+        let filtered = initial.filter_map(|_| None::<&str>).0;
+        assert_eq!(
+            filtered.len(),
+            2,
+            "Should have entries for both tenants even after filtering away all entries"
+        );
+        assert!(filtered.contains_key(&first_tenant));
+        assert!(filtered.contains_key(&second_tenant));
     }
 }

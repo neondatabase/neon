@@ -1,6 +1,7 @@
 use crate::{auth, compute, error::UserFacingError, stream::PqStream, waiters};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::info;
 use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 #[derive(Debug, Error)]
@@ -29,7 +30,7 @@ impl UserFacingError for LinkAuthError {
     }
 }
 
-fn hello_message(redirect_uri: &str, session_id: &str) -> String {
+fn hello_message(redirect_uri: &reqwest::Url, session_id: &str) -> String {
     format!(
         concat![
             "Welcome to Neon!\n",
@@ -46,21 +47,23 @@ pub fn new_psql_session_id() -> String {
 }
 
 pub async fn handle_user(
-    redirect_uri: &reqwest::Url,
+    link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<compute::NodeInfo> {
     let psql_session_id = new_psql_session_id();
-    let greeting = hello_message(redirect_uri.as_str(), &psql_session_id);
+    let greeting = hello_message(link_uri, &psql_session_id);
 
     let db_info = super::with_waiter(psql_session_id, |waiter| async {
-        // Give user a URL to spawn a new database
+        // Give user a URL to spawn a new database.
+        info!("sending the auth URL to the user");
         client
             .write_message_noflush(&Be::AuthenticationOk)?
             .write_message_noflush(&BeParameterStatusMessage::encoding())?
             .write_message(&Be::NoticeResponse(&greeting))
             .await?;
 
-        // Wait for web console response (see `mgmt`)
+        // Wait for web console response (see `mgmt`).
+        info!("waiting for console's reply...");
         waiter.await?.map_err(LinkAuthError::AuthFailed)
     })
     .await?;

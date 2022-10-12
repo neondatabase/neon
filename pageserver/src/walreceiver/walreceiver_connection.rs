@@ -12,19 +12,27 @@ use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
 use postgres::{SimpleQueryMessage, SimpleQueryRow};
+use postgres_ffi::v14::xlog_utils::normalize_lsn;
+use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
-use tracing::{debug, error, info, info_span, trace, warn, Instrument};
+use tracing::{debug, error, info, trace, warn};
 
-use super::TaskEvent;
+use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
 use crate::{
-    layered_repository::WalReceiverInfo, tenant_mgr, walingest::WalIngest,
+    task_mgr,
+    task_mgr::TaskKind,
+    task_mgr::WALRECEIVER_RUNTIME,
+    tenant::{Timeline, WalReceiverInfo},
+    tenant_mgr,
+    walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
-use postgres_ffi::v14::waldecoder::WalStreamDecoder;
-use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
+use postgres_ffi::waldecoder::WalStreamDecoder;
+use utils::id::TenantTimelineId;
+use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
 
 /// Status of the connection.
 #[derive(Debug, Clone)]
@@ -47,9 +55,9 @@ pub struct WalConnectionStatus {
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
-    id: ZTenantTimelineId,
-    wal_source_connstr: &str,
-    events_sender: &watch::Sender<TaskEvent<WalConnectionStatus>>,
+    timeline: Arc<Timeline>,
+    wal_source_connstr: String,
+    events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
@@ -63,7 +71,7 @@ pub async fn handle_walreceiver_connection(
     )
     .await
     .context("Timed out while waiting for walreceiver connection to open")?
-    .context("Failed to open walreceiver conection")?;
+    .context("Failed to open walreceiver connection")?;
 
     info!("connected!");
     let mut connection_status = WalConnectionStatus {
@@ -74,7 +82,7 @@ pub async fn handle_walreceiver_connection(
         streaming_lsn: None,
         commit_lsn: None,
     };
-    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
         return Ok(());
     }
@@ -82,30 +90,36 @@ pub async fn handle_walreceiver_connection(
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
     let mut connection_cancellation = cancellation.clone();
-    tokio::spawn(
+    task_mgr::spawn(
+        WALRECEIVER_RUNTIME.handle(),
+        TaskKind::WalReceiverConnection,
+        Some(timeline.tenant_id),
+        Some(timeline.timeline_id),
+        "walreceiver connection",
+        false,
         async move {
             select! {
-                    connection_result = connection => match connection_result{
-                            Ok(()) => info!("Walreceiver db connection closed"),
-                            Err(connection_error) => {
-                                if connection_error.is_closed() {
-                                    info!("Connection closed regularly: {connection_error}")
-                                } else {
-                                    warn!("Connection aborted: {connection_error}")
-                                }
-                            }
-                        },
+                connection_result = connection => match connection_result{
+                    Ok(()) => info!("Walreceiver db connection closed"),
+                    Err(connection_error) => {
+                        if connection_error.is_closed() {
+                            info!("Connection closed regularly: {connection_error}")
+                        } else {
+                            warn!("Connection aborted: {connection_error}")
+                        }
+                    }
+                },
 
-                    _ = connection_cancellation.changed() => info!("Connection cancelled"),
+                _ = connection_cancellation.changed() => info!("Connection cancelled"),
             }
-        }
-        .instrument(info_span!("safekeeper_handle_db")),
+            Ok(())
+        },
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.
     // One of the pros of `defer!` is that this will *most probably*
     // get called, even in presence of panics.
-    let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["wal_receiver"]);
+    let gauge = LIVE_CONNECTIONS_COUNT.with_label_values(&["wal_receiver"]);
     gauge.inc();
     scopeguard::defer! {
         gauge.dec();
@@ -116,30 +130,18 @@ pub async fn handle_walreceiver_connection(
 
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
-    let ZTenantTimelineId {
-        tenant_id,
-        timeline_id,
-    } = id;
 
     connection_status.latest_connection_update = Utc::now().naive_utc();
     connection_status.latest_wal_update = Utc::now().naive_utc();
     connection_status.commit_lsn = Some(end_of_wal);
-    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
         warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
         return Ok(());
     }
 
-    let (repo, timeline) = tokio::task::spawn_blocking(move || {
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
-            .with_context(|| format!("no repository found for tenant {tenant_id}"))?;
-        let timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)
-            .with_context(|| {
-                format!("local timeline {timeline_id} not found for tenant {tenant_id}")
-            })?;
-        Ok::<_, anyhow::Error>((repo, timeline))
-    })
-    .await
-    .with_context(|| format!("Failed to spawn blocking task to get repository and timeline for tenant {tenant_id} timeline {timeline_id}"))??;
+    let tenant_id = timeline.tenant_id;
+    let timeline_id = timeline.timeline_id;
+    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -156,6 +158,14 @@ pub async fn handle_walreceiver_connection(
     // There might be some padding after the last full record, skip it.
     startpoint += startpoint.calc_padding(8u32);
 
+    // If the starting point is at a WAL page boundary, skip past the page header. We don't need the page headers
+    // for anything, and in some corner cases, the compute node might have never generated the WAL for page headers
+    //. That happens if you create a branch at page boundary: the start point of the branch is at the page boundary,
+    // but when the compute node first starts on the branch, we normalize the first REDO position to just after the page
+    // header (see generate_pg_control()), so the WAL for the page header is never streamed from the compute node
+    //  to the safekeepers.
+    startpoint = normalize_lsn(startpoint, WAL_SEGMENT_SIZE);
+
     info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
 
     let query = format!("START_REPLICATION PHYSICAL {startpoint}");
@@ -164,7 +174,7 @@ pub async fn handle_walreceiver_connection(
     let physical_stream = ReplicationStream::new(copy_stream);
     pin!(physical_stream);
 
-    let mut waldecoder = WalStreamDecoder::new(startpoint);
+    let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint)?;
 
@@ -200,7 +210,7 @@ pub async fn handle_walreceiver_connection(
             }
             &_ => {}
         };
-        if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
             warn!("Wal connection event listener dropped, aborting the connection: {e}");
             return Ok(());
         }
@@ -266,26 +276,28 @@ pub async fn handle_walreceiver_connection(
         if !connection_status.has_processed_wal && last_rec_lsn > last_rec_lsn_before_msg {
             // We have successfully processed at least one WAL record.
             connection_status.has_processed_wal = true;
-            if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone()))
+            {
                 warn!("Wal connection event listener dropped, aborting the connection: {e}");
                 return Ok(());
             }
         }
 
-        let timeline_to_check = Arc::clone(&timeline);
-        tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
-            .await
-            .with_context(|| format!("Spawned checkpoint check task panicked for timeline {id}"))?
-            .with_context(|| format!("Failed to check checkpoint distance for timeline {id}"))?;
+        timeline.check_checkpoint_distance().with_context(|| {
+            format!(
+                "Failed to check checkpoint distance for timeline {}",
+                timeline.timeline_id
+            )
+        })?;
 
         if let Some(last_lsn) = status_update {
-            let remote_index = repo.get_remote_index();
+            let remote_index = tenant.get_remote_index();
             let timeline_remote_consistent_lsn = remote_index
                 .read()
                 .await
                 // here we either do not have this timeline in remote index
                 // or there were no checkpoints for it yet
-                .timeline_entry(&ZTenantTimelineId {
+                .timeline_entry(&TenantTimelineId {
                     tenant_id,
                     timeline_id,
                 })
@@ -313,20 +325,22 @@ pub async fn handle_walreceiver_connection(
             };
             *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
 
-            // Send zenith feedback message.
+            // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let zenith_status_update = ReplicationFeedback {
-                current_timeline_size: timeline.get_current_logical_size() as u64,
+            let status_update = ReplicationFeedback {
+                current_timeline_size: timeline
+                    .get_current_logical_size()
+                    .context("Status update creation failed to get current logical size")?,
                 ps_writelsn: write_lsn,
                 ps_flushlsn: flush_lsn,
                 ps_applylsn: apply_lsn,
                 ps_replytime: ts,
             };
 
-            debug!("zenith_status_update {zenith_status_update:?}");
+            debug!("neon_status_update {status_update:?}");
 
             let mut data = BytesMut::new();
-            zenith_status_update.serialize(&mut data)?;
+            status_update.serialize(&mut data)?;
             physical_stream
                 .as_mut()
                 .zenith_status_update(data.len() as u64, &data)

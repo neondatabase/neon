@@ -21,7 +21,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
-use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
@@ -36,19 +35,23 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
-use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock, zid::ZTenantId};
+use utils::crashsafe_dir::path_with_suffix_extension;
+use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
-use crate::config::PageServerConf;
+use crate::metrics::{
+    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME, WAL_REDO_WAIT_TIME,
+};
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
-use crate::walrecord::ZenithWalRecord;
-use metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
+use crate::walrecord::NeonWalRecord;
+use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
+use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
 };
-use postgres_ffi::v14::pg_constants;
 use postgres_ffi::BLCKSZ;
 
 ///
@@ -79,36 +82,10 @@ pub trait WalRedoManager: Send + Sync {
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: Vec<(Lsn, ZenithWalRecord)>,
+        records: Vec<(Lsn, NeonWalRecord)>,
+        pg_version: u32,
     ) -> Result<Bytes, WalRedoError>;
 }
-
-// Metrics collected on WAL redo operations
-//
-// We collect the time spent in actual WAL redo ('redo'), and time waiting
-// for access to the postgres process ('wait') since there is only one for
-// each tenant.
-
-static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!("pageserver_wal_redo_seconds", "Time spent on WAL redo")
-        .expect("failed to define a metric")
-});
-
-static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the WAL redo process"
-    )
-    .expect("failed to define a metric")
-});
-
-static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_replayed_wal_records_total",
-        "Number of WAL records replayed in WAL redo process"
-    )
-    .unwrap()
-});
 
 ///
 /// This is the real implementation that uses a Postgres process to
@@ -118,20 +95,20 @@ static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
 /// records.
 ///
 pub struct PostgresRedoManager {
-    tenantid: ZTenantId,
+    tenant_id: TenantId,
     conf: &'static PageServerConf,
 
     process: Mutex<Option<PostgresRedoProcess>>,
 }
 
-/// Can this request be served by zenith redo functions
+/// Can this request be served by neon redo functions
 /// or we need to pass it to wal-redo postgres process?
-fn can_apply_in_zenith(rec: &ZenithWalRecord) -> bool {
+fn can_apply_in_neon(rec: &NeonWalRecord) -> bool {
     // Currently, we don't have bespoken Rust code to replay any
-    // Postgres WAL records. But everything else is handled in zenith.
+    // Postgres WAL records. But everything else is handled in neon.
     #[allow(clippy::match_like_matches_macro)]
     match rec {
-        ZenithWalRecord::Postgres {
+        NeonWalRecord::Postgres {
             will_init: _,
             rec: _,
         } => false,
@@ -168,7 +145,8 @@ impl WalRedoManager for PostgresRedoManager {
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: Vec<(Lsn, ZenithWalRecord)>,
+        records: Vec<(Lsn, NeonWalRecord)>,
+        pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         if records.is_empty() {
             error!("invalid WAL redo request with no records");
@@ -176,14 +154,14 @@ impl WalRedoManager for PostgresRedoManager {
         }
 
         let mut img: Option<Bytes> = base_img;
-        let mut batch_zenith = can_apply_in_zenith(&records[0].1);
+        let mut batch_neon = can_apply_in_neon(&records[0].1);
         let mut batch_start = 0;
         for i in 1..records.len() {
-            let rec_zenith = can_apply_in_zenith(&records[i].1);
+            let rec_neon = can_apply_in_neon(&records[i].1);
 
-            if rec_zenith != batch_zenith {
-                let result = if batch_zenith {
-                    self.apply_batch_zenith(key, lsn, img, &records[batch_start..i])
+            if rec_neon != batch_neon {
+                let result = if batch_neon {
+                    self.apply_batch_neon(key, lsn, img, &records[batch_start..i])
                 } else {
                     self.apply_batch_postgres(
                         key,
@@ -191,17 +169,18 @@ impl WalRedoManager for PostgresRedoManager {
                         img,
                         &records[batch_start..i],
                         self.conf.wal_redo_timeout,
+                        pg_version,
                     )
                 };
                 img = Some(result?);
 
-                batch_zenith = rec_zenith;
+                batch_neon = rec_neon;
                 batch_start = i;
             }
         }
         // last batch
-        if batch_zenith {
-            self.apply_batch_zenith(key, lsn, img, &records[batch_start..])
+        if batch_neon {
+            self.apply_batch_neon(key, lsn, img, &records[batch_start..])
         } else {
             self.apply_batch_postgres(
                 key,
@@ -209,6 +188,7 @@ impl WalRedoManager for PostgresRedoManager {
                 img,
                 &records[batch_start..],
                 self.conf.wal_redo_timeout,
+                pg_version,
             )
         }
     }
@@ -218,10 +198,10 @@ impl PostgresRedoManager {
     ///
     /// Create a new PostgresRedoManager.
     ///
-    pub fn new(conf: &'static PageServerConf, tenantid: ZTenantId) -> PostgresRedoManager {
+    pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
-            tenantid,
+            tenant_id,
             conf,
             process: Mutex::new(None),
         }
@@ -235,8 +215,9 @@ impl PostgresRedoManager {
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: &[(Lsn, ZenithWalRecord)],
+        records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
+        pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
 
@@ -247,7 +228,7 @@ impl PostgresRedoManager {
 
         // launch the WAL redo process on first use
         if process_guard.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, &self.tenantid)?;
+            let p = PostgresRedoProcess::launch(self.conf, &self.tenant_id, pg_version)?;
             *process_guard = Some(p);
         }
         let process = process_guard.as_mut().unwrap();
@@ -262,7 +243,10 @@ impl PostgresRedoManager {
 
         let end_time = Instant::now();
         let duration = end_time.duration_since(lock_time);
+
         WAL_REDO_TIME.observe(duration.as_secs_f64());
+        WAL_REDO_RECORDS_HISTOGRAM.observe(records.len() as f64);
+
         debug!(
             "postgres applied {} WAL records in {} us to reconstruct page image at LSN {}",
             records.len(),
@@ -285,14 +269,14 @@ impl PostgresRedoManager {
     }
 
     ///
-    /// Process a batch of WAL records using bespoken Zenith code.
+    /// Process a batch of WAL records using bespoken Neon code.
     ///
-    fn apply_batch_zenith(
+    fn apply_batch_neon(
         &self,
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: &[(Lsn, ZenithWalRecord)],
+        records: &[(Lsn, NeonWalRecord)],
     ) -> Result<Bytes, WalRedoError> {
         let start_time = Instant::now();
 
@@ -302,13 +286,13 @@ impl PostgresRedoManager {
             page.extend_from_slice(&fpi[..]);
         } else {
             // All the current WAL record types that we can handle require a base image.
-            error!("invalid zenith WAL redo request with no base image");
+            error!("invalid neon WAL redo request with no base image");
             return Err(WalRedoError::InvalidRequest);
         }
 
         // Apply all the WAL records in the batch
         for (record_lsn, record) in records.iter() {
-            self.apply_record_zenith(key, &mut page, *record_lsn, record)?;
+            self.apply_record_neon(key, &mut page, *record_lsn, record)?;
         }
         // Success!
         let end_time = Instant::now();
@@ -316,7 +300,7 @@ impl PostgresRedoManager {
         WAL_REDO_TIME.observe(duration.as_secs_f64());
 
         debug!(
-            "zenith applied {} WAL records in {} ms to reconstruct page image at LSN {}",
+            "neon applied {} WAL records in {} ms to reconstruct page image at LSN {}",
             records.len(),
             duration.as_micros(),
             lsn
@@ -325,22 +309,22 @@ impl PostgresRedoManager {
         Ok(page.freeze())
     }
 
-    fn apply_record_zenith(
+    fn apply_record_neon(
         &self,
         key: Key,
         page: &mut BytesMut,
         _record_lsn: Lsn,
-        record: &ZenithWalRecord,
+        record: &NeonWalRecord,
     ) -> Result<(), WalRedoError> {
         match record {
-            ZenithWalRecord::Postgres {
+            NeonWalRecord::Postgres {
                 will_init: _,
                 rec: _,
             } => {
-                error!("tried to pass postgres wal record to zenith WAL redo");
+                error!("tried to pass postgres wal record to neon WAL redo");
                 return Err(WalRedoError::InvalidRequest);
             }
-            ZenithWalRecord::ClearVisibilityMapFlags {
+            NeonWalRecord::ClearVisibilityMapFlags {
                 new_heap_blkno,
                 old_heap_blkno,
                 flags,
@@ -348,7 +332,7 @@ impl PostgresRedoManager {
                 // sanity check that this is modifying the correct relation
                 let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert!(
-                    rel.forknum == pg_constants::VISIBILITYMAP_FORKNUM,
+                    rel.forknum == VISIBILITYMAP_FORKNUM,
                     "ClearVisibilityMapFlags record on unexpected rel {}",
                     rel
                 );
@@ -382,7 +366,7 @@ impl PostgresRedoManager {
             }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
-            ZenithWalRecord::ClogSetCommitted { xids, timestamp } => {
+            NeonWalRecord::ClogSetCommitted { xids, timestamp } => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -432,7 +416,7 @@ impl PostgresRedoManager {
                     );
                 }
             }
-            ZenithWalRecord::ClogSetAborted { xids } => {
+            NeonWalRecord::ClogSetAborted { xids } => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -463,7 +447,7 @@ impl PostgresRedoManager {
                     transaction_id_set_status(xid, pg_constants::TRANSACTION_STATUS_ABORTED, page);
                 }
             }
-            ZenithWalRecord::MultixactOffsetCreate { mid, moff } => {
+            NeonWalRecord::MultixactOffsetCreate { mid, moff } => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -496,7 +480,7 @@ impl PostgresRedoManager {
 
                 LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
             }
-            ZenithWalRecord::MultixactMembersCreate { moff, members } => {
+            NeonWalRecord::MultixactMembersCreate { moff, members } => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -592,29 +576,37 @@ impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    fn launch(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<PostgresRedoProcess, Error> {
+    fn launch(
+        conf: &PageServerConf,
+        tenant_id: &TenantId,
+        pg_version: u32,
+    ) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
-        let datadir = conf.tenant_path(tenantid).join("wal-redo-datadir");
+        let datadir = path_with_suffix_extension(
+            conf.tenant_path(tenant_id).join("wal-redo-datadir"),
+            TEMP_FILE_SUFFIX,
+        );
 
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
-            info!("directory {:?} exists, removing", &datadir);
-            if let Err(e) = fs::remove_dir_all(&datadir) {
-                error!("could not remove old wal-redo-datadir: {:#}", e);
-            }
+            info!(
+                "old temporary datadir {} exists, removing",
+                datadir.display()
+            );
+            fs::remove_dir_all(&datadir)?;
         }
-        info!("running initdb in {:?}", datadir.display());
-        let initdb = Command::new(conf.pg_bin_dir().join("initdb"))
+        info!("running initdb in {}", datadir.display());
+        let initdb = Command::new(conf.pg_bin_dir(pg_version).join("initdb"))
             .args(&["-D", &datadir.to_string_lossy()])
             .arg("-N")
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
             .close_fds()
             .output()
-            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {}", e)))?;
+            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
 
         if !initdb.status.success() {
             return Err(Error::new(
@@ -637,14 +629,14 @@ impl PostgresRedoProcess {
         }
 
         // Start postgres itself
-        let mut child = Command::new(conf.pg_bin_dir().join("postgres"))
+        let mut child = Command::new(conf.pg_bin_dir(pg_version).join("postgres"))
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
             .env("PGDATA", &datadir)
             // The redo process is not trusted, so it runs in seccomp mode
             // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't
@@ -668,7 +660,7 @@ impl PostgresRedoProcess {
             })?;
 
         info!(
-            "launched WAL redo postgres process on {:?}",
+            "launched WAL redo postgres process on {}",
             datadir.display()
         );
 
@@ -704,7 +696,7 @@ impl PostgresRedoProcess {
         &mut self,
         tag: BufferTag,
         base_img: Option<Bytes>,
-        records: &[(Lsn, ZenithWalRecord)],
+        records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
     ) -> Result<Bytes, std::io::Error> {
         // Serialize all the messages to send the WAL redo process first.
@@ -718,7 +710,7 @@ impl PostgresRedoProcess {
             build_push_page_msg(tag, &img, &mut writebuf);
         }
         for (lsn, rec) in records.iter() {
-            if let ZenithWalRecord::Postgres {
+            if let NeonWalRecord::Postgres {
                 will_init: _,
                 rec: postgres_rec,
             } = rec
@@ -727,7 +719,7 @@ impl PostgresRedoProcess {
             } else {
                 return Err(Error::new(
                     ErrorKind::Other,
-                    "tried to pass zenith wal record to postgres WAL redo",
+                    "tried to pass neon wal record to postgres WAL redo",
                 ));
             }
         }

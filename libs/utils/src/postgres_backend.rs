@@ -63,7 +63,7 @@ pub enum AuthType {
     Trust,
     MD5,
     // This mimics postgres's AuthenticationCleartextPassword but instead of password expects JWT
-    ZenithJWT,
+    NeonJWT,
 }
 
 impl FromStr for AuthType {
@@ -73,8 +73,8 @@ impl FromStr for AuthType {
         match s {
             "Trust" => Ok(Self::Trust),
             "MD5" => Ok(Self::MD5),
-            "ZenithJWT" => Ok(Self::ZenithJWT),
-            _ => bail!("invalid value \"{}\" for auth type", s),
+            "NeonJWT" => Ok(Self::NeonJWT),
+            _ => bail!("invalid value \"{s}\" for auth type"),
         }
     }
 }
@@ -84,7 +84,7 @@ impl fmt::Display for AuthType {
         f.write_str(match self {
             AuthType::Trust => "Trust",
             AuthType::MD5 => "MD5",
-            AuthType::ZenithJWT => "ZenithJWT",
+            AuthType::NeonJWT => "NeonJWT",
         })
     }
 }
@@ -376,7 +376,7 @@ impl PostgresBackend {
                                 ))?;
                                 self.state = ProtoState::Authentication;
                             }
-                            AuthType::ZenithJWT => {
+                            AuthType::NeonJWT => {
                                 self.write_message(&BeMessage::AuthenticationCleartextPassword)?;
                                 self.state = ProtoState::Authentication;
                             }
@@ -403,7 +403,7 @@ impl PostgresBackend {
                             bail!("auth failed: {}", e);
                         }
                     }
-                    AuthType::ZenithJWT => {
+                    AuthType::NeonJWT => {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
@@ -429,8 +429,22 @@ impl PostgresBackend {
                     // full cause of the error, not just the top-level context + its trace.
                     // We don't want to send that in the ErrorResponse though,
                     // because it's not relevant to the compute node logs.
-                    error!("query handler for '{}' failed: {:?}", query_string, e);
-                    self.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?;
+                    //
+                    // We also don't want to log full stacktrace when the error is primitive,
+                    // such as usual connection closed.
+                    let short_error = format!("{:#}", e);
+                    let root_cause = e.root_cause().to_string();
+                    if root_cause.contains("connection closed unexpectedly")
+                        || root_cause.contains("Broken pipe (os error 32)")
+                    {
+                        error!(
+                            "query handler for '{}' failed: {}",
+                            query_string, short_error
+                        );
+                    } else {
+                        error!("query handler for '{}' failed: {:?}", query_string, e);
+                    }
+                    self.write_message_noflush(&BeMessage::ErrorResponse(&short_error))?;
                     // TODO: untangle convoluted control flow
                     if e.to_string().contains("failed to run") {
                         return Ok(ProcessMsgResult::Break);

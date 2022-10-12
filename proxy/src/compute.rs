@@ -1,9 +1,12 @@
 use crate::{cancellation::CancelClosure, error::UserFacingError};
 use futures::TryFutureExt;
+use itertools::Itertools;
 use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::NoTls;
+use tracing::{error, info};
+use utils::pq_proto::StartupMessageParams;
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -52,6 +55,7 @@ impl NodeInfo {
         use tokio_postgres::config::Host;
 
         let connect_once = |host, port| {
+            info!("trying to connect to a compute node at {host}:{port}");
             TcpStream::connect((host, port)).and_then(|socket| async {
                 let socket_addr = socket.peer_addr()?;
                 // This prevents load balancer from severing the connection.
@@ -70,7 +74,11 @@ impl NodeInfo {
         if ports.len() > 1 && ports.len() != hosts.len() {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("couldn't connect: bad compute config, ports and hosts entries' count does not match: {:?}", self.config),
+                format!(
+                    "couldn't connect: bad compute config, \
+                        ports and hosts entries' count does not match: {:?}",
+                    self.config
+                ),
             ));
         }
 
@@ -86,7 +94,7 @@ impl NodeInfo {
                 Ok(socket) => return Ok(socket),
                 Err(err) => {
                     // We can't throw an error here, as there might be more hosts to try.
-                    println!("failed to connect to compute `{host}:{port}`: {err}");
+                    error!("failed to connect to a compute node at {host}:{port}: {err}");
                     connection_error = Some(err);
                 }
             }
@@ -110,7 +118,42 @@ pub struct PostgresConnection {
 
 impl NodeInfo {
     /// Connect to a corresponding compute node.
-    pub async fn connect(&self) -> Result<(PostgresConnection, CancelClosure), ConnectionError> {
+    pub async fn connect(
+        mut self,
+        params: &StartupMessageParams,
+    ) -> Result<(PostgresConnection, CancelClosure), ConnectionError> {
+        if let Some(options) = params.options_raw() {
+            // We must drop all proxy-specific parameters.
+            #[allow(unstable_name_collisions)]
+            let options: String = options
+                .filter(|opt| !opt.starts_with("project="))
+                .intersperse(" ") // TODO: use impl from std once it's stabilized
+                .collect();
+
+            self.config.options(&options);
+        }
+
+        if let Some(app_name) = params.get("application_name") {
+            self.config.application_name(app_name);
+        }
+
+        if let Some(replication) = params.get("replication") {
+            use tokio_postgres::config::ReplicationMode;
+            match replication {
+                "true" | "on" | "yes" | "1" => {
+                    self.config.replication_mode(ReplicationMode::Physical);
+                }
+                "database" => {
+                    self.config.replication_mode(ReplicationMode::Logical);
+                }
+                _other => {}
+            }
+        }
+
+        // TODO: extend the list of the forwarded startup parameters.
+        // Currently, tokio-postgres doesn't allow us to pass
+        // arbitrary parameters, but the ones above are a good start.
+
         let (socket_addr, mut stream) = self
             .connect_raw()
             .await
@@ -123,8 +166,8 @@ impl NodeInfo {
             .ok_or(ConnectionError::FailedToFetchPgVersion)?
             .into();
 
+        info!("connected to user's compute node at {socket_addr}");
         let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
-
         let db = PostgresConnection { stream, version };
 
         Ok((db, cancel_closure))

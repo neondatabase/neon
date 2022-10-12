@@ -9,15 +9,16 @@
 
 use crc32c::crc32c_append;
 
+use super::super::waldecoder::WalStreamDecoder;
 use super::bindings::{
-    CheckPoint, FullTransactionId, XLogLongPageHeaderData, XLogPageHeaderData, XLogRecord,
-    XLOG_PAGE_MAGIC,
+    CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
+    XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
 };
-use super::pg_constants;
-use super::pg_constants::WAL_SEGMENT_SIZE;
-use crate::v14::waldecoder::WalStreamDecoder;
+use super::PG_MAJORVERSION;
+use crate::pg_constants;
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
+use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
@@ -37,22 +38,15 @@ use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
-pub const XLOG_BLCKSZ: usize = 8192;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_REM_LEN_OFFS: usize = 2 + 2 + 4 + 8;
 pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
-pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = std::mem::size_of::<XLogPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = std::mem::size_of::<XLogLongPageHeaderData>();
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
 #[allow(clippy::identity_op)]
 pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
-
-pub type XLogRecPtr = u64;
-pub type TimeLineID = u32;
-pub type TimestampTz = i64;
-pub type XLogSegNo = u64;
 
 /// Interval of checkpointing metadata file. We should store metadata file to enforce
 /// predicate that checkpoint.nextXid is larger than any XID in WAL.
@@ -63,12 +57,10 @@ pub type XLogSegNo = u64;
 /// in order to let CLOG_TRUNCATE mechanism correctly extend CLOG.
 const XID_CHECKPOINT_INTERVAL: u32 = 1024;
 
-#[allow(non_snake_case)]
 pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: usize) -> XLogSegNo {
     (0x100000000u64 / wal_segsz_bytes as u64) as XLogSegNo
 }
 
-#[allow(non_snake_case)]
 pub fn XLogSegNoOffsetToRecPtr(
     segno: XLogSegNo,
     offset: u32,
@@ -77,7 +69,6 @@ pub fn XLogSegNoOffsetToRecPtr(
     segno * (wal_segsz_bytes as u64) + (offset as u64)
 }
 
-#[allow(non_snake_case)]
 pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize) -> String {
     format!(
         "{:>08X}{:>08X}{:>08X}",
@@ -87,7 +78,6 @@ pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize
     )
 }
 
-#[allow(non_snake_case)]
 pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
     let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
     let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
@@ -95,12 +85,10 @@ pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLin
     (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli)
 }
 
-#[allow(non_snake_case)]
 pub fn IsXLogFileName(fname: &str) -> bool {
     return fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit());
 }
 
-#[allow(non_snake_case)]
 pub fn IsPartialXLogFileName(fname: &str) -> bool {
     fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
 }
@@ -118,6 +106,30 @@ pub fn normalize_lsn(lsn: Lsn, seg_sz: usize) -> Lsn {
     } else {
         lsn.align()
     }
+}
+
+pub fn generate_pg_control(
+    pg_control_bytes: &[u8],
+    checkpoint_bytes: &[u8],
+    lsn: Lsn,
+) -> anyhow::Result<(Bytes, u64)> {
+    let mut pg_control = ControlFileData::decode(pg_control_bytes)?;
+    let mut checkpoint = CheckPoint::decode(checkpoint_bytes)?;
+
+    // Generate new pg_control needed for bootstrap
+    checkpoint.redo = normalize_lsn(lsn, WAL_SEGMENT_SIZE).0;
+
+    //reset some fields we don't want to preserve
+    //TODO Check this.
+    //We may need to determine the value from twophase data.
+    checkpoint.oldestActiveXid = 0;
+
+    //save new values in pg_control
+    pg_control.checkPoint = 0;
+    pg_control.checkPointCopy = checkpoint;
+    pg_control.state = DBState_DB_SHUTDOWNED;
+
+    Ok((pg_control.encode(), pg_control.system_identifier))
 }
 
 pub fn get_current_timestamp() -> TimestampTz {
@@ -151,7 +163,10 @@ pub fn find_end_of_wal(
     let mut result = start_lsn;
     let mut curr_lsn = start_lsn;
     let mut buf = [0u8; XLOG_BLCKSZ];
-    let mut decoder = WalStreamDecoder::new(start_lsn);
+    let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+    debug!("find_end_of_wal PG_VERSION: {}", pg_version);
+
+    let mut decoder = WalStreamDecoder::new(start_lsn, pg_version);
 
     // loop over segments
     loop {
@@ -161,7 +176,7 @@ pub fn find_end_of_wal(
         match open_wal_segment(&seg_file_path)? {
             None => {
                 // no more segments
-                info!(
+                debug!(
                     "find_end_of_wal reached end at {:?}, segment {:?} doesn't exist",
                     result, seg_file_path
                 );
@@ -184,7 +199,7 @@ pub fn find_end_of_wal(
                         match decoder.poll_decode() {
                             Ok(Some(record)) => result = record.0,
                             Err(e) => {
-                                info!(
+                                debug!(
                                     "find_end_of_wal reached end at {:?}, decode error: {:?}",
                                     result, e
                                 );
@@ -318,9 +333,9 @@ impl CheckPoint {
 // We need this segment to start compute node.
 //
 pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, SerializeError> {
-    let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
+    let mut seg_buf = BytesMut::with_capacity(WAL_SEGMENT_SIZE as usize);
 
-    let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, pg_constants::WAL_SEGMENT_SIZE);
+    let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, WAL_SEGMENT_SIZE);
     let hdr = XLogLongPageHeaderData {
         std: {
             XLogPageHeaderData {
@@ -333,7 +348,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, Seriali
             }
         },
         xlp_sysid: system_id,
-        xlp_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32,
+        xlp_seg_size: WAL_SEGMENT_SIZE as u32,
         xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
     };
 
@@ -341,7 +356,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, Seriali
     seg_buf.extend_from_slice(&hdr_bytes);
 
     //zero out the rest of the file
-    seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
+    seg_buf.resize(WAL_SEGMENT_SIZE, 0);
     Ok(seg_buf.freeze())
 }
 
@@ -426,6 +441,7 @@ pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::PG_MAJORVERSION;
     use super::*;
     use regex::Regex;
     use std::cmp::min;
@@ -434,23 +450,26 @@ mod tests {
     use utils::const_assert;
 
     fn init_logging() {
-        let _ = env_logger::Builder::from_env(
-            env_logger::Env::default()
-                .default_filter_or("wal_craft=info,postgres_ffi::xlog_utils=trace"),
-        )
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+            format!("wal_craft=info,postgres_ffi::{PG_MAJORVERSION}::xlog_utils=trace"),
+        ))
         .is_test(true)
         .try_init();
     }
 
     fn test_end_of_wal<C: wal_craft::Crafter>(test_name: &str) {
         use wal_craft::*;
+
+        let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+
         // Craft some WAL
         let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
         let cfg = Conf {
-            pg_distrib_dir: top_path.join("tmp_install"),
-            datadir: top_path.join(format!("test_output/{}", test_name)),
+            pg_version,
+            pg_distrib_dir: top_path.join("pg_install"),
+            datadir: top_path.join(format!("test_output/{}-{PG_MAJORVERSION}", test_name)),
         };
         if cfg.datadir.exists() {
             fs::remove_dir_all(&cfg.datadir).unwrap();

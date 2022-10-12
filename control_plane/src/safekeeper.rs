@@ -12,12 +12,12 @@ use nix::unistd::Pid;
 use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
-use safekeeper::http::models::TimelineCreateRequest;
+use safekeeper_api::models::TimelineCreateRequest;
 use thiserror::Error;
 use utils::{
     connstring::connection_address,
     http::error::HttpErrorBody,
-    zid::{NodeId, ZTenantId, ZTimelineId},
+    id::{NodeId, TenantId, TimelineId},
 };
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
@@ -46,7 +46,7 @@ impl ResponseErrorMessageExt for Response {
             return Ok(self);
         }
 
-        // reqwest do not export it's error construction utility functions, so lets craft the message ourselves
+        // reqwest does not export its error construction utility functions, so let's craft the message ourselves
         let url = self.url().to_owned();
         Err(SafekeeperHttpError::Response(
             match self.json::<HttpErrorBody>() {
@@ -269,7 +269,7 @@ impl SafekeeperNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
         // TODO: authentication
-        //if self.env.auth_type == AuthType::ZenithJWT {
+        //if self.env.auth_type == AuthType::NeonJWT {
         //    builder = builder.bearer_auth(&self.env.safekeeper_auth_token)
         //}
         self.http_client.request(method, url)
@@ -284,8 +284,8 @@ impl SafekeeperNode {
 
     pub fn timeline_create(
         &self,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         peer_ids: Vec<NodeId>,
     ) -> Result<()> {
         Ok(self

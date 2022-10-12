@@ -1,4 +1,5 @@
 settings:
+  authBackend: "link"
   authEndpoint: "https://console.neon.tech/authenticate_proxy_request/"
   uri: "https://console.neon.tech/psql_session/"
 

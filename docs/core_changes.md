@@ -148,31 +148,6 @@ relcache? (I think we do cache nblocks in relcache already, check why that's not
 Neon)
 
 
-## Misc change in vacuumlazy.c
-
-```
-index 8aab6e324e..c684c4fbee 100644
---- a/src/backend/access/heap/vacuumlazy.c
-+++ b/src/backend/access/heap/vacuumlazy.c
-@@ -1487,7 +1487,10 @@ lazy_scan_heap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
-                else if (all_visible_according_to_vm && !PageIsAllVisible(page)
-                                 && VM_ALL_VISIBLE(vacrel->rel, blkno, &vmbuffer))
-                {
--                       elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
-+                       /* ZENITH-XXX: all visible hint is not wal-logged
-+                        * FIXME: Replay visibilitymap changes in pageserver
-+                        */
-+                       elog(DEBUG1, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
-                                 vacrel->relname, blkno);
-                        visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-                                                                VISIBILITYMAP_VALID_BITS);
-```
-
-
-Is this still needed? If that WARNING happens, it looks like potential corruption that we should
-fix!
-
-
 ## Use buffer manager when extending VM or FSM
 
 ```

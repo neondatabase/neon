@@ -17,6 +17,7 @@ use toml_edit::Document;
 use tracing::*;
 use url::{ParseError, Url};
 
+use metrics::set_build_info_metric;
 use safekeeper::broker;
 use safekeeper::control_file;
 use safekeeper::defaults::{
@@ -24,14 +25,14 @@ use safekeeper::defaults::{
 };
 use safekeeper::http;
 use safekeeper::remove_wal;
-use safekeeper::timeline::GlobalTimelines;
 use safekeeper::wal_backup;
 use safekeeper::wal_service;
+use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use utils::auth::JwtAuth;
 use utils::{
-    http::endpoint, logging, project_git_version, shutdown::exit_now, signals, tcp_listener,
-    zid::NodeId,
+    http::endpoint, id::NodeId, logging, project_git_version, shutdown::exit_now, signals,
+    tcp_listener,
 };
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
@@ -39,7 +40,7 @@ const ID_FILE_NAME: &str = "safekeeper.id";
 project_git_version!(GIT_VERSION);
 
 fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("Zenith safekeeper")
+    let arg_matches = App::new("Neon safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .version(GIT_VERSION)
         .arg(
@@ -70,7 +71,7 @@ fn main() -> anyhow::Result<()> {
                 .help(formatcp!("http endpoint address for metrics on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
         )
         // FIXME this argument is no longer needed since pageserver address is forwarded from compute.
-        // However because this argument is in use by console's e2e tests lets keep it for now and remove separately.
+        // However because this argument is in use by console's e2e tests let's keep it for now and remove separately.
         // So currently it is a noop.
         .arg(
             Arg::new("pageserver")
@@ -291,14 +292,15 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
 
     // Register metrics collector for active timelines. It's important to do this
     // after daemonizing, otherwise process collector will be upset.
-    let registry = metrics::default_registry();
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
-    registry.register(Box::new(timeline_collector))?;
+    metrics::register_internal(Box::new(timeline_collector))?;
 
     let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
     let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
-    GlobalTimelines::init(wal_backup_launcher_tx);
+
+    // Load all timelines from disk to memory.
+    GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
 
     let conf_ = conf.clone();
     threads.push(
@@ -362,6 +364,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
             })?,
     );
 
+    set_build_info_metric(GIT_VERSION);
     // TODO: put more thoughts into handling of failed threads
     // We probably should restart them.
 

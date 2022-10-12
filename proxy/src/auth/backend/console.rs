@@ -1,17 +1,18 @@
 //! Cloud API V2.
 
+use super::ConsoleReqExtra;
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute::{self, ComputeConnCfg},
     error::{io_error, UserFacingError},
-    scram,
+    http, scram,
     stream::PqStream,
-    url::ApiUrl,
 };
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::info;
 
 const REQUEST_FAILED: &str = "Console request failed";
 
@@ -120,14 +121,23 @@ pub enum AuthInfo {
 
 #[must_use]
 pub(super) struct Api<'a> {
-    endpoint: &'a ApiUrl,
-    creds: &'a ClientCredentials,
+    endpoint: &'a http::Endpoint,
+    extra: &'a ConsoleReqExtra<'a>,
+    creds: &'a ClientCredentials<'a>,
 }
 
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
-    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
-        Self { endpoint, creds }
+    pub(super) fn new(
+        endpoint: &'a http::Endpoint,
+        extra: &'a ConsoleReqExtra<'a>,
+        creds: &'a ClientCredentials,
+    ) -> Self {
+        Self {
+            endpoint,
+            extra,
+            creds,
+        }
     }
 
     /// Authenticate the existing user or throw an error.
@@ -139,16 +149,21 @@ impl<'a> Api<'a> {
     }
 
     async fn get_auth_info(&self) -> Result<AuthInfo, GetAuthInfoError> {
-        let mut url = self.endpoint.clone();
-        url.path_segments_mut().push("proxy_get_role_secret");
-        url.query_pairs_mut()
-            .append_pair("project", self.creds.project().expect("impossible"))
-            .append_pair("role", &self.creds.user);
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let req = self
+            .endpoint
+            .get("proxy_get_role_secret")
+            .header("X-Request-ID", &request_id)
+            .query(&[("session_id", self.extra.session_id)])
+            .query(&[
+                ("application_name", self.extra.application_name),
+                ("project", Some(self.creds.project().expect("impossible"))),
+                ("role", Some(self.creds.user)),
+            ])
+            .build()?;
 
-        // TODO: use a proper logger
-        println!("cplane request: {url}");
-
-        let resp = reqwest::get(url.into_inner()).await?;
+        info!(id = request_id, url = req.url().as_str(), "request");
+        let resp = self.endpoint.execute(req).await?;
         if !resp.status().is_success() {
             return Err(TransportError::HttpStatus(resp.status()).into());
         }
@@ -162,15 +177,20 @@ impl<'a> Api<'a> {
 
     /// Wake up the compute node and return the corresponding connection info.
     pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg, WakeComputeError> {
-        let mut url = self.endpoint.clone();
-        url.path_segments_mut().push("proxy_wake_compute");
-        url.query_pairs_mut()
-            .append_pair("project", self.creds.project().expect("impossible"));
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let req = self
+            .endpoint
+            .get("proxy_wake_compute")
+            .header("X-Request-ID", &request_id)
+            .query(&[("session_id", self.extra.session_id)])
+            .query(&[
+                ("application_name", self.extra.application_name),
+                ("project", Some(self.creds.project().expect("impossible"))),
+            ])
+            .build()?;
 
-        // TODO: use a proper logger
-        println!("cplane request: {url}");
-
-        let resp = reqwest::get(url.into_inner()).await?;
+        info!(id = request_id, url = req.url().as_str(), "request");
+        let resp = self.endpoint.execute(req).await?;
         if !resp.status().is_success() {
             return Err(TransportError::HttpStatus(resp.status()).into());
         }
@@ -187,8 +207,8 @@ impl<'a> Api<'a> {
         config
             .host(host)
             .port(port)
-            .dbname(&self.creds.dbname)
-            .user(&self.creds.user);
+            .dbname(self.creds.dbname)
+            .user(self.creds.user);
 
         Ok(config)
     }
@@ -206,15 +226,18 @@ where
     GetAuthInfo: Future<Output = Result<AuthInfo, GetAuthInfoError>>,
     WakeCompute: Future<Output = Result<ComputeConnCfg, WakeComputeError>>,
 {
+    info!("fetching user's authentication info");
     let auth_info = get_auth_info(endpoint).await?;
 
     let flow = AuthFlow::new(client);
     let scram_keys = match auth_info {
         AuthInfo::Md5(_) => {
             // TODO: decide if we should support MD5 in api v2
+            info!("auth endpoint chooses MD5");
             return Err(auth::AuthError::bad_auth_method("MD5"));
         }
         AuthInfo::Scram(secret) => {
+            info!("auth endpoint chooses SCRAM");
             let scram = auth::Scram(&secret);
             Some(compute::ScramKeys {
                 client_key: flow.begin(scram).await?.authenticate().await?.as_bytes(),
@@ -237,4 +260,16 @@ where
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {
     let (host, port) = input.split_once(':')?;
     Some((host, port.parse().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_host_port() {
+        let (host, port) = parse_host_port("127.0.0.1:5432").expect("failed to parse");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 5432);
+    }
 }

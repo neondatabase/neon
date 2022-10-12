@@ -11,6 +11,10 @@ inputs:
   test_selection:
     description: '`test_selector` from run-python-test-set action'
     required: false
+outputs:
+  report-url:
+    description: 'Allure report URL'
+    value: ${{ steps.generate-report.outputs.report-url }}
 
 runs:
   using: "composite"
@@ -18,7 +22,7 @@ runs:
     - name: Validate input parameters
       shell: bash -euxo pipefail {0}
       run: |
-        if [ "${{ inputs.action }}" != "store"] && [ "${{ inputs.action }}" != "generate" ]; then
+        if [ "${{ inputs.action }}" != "store" ] && [ "${{ inputs.action }}" != "generate" ]; then
           echo 2>&1 "Unknown inputs.action type '${{ inputs.action }}'; allowed 'generate' or 'store' only"
           exit 1
         fi
@@ -41,9 +45,9 @@ runs:
           # Shortcut for a special branch
           key=main
         else
-          key=branch-$(echo ${GITHUB_REF#refs/heads/} | tr -cd "[:alnum:]._-")
+          key=branch-$(echo ${GITHUB_REF#refs/heads/} | tr -c "[:alnum:]._-" "-")
         fi
-        echo "::set-output name=KEY::${key}"
+        echo "KEY=${key}" >> $GITHUB_OUTPUT
 
     - uses: actions/setup-java@v3
       if: ${{ inputs.action == 'generate' }}
@@ -94,7 +98,7 @@ runs:
           BUILD_TYPE=${{ inputs.build_type }}
         EOF
 
-        ARCHIVE="${GITHUB_RUN_ID}-${{ inputs.test_selection }}-${GITHUB_RUN_ATTEMPT}.tar.zst"
+        ARCHIVE="${GITHUB_RUN_ID}-${{ inputs.test_selection }}-${GITHUB_RUN_ATTEMPT}-$(date +%s).tar.zst"
         ZSTD_NBTHREADS=0
 
         tar -C ${TEST_OUTPUT}/allure/results -cf ${ARCHIVE} --zstd .
@@ -182,7 +186,7 @@ runs:
         aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
-        echo "::set-output name=REPORT_URL::${REPORT_URL}"
+        echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
     - name: Release Allure lock
       if: ${{ inputs.action == 'generate' && always() }}
@@ -200,14 +204,14 @@ runs:
     - uses: actions/github-script@v6
       if: ${{ inputs.action == 'generate' && always() }}
       env:
-        REPORT_URL: ${{ steps.generate-report.outputs.REPORT_URL }}
+        REPORT_URL: ${{ steps.generate-report.outputs.report-url }}
         BUILD_TYPE: ${{ inputs.build_type }}
         SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       with:
         script: |
           const { REPORT_URL, BUILD_TYPE, SHA } = process.env
 
-          result = await github.rest.repos.createCommitStatus({
+          await github.rest.repos.createCommitStatus({
             owner: context.repo.owner,
             repo: context.repo.repo,
             sha: `${SHA}`,
@@ -215,5 +219,3 @@ runs:
             target_url: `${REPORT_URL}`,
             context: `Allure report / ${BUILD_TYPE}`,
           })
-
-          console.log(result);

@@ -4,10 +4,8 @@ use log::*;
 use once_cell::sync::Lazy;
 use postgres::types::PgLsn;
 use postgres::Client;
-use postgres_ffi::v14::pg_constants::WAL_SEGMENT_SIZE;
-use postgres_ffi::v14::xlog_utils::{
-    XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
-};
+use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
+use postgres_ffi::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +15,7 @@ use tempfile::{tempdir, TempDir};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conf {
+    pub pg_version: u32,
     pub pg_distrib_dir: PathBuf,
     pub datadir: PathBuf,
 }
@@ -38,12 +37,22 @@ pub static REQUIRED_POSTGRES_CONFIG: Lazy<Vec<&'static str>> = Lazy::new(|| {
 });
 
 impl Conf {
+    pub fn pg_distrib_dir(&self) -> PathBuf {
+        let path = self.pg_distrib_dir.clone();
+
+        match self.pg_version {
+            14 => path.join(format!("v{}", self.pg_version)),
+            15 => path.join(format!("v{}", self.pg_version)),
+            _ => panic!("Unsupported postgres version: {}", self.pg_version),
+        }
+    }
+
     fn pg_bin_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("bin")
+        self.pg_distrib_dir().join("bin")
     }
 
     fn pg_lib_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("lib")
+        self.pg_distrib_dir().join("lib")
     }
 
     pub fn wal_dir(&self) -> PathBuf {

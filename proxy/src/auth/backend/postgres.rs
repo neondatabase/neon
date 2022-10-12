@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 #[must_use]
 pub(super) struct Api<'a> {
     endpoint: &'a ApiUrl,
-    creds: &'a ClientCredentials,
+    creds: &'a ClientCredentials<'a>,
 }
 
 // Helps eliminate graceless `.map_err` calls without introducing another ctor.
@@ -87,8 +87,8 @@ impl<'a> Api<'a> {
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
             .port(self.endpoint.port().unwrap_or(5432))
-            .dbname(&self.creds.dbname)
-            .user(&self.creds.user);
+            .dbname(self.creds.dbname)
+            .user(self.creds.user);
 
         Ok(config)
     }

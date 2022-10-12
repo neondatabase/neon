@@ -1,12 +1,11 @@
-use anyhow::anyhow;
 use hyper::{header, Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("Bad request: {0}")]
-    BadRequest(String),
+    #[error("Bad request: {0:#?}")]
+    BadRequest(anyhow::Error),
 
     #[error("Forbidden: {0}")]
     Forbidden(String),
@@ -15,24 +14,20 @@ pub enum ApiError {
     Unauthorized(String),
 
     #[error("NotFound: {0}")]
-    NotFound(String),
+    NotFound(anyhow::Error),
 
     #[error("Conflict: {0}")]
     Conflict(String),
 
     #[error(transparent)]
-    InternalServerError(#[from] anyhow::Error),
+    InternalServerError(anyhow::Error),
 }
 
 impl ApiError {
-    pub fn from_err<E: Into<anyhow::Error>>(err: E) -> Self {
-        Self::InternalServerError(anyhow!(err))
-    }
-
     pub fn into_response(self) -> Response<Body> {
         match self {
-            ApiError::BadRequest(_) => HttpErrorBody::response_from_msg_and_status(
-                self.to_string(),
+            ApiError::BadRequest(err) => HttpErrorBody::response_from_msg_and_status(
+                format!("{err:#?}"), // use debug printing so that we give the cause
                 StatusCode::BAD_REQUEST,
             ),
             ApiError::Forbidden(_) => {
