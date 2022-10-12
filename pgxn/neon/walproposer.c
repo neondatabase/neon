@@ -1471,12 +1471,6 @@ SendProposerElected(Safekeeper *sk)
 	 */
 	th = &sk->voteResponse.termHistory;
 
-	/*
-	 * If any WAL is present on the sk, it must be authorized by some term.
-	 * OTOH, without any WAL there are no term swiches in the log.
-	 */
-	Assert((th->n_entries == 0) ==
-		   (sk->voteResponse.flushLsn == InvalidXLogRecPtr));
 	/* We must start somewhere. */
 	Assert(propTermHistory.n_entries >= 1);
 

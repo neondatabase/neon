@@ -2339,6 +2339,7 @@ class Safekeeper:
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
+    pg_version: int
     flush_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
@@ -2367,6 +2368,18 @@ class SafekeeperHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def timeline_create(
+        self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
+    ):
+        body = {
+            "tenant_id": str(tenant_id),
+            "timeline_id": str(timeline_id),
+            "pg_version": pg_version,
+            "commit_lsn": str(commit_lsn),
+        }
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/timeline", json=body)
+        res.raise_for_status()
+
     def timeline_status(
         self, tenant_id: TenantId, timeline_id: TimelineId
     ) -> SafekeeperTimelineStatus:
@@ -2375,6 +2388,7 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         return SafekeeperTimelineStatus(
             acceptor_epoch=resj["acceptor_state"]["epoch"],
+            pg_version=resj["pg_info"]["pg_version"],
             flush_lsn=Lsn(resj["flush_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
