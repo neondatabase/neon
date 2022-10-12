@@ -212,8 +212,8 @@ impl RemoteTimelineIndex {
 /// Restored index part data about the timeline, stored in the remote index.
 #[derive(Debug, Clone)]
 pub struct RemoteTimeline {
-    timeline_layers: HashMap<PathBuf, LayerFileMetadata>,
-    missing_layers: HashMap<PathBuf, LayerFileMetadata>,
+    timeline_layers: HashMap<PathBuf, Option<LayerFileMetadata>>,
+    missing_layers: HashMap<PathBuf, Option<LayerFileMetadata>>,
 
     pub metadata: TimelineMetadata,
     pub awaits_download: bool,
@@ -233,14 +233,16 @@ impl RemoteTimeline {
         &mut self,
         new_layers: impl IntoIterator<Item = (PathBuf, LayerFileMetadata)>,
     ) {
-        self.timeline_layers.extend(new_layers);
+        self.timeline_layers
+            .extend(new_layers.into_iter().map(|(p, m)| (p, Some(m))));
     }
 
     pub fn add_upload_failures(
         &mut self,
         upload_failures: impl IntoIterator<Item = (PathBuf, LayerFileMetadata)>,
     ) {
-        self.missing_layers.extend(upload_failures);
+        self.missing_layers
+            .extend(upload_failures.into_iter().map(|(p, m)| (p, Some(m))));
     }
 
     pub fn remove_layers(&mut self, layers_to_remove: &HashSet<PathBuf>) {
@@ -257,14 +259,12 @@ impl RemoteTimeline {
 
     pub fn from_index_part(timeline_path: &Path, index_part: IndexPart) -> anyhow::Result<Self> {
         let metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)?;
-        let default_metadata = &IndexLayerMetadata::default();
 
-        let find_metadata = |key: &RelativePath| -> LayerFileMetadata {
-            index_part
-                .layer_metadata
-                .get(key)
-                .unwrap_or(default_metadata)
-                .into()
+        let find_metadata = |key: &RelativePath| -> Option<LayerFileMetadata> {
+            let index_metadata = index_part.layer_metadata.get(key)?;
+            Some(LayerFileMetadata {
+                file_size: index_metadata.file_size?,
+            })
         };
 
         Ok(Self {
@@ -291,37 +291,17 @@ impl RemoteTimeline {
 // FIXME: move to parent module?
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LayerFileMetadata {
-    file_size: Option<u64>,
-}
-
-impl From<&'_ IndexLayerMetadata> for LayerFileMetadata {
-    fn from(other: &IndexLayerMetadata) -> Self {
-        LayerFileMetadata {
-            file_size: other.file_size,
-        }
-    }
+    file_size: u64,
 }
 
 impl LayerFileMetadata {
     // TODO: probably best to go ahead with builder pattern?
     pub fn new(file_size: u64) -> Self {
-        LayerFileMetadata {
-            file_size: Some(file_size),
-        }
+        LayerFileMetadata { file_size }
     }
 
-    pub fn file_size(&self) -> Option<u64> {
+    pub fn file_size(&self) -> u64 {
         self.file_size
-    }
-
-    /// Overwrites the stored file size for this layer file.
-    pub fn with_file_size(&mut self, file_size: u64) -> &mut Self {
-        if let Some(prev_file_size) = self.file_size {
-            debug_assert_eq!(prev_file_size, file_size);
-            // it is much more common that the size is not yet set, when building the metadata
-        }
-        self.file_size = Some(file_size);
-        self
     }
 
     // FIXME: this is ambigious, better to get rid of it from the start; when file hashes get
@@ -329,8 +309,7 @@ impl LayerFileMetadata {
     pub fn for_collected_file(p: &std::path::Path) -> anyhow::Result<Self> {
         let m = std::fs::metadata(p)
             .with_context(|| format!("Failed to read layer file metadata: {p:?}"))?;
-        let file_size = Some(m.len());
-        Ok(LayerFileMetadata { file_size })
+        Ok(LayerFileMetadata { file_size: m.len() })
     }
 }
 
@@ -448,22 +427,26 @@ pub struct IndexLayerMetadata {
 impl From<&'_ LayerFileMetadata> for IndexLayerMetadata {
     fn from(other: &'_ LayerFileMetadata) -> Self {
         IndexLayerMetadata {
-            file_size: other.file_size,
+            file_size: Some(other.file_size),
         }
     }
 }
 
 fn separate_paths_and_metadata(
     timeline_path: &Path,
-    input: &HashMap<PathBuf, LayerFileMetadata>,
+    input: &HashMap<PathBuf, Option<LayerFileMetadata>>,
     output: &mut HashSet<RelativePath>,
     layer_metadata: &mut HashMap<RelativePath, IndexLayerMetadata>,
 ) -> anyhow::Result<()> {
-    for (path, metadata) in input {
+    for (path, local_layer_metadata) in input {
         let rel_path = RelativePath::new(timeline_path, path)?;
-        let metadata = IndexLayerMetadata::from(metadata);
+        // TODO kb wrong transition
+        let file_size = match local_layer_metadata {
+            Some(local_layer_metadata) => Some(local_layer_metadata.file_size()),
+            None => None,
+        };
 
-        layer_metadata.insert(rel_path.clone(), metadata);
+        layer_metadata.insert(rel_path.clone(), IndexLayerMetadata { file_size });
         output.insert(rel_path);
     }
     Ok(())
@@ -492,12 +475,24 @@ mod tests {
         );
         let remote_timeline = RemoteTimeline {
             timeline_layers: HashMap::from([
-                (timeline_path.join("layer_1"), LayerFileMetadata::new(1)),
-                (timeline_path.join("layer_2"), LayerFileMetadata::new(2)),
+                (
+                    timeline_path.join("layer_1"),
+                    Some(LayerFileMetadata::new(1)),
+                ),
+                (
+                    timeline_path.join("layer_2"),
+                    Some(LayerFileMetadata::new(2)),
+                ),
             ]),
             missing_layers: HashMap::from([
-                (timeline_path.join("missing_1"), LayerFileMetadata::new(3)),
-                (timeline_path.join("missing_2"), LayerFileMetadata::new(4)),
+                (
+                    timeline_path.join("missing_1"),
+                    Some(LayerFileMetadata::new(3)),
+                ),
+                (
+                    timeline_path.join("missing_2"),
+                    Some(LayerFileMetadata::new(4)),
+                ),
             ]),
             metadata: metadata.clone(),
             awaits_download: false,
@@ -620,12 +615,21 @@ mod tests {
             &timeline_path,
             RemoteTimeline {
                 timeline_layers: HashMap::from([
-                    (PathBuf::from("bad_path"), LayerFileMetadata::new(1)),
-                    (timeline_path.join("layer_2"), LayerFileMetadata::new(2)),
+                    (PathBuf::from("bad_path"), Some(LayerFileMetadata::new(1))),
+                    (
+                        timeline_path.join("layer_2"),
+                        Some(LayerFileMetadata::new(2)),
+                    ),
                 ]),
                 missing_layers: HashMap::from([
-                    (timeline_path.join("missing_1"), LayerFileMetadata::new(3)),
-                    (timeline_path.join("missing_2"), LayerFileMetadata::new(4)),
+                    (
+                        timeline_path.join("missing_1"),
+                        Some(LayerFileMetadata::new(3)),
+                    ),
+                    (
+                        timeline_path.join("missing_2"),
+                        Some(LayerFileMetadata::new(4)),
+                    ),
                 ]),
                 metadata: metadata.clone(),
                 awaits_download: false,
@@ -637,12 +641,21 @@ mod tests {
             &timeline_path,
             RemoteTimeline {
                 timeline_layers: HashMap::from([
-                    (timeline_path.join("layer_1"), LayerFileMetadata::new(1)),
-                    (timeline_path.join("layer_2"), LayerFileMetadata::new(2)),
+                    (
+                        timeline_path.join("layer_1"),
+                        Some(LayerFileMetadata::new(1)),
+                    ),
+                    (
+                        timeline_path.join("layer_2"),
+                        Some(LayerFileMetadata::new(2)),
+                    ),
                 ]),
                 missing_layers: HashMap::from([
-                    (PathBuf::from("bad_path"), LayerFileMetadata::new(3)),
-                    (timeline_path.join("missing_2"), LayerFileMetadata::new(4)),
+                    (PathBuf::from("bad_path"), Some(LayerFileMetadata::new(3))),
+                    (
+                        timeline_path.join("missing_2"),
+                        Some(LayerFileMetadata::new(4)),
+                    ),
                 ]),
                 metadata,
                 awaits_download: false,

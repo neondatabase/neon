@@ -119,7 +119,7 @@ pub(super) async fn upload_timeline_layers<'a>(
                 Err(e) => return Err(UploadError::MissingLocalFile(source_path, e)),
             };
 
-            let source_size = source_file
+            let fs_size = source_file
                 .metadata()
                 .await
                 .with_context(|| {
@@ -129,20 +129,19 @@ pub(super) async fn upload_timeline_layers<'a>(
                     )
                 })
                 .map_err(UploadError::Other)?
-                .len() as usize;
+                .len();
 
-            // FIXME: this looks bad
-            if let Some(file_size) = known_metadata.file_size() {
-                assert_eq!(
-                    source_size, file_size as usize,
-                    "the length we read just a moment ago has changed"
-                );
-            } else {
-                // this is a silly state we would like to avoid
+            let metadata_size = known_metadata.file_size();
+            if fs_size != metadata_size {
+                return Err(UploadError::Other(anyhow::anyhow!(
+                    "File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}"
+                )));
             }
+            let fs_size = usize::try_from(fs_size).with_context(|| format!("File {source_path:?} size {fs_size} could not be converted to usize"))
+                .map_err(UploadError::Other)?;
 
             match storage
-                .upload_storage_object(Box::new(source_file), source_size, &source_path)
+                .upload_storage_object(Box::new(source_file), fs_size, &source_path)
                 .await
                 .with_context(|| format!("Failed to upload layer file for {sync_id}"))
             {
