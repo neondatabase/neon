@@ -4,9 +4,9 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
-# Benchmark searching the layer map, when there are a lot of small layer files.
+# Benchmark estimating effect of prefetch on bulk update operations
 #
-def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
+def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark):
 
     env = neon_env_builder.init_start()
     n_records = 10000000
