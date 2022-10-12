@@ -231,7 +231,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
 pin_project! {
     /// This stream tracks all writes and calls user provided
     /// callback when the underlying stream is flushed.
-    pub struct MetricsStream<S, W> {
+    pub struct MeasuredStream<S, W> {
         #[pin]
         stream: S,
         write_count: usize,
@@ -239,7 +239,7 @@ pin_project! {
     }
 }
 
-impl<S, W> MetricsStream<S, W> {
+impl<S, W> MeasuredStream<S, W> {
     pub fn new(stream: S, inc_write_count: W) -> Self {
         Self {
             stream,
@@ -249,7 +249,7 @@ impl<S, W> MetricsStream<S, W> {
     }
 }
 
-impl<S: AsyncRead + Unpin, W> AsyncRead for MetricsStream<S, W> {
+impl<S: AsyncRead + Unpin, W> AsyncRead for MeasuredStream<S, W> {
     fn poll_read(
         self: Pin<&mut Self>,
         context: &mut task::Context<'_>,
@@ -259,7 +259,7 @@ impl<S: AsyncRead + Unpin, W> AsyncRead for MetricsStream<S, W> {
     }
 }
 
-impl<S: AsyncWrite + Unpin, W: FnMut(usize)> AsyncWrite for MetricsStream<S, W> {
+impl<S: AsyncWrite + Unpin, W: FnMut(usize)> AsyncWrite for MeasuredStream<S, W> {
     fn poll_write(
         self: Pin<&mut Self>,
         context: &mut task::Context<'_>,
