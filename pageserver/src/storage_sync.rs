@@ -470,6 +470,20 @@ struct LayersUpload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LayersDownload {
     layers_to_skip: HashSet<PathBuf>,
+
+    /// Paths which have been downloaded, and had their metadata verified or generated.
+    ///
+    /// Metadata generation happens when upgrading from past version of `IndexPart`.
+    gathered_metadata: HashMap<PathBuf, LayerFileMetadata>,
+}
+
+impl LayersDownload {
+    fn from_skipped_layers(layers_to_skip: HashSet<PathBuf>) -> Self {
+        LayersDownload {
+            layers_to_skip,
+            gathered_metadata: HashMap::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -566,9 +580,7 @@ pub fn schedule_layer_download(tenant_id: TenantId, timeline_id: TimelineId) {
             tenant_id,
             timeline_id,
         },
-        SyncTask::download(LayersDownload {
-            layers_to_skip: HashSet::new(),
-        }),
+        SyncTask::download(LayersDownload::from_skipped_layers(HashSet::new())),
     );
     debug!("Download task for tenant {tenant_id}, timeline {timeline_id} sent")
 }
@@ -1380,9 +1392,9 @@ fn compare_local_and_remote_timeline(
     let (initial_timeline_status, awaits_download) = if have_downloadable {
         new_sync_tasks.push_back((
             sync_id,
-            SyncTask::download(LayersDownload {
-                layers_to_skip: local_files.keys().cloned().collect::<HashSet<_>>(),
-            }),
+            SyncTask::download(LayersDownload::from_skipped_layers(
+                local_files.keys().cloned().collect::<HashSet<_>>(),
+            )),
         ));
         info!("NeedsSync");
         (LocalTimelineInitStatus::NeedsSync, true)
@@ -1539,9 +1551,10 @@ mod tests {
         assert!(sync_id_2 != sync_id_3);
         assert!(sync_id_3 != TEST_SYNC_ID);
 
-        let download_task = SyncTask::download(LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk")]),
-        });
+        let download_task =
+            SyncTask::download(LayersDownload::from_skipped_layers(HashSet::from([
+                PathBuf::from("sk"),
+            ])));
         let upload_task = SyncTask::upload(LayersUpload {
             layers_to_upload: HashMap::from([(PathBuf::from("up"), LayerFileMetadata::new(123))]),
             uploaded_layers: HashMap::from([(PathBuf::from("upl"), LayerFileMetadata::new(123))]),
@@ -1588,9 +1601,7 @@ mod tests {
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         assert_eq!(sync_queue.len(), 0);
 
-        let download = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk")]),
-        };
+        let download = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk")]));
         let upload = LayersUpload {
             layers_to_upload: HashMap::from([(PathBuf::from("up"), LayerFileMetadata::new(123))]),
             uploaded_layers: HashMap::from([(PathBuf::from("upl"), LayerFileMetadata::new(123))]),
@@ -1641,18 +1652,10 @@ mod tests {
     #[tokio::test]
     async fn same_task_id_same_tasks_batch() {
         let sync_queue = SyncQueue::new(NonZeroUsize::new(1).unwrap());
-        let download_1 = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk1")]),
-        };
-        let download_2 = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk2")]),
-        };
-        let download_3 = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk3")]),
-        };
-        let download_4 = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk4")]),
-        };
+        let download_1 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk1")]));
+        let download_2 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk2")]));
+        let download_3 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk3")]));
+        let download_4 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk4")]));
 
         let sync_id_2 = TenantTimelineId {
             tenant_id: TenantId::from_array(hex!("22223344556677881122334455667788")),
@@ -1676,15 +1679,15 @@ mod tests {
             Some(SyncTaskBatch {
                 download: Some(SyncData {
                     retries: 0,
-                    data: LayersDownload {
-                        layers_to_skip: {
+                    data: LayersDownload::from_skipped_layers(
+                        {
                             let mut set = HashSet::new();
                             set.extend(download_1.layers_to_skip.into_iter());
                             set.extend(download_2.layers_to_skip.into_iter());
                             set.extend(download_4.layers_to_skip.into_iter());
                             set
                         },
-                    }
+                    )
                 }),
                 upload: None,
                 delete: None,
@@ -1759,9 +1762,9 @@ mod tests {
                 &new_sync_tasks,
                 &[(
                     sync_id,
-                    SyncTask::download(LayersDownload {
-                        layers_to_skip: local_files.keys().cloned().collect()
-                    })
+                    SyncTask::download(LayersDownload::from_skipped_layers(
+                        local_files.keys().cloned().collect()
+                    ))
                 )]
             );
         }

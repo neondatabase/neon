@@ -495,9 +495,9 @@ mod tests {
             sync_id,
             SyncData::new(
                 current_retries,
-                LayersDownload {
-                    layers_to_skip: HashSet::from([local_timeline_path.join("layer_to_skip")]),
-                },
+                LayersDownload::from_skipped_layers(HashSet::from([
+                    local_timeline_path.join("layer_to_skip")
+                ])),
             ),
         )
         .await
@@ -560,12 +560,7 @@ mod tests {
             &sync_queue,
             None,
             sync_id,
-            SyncData::new(
-                0,
-                LayersDownload {
-                    layers_to_skip: HashSet::new(),
-                },
-            ),
+            SyncData::new(0, LayersDownload::from_skipped_layers(HashSet::new())),
         )
         .await;
         assert!(
@@ -584,12 +579,7 @@ mod tests {
             &sync_queue,
             Some(&not_expecting_download_remote_timeline),
             sync_id,
-            SyncData::new(
-                0,
-                LayersDownload {
-                    layers_to_skip: HashSet::new(),
-                },
-            ),
+            SyncData::new(0, LayersDownload::from_skipped_layers(HashSet::new())),
         )
         .await;
         assert!(
