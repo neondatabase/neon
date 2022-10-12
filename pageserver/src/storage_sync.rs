@@ -169,9 +169,14 @@ use self::{
     upload::{upload_index_part, upload_timeline_layers, UploadedTimeline},
 };
 use crate::{
-    config::PageServerConf, exponential_backoff, storage_sync::index::RemoteIndex, task_mgr,
-    task_mgr::TaskKind, task_mgr::BACKGROUND_RUNTIME, tenant::metadata::TimelineMetadata,
-    tenant_mgr::attach_local_tenants,
+    config::PageServerConf,
+    exponential_backoff,
+    storage_sync::index::RemoteIndex,
+    task_mgr,
+    task_mgr::TaskKind,
+    task_mgr::BACKGROUND_RUNTIME,
+    tenant::metadata::TimelineMetadata,
+    tenant_mgr::{attach_local_tenants, TenantAttachData},
 };
 use crate::{
     metrics::{IMAGE_SYNC_TIME, REMAINING_SYNC_ITEMS, REMOTE_INDEX_UPLOAD},
@@ -572,7 +577,10 @@ pub fn schedule_layer_download(tenant_id: TenantId, timeline_id: TimelineId) {
 /// See module docs for loop step description.
 pub fn spawn_storage_sync_task(
     conf: &'static PageServerConf,
-    local_timeline_files: TenantTimelineValues<(TimelineMetadata, HashSet<PathBuf>)>,
+    local_timeline_files: HashMap<
+        TenantId,
+        HashMap<TimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
+    >,
     storage: GenericRemoteStorage,
     max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
@@ -595,7 +603,7 @@ pub fn spawn_storage_sync_task(
     let mut keys_for_index_part_downloads = HashSet::new();
     let mut timelines_to_sync = HashMap::new();
 
-    for (tenant_id, timeline_data) in local_timeline_files.0 {
+    for (tenant_id, timeline_data) in local_timeline_files {
         if timeline_data.is_empty() {
             info!("got empty tenant {}", tenant_id);
             let _ = empty_tenants.0.entry(tenant_id).or_default();
@@ -698,7 +706,7 @@ async fn storage_sync_loop(
                         "Sync loop step completed, {} new tenant state update(s)",
                         updated_tenants.len()
                     );
-                    let mut timelines_to_attach = TenantTimelineValues::new();
+                    let mut timelines_to_attach = HashMap::new();
                     let index_accessor = index.read().await;
                     for tenant_id in updated_tenants {
                         let tenant_entry = match index_accessor.tenant_entry(&tenant_id) {
@@ -724,12 +732,16 @@ async fn storage_sync_loop(
                             // and register them all at once in a tenant for download
                             // to be submitted in a single operation to tenant
                             // so it can apply them at once to internal timeline map.
-                            timelines_to_attach.0.insert(
+                            timelines_to_attach.insert(
                                 tenant_id,
-                                tenant_entry
-                                    .iter()
-                                    .map(|(&id, entry)| (id, entry.metadata.clone()))
-                                    .collect(),
+                                TenantAttachData::Ready(
+                                    tenant_entry
+                                        .iter()
+                                        .map(|(&id, entry)| {
+                                            (id, (entry.metadata.clone(), HashSet::new()))
+                                        })
+                                        .collect(),
+                                ),
                             );
                         }
                     }
