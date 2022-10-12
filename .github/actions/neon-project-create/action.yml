@@ -41,8 +41,8 @@ runs:
             ;;
         esac
 
-        echo "::set-output name=api_host::${API_HOST}"
-        echo "::set-output name=region_id::${REGION_ID}"
+        echo "api_host=${API_HOST}" >> $GITHUB_OUTPUT
+        echo "region_id=${REGION_ID}" >> $GITHUB_OUTPUT
       env:
         ENVIRONMENT: ${{ inputs.environment }}
         REGION_ID: ${{ inputs.region_id }}
@@ -72,10 +72,10 @@ runs:
 
         dsn=$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .dsn')/main
         echo "::add-mask::${dsn}"
-        echo "::set-output name=dsn::${dsn}"
+        echo "dsn=${dsn}" >> $GITHUB_OUTPUT
 
         project_id=$(echo $project | jq --raw-output '.id')
-        echo "::set-output name=project_id::${project_id}"
+        echo "project_id=${project_id}" >> $GITHUB_OUTPUT
       env:
         API_KEY: ${{ inputs.api_key }}
         API_HOST: ${{ steps.parse-input.outputs.api_host }}

@@ -35,12 +35,12 @@ jobs:
           echo ref:$GITHUB_REF_NAME
           echo rev:$(git rev-list --count HEAD)
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "::set-output name=tag::$(git rev-list --count HEAD)"
+            echo "tag=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
+            echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            echo "::set-output name=tag::$GITHUB_RUN_ID"
+            echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
           fi
         shell: bash
         id: build-tag
@@ -78,12 +78,12 @@ jobs:
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
-        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v14)
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
         shell: bash -euxo pipefail {0}
 
       - name: Set pg 15 revision for caching
         id: pg_v15_rev
-        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v15)
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
         shell: bash -euxo pipefail {0}
 
       # Set some environment variables used by all the steps.
@@ -671,10 +671,10 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA"}'
             NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA"}'
-            echo "::set-output name=include::[$STAGING, $NEON_STRESS]"
+            echo "include=[$STAGING, $NEON_STRESS]" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA"}'
-            echo "::set-output name=include::[$PRODUCTION]"
+            echo "include=[$PRODUCTION]" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1

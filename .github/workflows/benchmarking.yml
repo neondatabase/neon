@@ -204,7 +204,7 @@ jobs:
             ;;
         esac
 
-        echo "::set-output name=connstr::${CONNSTR}"
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
       env:
