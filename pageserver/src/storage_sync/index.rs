@@ -251,8 +251,8 @@ impl RemoteTimeline {
     }
 
     /// Lists all layer files in the given remote timeline. Omits the metadata file.
-    pub fn stored_files(&self) -> impl Iterator<Item = &PathBuf> {
-        self.timeline_layers.keys()
+    pub fn stored_files(&self) -> impl Iterator<Item = (&PathBuf, &LayerFileMetadata)> {
+        self.timeline_layers.iter()
     }
 
     pub fn from_index_part(timeline_path: &Path, index_part: IndexPart) -> anyhow::Result<Self> {

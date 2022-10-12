@@ -72,7 +72,9 @@ pub(super) async fn upload_timeline_layers<'a>(
         .map(|timeline| {
             timeline
                 .stored_files()
-                .cloned()
+                // FIXME: this could be just the remote_timeline.iter().flat_map(|x|
+                // x.stored_files()) maybe?
+                .map(|(k, _v)| k.to_owned())
                 .collect::<std::collections::HashSet<_>>()
         })
         .unwrap_or_default();

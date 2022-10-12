@@ -1383,11 +1383,14 @@ fn compare_local_and_remote_timeline(
 ) -> (LocalTimelineInitStatus, bool) {
     let _entered = info_span!("compare_local_and_remote_timeline", sync_id = %sync_id).entered();
 
-    let remote_files = remote_entry.stored_files().collect::<HashSet<_>>();
+    let remote_files = remote_entry
+        .stored_files()
+        .map(|(k, _v)| k.to_owned())
+        .collect::<HashSet<_>>();
 
     let have_downloadable = remote_files
         .iter()
-        .any(|&remote_file| !local_files.contains_key(remote_file));
+        .any(|remote_file| !local_files.contains_key(remote_file));
 
     let (initial_timeline_status, awaits_download) = if have_downloadable {
         new_sync_tasks.push_back((
