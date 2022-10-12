@@ -22,13 +22,13 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark):
         cur.execute(f"insert into t values (generate_series(1,{n_records}))")
 
     cur.execute("vacuum t")
-    time.sleep(10) # wait until pageserver catch-up
+    time.sleep(10)  # wait until pageserver catch-up
 
     with zenbenchmark.record_duration("update-no-prefetch"):
         cur.execute("update t set x=x+1")
 
     cur.execute("vacuum t")
-    time.sleep(10) # wait until pageserver catch-up
+    time.sleep(10)  # wait until pageserver catch-up
 
     with zenbenchmark.record_duration("delete-no-prefetch"):
         cur.execute("delete from t")
@@ -43,14 +43,13 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark):
         cur.execute(f"insert into t2 values (generate_series(1,{n_records}))")
 
     cur.execute("vacuum t2")
-    time.sleep(10) # wait until pageserver catch-up
+    time.sleep(10)  # wait until pageserver catch-up
 
     with zenbenchmark.record_duration("update-with-prefetch"):
         cur.execute("update t2 set x=x+1")
 
     cur.execute("vacuum t2")
-    time.sleep(10) # wait until pageserver catch-up
+    time.sleep(10)  # wait until pageserver catch-up
 
     with zenbenchmark.record_duration("delete-with-prefetch"):
         cur.execute("delete from t2")
-
