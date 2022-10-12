@@ -10,7 +10,7 @@
 <!-- List everything that should be done **before** release, any issues / setting changes / etc -->
 
 ### Checklist after release
-- [ ] Based on the merged commits write release notes and open a PR into `website` repo ([example](https://github.com/neondatabase/website/pull/120/files))
+- [ ] Based on the merged commits write release notes and open a PR into `website` repo ([example](https://github.com/neondatabase/website/pull/219/files))
 - [ ] Check [#dev-production-stream](https://neondb.slack.com/archives/C03F5SM1N02) Slack channel
 - [ ] Check [stuck projects page](https://console.neon.tech/admin/projects?sort=last_active&order=desc&stuck=true)
 - [ ] Check [recent operation failures](https://console.neon.tech/admin/operations?action=create_timeline%2Cstart_compute%2Cstop_compute%2Csuspend_compute%2Capply_config%2Cdelete_timeline%2Cdelete_tenant%2Ccreate_branch%2Ccheck_availability&sort=updated_at&order=desc&had_retries=some)
