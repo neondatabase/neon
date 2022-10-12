@@ -996,15 +996,32 @@ async fn download_timeline_data(
         }
         DownloadedTimeline::Successful(mut download_data) => {
             match update_local_metadata(conf, sync_id, current_remote_timeline).await {
-                Ok(()) => match index.write().await.set_awaits_download(&sync_id, false) {
-                    Ok(()) => {
-                        register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
-                        return DownloadStatus::Downloaded;
-                    }
-                    Err(e) => {
-                        error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
-                    }
-                },
+                Ok(()) => {
+                    let mut g = index.write().await;
+
+                    match g.set_awaits_download(&sync_id, false) {
+                        Ok(()) => {
+                            let timeline = g
+                                .timeline_entry_mut(&sync_id)
+                                .expect("set_awaits_download verified existence");
+
+                            let gathered = &download_data.data.gathered_metadata;
+
+                            if let Err(e) = timeline.merge_metadata_from_downloaded(gathered) {
+                                error!("Merging metadata after successful download for {sync_id:?}: {e:?}");
+                                // FIXME: this is "handling" an assertion error which describes that
+                                // not all layers were downloaded, unsure what to do.
+                                return DownloadStatus::Nothing;
+                            }
+
+                            register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
+                            return DownloadStatus::Downloaded;
+                        }
+                        Err(e) => {
+                            error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
+                        }
+                    };
+                }
                 Err(e) => {
                     error!("Failed to update local timeline metadata: {e:?}");
                     download_data.retries += 1;

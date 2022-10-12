@@ -255,6 +255,29 @@ impl RemoteTimeline {
         self.timeline_layers.iter()
     }
 
+    /// Combines metadata gathered or verified during downloading needed layer files to metadata on
+    /// the [`RemoteIndex`], so it can be uploaded later.
+    pub fn merge_metadata_from_downloaded(
+        &mut self,
+        downloaded: &HashMap<PathBuf, LayerFileMetadata>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            downloaded
+                .keys()
+                .all(|key| self.timeline_layers.contains_key(key)),
+            "should not have downloaded layer files which timeline knows nothing about",
+        );
+
+        downloaded.iter().for_each(|(path, metadata)| {
+            self.timeline_layers
+                .get_mut(path)
+                .expect("already verified existence of all keys")
+                .merge(metadata);
+        });
+
+        Ok(())
+    }
+
     pub fn from_index_part(timeline_path: &Path, index_part: IndexPart) -> anyhow::Result<Self> {
         let metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)?;
         let default_metadata = &IndexLayerMetadata::default();
@@ -310,6 +333,14 @@ impl LayerFileMetadata {
 
     pub fn file_size(&self) -> Option<u64> {
         self.file_size
+    }
+
+    /// Metadata has holes due to version upgrades. This method is called to upgrade self with the
+    /// other value.
+    ///
+    /// This is called on the possibly outdated version.
+    pub fn merge(&mut self, other: &Self) {
+        self.file_size = other.file_size.or(self.file_size);
     }
 }
 
