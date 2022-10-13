@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use utils::{
     auth::{encode_from_key_file, Claims, Scope},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
+    id::{NodeId, RegionId, TenantId, TenantTimelineId, TimelineId},
     postgres_backend::AuthType,
 };
 
@@ -78,8 +78,8 @@ pub struct LocalEnv {
     // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
-    #[serde_as(as = "HashMap<_, Vec<(DisplayFromStr, DisplayFromStr)>>")]
-    branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+    #[serde_as(as = "HashMap<_, Vec<(DisplayFromStr, DisplayFromStr, DisplayFromStr)>>")]
+    branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId, RegionId)>>,
 
     #[serde(default)]
     pub xactserver: XactServerConf,
@@ -234,6 +234,7 @@ impl LocalEnv {
         branch_name: String,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        region_id: RegionId,
     ) -> anyhow::Result<()> {
         let existing_values = self
             .branch_name_mappings
@@ -242,16 +243,16 @@ impl LocalEnv {
 
         let existing_ids = existing_values
             .iter()
-            .find(|(existing_tenant_id, _)| existing_tenant_id == &tenant_id);
+            .find(|(existing_tenant_id, _, _)| existing_tenant_id == &tenant_id);
 
-        if let Some((_, old_timeline_id)) = existing_ids {
+        if let Some((_, old_timeline_id, _)) = existing_ids {
             if old_timeline_id == &timeline_id {
                 Ok(())
             } else {
                 bail!("branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}");
             }
         } else {
-            existing_values.push((tenant_id, timeline_id));
+            existing_values.push((tenant_id, timeline_id, region_id));
             Ok(())
         }
     }
@@ -260,20 +261,19 @@ impl LocalEnv {
         &self,
         branch_name: &str,
         tenant_id: TenantId,
-    ) -> Option<TimelineId> {
+    ) -> Option<(TimelineId, RegionId)> {
         self.branch_name_mappings
             .get(branch_name)?
             .iter()
-            .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
-            .map(|&(_, timeline_id)| timeline_id)
-            .map(TimelineId::from)
+            .find(|(mapped_tenant_id, _, _)| mapped_tenant_id == &tenant_id)
+            .map(|&(_, timeline_id, region_id)| (timeline_id, region_id))
     }
 
     pub fn timeline_name_mappings(&self) -> HashMap<TenantTimelineId, String> {
         self.branch_name_mappings
             .iter()
             .flat_map(|(name, tenant_timelines)| {
-                tenant_timelines.iter().map(|&(tenant_id, timeline_id)| {
+                tenant_timelines.iter().map(|&(tenant_id, timeline_id, _)| {
                     (TenantTimelineId::new(tenant_id, timeline_id), name.clone())
                 })
             })

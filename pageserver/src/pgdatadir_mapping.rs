@@ -1609,7 +1609,7 @@ pub fn create_test_timeline(
     ctx: &RequestContext,
 ) -> anyhow::Result<std::sync::Arc<Timeline>> {
     let tline = tenant
-        .create_empty_timeline(timeline_id, Lsn(8), pg_version, ctx)?
+        .create_empty_timeline(timeline_id, Lsn(8), pg_version, utils::id::RegionId(0), ctx)?
         .initialize(ctx)?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;

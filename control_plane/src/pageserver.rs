@@ -18,7 +18,7 @@ use thiserror::Error;
 use utils::auth::{Claims, Scope};
 use utils::{
     http::error::HttpErrorBody,
-    id::{TenantId, TimelineId},
+    id::{RegionId, TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
 };
@@ -446,6 +446,7 @@ impl PageServerNode {
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
+        region_id: Option<RegionId>,
     ) -> anyhow::Result<TimelineInfo> {
         self.http_request(
             Method::POST,
@@ -456,6 +457,7 @@ impl PageServerNode {
             ancestor_start_lsn,
             ancestor_timeline_id,
             pg_version,
+            region_id,
         })
         .send()?
         .error_from_body()?

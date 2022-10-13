@@ -28,7 +28,7 @@ use std::str::FromStr;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use utils::{
     auth::{Claims, Scope},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
+    id::{NodeId, RegionId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
     project_git_version,
@@ -363,6 +363,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 None,
                 None,
                 Some(pg_version),
+                Some(RegionId::default()),
             )?;
             let new_timeline_id = timeline_info.timeline_id;
             let last_record_lsn = timeline_info.last_record_lsn;
@@ -371,6 +372,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 DEFAULT_BRANCH_NAME.to_string(),
                 new_tenant_id,
                 new_timeline_id,
+                RegionId::default(),
             )?;
 
             println!(
@@ -420,18 +422,33 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let new_branch_name = create_match
                 .get_one::<String>("branch-name")
                 .ok_or_else(|| anyhow!("No branch name provided"))?;
+            let region_id = create_match
+                .get_one::<String>("region-id")
+                .and_then(|reg| RegionId::from_str(reg).ok())
+                .unwrap_or_default();
 
             let pg_version = create_match
                 .get_one::<u32>("pg-version")
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let timeline_info =
-                pageserver.timeline_create(tenant_id, None, None, None, Some(pg_version))?;
+            let timeline_info = pageserver.timeline_create(
+                tenant_id,
+                None,
+                None,
+                None,
+                Some(pg_version),
+                Some(region_id),
+            )?;
             let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
-            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
+            env.register_branch_mapping(
+                new_branch_name.to_string(),
+                tenant_id,
+                new_timeline_id,
+                region_id,
+            )?;
 
             println!(
                 "Created timeline '{}' at Lsn {last_record_lsn} for tenant: {tenant_id}",
@@ -474,8 +491,21 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             println!("Importing timeline into pageserver ...");
             pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)?;
             println!("Creating node for imported timeline ...");
-            env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
-            cplane.new_node(tenant_id, name, timeline_id, None, None, pg_version, None)?;
+            env.register_branch_mapping(
+                name.to_string(),
+                tenant_id,
+                timeline_id,
+                RegionId::default(),
+            )?;
+            cplane.new_node(
+                tenant_id,
+                name,
+                timeline_id,
+                None,
+                None,
+                pg_version,
+                RegionId::default(),
+            )?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -483,11 +513,15 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let new_branch_name = branch_match
                 .get_one::<String>("branch-name")
                 .ok_or_else(|| anyhow!("No branch name provided"))?;
+            let region_id = branch_match
+                .get_one::<String>("region-id")
+                .and_then(|reg| RegionId::from_str(reg).ok())
+                .unwrap_or_default();
             let ancestor_branch_name = branch_match
                 .get_one::<String>("ancestor-branch-name")
                 .map(|s| s.as_str())
                 .unwrap_or(DEFAULT_BRANCH_NAME);
-            let ancestor_timeline_id = env
+            let (ancestor_timeline_id, _) = env
                 .get_branch_timeline_id(ancestor_branch_name, tenant_id)
                 .ok_or_else(|| {
                     anyhow!("Found no timeline id for branch name '{ancestor_branch_name}'")
@@ -504,12 +538,18 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 start_lsn,
                 Some(ancestor_timeline_id),
                 None,
+                Some(region_id),
             )?;
             let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
 
-            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
+            env.register_branch_mapping(
+                new_branch_name.to_string(),
+                tenant_id,
+                new_timeline_id,
+                region_id,
+            )?;
 
             println!(
                 "Created timeline '{}' at Lsn {last_record_lsn} for tenant: {tenant_id}. Ancestor timeline: '{ancestor_branch_name}'",
@@ -609,7 +649,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .map(|lsn_str| Lsn::from_str(lsn_str))
                 .transpose()
                 .context("Failed to parse Lsn from the request")?;
-            let timeline_id = env
+            let (timeline_id, region_id) = env
                 .get_branch_timeline_id(branch_name, tenant_id)
                 .ok_or_else(|| anyhow!("Found no timeline id for branch name '{branch_name}'"))?;
 
@@ -620,19 +660,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let region_timeline_ids = sub_args
-                .get_many::<String>("regions")
-                .map(|regions| {
-                    regions
-                        .map(|r| {
-                            env.get_branch_timeline_id(r, tenant_id).ok_or_else(|| {
-                                anyhow!("Found no timeline id for branch name '{}'", r)
-                            })
-                        })
-                        .collect()
-                })
-                .transpose()?;
-
             cplane.new_node(
                 tenant_id,
                 &node_name,
@@ -640,7 +667,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 lsn,
                 port,
                 pg_version,
-                region_timeline_ids,
+                region_id,
             )?;
         }
         "start" => {
@@ -667,11 +694,11 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     .get_one::<String>("branch-name")
                     .map(|s| s.as_str())
                     .unwrap_or(DEFAULT_BRANCH_NAME);
-                let timeline_id = env
+                let (timeline_id, region_id) = env
                     .get_branch_timeline_id(branch_name, tenant_id)
                     .ok_or_else(|| {
-                        anyhow!("Found no timeline id for branch name '{branch_name}'")
-                    })?;
+                    anyhow!("Found no timeline id for branch name '{}'", branch_name)
+                })?;
                 let lsn = sub_args
                     .get_one::<String>("lsn")
                     .map(|lsn_str| Lsn::from_str(lsn_str))
@@ -681,19 +708,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     .get_one::<u32>("pg-version")
                     .copied()
                     .context("Failed to `pg-version` from the argument string")?;
-                let region_timeline_ids = sub_args
-                    .get_many::<String>("regions")
-                    .map(|regions| {
-                        regions
-                            .map(|r| {
-                                env.get_branch_timeline_id(r, tenant_id).ok_or_else(|| {
-                                    anyhow!("Found no timeline id for branch name '{}'", r)
-                                })
-                            })
-                            .collect()
-                    })
-                    .transpose()?;
-
                 // when used with custom port this results in non obvious behaviour
                 // port is remembered from first start command, i e
                 // start --port X
@@ -708,7 +722,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     lsn,
                     port,
                     pg_version,
-                    region_timeline_ids,
+                    region_id,
                 )?;
                 node.start(&auth_token)?;
             }
@@ -929,6 +943,12 @@ fn cli() -> Command {
         .help("Timeline id. Represented as a hexadecimal string 32 symbols length")
         .required(false);
 
+    let region_id_arg = Arg::new("region-id")
+        .long("region-id")
+        .help("Id of the region the timeline belongs to")
+        .required(false)
+        .default_value("0");
+
     let pg_version_arg = Arg::new("pg-version")
         .long("pg-version")
         .help("Postgres version to use for the initial tenant")
@@ -962,12 +982,6 @@ fn cli() -> Command {
         .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
         .required(false);
 
-    let regions_arg = Arg::new("regions")
-        .long("regions")
-        .help("List of branch names for each regions. The position of the branch in this list corresponds to its region id (1-based).")
-        .value_delimiter(',')
-        .required(false);
-
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -994,6 +1008,7 @@ fn cli() -> Command {
                 .about("Create a new timeline, using another timeline as a base, copying its data")
                 .arg(tenant_id_arg.clone())
                 .arg(branch_name_arg.clone())
+                .arg(region_id_arg.clone())
                 .arg(Arg::new("ancestor-branch-name").long("ancestor-branch-name")
                     .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(false))
                 .arg(Arg::new("ancestor-start-lsn").long("ancestor-start-lsn")
@@ -1002,6 +1017,7 @@ fn cli() -> Command {
                 .about("Create a new blank timeline")
                 .arg(tenant_id_arg.clone())
                 .arg(branch_name_arg.clone())
+                .arg(region_id_arg.clone())
                 .arg(pg_version_arg.clone())
             )
             .subcommand(Command::new("import")
@@ -1086,7 +1102,6 @@ fn cli() -> Command {
                     .arg(tenant_id_arg.clone())
                     .arg(lsn_arg.clone())
                     .arg(port_arg.clone())
-                    .arg(regions_arg.clone())
                     .arg(
                         Arg::new("config-only")
                             .help("Don't do basebackup, create compute node with only config files")
@@ -1103,7 +1118,6 @@ fn cli() -> Command {
                     .arg(lsn_arg)
                     .arg(port_arg)
                     .arg(pg_version_arg)
-                    .arg(regions_arg.clone())
                 )
                 .subcommand(
                     Command::new("stop")

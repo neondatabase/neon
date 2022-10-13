@@ -72,7 +72,7 @@ pub use pageserver_api::models::TenantState;
 use toml_edit;
 use utils::{
     crashsafe,
-    id::{TenantId, TimelineId},
+    id::{RegionId, TenantId, TimelineId},
     lsn::{Lsn, RecordLsn},
 };
 
@@ -1123,6 +1123,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
+        region_id: RegionId,
         _ctx: &RequestContext,
     ) -> anyhow::Result<UninitializedTimeline> {
         anyhow::ensure!(
@@ -1142,6 +1143,7 @@ impl Tenant {
             initdb_lsn,
             initdb_lsn,
             pg_version,
+            region_id,
         );
         self.prepare_timeline(
             new_timeline_id,
@@ -1165,6 +1167,7 @@ impl Tenant {
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
+        region_id: RegionId,
         ctx: &RequestContext,
     ) -> anyhow::Result<Option<Arc<Timeline>>> {
         anyhow::ensure!(
@@ -1206,11 +1209,17 @@ impl Tenant {
                     ancestor_timeline.wait_lsn(*lsn, ctx).await?;
                 }
 
-                self.branch_timeline(&ancestor_timeline, new_timeline_id, ancestor_start_lsn, ctx)
-                    .await?
+                self.branch_timeline(
+                    &ancestor_timeline,
+                    new_timeline_id,
+                    ancestor_start_lsn,
+                    region_id,
+                    ctx,
+                )
+                .await?
             }
             None => {
-                self.bootstrap_timeline(new_timeline_id, pg_version, ctx)
+                self.bootstrap_timeline(new_timeline_id, pg_version, region_id, ctx)
                     .await?
             }
         };
@@ -2078,6 +2087,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
+        region_id: RegionId,
         _ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let src_id = src_timeline.timeline_id;
@@ -2161,6 +2171,7 @@ impl Tenant {
             *src_timeline.latest_gc_cutoff_lsn.read(), // FIXME: should we hold onto this guard longer?
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
+            region_id,
         );
         let mut timelines = self.timelines.lock().unwrap();
         let new_timeline = self
@@ -2184,6 +2195,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
+        region_id: RegionId,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_uninit_mark = {
@@ -2233,6 +2245,7 @@ impl Tenant {
             pgdata_lsn,
             pgdata_lsn,
             pg_version,
+            region_id,
         );
         let raw_timeline =
             self.prepare_timeline(timeline_id, new_metadata, timeline_uninit_mark, true, None)?;
@@ -2917,7 +2930,13 @@ mod tests {
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_basic")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let tline = tline.initialize(&ctx)?;
 
         let writer = tline.writer();
@@ -2951,11 +2970,22 @@ mod tests {
         let (tenant, ctx) = TenantHarness::create("no_duplicate_timelines")?
             .load()
             .await;
-        let timeline =
-            tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let timeline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let _ = timeline.initialize(&ctx)?;
 
-        match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx) {
+        match tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        ) {
             Ok(_) => panic!("duplicate timeline creation should fail"),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -2984,7 +3014,13 @@ mod tests {
         use std::str::from_utf8;
 
         let (tenant, ctx) = TenantHarness::create("test_branch")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let tline = tline.initialize(&ctx)?;
         let writer = tline.writer();
 
@@ -3007,7 +3043,7 @@ mod tests {
 
         // Branch the history, modify relation differently on the new timeline
         tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x30)), &ctx)
+            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x30)), RegionId(0), &ctx)
             .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
@@ -3082,7 +3118,13 @@ mod tests {
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
                 .load()
                 .await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let tline = tline.initialize(&ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
@@ -3096,7 +3138,7 @@ mod tests {
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), &ctx)
+            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), RegionId(0), &ctx)
             .await
         {
             Ok(_) => panic!("branching should have failed"),
@@ -3121,11 +3163,17 @@ mod tests {
                 .await;
 
         let tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0x50), DEFAULT_PG_VERSION, &ctx)?
+            .create_empty_timeline(
+                TIMELINE_ID,
+                Lsn(0x50),
+                DEFAULT_PG_VERSION,
+                RegionId(0),
+                &ctx,
+            )?
             .initialize(&ctx)?;
         // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
         match tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), &ctx)
+            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), RegionId(0), &ctx)
             .await
         {
             Ok(_) => panic!("branching should have failed"),
@@ -3171,12 +3219,18 @@ mod tests {
             TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
                 .load()
                 .await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let tline = tline.initialize(&ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
+            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), RegionId(0), &ctx)
             .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
@@ -3195,12 +3249,18 @@ mod tests {
             TenantHarness::create("test_parent_keeps_data_forever_after_branching")?
                 .load()
                 .await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let tline = tline.initialize(&ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
+            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), RegionId(0), &ctx)
             .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
@@ -3228,8 +3288,13 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
         {
             let (tenant, ctx) = harness.load().await;
-            let tline =
-                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION, &ctx)?;
+            let tline = tenant.create_empty_timeline(
+                TIMELINE_ID,
+                Lsn(0x8000),
+                DEFAULT_PG_VERSION,
+                RegionId(0),
+                &ctx,
+            )?;
             let tline = tline.initialize(&ctx)?;
             make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
         }
@@ -3249,14 +3314,19 @@ mod tests {
         // create two timelines
         {
             let (tenant, ctx) = harness.load().await;
-            let tline =
-                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            let tline = tenant.create_empty_timeline(
+                TIMELINE_ID,
+                Lsn(0),
+                DEFAULT_PG_VERSION,
+                RegionId(0),
+                &ctx,
+            )?;
             let tline = tline.initialize(&ctx)?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
             tenant
-                .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
+                .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), RegionId(0), &ctx)
                 .await?;
 
             let newtline = tenant
@@ -3288,7 +3358,7 @@ mod tests {
         let (tenant, ctx) = harness.load().await;
 
         tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, RegionId(0), &ctx)?
             .initialize(&ctx)?;
         drop(tenant);
 
@@ -3326,7 +3396,13 @@ mod tests {
     #[tokio::test]
     async fn test_images() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_images")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let tline = tline.initialize(&ctx)?;
 
         let writer = tline.writer();
@@ -3392,7 +3468,13 @@ mod tests {
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let tline = tline.initialize(&ctx)?;
 
         let mut lsn = Lsn(0x10);
@@ -3435,7 +3517,13 @@ mod tests {
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_random_updates")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let tline = tline.initialize(&ctx)?;
 
         const NUM_KEYS: usize = 1000;
@@ -3510,7 +3598,7 @@ mod tests {
             .load()
             .await;
         let mut tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, RegionId(0), &ctx)?
             .initialize(&ctx)?;
 
         const NUM_KEYS: usize = 1000;
@@ -3544,7 +3632,7 @@ mod tests {
         for _ in 0..50 {
             let new_tline_id = TimelineId::generate();
             tenant
-                .branch_timeline(&tline, new_tline_id, Some(lsn), &ctx)
+                .branch_timeline(&tline, new_tline_id, Some(lsn), RegionId(0), &ctx)
                 .await?;
             tline = tenant
                 .get_timeline(new_tline_id, true)
@@ -3594,7 +3682,7 @@ mod tests {
             .load()
             .await;
         let mut tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, RegionId(0), &ctx)?
             .initialize(&ctx)?;
 
         const NUM_KEYS: usize = 100;
@@ -3610,7 +3698,7 @@ mod tests {
         for idx in 0..NUM_TLINES {
             let new_tline_id = TimelineId::generate();
             tenant
-                .branch_timeline(&tline, new_tline_id, Some(lsn), &ctx)
+                .branch_timeline(&tline, new_tline_id, Some(lsn), RegionId(0), &ctx)
                 .await?;
             tline = tenant
                 .get_timeline(new_tline_id, true)

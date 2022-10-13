@@ -55,8 +55,8 @@ pub mod relfile_utils;
 pub use v14::bindings::{uint32, uint64, Oid};
 pub use v14::bindings::{BlockNumber, OffsetNumber};
 pub use v14::bindings::{MultiXactId, TransactionId};
+pub use v14::bindings::{SnapshotCSN, XidCSN};
 pub use v14::bindings::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
-pub use v14::bindings::{XidCSN, SnapshotCSN};
 
 // Likewise for these, although the assumption that these don't change is a little more iffy.
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};

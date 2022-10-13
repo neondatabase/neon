@@ -1016,7 +1016,7 @@ mod tests {
     };
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
     use std::{collections::HashSet, path::Path};
-    use utils::lsn::Lsn;
+    use utils::{id::RegionId, lsn::Lsn};
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
         format!("contents for {name}").into()
@@ -1033,6 +1033,7 @@ mod tests {
             // Any version will do
             // but it should be consistent with the one in the tests
             crate::DEFAULT_PG_VERSION,
+            utils::id::RegionId(0),
         );
 
         // go through serialize + deserialize to fix the header, including checksum
@@ -1077,8 +1078,13 @@ mod tests {
 
         let harness = TenantHarness::create("upload_scheduling")?;
         let (tenant, ctx) = runtime.block_on(harness.load());
-        let _timeline =
-            tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let _timeline = tenant.create_empty_timeline(
+            TIMELINE_ID,
+            Lsn(0),
+            DEFAULT_PG_VERSION,
+            RegionId(0),
+            &ctx,
+        )?;
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
         let remote_fs_dir = harness.conf.workdir.join("remote_fs");

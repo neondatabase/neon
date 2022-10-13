@@ -51,15 +51,15 @@ pub const CLOG_TRUNCATE: u8 = 0x10;
 
 //
 // Constants from csn_log.c, csn_log.h, and csn_snapshpot.h
-// 
+//
 
 pub const CSN_SIZE: u32 = std::mem::size_of::<XidCSN>() as u32;
 pub const CSN_LOG_XACTS_PER_PAGE: u32 = BLCKSZ as u32 / CSN_SIZE;
 
 pub const InProgressXidCSN: u64 = 0x0;
 pub const AbortedXidCSN: u64 = 0x1;
-pub const FrozenXidCSN: u64 = 0x2; 
-pub const InDoubtXidCSN: u64 = 0x3; 
+pub const FrozenXidCSN: u64 = 0x2;
+pub const InDoubtXidCSN: u64 = 0x3;
 pub const FirstNormalXidCSN: u64 = 0x4;
 
 pub const XLOG_CSN_ASSIGNMENT: u8 = 0x00;
