@@ -335,9 +335,6 @@ impl LayerMap {
     /// Insert an on-disk layer
     ///
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        let err = anyhow::anyhow!("Adding layer {}", layer.filename().display());
-        error!("insert_historic: {err:?}");
-
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
         }

@@ -1553,16 +1553,6 @@ impl Timeline {
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
-        // TODO: broken version contains 2 deltas with the same file name, need to check where do they come from
-        error!(
-            "Delta layers: [{}]",
-            level0_deltas
-                .iter()
-                .map(|l| l.filename().display().to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-
         // Only compact if enough layers have accumulated.
         if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
             return Ok(());
@@ -1586,7 +1576,6 @@ impl Timeline {
 
         let first_level0_delta = level0_deltas_iter.next().unwrap();
         let mut prev_lsn_end = first_level0_delta.get_lsn_range().end;
-        dbg!(first_level0_delta.filename().display());
         let mut deltas_to_compact = vec![Arc::clone(first_level0_delta)];
         for l in level0_deltas_iter {
             let lsn_range = l.get_lsn_range();
@@ -1594,7 +1583,6 @@ impl Timeline {
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            dbg!(l.filename().display());
             deltas_to_compact.push(Arc::clone(l));
             prev_lsn_end = lsn_range.end;
         }

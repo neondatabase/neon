@@ -148,12 +148,13 @@ impl UninitializedTimeline<'_> {
     /// Ensures timeline data is valid, loads it into pageserver's memory and removes all temporary marks on success.
     pub fn initialize(self) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(&mut timelines)
+        self.initialize_with_lock(&mut timelines, true)
     }
 
     fn initialize_with_lock(
         mut self,
         timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        load_layer_map: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
@@ -173,11 +174,15 @@ impl UninitializedTimeline<'_> {
                 "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
             ),
             Entry::Vacant(v) => {
-                new_timeline
-                    .load_layer_map(new_disk_consistent_lsn)
-                    .with_context(|| {
-                        format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
-                    })?;
+                if load_layer_map {
+                    new_timeline
+                        .load_layer_map(new_disk_consistent_lsn)
+                        .with_context(|| {
+                            format!(
+                                "Failed to load layermap for timeline {tenant_id}/{timeline_id}"
+                            )
+                        })?;
+                }
                 new_timeline.launch_wal_receiver().with_context(|| {
                     format!("Failed to launch walreceiver for timeline {tenant_id}/{timeline_id}")
                 })?;
@@ -189,41 +194,6 @@ impl UninitializedTimeline<'_> {
         }
 
         Ok(new_timeline)
-    }
-
-    /// Prepares timeline data by loading it from the pginit datadir.
-    pub fn import_timeline_from_postgres_datadir(
-        &self,
-        pgdata_path: &Path,
-        pgdata_lsn: Lsn,
-    ) -> anyhow::Result<()> {
-        let raw_timeline = self.raw_timeline()?;
-        import_datadir::import_timeline_from_postgres_datadir(
-            raw_timeline,
-            pgdata_path,
-            pgdata_lsn,
-        )
-        .with_context(|| {
-            format!(
-                "Failed to import pgdatadir for timeline {}/{}",
-                self.owning_tenant.tenant_id, self.timeline_id
-            )
-        })?;
-
-        fail::fail_point!("before-checkpoint-new-timeline", |_| {
-            anyhow::bail!("failpoint before-checkpoint-new-timeline");
-        });
-
-        raw_timeline
-            .checkpoint(CheckpointConfig::Forced)
-            .with_context(|| {
-                format!(
-                    "Failed to checkpoint after pgdatadir import for timeline {}/{}",
-                    self.owning_tenant.tenant_id, self.timeline_id
-                )
-            })?;
-
-        Ok(())
     }
 
     /// Prepares timeline data by loading it from the basebackup archive.
@@ -397,25 +367,28 @@ impl Tenant {
 
     /// Lists timelines the tenant contains.
     /// Up to tenant's implementation to omit certain timelines that ar not considered ready for use.
-    pub fn list_timelines(&self) -> Vec<(TimelineId, Arc<Timeline>)> {
+    pub fn list_timelines(&self) -> Vec<Arc<Timeline>> {
         self.timelines
             .lock()
             .unwrap()
-            .iter()
-            .map(|(timeline_id, timeline_entry)| (*timeline_id, Arc::clone(timeline_entry)))
+            .values()
+            .map(Arc::clone)
             .collect()
     }
 
-    /// Create a new, empty timeline. The caller is responsible for loading data into it
-    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
+    /// This is used to create the initial 'main' timeline during bootstrapping,
+    /// or when importing a new base backup. The caller is expected to load an
+    /// initial image of the datadir to the new timeline after this.
     pub fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<UninitializedTimeline> {
-        let mut timelines = self.timelines.lock().unwrap();
+        let timelines = self.timelines.lock().unwrap();
         let timeline_tombstone = self.create_timeline_tombstone(new_timeline_id, &timelines)?;
+        drop(timelines);
+
         let new_metadata = TimelineMetadata::new(
             Lsn(0),
             None,
@@ -430,7 +403,7 @@ impl Tenant {
             new_metadata,
             timeline_tombstone,
             true,
-            &mut timelines,
+            None,
         )
     }
 
@@ -585,7 +558,7 @@ impl Tenant {
 
         ensure!(
             !children_exist,
-            "Cannot detach timeline which has child timelines"
+            "Cannot delete timeline which has child timelines"
         );
         let timeline_entry = match timelines.entry(timeline_id) {
             Entry::Occupied(e) => e,
@@ -653,7 +626,7 @@ impl Tenant {
                     )),
                 };
                 let initialized_timeline =
-                    timeline.initialize_with_lock(&mut timelines_accessor)?;
+                    timeline.initialize_with_lock(&mut timelines_accessor, true)?;
                 timelines_accessor.insert(timeline_id, initialized_timeline);
             }
         }
@@ -1148,6 +1121,7 @@ impl Tenant {
         Ok(totals)
     }
 
+    /// Branch an existing timeline
     fn branch_timeline(
         &self,
         src: TimelineId,
@@ -1226,14 +1200,14 @@ impl Tenant {
             dst_prev,
             Some(src),
             start_lsn,
-            *src_timeline.latest_gc_cutoff_lsn.read(),
+            *src_timeline.latest_gc_cutoff_lsn.read(), // FIXME: should we hold onto this guard longer?
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
         let mut timelines = self.timelines.lock().unwrap();
         let new_timeline = self
-            .prepare_timeline(dst, metadata, timeline_tombstone, false, &mut timelines)?
-            .initialize_with_lock(&mut timelines)?;
+            .prepare_timeline(dst, metadata, timeline_tombstone, false, Some(src_timeline))?
+            .initialize_with_lock(&mut timelines, true)?;
         drop(timelines);
         info!("branched timeline {dst} from {src} at {start_lsn}");
 
@@ -1294,16 +1268,29 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
+        let raw_timeline =
+            self.prepare_timeline(timeline_id, new_metadata, timeline_tombstone, true, None)?;
+
+        let tenant_id = raw_timeline.owning_tenant.tenant_id;
+        let unfinished_timeline = raw_timeline.raw_timeline()?;
+        import_datadir::import_timeline_from_postgres_datadir(
+            unfinished_timeline,
+            pgdata_path,
+            pgdata_lsn,
+        )
+        .with_context(|| {
+            format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
+        })?;
+
+        fail::fail_point!("before-checkpoint-new-timeline", |_| {
+            anyhow::bail!("failpoint before-checkpoint-new-timeline");
+        });
+        unfinished_timeline
+            .checkpoint(CheckpointConfig::Forced)
+            .with_context(|| format!("Failed to checkpoint after pgdatadir import for timeline {tenant_id}/{timeline_id}"))?;
+
         let mut timelines = self.timelines.lock().unwrap();
-        let raw_timeline = self.prepare_timeline(
-            timeline_id,
-            new_metadata,
-            timeline_tombstone,
-            true,
-            &mut timelines,
-        )?;
-        raw_timeline.import_timeline_from_postgres_datadir(pgdata_path, pgdata_lsn)?;
-        let timeline = raw_timeline.initialize_with_lock(&mut timelines)?;
+        let timeline = raw_timeline.initialize_with_lock(&mut timelines, false)?;
         drop(timelines);
 
         info!(
@@ -1323,7 +1310,7 @@ impl Tenant {
         new_metadata: TimelineMetadata,
         tombstone: TimelineTombstone,
         init_layers: bool,
-        timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        ancestor: Option<Arc<Timeline>>,
     ) -> anyhow::Result<UninitializedTimeline> {
         crashsafe_dir::create_dir_all(&tombstone.timeline_path).with_context(|| {
             format!(
@@ -1345,10 +1332,6 @@ impl Tenant {
             )
         })?;
 
-        let ancestor = new_metadata
-            .ancestor_timeline()
-            .and_then(|ancestor_timeline_id| timelines.get(&ancestor_timeline_id))
-            .cloned();
         let new_timeline = self
             .create_timeline_data(new_timeline_id, new_metadata, ancestor)
             .with_context(|| {
