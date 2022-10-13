@@ -247,8 +247,8 @@ pub(super) async fn download_timeline_layers<'a>(
 
             match layer_destination_path.metadata() {
                 Ok(m) if m.is_file() => {
-                    // the file is from earlier round when we failed after renaming it as
-                    // destination
+                    // the file exists from earlier round when we failed after renaming it as
+                    // layer_destination_path
                     let verified = if let Some(expected) = metadata.file_size() {
                         m.len() == expected
                     } else {
@@ -262,9 +262,15 @@ pub(super) async fn download_timeline_layers<'a>(
                             layer_destination_path.display()
                         );
                         return Ok((layer_destination_path, LayerFileMetadata::new(m.len())))
+                    } else {
+                        // no need to remove it, it will be overwritten by fs::rename
+                        // after successful download
                     }
                 }
-                Ok(_) | Err(_) => {
+                Ok(m) => {
+                    return Err(anyhow::anyhow!("Downloaded layer destination exists but is not a file: {m:?}, target needs to be removed/archived manually: {layer_destination_path:?}"));
+                }
+                Err(_) => {
                     // behave as the file didn't exist
                 }
             }
@@ -300,8 +306,6 @@ pub(super) async fn download_timeline_layers<'a>(
                     )
                 })?;
 
-            // TODO: with a wrapper AsyncWrite to calculate the sha2-256 for each chunk we'd
-            // get the checksum as well.
             let bytes_amount = io::copy(&mut layer_download.download_stream, &mut destination_file)
                 .await
                 .with_context(|| {
@@ -372,7 +376,8 @@ pub(super) async fn download_timeline_layers<'a>(
             Ok((downloaded_path, metadata)) => {
                 undo.insert(downloaded_path.clone());
                 download.layers_to_skip.insert(downloaded_path.clone());
-                // TODO: what if the key existed already
+                // what if the key existed already? ignore, because then we would had
+                // downloaded a partial file, and had to retry
                 download.gathered_metadata.insert(downloaded_path, metadata);
             }
             Err(e) => {
