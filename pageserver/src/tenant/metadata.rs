@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info_span;
 use utils::{
     bin_ser::BeSer,
-    id::{TenantId, TimelineId},
+    id::{RegionId, TenantId, TimelineId},
     lsn::Lsn,
 };
 
@@ -69,6 +69,7 @@ struct TimelineMetadataBodyV2 {
     latest_gc_cutoff_lsn: Lsn,
     initdb_lsn: Lsn,
     pg_version: u32,
+    region_id: RegionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +90,7 @@ struct TimelineMetadataBodyV1 {
     ancestor_lsn: Lsn,
     latest_gc_cutoff_lsn: Lsn,
     initdb_lsn: Lsn,
+    region_id: RegionId,
 }
 
 impl TimelineMetadata {
@@ -100,6 +102,7 @@ impl TimelineMetadata {
         latest_gc_cutoff_lsn: Lsn,
         initdb_lsn: Lsn,
         pg_version: u32,
+        region_id: RegionId,
     ) -> Self {
         Self {
             hdr: TimelineMetadataHeader {
@@ -115,6 +118,7 @@ impl TimelineMetadata {
                 latest_gc_cutoff_lsn,
                 initdb_lsn,
                 pg_version,
+                region_id,
             },
         }
     }
@@ -142,6 +146,7 @@ impl TimelineMetadata {
             latest_gc_cutoff_lsn: body.latest_gc_cutoff_lsn,
             initdb_lsn: body.initdb_lsn,
             pg_version: 14, // All timelines created before this version had pg_version 14
+            region_id: body.region_id,
         };
 
         hdr.format_version = METADATA_FORMAT_VERSION;
@@ -226,6 +231,10 @@ impl TimelineMetadata {
     pub fn pg_version(&self) -> u32 {
         self.body.pg_version
     }
+
+    pub fn region_id(&self) -> RegionId {
+        self.body.region_id
+    }
 }
 
 /// Save timeline metadata to file
@@ -280,6 +289,7 @@ mod tests {
             Lsn(0),
             // Any version will do here, so use the default
             crate::DEFAULT_PG_VERSION,
+            RegionId(0),
         );
 
         let metadata_bytes = original_metadata
@@ -318,6 +328,7 @@ mod tests {
                 ancestor_lsn: Lsn(0),
                 latest_gc_cutoff_lsn: Lsn(0),
                 initdb_lsn: Lsn(0),
+                region_id: RegionId(0),
             },
         };
 
@@ -354,6 +365,7 @@ mod tests {
             Lsn(0),
             Lsn(0),
             14, // All timelines created before this version had pg_version 14
+            RegionId(0),
         );
 
         assert_eq!(

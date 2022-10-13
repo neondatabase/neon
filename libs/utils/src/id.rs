@@ -256,3 +256,27 @@ impl fmt::Display for NodeId {
         write!(f, "{}", self.0)
     }
 }
+
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RegionId(pub u8);
+
+impl Default for RegionId {
+    fn default() -> Self {
+        RegionId(0)
+    }
+}
+
+impl FromStr for RegionId {
+    type Err = <u8 as ::core::str::FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(u8::from_str(s)?))
+    }
+}
+
+impl fmt::Display for RegionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}

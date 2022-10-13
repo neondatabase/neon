@@ -23,8 +23,8 @@
 
 use anyhow::Context;
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
-use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_segment;
 use postgres_ffi::v14::nonrelfile_utils::csnlogpage_precedes;
+use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_segment;
 use postgres_ffi::{page_is_new, page_set_lsn};
 
 use anyhow::Result;
@@ -42,8 +42,8 @@ use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::v14::xlog_utils::*;
 use postgres_ffi::v14::CheckPoint;
 use postgres_ffi::TransactionId;
-use postgres_ffi::BLCKSZ;
 use postgres_ffi::XidCSN;
+use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
 
 pub struct WalIngest<'a> {
@@ -294,9 +294,8 @@ impl<'a> WalIngest<'a> {
                 self.ingest_csnlog_truncate_record(modification, pageno)?;
             }
             // We don't handle assignment and set records to avoid the
-            // ambiguity of the commit order. Instead we rely on the 
+            // ambiguity of the commit order. Instead we rely on the
             // XLOG records to determine the LSN and thus commit order.
-
         }
 
         // Iterate through all the blocks that the record modifies, and
@@ -731,7 +730,7 @@ impl<'a> WalIngest<'a> {
         let mut csn_segno = csn_pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut csn_rpageno = csn_pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut csn_page_xids: Vec<TransactionId> = vec![parsed.xid];
-        let lsn : XidCSN = modification.lsn.0;
+        let lsn: XidCSN = modification.lsn.0;
 
         for subxact in &parsed.subxacts {
             let csn_subxact_pageno = subxact / pg_constants::CSN_LOG_XACTS_PER_PAGE;
@@ -744,9 +743,14 @@ impl<'a> WalIngest<'a> {
                     csn_segno,
                     csn_rpageno,
                     if is_commit {
-                        NeonWalRecord::CsnLogSetCommitted { xids: csn_page_xids, lsn: lsn }
+                        NeonWalRecord::CsnLogSetCommitted {
+                            xids: csn_page_xids,
+                            lsn: lsn,
+                        }
                     } else {
-                        NeonWalRecord::CsnLogSetAborted { xids: csn_page_xids }
+                        NeonWalRecord::CsnLogSetAborted {
+                            xids: csn_page_xids,
+                        }
                     },
                 )?;
                 csn_page_xids = Vec::new();
@@ -761,12 +765,16 @@ impl<'a> WalIngest<'a> {
             csn_segno,
             csn_rpageno,
             if is_commit {
-                NeonWalRecord::CsnLogSetCommitted { xids: csn_page_xids, lsn: lsn }
+                NeonWalRecord::CsnLogSetCommitted {
+                    xids: csn_page_xids,
+                    lsn: lsn,
+                }
             } else {
-                NeonWalRecord::CsnLogSetAborted { xids: csn_page_xids }
+                NeonWalRecord::CsnLogSetAborted {
+                    xids: csn_page_xids,
+                }
             },
         )?;
-
 
         for xnode in &parsed.xnodes {
             for forknum in MAIN_FORKNUM..=VISIBILITYMAP_FORKNUM {
@@ -979,7 +987,7 @@ impl<'a> WalIngest<'a> {
     ) -> Result<()> {
         info!("XLOG_CSN_TRUNCATE truncate pageno {} ", pageno);
 
-        let latest_page_number = 
+        let latest_page_number =
             self.checkpoint.nextXid.value as u32 / pg_constants::CSN_LOG_XACTS_PER_PAGE;
 
         // First, make an important safety check:

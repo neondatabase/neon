@@ -195,7 +195,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             request_data.new_timeline_id.map(TimelineId::from),
             request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
-            request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION)
+            request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+            request_data.region_id.unwrap_or_default(),
         ).await {
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.

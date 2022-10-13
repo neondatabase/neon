@@ -42,7 +42,7 @@ use pageserver_api::reltag::RelTag;
 
 use postgres_ffi::to_pg_timestamp;
 use utils::{
-    id::{TenantId, TimelineId},
+    id::{RegionId, TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
     simple_rcu::{Rcu, RcuReadGuard},
@@ -172,6 +172,9 @@ pub struct Timeline {
     pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
 
     state: watch::Sender<TimelineState>,
+
+    /// Region id
+    pub region_id: RegionId,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -788,6 +791,7 @@ impl Timeline {
             last_received_wal: Mutex::new(None),
             rel_size_cache: RwLock::new(HashMap::new()),
             state,
+            region_id: metadata.region_id(),
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
         result
@@ -1491,6 +1495,7 @@ impl Timeline {
             *self.latest_gc_cutoff_lsn.read(),
             self.initdb_lsn,
             self.pg_version,
+            self.region_id,
         );
 
         fail_point!("checkpoint-before-saving-metadata", |x| bail!(

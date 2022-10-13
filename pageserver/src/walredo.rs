@@ -53,7 +53,7 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
-    transaction_id_set_status, transaction_id_set_csn,
+    transaction_id_set_csn, transaction_id_set_status,
 };
 use postgres_ffi::BLCKSZ;
 

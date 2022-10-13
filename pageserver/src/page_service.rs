@@ -392,7 +392,12 @@ impl PageServerHandler {
         // Create empty timeline
         info!("creating new timeline");
         let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
+        let timeline = tenant.create_empty_timeline(
+            timeline_id,
+            base_lsn,
+            pg_version,
+            utils::id::RegionId::default(),
+        )?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
