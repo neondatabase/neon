@@ -223,6 +223,7 @@ pub(super) async fn download_timeline_layers<'a>(
 
     let layers_to_download = remote_timeline
         .stored_files()
+        .iter()
         .filter_map(|(layer_path, metadata)| {
             if !download.layers_to_skip.contains(layer_path) {
                 Some((layer_path.to_owned(), metadata.to_owned()))

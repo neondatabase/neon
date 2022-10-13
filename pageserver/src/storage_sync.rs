@@ -1400,20 +1400,36 @@ fn compare_local_and_remote_timeline(
 ) -> (LocalTimelineInitStatus, bool) {
     let _entered = info_span!("compare_local_and_remote_timeline", sync_id = %sync_id).entered();
 
-    let remote_files = remote_entry
+    let needed_to_download_files = remote_entry
         .stored_files()
-        .map(|(k, _v)| k.to_owned())
+        .iter()
+        .filter_map(|(layer_file, remote_metadata)| {
+            if let Some(local_metadata) = local_files.get(layer_file) {
+                match (remote_metadata.file_size(), local_metadata.file_size()) {
+                    (Some(x), Some(y)) if x == y => { None },
+                    _ => {
+                        // having to deal with other than (Some(x), Some(y)) where x != y here is a
+                        // bummer, but see #2582 and #2610 for attempts and discussion.
+                        warn!("Redownloading locally existing {layer_file:?} due to size mismatch, size on index: {:?}, on disk: {:?}", remote_metadata.file_size(), local_metadata.file_size());
+                        Some(layer_file)
+                    },
+                }
+            } else {
+                // doesn't exist locally
+                Some(layer_file)
+            }
+        })
         .collect::<HashSet<_>>();
 
-    let have_downloadable = remote_files
-        .iter()
-        .any(|remote_file| !local_files.contains_key(remote_file));
-
-    let (initial_timeline_status, awaits_download) = if have_downloadable {
+    let (initial_timeline_status, awaits_download) = if !needed_to_download_files.is_empty() {
         new_sync_tasks.push_back((
             sync_id,
             SyncTask::download(LayersDownload::from_skipped_layers(
-                local_files.keys().cloned().collect::<HashSet<_>>(),
+                local_files
+                    .keys()
+                    .filter(|path| !needed_to_download_files.contains(path))
+                    .cloned()
+                    .collect(),
             )),
         ));
         info!("NeedsSync");
@@ -1431,7 +1447,7 @@ fn compare_local_and_remote_timeline(
     let layers_to_upload = local_files
         .iter()
         .filter_map(|(local_file, metadata)| {
-            if !remote_files.contains(local_file) {
+            if !remote_entry.stored_files().contains_key(local_file) {
                 Some((local_file.to_owned(), metadata.to_owned()))
             } else {
                 None

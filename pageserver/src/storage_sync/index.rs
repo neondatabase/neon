@@ -251,8 +251,8 @@ impl RemoteTimeline {
     }
 
     /// Lists all layer files in the given remote timeline. Omits the metadata file.
-    pub fn stored_files(&self) -> impl Iterator<Item = (&PathBuf, &LayerFileMetadata)> {
-        self.timeline_layers.iter()
+    pub fn stored_files(&self) -> &HashMap<PathBuf, LayerFileMetadata> {
+        &self.timeline_layers
     }
 
     /// Combines metadata gathered or verified during downloading needed layer files to metadata on
