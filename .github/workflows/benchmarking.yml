@@ -138,22 +138,31 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   pgbench-compare:
-    env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
-      TEST_PG_BENCH_SCALES_MATRIX: "10gb"
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
-      TEST_OUTPUT: /tmp/test_output
-      BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
-
     strategy:
       fail-fast: false
       matrix:
         # neon-captest-new: Run pgbench in a freshly created project
         # neon-captest-reuse: Same, but reusing existing project
         # neon-captest-prefetch: Same, with prefetching enabled (new project)
-        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch, rds-aurora ]
+        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch ]
+        db_size: [ 10gb ]
+        include:
+          - platform: neon-captest-new
+            db_size: 50gb
+          - platform: neon-captest-prefetch
+            db_size: 50gb
+          - platform: rds-aurora
+            db_size: 50gb
+
+    env:
+      TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
+      TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      DEFAULT_PG_VERSION: 14
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      PLATFORM: ${{ matrix.platform }}
 
     runs-on: dev
     container:
@@ -178,7 +187,7 @@ jobs:
         echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
     - name: Create Neon Project
-      if: matrix.platform != 'neon-captest-reuse'
+      if: contains(fromJson('["neon-captest-new", "neon-captest-prefetch"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -207,8 +216,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-      env:
-        PLATFORM: ${{ matrix.platform }}
 
     - name: Set database options
       if: matrix.platform == 'neon-captest-prefetch'
@@ -227,7 +234,6 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
       env:
-        PLATFORM: ${{ matrix.platform }}
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -241,7 +247,6 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
       env:
-        PLATFORM: ${{ matrix.platform }}
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -255,7 +260,6 @@ jobs:
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
       env:
-        PLATFORM: ${{ matrix.platform }}
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -268,7 +272,7 @@ jobs:
         build_type: ${{ env.BUILD_TYPE }}
 
     - name: Delete Neon Project
-      if: ${{ matrix.platform != 'neon-captest-reuse' && always() }}
+      if: ${{ steps.create-neon-project.outputs.project_id && always() }}
       uses: ./.github/actions/neon-project-delete
       with:
         environment: dev
