@@ -25,7 +25,7 @@ use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
-pub const TIMELINE_TOMBSTONE_SUFFIX: &str = "___tlitmbstn";
+pub const TIMELINE_TOMBSTONE_SUFFIX: &str = "___tombstone";
 const TENANT_CONFIG_NAME: &str = "config";
 
 pub mod defaults {

@@ -122,10 +122,11 @@ pub struct Tenant {
 }
 
 /// A timeline with some of its files on disk, being initialized.
-/// The struct API ensures the atomicity of the timeline init: it's either properly created and inserted into pageserver's memory, or
-/// its local files removed (at the worst case of a crash, left with a mark to get removed on the next restart).
+/// This struct ensures the atomicity of the timeline init: it's either properly created and inserted into pageserver's memory, or
+/// its local files are removed. In the worst case of a crash, a tombstone file is left behind, which causes the directory
+/// to be removed on next restart.
 ///
-/// A caller is responsible for proper timeline data filling before the final init.
+/// The caller is responsible for proper timeline data filling before the final init.
 #[must_use]
 pub struct UninitializedTimeline<'t> {
     owning_tenant: &'t Tenant,
@@ -145,7 +146,7 @@ struct TimelineTombstone {
 }
 
 impl UninitializedTimeline<'_> {
-    /// Ensures timeline data is valid, loads it into pageserver's memory and removes all temporary marks on success.
+    /// Ensures timeline data is valid, loads it into pageserver's memory and removes tombstone file on success.
     pub fn initialize(self) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         self.initialize_with_lock(&mut timelines, true)
@@ -246,7 +247,7 @@ impl Drop for UninitializedTimeline<'_> {
         if let Some((_, tombstone)) = self.raw_timeline.take() {
             let tenant_id = self.owning_tenant.tenant_id;
             let timeline_id = self.timeline_id;
-            let _entered = info_span!("drop_unitialized_timeline", tenant = %tenant_id, timeline = %timeline_id).entered();
+            let _entered = info_span!("drop_uninitialized_timeline", tenant = %tenant_id, timeline = %timeline_id).entered();
             error!("Timeline got dropped without initializing, cleaning its files");
 
             let raw_timeline_dir = &tombstone.timeline_path;
@@ -258,7 +259,7 @@ impl Drop for UninitializedTimeline<'_> {
                 }
                 Err(e) => {
                     should_remove_tombstone = false;
-                    error!("Failed to clean up unitialized timeline directory: {e:?}");
+                    error!("Failed to clean up uninitialized timeline directory: {e:?}");
                 }
             }
 
@@ -1233,8 +1234,8 @@ impl Tenant {
             TEMP_FILE_SUFFIX,
         );
 
-        // a tombstone was placed in the parent method, nothing else can access this timeline files
-        // current initdb was not run before, so remove whatever was left
+        // a tombstone was placed before, nothing else can access this timeline files
+        // current initdb was not run yet, so remove whatever was left from the previous runs
         if initdb_path.exists() {
             fs::remove_dir_all(&initdb_path).with_context(|| {
                 format!(

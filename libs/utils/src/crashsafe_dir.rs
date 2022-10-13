@@ -88,7 +88,7 @@ pub fn fsync_file_and_parent(file_path: &Path) -> io::Result<()> {
     let parent = file_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::Other,
-            format!("File {} has no parent", file_path.display()),
+            format!("File {file_path:?} has no parent"),
         )
     })?;
 
@@ -102,7 +102,7 @@ pub fn fsync(path: &Path) -> io::Result<()> {
         .map_err(|e| {
             io::Error::new(
                 io::ErrorKind::Other,
-                format!("Failed to open the file: {e}"),
+                format!("Failed to open the file {path:?}: {e}"),
             )
         })
         .and_then(|file| {
@@ -110,13 +110,13 @@ pub fn fsync(path: &Path) -> io::Result<()> {
                 .map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::Other,
-                        format!("Failed to sync file metadata: {e}"),
+                        format!("Failed to sync file {path:?} data and metadata: {e}"),
                     )
                 })
                 .map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::Other,
-                        format!("Failed to fsync file {}: {}", path.display(), e),
+                        format!("Failed to fsync file {path:?}: {e}"),
                     )
                 })
         })
