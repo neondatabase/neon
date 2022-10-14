@@ -12,7 +12,7 @@ use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
 
-use crate::config::{PageServerConf, METADATA_FILE_NAME, TIMELINE_TOMBSTONE_SUFFIX};
+use crate::config::{PageServerConf, METADATA_FILE_NAME, TIMELINE_UNINIT_MARK_SUFFIX};
 use crate::http::models::TenantInfo;
 use crate::storage_sync::index::{LayerFileMetadata, RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData, TimelineLocalFiles};
@@ -642,9 +642,11 @@ fn is_temporary(path: &Path) -> bool {
     }
 }
 
-fn is_tombstone(path: &Path) -> bool {
+fn is_uninit_mark(path: &Path) -> bool {
     match path.file_name() {
-        Some(name) => name.to_string_lossy().ends_with(TIMELINE_TOMBSTONE_SUFFIX),
+        Some(name) => name
+            .to_string_lossy()
+            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
         None => false,
     }
 }
@@ -691,28 +693,28 @@ fn collect_timelines_for_tenant(
                             e
                         );
                     }
-                } else if is_tombstone(&timeline_dir) {
-                    let timeline_tombstone_file = &timeline_dir;
+                } else if is_uninit_mark(&timeline_dir) {
+                    let timeline_uninit_mark_file = &timeline_dir;
                     info!(
-                        "Found a tombstone file {}, removing the timeline and its tombstone",
-                        timeline_tombstone_file.display()
+                        "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                        timeline_uninit_mark_file.display()
                     );
-                    let timeline_id = timeline_tombstone_file
+                    let timeline_id = timeline_uninit_mark_file
                         .file_stem()
                         .and_then(OsStr::to_str)
                         .unwrap_or_default()
                         .parse::<TimelineId>()
                         .with_context(|| {
                             format!(
-                                "Could not parse timeline id out of the timeline tombstone name {}",
-                                timeline_tombstone_file.display()
+                                "Could not parse timeline id out of the timeline uninit mark name {}",
+                                timeline_uninit_mark_file.display()
                             )
                         })?;
                     let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
                     if let Err(e) =
-                        remove_timeline_and_tombstone(&timeline_dir, timeline_tombstone_file)
+                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
                     {
-                        error!("Failed to clean up tombstoned timeline: {e:?}");
+                        error!("Failed to clean up uninit marked timeline: {e:?}");
                     }
                 } else {
                     let timeline_id = timeline_dir
@@ -726,14 +728,15 @@ fn collect_timelines_for_tenant(
                                 timeline_dir.display()
                             )
                         })?;
-                    let timeline_tombstone_file =
-                        config.timeline_tombstone_file_path(tenant_id, timeline_id);
-                    if timeline_tombstone_file.exists() {
-                        info!("Found a tombstone file for timeline {tenant_id}/{timeline_id}, removing the timeline and its tombstone");
-                        if let Err(e) =
-                            remove_timeline_and_tombstone(&timeline_dir, &timeline_tombstone_file)
-                        {
-                            error!("Failed to clean up tombstoned timeline: {e:?}");
+                    let timeline_uninit_mark_file =
+                        config.timeline_uninit_mark_file_path(tenant_id, timeline_id);
+                    if timeline_uninit_mark_file.exists() {
+                        info!("Found an uninit mark file for timeline {tenant_id}/{timeline_id}, removing the timeline and its uninit mark");
+                        if let Err(e) = remove_timeline_and_uninit_mark(
+                            &timeline_dir,
+                            &timeline_uninit_mark_file,
+                        ) {
+                            error!("Failed to clean up uninit marked timeline: {e:?}");
                         }
                     } else {
                         match collect_timeline_files(&timeline_dir) {
@@ -780,15 +783,12 @@ fn collect_timelines_for_tenant(
     Ok((tenant_id, TenantAttachData::Ready(tenant_timelines)))
 }
 
-fn remove_timeline_and_tombstone(
-    timeline_dir: &Path,
-    timeline_tombstone: &Path,
-) -> anyhow::Result<()> {
+fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
     fs::remove_dir_all(&timeline_dir)
         .or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                // we can leave the tombstone without a timeline dir,
-                // just remove the tombstone then
+                // we can leave the uninit mark without a timeline dir,
+                // just remove the mark then
                 Ok(())
             } else {
                 Err(e)
@@ -796,14 +796,14 @@ fn remove_timeline_and_tombstone(
         })
         .with_context(|| {
             format!(
-                "Failed to remove tombstoned timeline directory {}",
+                "Failed to remove unit marked timeline directory {}",
                 timeline_dir.display()
             )
         })?;
-    fs::remove_file(&timeline_tombstone).with_context(|| {
+    fs::remove_file(&uninit_mark).with_context(|| {
         format!(
-            "Failed to remove timeline tombstone file {}",
-            timeline_tombstone.display()
+            "Failed to remove timeline uninit mark file {}",
+            uninit_mark.display()
         )
     })?;
 

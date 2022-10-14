@@ -142,7 +142,7 @@ def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
 
-def test_timeline_create_break_after_tombstone(neon_simple_env: NeonEnv):
+def test_timeline_create_break_after_uninit_mark(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
 
@@ -152,10 +152,10 @@ def test_timeline_create_break_after_tombstone(neon_simple_env: NeonEnv):
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 
-    # Introduce failpoint when creating a new timeline tombstone, before any other files were created
-    pageserver_http.configure_failpoints(("after-timeline-tombstone-creation", "return"))
-    with pytest.raises(Exception, match="after-timeline-tombstone-creation"):
-        _ = env.neon_cli.create_timeline("test_timeline_create_break_after_tombstone", tenant_id)
+    # Introduce failpoint when creating a new timeline uninit mark, before any other files were created
+    pageserver_http.configure_failpoints(("after-timeline-uninit-mark-creation", "return"))
+    with pytest.raises(Exception, match="after-timeline-uninit-mark-creation"):
+        _ = env.neon_cli.create_timeline("test_timeline_create_break_after_uninit_mark", tenant_id)
 
     # Restart the page server
     env.neon_cli.pageserver_stop(immediate=True)

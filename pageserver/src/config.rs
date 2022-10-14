@@ -25,7 +25,7 @@ use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
-pub const TIMELINE_TOMBSTONE_SUFFIX: &str = "___tombstone";
+pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 const TENANT_CONFIG_NAME: &str = "config";
 
 pub mod defaults {
@@ -366,14 +366,14 @@ impl PageServerConf {
         self.timelines_path(tenant_id).join(timeline_id.to_string())
     }
 
-    pub fn timeline_tombstone_file_path(
+    pub fn timeline_uninit_mark_file_path(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> PathBuf {
         path_with_suffix_extension(
             self.timeline_path(&timeline_id, &tenant_id),
-            TIMELINE_TOMBSTONE_SUFFIX,
+            TIMELINE_UNINIT_MARK_SUFFIX,
         )
     }
 
