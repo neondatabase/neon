@@ -169,7 +169,7 @@ pub struct TimelineInfo {
     pub tenant_id: TenantId,
     #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
-    pub local: Option<LocalTimelineInfo>,
+    pub local: LocalTimelineInfo,
     pub remote: Option<RemoteTimelineInfo>,
 }
 

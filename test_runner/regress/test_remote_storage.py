@@ -111,10 +111,9 @@ def test_remote_storage_backup_and_restore(
     with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
         client.tenant_attach(tenant_id)
 
-    detail = client.timeline_detail(tenant_id, timeline_id)
-    log.info("Timeline detail with active failpoint: %s", detail)
-    assert detail["local"] is None
-    assert detail["remote"]["awaits_download"]
+    tenant_status = client.tenant_status(tenant_id)
+    log.info("Tenant status with active failpoint: %s", tenant_status)
+    assert tenant_status["has_in_progress_downloads"] is True
 
     # trigger temporary download files removal
     env.pageserver.stop()
