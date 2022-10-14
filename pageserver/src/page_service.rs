@@ -546,7 +546,7 @@ impl PageServerHandler {
 
         // Flush data to disk, then upload to s3
         info!("flushing layers");
-        timeline.checkpoint(CheckpointConfig::Flush)?;
+        timeline.checkpoint(CheckpointConfig::Flush).await?;
 
         timeline.launch_wal_receiver()?;
 
@@ -598,7 +598,7 @@ impl PageServerHandler {
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.checkpoint(CheckpointConfig::Flush)?;
+        timeline.checkpoint(CheckpointConfig::Flush).await?;
 
         info!("done");
         Ok(())

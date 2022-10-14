@@ -14,7 +14,7 @@ use std::fs;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::tenant::{
@@ -117,8 +117,13 @@ pub struct Timeline {
     /// to avoid deadlock.
     write_lock: Mutex<()>,
 
-    /// Used to ensure that there is only task performing flushing at a time
-    layer_flush_lock: Mutex<()>,
+    /// layer_flush_start_tx can be used to wake up the layer-flushing task.
+    /// The value is a counter, incremented every time a new flush cycle is requested.
+    /// The flush cycle counter is sent back on the layer_flush_done channel when
+    /// the flush finishes. You can use that to wait for the flush to finish.
+    layer_flush_start_tx: tokio::sync::watch::Sender<u64>,
+    /// to be notified when layer flushing has finished, subscribe to the layer_flush_done channel
+    layer_flush_done_tx: tokio::sync::watch::Sender<(u64, Result<()>)>,
 
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
@@ -463,15 +468,16 @@ impl Timeline {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
-    pub fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
+    pub async fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
         match cconf {
             CheckpointConfig::Flush => {
                 self.freeze_inmem_layer(false);
-                self.flush_frozen_layers(true)
+                self.flush_frozen_layers_and_wait().await
             }
             CheckpointConfig::Forced => {
                 self.freeze_inmem_layer(false);
-                self.flush_frozen_layers(true)?;
+                self.flush_frozen_layers_and_wait().await?;
                 self.compact()
             }
         }
@@ -540,6 +546,9 @@ impl Timeline {
     ) -> Timeline {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
+        let (layer_flush_start_tx, _) = tokio::sync::watch::channel(0);
+        let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
+
         let mut result = Timeline {
             conf,
             tenant_conf,
@@ -567,8 +576,10 @@ impl Timeline {
 
             upload_layers: AtomicBool::new(upload_layers),
 
+            layer_flush_start_tx,
+            layer_flush_done_tx,
+
             write_lock: Mutex::new(()),
-            layer_flush_lock: Mutex::new(()),
             layer_removal_cs: Mutex::new(()),
 
             gc_info: RwLock::new(GcInfo {
@@ -641,7 +652,7 @@ impl Timeline {
     /// Scan the timeline directory to populate the layer map.
     /// Returns all timeline-related files that were found and loaded.
     ///
-    pub fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+    pub fn load_layer_map(self: &Arc<Self>, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         let mut layers = self.layers.write().unwrap();
         let mut num_layers = 0;
 
@@ -723,6 +734,20 @@ impl Timeline {
             .set(total_physical_size);
 
         timer.stop_and_record();
+
+        // spawn layer flush task
+        let layer_flush_start_rx = self.layer_flush_start_tx.subscribe();
+        let self_clone = Arc::clone(self);
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            task_mgr::TaskKind::LayerFlushTask,
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+            "layer flush task",
+            false,
+            async move { self_clone.flush_loop(layer_flush_start_rx).await; Ok(()) }
+            .instrument(info_span!(parent: None, "layer flush task", tenant = %self.tenant_id, timeline = %self.timeline_id))
+        );
 
         Ok(())
     }
@@ -1111,76 +1136,90 @@ impl Timeline {
                 self.last_freeze_at.store(last_lsn);
                 *(self.last_freeze_ts.write().unwrap()) = Instant::now();
 
-                // Launch a task to flush the frozen layer to disk, unless
-                // a task was already running. (If the task was running
-                // at the time that we froze the layer, it must've seen the
-                // the layer we just froze before it exited; see comments
-                // in flush_frozen_layers())
-                if let Ok(guard) = self.layer_flush_lock.try_lock() {
-                    drop(guard);
-                    let self_clone = Arc::clone(self);
-                    task_mgr::spawn(
-                        task_mgr::BACKGROUND_RUNTIME.handle(),
-                        task_mgr::TaskKind::LayerFlushTask,
-                        Some(self.tenant_id),
-                        Some(self.timeline_id),
-                        "layer flush task",
-                        false,
-                        async move { self_clone.flush_frozen_layers(false) },
-                    );
-                }
+                // Wake up the layer flusher
+                self.flush_frozen_layers();
             }
         }
         Ok(())
     }
 
-    /// Flush all frozen layers to disk.
-    ///
-    /// Only one task at a time can be doing layer-flushing for a
-    /// given timeline. If 'wait' is true, and another task is
-    /// currently doing the flushing, this function will wait for it
-    /// to finish. If 'wait' is false, this function will return
-    /// immediately instead.
-    fn flush_frozen_layers(&self, wait: bool) -> Result<()> {
-        let flush_lock_guard = if wait {
-            self.layer_flush_lock.lock().unwrap()
-        } else {
-            match self.layer_flush_lock.try_lock() {
-                Ok(guard) => guard,
-                Err(TryLockError::WouldBlock) => return Ok(()),
-                Err(TryLockError::Poisoned(err)) => panic!("{:?}", err),
+    /// Layer flusher task's main loop.
+    async fn flush_loop(&self, mut layer_flush_start_rx: tokio::sync::watch::Receiver<u64>) {
+        loop {
+            tokio::select! {
+                _ = task_mgr::shutdown_watcher() => {
+                    info!("shutting down layer flush task");
+                    break;
+                },
+                _ = layer_flush_start_rx.changed() => {}
             }
-        };
 
-        let timer = self.metrics.flush_time_histo.start_timer();
+            trace!("waking up");
+            let timer = self.metrics.flush_time_histo.start_timer();
+            let flush_counter = *layer_flush_start_rx.borrow();
+            let result = loop {
+                let layer_to_flush = {
+                    let layers = self.layers.read().unwrap();
+                    layers.frozen_layers.front().cloned()
+                    // drop 'layers' lock to allow concurrent reads and writes
+                };
+                if let Some(layer_to_flush) = layer_to_flush {
+                    if let Err(err) = self.flush_frozen_layer(layer_to_flush).await {
+                        error!("could not flush frozen layer: {err:?}");
+                        break Err(err);
+                    }
+                    continue;
+                } else {
+                    break Ok(());
+                }
+            };
+            // Notify any listeners that we're done
+            let _ = self
+                .layer_flush_done_tx
+                .send_replace((flush_counter, result));
+
+            timer.stop_and_record();
+        }
+    }
+
+    async fn flush_frozen_layers_and_wait(&self) -> Result<()> {
+        let mut rx = self.layer_flush_done_tx.subscribe();
+
+        // Increment the flush cycle counter and wake up the flush task.
+        // Remember the new value, so that when we listen for the flush
+        // to finish, we know when the flush that we initiated has
+        // finished, instead of some other flush that was started earlier.
+        let mut my_flush_request = 0;
+        self.layer_flush_start_tx.send_modify(|counter| {
+            my_flush_request = *counter + 1;
+            *counter = my_flush_request;
+        });
 
         loop {
-            let layers = self.layers.read().unwrap();
-            if let Some(frozen_layer) = layers.frozen_layers.front() {
-                let frozen_layer = Arc::clone(frozen_layer);
-                drop(layers); // to allow concurrent reads and writes
-                self.flush_frozen_layer(frozen_layer)?;
-            } else {
-                // Drop the 'layer_flush_lock' *before* 'layers'. That
-                // way, if you freeze a layer, and then call
-                // flush_frozen_layers(false), it is guaranteed that
-                // if another thread was busy flushing layers and the
-                // call therefore returns immediately, the other
-                // thread will have seen the newly-frozen layer and
-                // will flush that too (assuming no errors).
-                drop(flush_lock_guard);
-                drop(layers);
-                break;
+            {
+                let (last_result_counter, last_result) = &*rx.borrow();
+                if *last_result_counter >= my_flush_request {
+                    if let Err(_err) = last_result {
+                        // We already logged the original error in
+                        // flush_loop. We cannot propagate it to the caller
+                        // here, because it might not be Cloneable
+                        bail!("could not flush frozen layer");
+                    } else {
+                        return Ok(());
+                    }
+                }
             }
+            rx.changed().await?;
         }
+    }
 
-        timer.stop_and_record();
-
-        Ok(())
+    fn flush_frozen_layers(&self) {
+        self.layer_flush_start_tx.send_modify(|val| *val += 1);
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
+    #[instrument(skip(self, frozen_layer), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.filename().display()))]
+    async fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the

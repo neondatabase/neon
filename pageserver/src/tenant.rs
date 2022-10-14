@@ -247,7 +247,7 @@ impl Tenant {
 
                 self.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
             }
-            None => self.bootstrap_timeline(new_timeline_id, pg_version)?,
+            None => self.bootstrap_timeline(new_timeline_id, pg_version).await?,
         };
 
         // Have added new timeline into the tenant, now its background tasks are needed.
@@ -265,7 +265,7 @@ impl Tenant {
     /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
     /// to make tests more deterministic.
     /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
-    pub fn gc_iteration(
+    pub async fn gc_iteration(
         &self,
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
@@ -276,11 +276,13 @@ impl Tenant {
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
 
-        STORAGE_TIME
-            .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
-            .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
-            })
+        {
+            let _timer = STORAGE_TIME
+                .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
+                .start_timer();
+            self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
+                .await
+        }
     }
 
     /// Perform one compaction iteration.
@@ -311,23 +313,18 @@ impl Tenant {
     ///
     /// Used at graceful shutdown.
     ///
-    pub fn checkpoint(&self) -> Result<()> {
+    pub async fn checkpoint(&self) -> Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // checkpoints. We don't want to block everything else while the
         // checkpoint runs.
-        let timelines = self.timelines.lock().unwrap();
-        let timelines_to_compact = timelines
-            .iter()
-            .map(|(timeline_id, timeline)| (*timeline_id, Arc::clone(timeline)))
-            .collect::<Vec<_>>();
-        drop(timelines);
+        let timelines_to_compact = {
+            let timelines = self.timelines.lock().unwrap();
+            timelines.values().map(Arc::clone).collect::<Vec<_>>()
+        };
 
-        for (timeline_id, timeline) in &timelines_to_compact {
-            let _entered =
-                info_span!("checkpoint", timeline = %timeline_id, tenant = %self.tenant_id)
-                    .entered();
-            timeline.checkpoint(CheckpointConfig::Flush)?;
+        for timeline in &timelines_to_compact {
+            timeline.checkpoint(CheckpointConfig::Flush).await?;
         }
 
         Ok(())
@@ -787,7 +784,7 @@ impl Tenant {
     // - if a relation has a non-incremental persistent layer on a child branch, then we
     //   don't need to keep that in the parent anymore. But currently
     //   we do.
-    fn gc_iteration_internal(
+    async fn gc_iteration_internal(
         &self,
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
@@ -797,80 +794,83 @@ impl Tenant {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        // grab mutex to prevent new timelines from being created here.
-        let gc_cs = self.gc_cs.lock().unwrap();
+        let gc_timelines = {
+            // grab mutex to prevent new timelines from being created here.
+            let gc_cs = self.gc_cs.lock().unwrap();
 
-        let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock().unwrap();
 
-        // Scan all timelines. For each timeline, remember the timeline ID and
-        // the branch point where it was created.
-        let mut all_branchpoints: BTreeSet<(TimelineId, Lsn)> = BTreeSet::new();
-        let timeline_ids = {
-            if let Some(target_timeline_id) = target_timeline_id.as_ref() {
-                if timelines.get(target_timeline_id).is_none() {
-                    bail!("gc target timeline does not exist")
-                }
-            };
+            // Scan all timelines. For each timeline, remember the timeline ID and
+            // the branch point where it was created.
+            let mut all_branchpoints: BTreeSet<(TimelineId, Lsn)> = BTreeSet::new();
+            let timeline_ids = {
+                if let Some(target_timeline_id) = target_timeline_id.as_ref() {
+                    if timelines.get(target_timeline_id).is_none() {
+                        bail!("gc target timeline does not exist")
+                    }
+                };
 
-            timelines
-                .iter()
-                .map(|(timeline_id, timeline_entry)| {
-                    // This is unresolved question for now, how to do gc in presence of remote timelines
-                    // especially when this is combined with branching.
-                    // Somewhat related: https://github.com/neondatabase/neon/issues/999
-                    if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
-                        // If target_timeline is specified, we only need to know branchpoints of its children
-                        if let Some(timeline_id) = target_timeline_id {
-                            if ancestor_timeline_id == &timeline_id {
-                                all_branchpoints.insert((
-                                    *ancestor_timeline_id,
-                                    timeline_entry.get_ancestor_lsn(),
-                                ));
+                timelines
+                    .iter()
+                    .map(|(timeline_id, timeline_entry)| {
+                        // This is unresolved question for now, how to do gc in presence of remote timelines
+                        // especially when this is combined with branching.
+                        // Somewhat related: https://github.com/neondatabase/neon/issues/999
+                        if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
+                            // If target_timeline is specified, we only need to know branchpoints of its children
+                            if let Some(timeline_id) = target_timeline_id {
+                                if ancestor_timeline_id == &timeline_id {
+                                    all_branchpoints.insert((
+                                        *ancestor_timeline_id,
+                                        timeline_entry.get_ancestor_lsn(),
+                                    ));
+                                }
+                            }
+                            // Collect branchpoints for all timelines
+                            else {
+                                all_branchpoints
+                                    .insert((*ancestor_timeline_id, timeline_entry.get_ancestor_lsn()));
                             }
                         }
-                        // Collect branchpoints for all timelines
-                        else {
-                            all_branchpoints
-                                .insert((*ancestor_timeline_id, timeline_entry.get_ancestor_lsn()));
-                        }
+
+                        *timeline_id
+                    })
+                    .collect::<Vec<_>>()
+            };
+            drop(timelines);
+
+            // Ok, we now know all the branch points.
+            // Update the GC information for each timeline.
+            let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
+            for timeline_id in timeline_ids {
+                // Timeline is known to be local and loaded.
+                let timeline = self
+                    .get_timeline(timeline_id)
+                    .with_context(|| format!("Timeline {timeline_id} was not found"))?;
+
+                // If target_timeline is specified, ignore all other timelines
+                if let Some(target_timeline_id) = target_timeline_id {
+                    if timeline_id != target_timeline_id {
+                        continue;
                     }
+                }
 
-                    *timeline_id
-                })
-                .collect::<Vec<_>>()
-        };
-        drop(timelines);
+                if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
+                    let branchpoints: Vec<Lsn> = all_branchpoints
+                        .range((
+                            Included((timeline_id, Lsn(0))),
+                            Included((timeline_id, Lsn(u64::MAX))),
+                        ))
+                        .map(|&x| x.1)
+                        .collect();
+                    timeline.update_gc_info(branchpoints, cutoff, pitr)?;
 
-        // Ok, we now know all the branch points.
-        // Update the GC information for each timeline.
-        let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
-        for timeline_id in timeline_ids {
-            // Timeline is known to be local and loaded.
-            let timeline = self
-                .get_timeline(timeline_id)
-                .with_context(|| format!("Timeline {timeline_id} was not found"))?;
-
-            // If target_timeline is specified, ignore all other timelines
-            if let Some(target_timeline_id) = target_timeline_id {
-                if timeline_id != target_timeline_id {
-                    continue;
+                    gc_timelines.push(timeline);
                 }
             }
-
-            if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
-                let branchpoints: Vec<Lsn> = all_branchpoints
-                    .range((
-                        Included((timeline_id, Lsn(0))),
-                        Included((timeline_id, Lsn(u64::MAX))),
-                    ))
-                    .map(|&x| x.1)
-                    .collect();
-                timeline.update_gc_info(branchpoints, cutoff, pitr)?;
-
-                gc_timelines.push(timeline);
-            }
-        }
-        drop(gc_cs);
+            drop(gc_cs);
+            gc_timelines
+        };
 
         // Perform GC for each timeline.
         //
@@ -893,7 +893,7 @@ impl Tenant {
             // so that they too can be garbage collected. That's
             // used in tests, so we want as deterministic results as possible.
             if checkpoint_before_gc {
-                timeline.checkpoint(CheckpointConfig::Forced)?;
+                timeline.checkpoint(CheckpointConfig::Forced).await?;
                 info!(
                     "timeline {} checkpoint_before_gc done",
                     timeline.timeline_id
@@ -996,7 +996,7 @@ impl Tenant {
 
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization complete, remove the temp dir.
-    fn bootstrap_timeline(
+    async fn bootstrap_timeline(
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
@@ -1027,7 +1027,7 @@ impl Tenant {
             bail!("failpoint before-checkpoint-new-timeline");
         });
 
-        timeline.checkpoint(CheckpointConfig::Forced)?;
+        timeline.checkpoint(CheckpointConfig::Forced).await?;
 
         info!(
             "created root timeline {} timeline.lsn {}",
@@ -1476,7 +1476,7 @@ mod tests {
         Ok(())
     }
 
-    fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> Result<()> {
+    async fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
@@ -1497,7 +1497,7 @@ mod tests {
             writer.finish_write(lsn);
             lsn += 0x10;
         }
-        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.checkpoint(CheckpointConfig::Forced).await?;
         {
             let writer = tline.writer();
             writer.put(
@@ -1514,22 +1514,22 @@ mod tests {
             )?;
             writer.finish_write(lsn);
         }
-        tline.checkpoint(CheckpointConfig::Forced)
+        tline.checkpoint(CheckpointConfig::Forced).await
     }
 
-    #[test]
-    fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
+    #[tokio::test]
+    async fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
         let tenant =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
                 .load();
         let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
-        make_some_layers(tline.as_ref(), Lsn(0x20))?;
+        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         // FIXME: this doesn't actually remove any layer currently, given how the checkpointing
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
-        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
+        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false).await?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
@@ -1572,14 +1572,14 @@ mod tests {
     /*
     // FIXME: This currently fails to error out. Calling GC doesn't currently
     // remove the old value, we'd need to work a little harder
-    #[test]
-    fn test_prohibit_get_for_garbage_collected_data() -> Result<()> {
+    #[tokio::test]
+    async fn test_prohibit_get_for_garbage_collected_data() -> Result<()> {
         let repo =
             RepoHarness::create("test_prohibit_get_for_garbage_collected_data")?
             .load();
 
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
-        make_some_layers(tline.as_ref(), Lsn(0x20))?;
+        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
         let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
@@ -1592,39 +1592,39 @@ mod tests {
     }
      */
 
-    #[test]
-    fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
+    #[tokio::test]
+    async fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
         let tenant =
             TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
         let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
-        make_some_layers(tline.as_ref(), Lsn(0x20))?;
+        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
+        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false).await?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
 
         Ok(())
     }
-    #[test]
-    fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
+    #[tokio::test]
+    async fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
         let tenant =
             TenantHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
         let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
-        make_some_layers(tline.as_ref(), Lsn(0x20))?;
+        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
 
-        make_some_layers(newtline.as_ref(), Lsn(0x60))?;
+        make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
 
         // run gc on parent
-        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
+        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false).await?;
 
         // Check that the data is still accessible on the branch.
         assert_eq!(
@@ -1635,16 +1635,16 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn timeline_load() -> Result<()> {
+    #[tokio::test]
+    async fn timeline_load() -> Result<()> {
         const TEST_NAME: &str = "timeline_load";
         let harness = TenantHarness::create(TEST_NAME)?;
         {
             let tenant = harness.load();
             let tline =
                 tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION)?;
-            make_some_layers(tline.as_ref(), Lsn(0x8000))?;
-            tline.checkpoint(CheckpointConfig::Forced)?;
+            make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
+            tline.checkpoint(CheckpointConfig::Forced).await?;
         }
 
         let tenant = harness.load();
@@ -1655,8 +1655,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn timeline_load_with_ancestor() -> Result<()> {
+    #[tokio::test]
+    async fn timeline_load_with_ancestor() -> Result<()> {
         const TEST_NAME: &str = "timeline_load_with_ancestor";
         let harness = TenantHarness::create(TEST_NAME)?;
         // create two timelines
@@ -1664,8 +1664,8 @@ mod tests {
             let tenant = harness.load();
             let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
 
-            make_some_layers(tline.as_ref(), Lsn(0x20))?;
-            tline.checkpoint(CheckpointConfig::Forced)?;
+            make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+            tline.checkpoint(CheckpointConfig::Forced).await?;
 
             tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
 
@@ -1673,8 +1673,8 @@ mod tests {
                 .get_timeline(NEW_TIMELINE_ID)
                 .expect("Should have a local timeline");
 
-            make_some_layers(newtline.as_ref(), Lsn(0x60))?;
-            tline.checkpoint(CheckpointConfig::Forced)?;
+            make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+            tline.checkpoint(CheckpointConfig::Forced).await?;
         }
 
         // check that both of them are initially unloaded
@@ -1732,8 +1732,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_images() -> Result<()> {
+    #[tokio::test]
+    async fn test_images() -> Result<()> {
         let tenant = TenantHarness::create("test_images")?.load();
         let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
 
@@ -1742,7 +1742,7 @@ mod tests {
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
-        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.checkpoint(CheckpointConfig::Forced).await?;
         tline.compact()?;
 
         let writer = tline.writer();
@@ -1750,7 +1750,7 @@ mod tests {
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
-        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.checkpoint(CheckpointConfig::Forced).await?;
         tline.compact()?;
 
         let writer = tline.writer();
@@ -1758,7 +1758,7 @@ mod tests {
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
-        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.checkpoint(CheckpointConfig::Forced).await?;
         tline.compact()?;
 
         let writer = tline.writer();
@@ -1766,7 +1766,7 @@ mod tests {
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
-        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.checkpoint(CheckpointConfig::Forced).await?;
         tline.compact()?;
 
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
@@ -1782,8 +1782,8 @@ mod tests {
     // Insert 1000 key-value pairs with increasing keys, checkpoint,
     // repeat 50 times.
     //
-    #[test]
-    fn test_bulk_insert() -> Result<()> {
+    #[tokio::test]
+    async fn test_bulk_insert() -> Result<()> {
         let tenant = TenantHarness::create("test_bulk_insert")?.load();
         let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
 
@@ -1814,7 +1814,7 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
 
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
-            tline.checkpoint(CheckpointConfig::Forced)?;
+            tline.checkpoint(CheckpointConfig::Forced).await?;
             tline.compact()?;
             tline.gc()?;
         }
@@ -1822,8 +1822,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_random_updates() -> Result<()> {
+    #[tokio::test]
+    async fn test_random_updates() -> Result<()> {
         let tenant = TenantHarness::create("test_random_updates")?.load();
         let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
 
@@ -1884,7 +1884,7 @@ mod tests {
             println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
-            tline.checkpoint(CheckpointConfig::Forced)?;
+            tline.checkpoint(CheckpointConfig::Forced).await?;
             tline.compact()?;
             tline.gc()?;
         }
@@ -1892,8 +1892,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_traverse_branches() -> Result<()> {
+    #[tokio::test]
+    async fn test_traverse_branches() -> Result<()> {
         let tenant = TenantHarness::create("test_traverse_branches")?.load();
         let mut tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
 
@@ -1963,7 +1963,7 @@ mod tests {
             println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
-            tline.checkpoint(CheckpointConfig::Forced)?;
+            tline.checkpoint(CheckpointConfig::Forced).await?;
             tline.compact()?;
             tline.gc()?;
         }

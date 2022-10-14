@@ -119,7 +119,7 @@ async fn gc_loop(tenant_id: TenantId) {
             let gc_horizon = tenant.get_gc_horizon();
             let mut sleep_duration = gc_period;
             if gc_horizon > 0 {
-                if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false)
+                if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false).await
                 {
                     sleep_duration = wait_duration;
                     error!("Gc failed, retrying in {:?}: {e:#}", sleep_duration);
