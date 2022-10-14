@@ -1,7 +1,11 @@
 openapi: "3.0.2"
 info:
   title: Page Server API
+  description: Neon Pageserver API
   version: "1.0"
+  license:
+    name: "Apache"
+    url: https://github.com/neondatabase/neon/blob/main/LICENSE
 servers:
   - url: ""
 paths:
