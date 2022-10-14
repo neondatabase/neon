@@ -71,7 +71,7 @@ typedef struct
 	NeonMessageTag tag;
 	bool		latest;			/* if true, request latest page version */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
-	int			region;			/* region to fetch page from */
+	int8    	region;			/* region to fetch page from */
 }			NeonRequest;
 
 typedef struct

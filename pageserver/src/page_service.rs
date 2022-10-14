@@ -24,6 +24,7 @@ use pageserver_api::models::{
 use pq_proto::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
+use std::collections::HashMap;
 use std::io;
 use std::net::TcpListener;
 use std::str;
@@ -34,7 +35,7 @@ use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
     auth::{Claims, JwtAuth, Scope},
-    id::{TenantId, TimelineId},
+    id::{RegionId, TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
     postgres_backend_async::{self, is_expected_io_error, PostgresBackend, QueryError},
@@ -294,40 +295,47 @@ impl PageServerHandler {
         &self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
-        timeline_ids: Vec<TimelineId>,
+        timeline_id: Option<TimelineId>,
         ctx: RequestContext,
     ) -> anyhow::Result<()> {
-        let dummy_timeline_id = *timeline_ids
-            .get(0)
-            .ok_or_else(|| anyhow::anyhow!("List of timeline ids must not be empty"))?;
-
         // NOTE: pagerequests handler exits when connection is closed,
         //       so there is no need to reset the association
-        task_mgr::associate_with(Some(tenant_id), Some(dummy_timeline_id));
+        task_mgr::associate_with(Some(tenant_id), timeline_id);
 
         // Make request tracer if needed
         let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
-            let path = tenant
-                .conf
-                .trace_path(&tenant_id, &dummy_timeline_id, &connection_id);
+            let path = tenant.conf.trace_path(
+                &tenant_id,
+                &timeline_id.unwrap_or_else(|| TimelineId::from([0u8; 16])),
+                &connection_id,
+            );
             Some(Tracer::new(path))
         } else {
             None
         };
 
         // Check that the timeline exists
-        let timelines = timeline_ids
-            .into_iter()
-            .map(|tlid| tenant.get_timeline(tlid, true))
-            .collect::<Result<Vec<_>, _>>()?;
+        let timelines = if let Some(id) = timeline_id {
+            HashMap::from([(RegionId::default(), tenant.get_timeline(id, true)?)])
+        } else {
+            get_timelines_indexed_by_region_id(&*tenant)?
+        };
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
         pgb.flush().await?;
 
-        let metrics = PageRequestMetrics::new(&tenant_id, &dummy_timeline_id);
+        let empty_timeline_id = TimelineId::from([0u8; 16]);
+        let metrics = PageRequestMetrics::new(
+            &tenant_id,
+            if let Some(ref id) = timeline_id {
+                id
+            } else {
+                &empty_timeline_id
+            },
+        );
 
         loop {
             let msg = tokio::select! {
@@ -366,27 +374,44 @@ impl PageServerHandler {
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
-                    self.handle_get_rel_exists_request(&timelines[req.region as usize], &req, &ctx)
-                        .await
+                    self.handle_get_rel_exists_request(
+                        &*get_timeline_by_region_id(&timelines, req.region)?,
+                        &req,
+                        &ctx,
+                    )
+                    .await
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.get_rel_size.start_timer();
-                    self.handle_get_nblocks_request(&timelines[req.region as usize], &req, &ctx)
-                        .await
+                    self.handle_get_nblocks_request(
+                        &*get_timeline_by_region_id(&timelines, req.region)?,
+                        &req,
+                        &ctx,
+                    )
+                    .await
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
-                    self.handle_get_page_at_lsn_request(&timelines[req.region as usize], &req, &ctx)
-                        .await
+                    self.handle_get_page_at_lsn_request(
+                        &*get_timeline_by_region_id(&timelines, req.region)?,
+                        &req,
+                        &ctx,
+                    )
+                    .await
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
-                    self.handle_db_size_request(&timelines[0], &req, &ctx).await
+                    self.handle_db_size_request(
+                        &*get_timeline_by_region_id(&timelines, RegionId::default())?,
+                        &req,
+                        &ctx,
+                    )
+                    .await
                 }
                 PagestreamFeMessage::GetSlruPage(req) => {
                     let _timer = metrics.get_slru_page.start_timer();
                     self.handle_get_slru_page_at_lsn_request(
-                        &timelines[req.region as usize],
+                        &*get_timeline_by_region_id(&timelines, req.region)?,
                         &req,
                         &ctx,
                     )
@@ -862,13 +887,12 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            self.handle_pagerequests(pgb, tenant_id, vec![timeline_id], ctx)
+            self.handle_pagerequests(pgb, tenant_id, Some(timeline_id), ctx)
                 .await?;
         } else if query_string.starts_with("multipagestream ") {
-            // multipagestream <tenant id as hex string> <timelineid>,<timelineid>,...
             let (_, params_raw) = query_string.split_at("multipagestream ".len());
-            let params: Vec<_> = params_raw.split(' ').collect();
-            if params.len() != 2 {
+            let params = params_raw.split(' ').collect::<Vec<_>>();
+            if params.len() != 1 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for multipagestream command"
                 )));
@@ -879,14 +903,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            let timeline_ids = params[1]
-                .split(',')
-                .map(TimelineId::from_str)
-                .collect::<Result<_, _>>()
-                .with_context(|| format!("Failed to parse timeline ids from {}", params[1]))?;
-
-            self.handle_pagerequests(pgb, tenant_id, timeline_ids, ctx)
-                .await?;
+            self.handle_pagerequests(pgb, tenant_id, None, ctx).await?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
@@ -1204,4 +1221,54 @@ async fn get_active_tenant_timeline(
     let tenant = get_active_tenant_with_timeout(tenant_id, ctx).await?;
     let timeline = tenant.get_timeline(timeline_id, true)?;
     Ok(timeline)
+}
+
+fn get_timelines_indexed_by_region_id(
+    tenant: &Tenant,
+) -> anyhow::Result<HashMap<RegionId, Arc<Timeline>>> {
+    let timelines = tenant.list_timelines();
+    let mut map = HashMap::new();
+    for timeline in timelines {
+        map.insert(timeline.region_id, timeline);
+    }
+    Ok(map)
+}
+
+fn get_timeline_by_region_id(
+    index: &HashMap<RegionId, Arc<Timeline>>,
+    region_id: RegionId,
+) -> anyhow::Result<Arc<Timeline>> {
+    index
+        .get(&region_id)
+        .map(Arc::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("Region id {} does not exists", region_id))
+}
+
+///
+/// A std::io::Write implementation that wraps all data written to it in CopyData
+/// messages.
+///
+struct CopyDataSink<'a> {
+    pgb: &'a mut PostgresBackend,
+    rt: tokio::runtime::Handle,
+}
+
+impl<'a> io::Write for CopyDataSink<'a> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        // CopyData
+        // FIXME: if the input is large, we should split it into multiple messages.
+        // Not sure what the threshold should be, but the ultimate hard limit is that
+        // the length cannot exceed u32.
+        // FIXME: flush isn't really required, but makes it easier
+        // to view in wireshark
+        self.pgb.write_message(&BeMessage::CopyData(data))?;
+        self.rt.block_on(self.pgb.flush())?;
+        trace!("CopyData sent for {} bytes!", data.len());
+
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        // no-op
+        Ok(())
+    }
 }
