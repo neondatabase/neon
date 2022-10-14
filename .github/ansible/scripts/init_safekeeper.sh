@@ -22,7 +22,7 @@ cat <<EOF | tee /tmp/payload
 EOF
 
 # check if safekeeper already registered or not
-if ! curl -sf -X PATCH -d '{}' {{ console_mgmt_base_url }}/api/v1/safekeepers/${INSTANCE_ID} -o /dev/null; then
+if ! curl -sf -H "Authorization: Bearer {{ CONSOLE_API_TOKEN }}" {{ console_mgmt_base_url }}/management/api/v2/safekeepers/${INSTANCE_ID} -o /dev/null; then
 
     # not registered, so register it now
     ID=$(curl -sf -X POST -H "Authorization: Bearer {{ CONSOLE_API_TOKEN }}" {{ console_mgmt_base_url }}/management/api/v2/safekeepers -d@/tmp/payload | jq -r '.id')
