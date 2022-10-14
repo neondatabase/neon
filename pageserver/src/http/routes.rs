@@ -184,7 +184,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
                 Ok(Some(TimelineInfo {
                     tenant_id,
                     timeline_id: new_timeline.timeline_id,
-                    local: Some(local_info),
+                    local: local_info,
                     remote: None,
                 }))
             }
@@ -220,17 +220,13 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     let mut response_data = Vec::with_capacity(timelines.len());
     for timeline in timelines {
         let timeline_id = timeline.timeline_id;
-        let local = match local_timeline_info_from_timeline(
+        let local = local_timeline_info_from_timeline(
             &timeline,
             include_non_incremental_logical_size,
             include_non_incremental_physical_size,
-        ) {
-            Ok(local) => Some(local),
-            Err(e) => {
-                error!("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}");
-                None
-            }
-        };
+        )
+            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
+            .map_err(ApiError::InternalServerError)?;
 
         response_data.push(TimelineInfo {
             tenant_id,
@@ -300,19 +296,15 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         .await
         .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
 
-        let local_timeline_info = match timeline.and_then(|timeline| {
-            local_timeline_info_from_timeline(
-                &timeline,
-                include_non_incremental_logical_size,
-                include_non_incremental_physical_size,
-            )
-        }) {
-            Ok(local_info) => Some(local_info),
-            Err(e) => {
-                error!("Failed to get local timeline info: {e:#}");
-                None
-            }
-        };
+        let timeline = timeline.map_err(ApiError::NotFound)?;
+
+        let local_timeline_info = local_timeline_info_from_timeline(
+            &timeline,
+            include_non_incremental_logical_size,
+            include_non_incremental_physical_size,
+        )
+            .context("Failed to get local timeline info: {e:#}")
+            .map_err(ApiError::InternalServerError)?;
 
         let remote_timeline_info = {
             let remote_index_read = get_state(&request).remote_index.read().await;
@@ -331,21 +323,15 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     .instrument(info_span!("timeline_detail", tenant = %tenant_id, timeline = %timeline_id))
     .await?;
 
-    if local_timeline_info.is_none() && remote_timeline_info.is_none() {
-        Err(ApiError::NotFound(anyhow!(
-            "Timeline {tenant_id}/{timeline_id} is not found neither locally nor remotely"
-        )))
-    } else {
-        json_response(
-            StatusCode::OK,
-            TimelineInfo {
-                tenant_id,
-                timeline_id,
-                local: local_timeline_info,
-                remote: remote_timeline_info,
-            },
-        )
-    }
+    json_response(
+        StatusCode::OK,
+        TimelineInfo {
+            tenant_id,
+            timeline_id,
+            local: local_timeline_info,
+            remote: remote_timeline_info,
+        },
+    )
 }
 
 async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
