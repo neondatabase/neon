@@ -14,7 +14,7 @@ safekeepers
 remote_user=ssm-user
 console_region_id=aws-us-east-2
 env_name = us-stage
-console_mgmt_base_url  = http://console-mgmt.us-east-2.aws.neon.build
+console_mgmt_base_url  = http://console-staging.local
 bucket_name            = v1
 bucket_region          = us-east-2
 etcd_endpoints         = etcd.us-east-2.aws.neon.build:2379
