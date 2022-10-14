@@ -1,7 +1,7 @@
 - name: Upload Neon binaries
   hosts: storage
   gather_facts: False
-  remote_user: admin
+  remote_user: "{{ remote_user }}"
 
   tasks:
 
@@ -36,7 +36,7 @@
 - name: Deploy pageserver
   hosts: pageservers
   gather_facts: False
-  remote_user: admin
+  remote_user: "{{ remote_user }}"
 
   tasks:
 
@@ -124,7 +124,7 @@
 - name: Deploy safekeeper
   hosts: safekeepers
   gather_facts: False
-  remote_user: admin
+  remote_user: "{{ remote_user }}"
 
   tasks:
 

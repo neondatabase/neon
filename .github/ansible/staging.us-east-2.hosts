@@ -1,16 +1,20 @@
 [pageservers]
-pageserver-0 console_region_id=aws-test-us-east-1	ansible_host=i-0984e088ee223af29
+pageserver-0.us-east-2.aws.neon.build ansible_host=i-0c3e70929edb5d691
 
 [safekeepers]
-safekeeper-0 console_region_id=aws-test-us-east-1	ansible_host=i-123213123213
+safekeeper-0.us-east-2.aws.neon.build ansible_host=i-027662bd552bf5db0
+safekeeper-1.us-east-2.aws.neon.build ansible_host=i-0171efc3604a7b907
+safekeeper-2.us-east-2.aws.neon.build ansible_host=i-0de0b03a51676a6ce
 
 [storage:children]
 pageservers
 safekeepers
 
 [storage:vars]
+remote_user=ssm-user
+console_region_id=aws-us-east-2
 env_name = us-stage
-console_mgmt_base_url  = http://console.us-east-2.aws.neon.build
+console_mgmt_base_url  = http://console-mgmt.us-east-2.aws.neon.build
 bucket_name            = v1
 bucket_region          = us-east-2
 etcd_endpoints         = etcd.us-east-2.aws.neon.build:2379

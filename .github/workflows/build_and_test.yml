@@ -739,8 +739,8 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-new:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    #container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -760,16 +760,6 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Setup ansible
-        run: |
-          export PATH="/root/.local/bin:$PATH"
-          pip install --progress-bar off --user ansible boto3
-
       - name: Redeploy
         run: |
           export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
@@ -784,7 +774,7 @@ jobs:
             exit 1
           fi
 
-          ansible-playbook deploy.yaml -i staging.test-us-east-2.hosts -e @ssm_config
+          ansible-playbook deploy.yaml -i staging.us-east-2.hosts -e @ssm_config
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:
