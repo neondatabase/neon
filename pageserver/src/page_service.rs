@@ -25,6 +25,7 @@ use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::pin;
 use tokio_util::io::StreamReader;
 use tokio_util::io::SyncIoBridge;
 use tracing::*;
@@ -367,14 +368,12 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
 
-        // import_basebackup_from_tar() is not async, mainly because the Tar crate
-        // it uses is not async. So we need to jump through some hoops:
-        // - convert the input from client connection to a synchronous Read
-        // - use block_in_place()
-        let mut copyin_stream = Box::pin(copyin_stream(pgb));
-        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-        tokio::task::block_in_place(|| timeline.import_basebackup_from_tar(reader, base_lsn))?;
-        timeline.initialize()?;
+        let copyin_stream = copyin_stream(pgb);
+        pin!(copyin_stream);
+
+        timeline
+            .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
+            .await?;
 
         // Drain the rest of the Copy data
         let mut bytes_after_tar = 0;
@@ -439,7 +438,7 @@ impl PageServerHandler {
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.checkpoint(CheckpointConfig::Flush)?;
+        timeline.checkpoint(CheckpointConfig::Flush).await?;
 
         info!("done");
         Ok(())
