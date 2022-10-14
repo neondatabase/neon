@@ -1402,6 +1402,10 @@ fn compare_local_and_remote_timeline(
             if let Some(local_metadata) = local_files.get(layer_file) {
                 match (remote_metadata.file_size(), local_metadata.file_size()) {
                     (Some(x), Some(y)) if x == y => { None },
+                    (None, Some(_)) => {
+                        // upgrading from an earlier IndexPart without metadata
+                        None
+                    },
                     _ => {
                         // having to deal with other than (Some(x), Some(y)) where x != y here is a
                         // bummer, but see #2582 and #2610 for attempts and discussion.
@@ -1798,6 +1802,45 @@ mod tests {
                     ))
                 )]
             );
+        }
+
+        #[test]
+        fn redownload_is_not_needed_on_upgrade() {
+            // originally the implementation missed the `(None, Some(_))` case in the match, and
+            // proceeded to always redownload if the remote metadata was not available.
+
+            let mut new_sync_tasks = VecDeque::default();
+            let sync_id = TenantTimelineId::generate();
+
+            let local_metadata = dummy_metadata(0x02.into());
+
+            // type system would in general allow that LayerFileMetadata would be created with
+            // file_size: None, however `LayerFileMetadata::default` is only allowed from tests,
+            // and so everywhere within the system valid LayerFileMetadata is being created, it is
+            // created through `::new`.
+            let local_files =
+                HashMap::from([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
+
+            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
+
+            // RemoteTimeline is constructed out of an older version IndexPart, which didn't carry
+            // any metadata.
+            remote_entry
+                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::default())]);
+
+            let (status, sync_needed) = compare_local_and_remote_timeline(
+                &mut new_sync_tasks,
+                sync_id,
+                local_metadata.clone(),
+                local_files,
+                &remote_entry,
+            );
+
+            assert_eq!(
+                status,
+                LocalTimelineInitStatus::LocallyComplete(local_metadata)
+            );
+            assert!(!sync_needed);
         }
 
         #[test]
