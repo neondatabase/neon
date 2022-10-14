@@ -16,7 +16,7 @@ cat <<EOF | tee /tmp/payload
   "instance_id": "${INSTANCE_ID}",
   "http_host": "${HOST}",
   "http_port": 9898,
-  "active": "false"
+  "active": false
 }
 EOF
 
