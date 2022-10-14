@@ -16,18 +16,16 @@ publish = false
 [dependencies]
 ahash = { version = "0.7", features = ["std"] }
 anyhow = { version = "1", features = ["backtrace", "std"] }
-bstr = { version = "0.2", features = ["lazy_static", "regex-automata", "serde", "serde1", "serde1-nostd", "std", "unicode"] }
 bytes = { version = "1", features = ["serde", "std"] }
-chrono = { version = "0.4", features = ["clock", "libc", "oldtime", "serde", "std", "time", "winapi"] }
+chrono = { version = "0.4", features = ["clock", "iana-time-zone", "js-sys", "oldtime", "serde", "std", "time", "wasm-bindgen", "wasmbind", "winapi"] }
+clap = { version = "3", features = ["atty", "color", "std", "strsim", "suggestions", "termcolor"] }
 crossbeam-utils = { version = "0.8", features = ["once_cell", "std"] }
 either = { version = "1", features = ["use_std"] }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 hashbrown = { version = "0.12", features = ["ahash", "inline-more", "raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
-itoa = { version = "0.4", features = ["i128", "std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
-memchr = { version = "2", features = ["std", "use_std"] }
 nom = { version = "7", features = ["alloc", "std"] }
 num-bigint = { version = "0.4", features = ["std"] }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
@@ -35,7 +33,6 @@ num-traits = { version = "0.2", features = ["i128", "libm", "std"] }
 prost = { version = "0.10", features = ["prost-derive", "std"] }
 rand = { version = "0.8", features = ["alloc", "getrandom", "libc", "rand_chacha", "rand_hc", "small_rng", "std", "std_rng"] }
 regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
-regex-automata = { version = "0.1", features = ["regex-syntax", "std"] }
 regex-syntax = { version = "0.6", features = ["unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
 scopeguard = { version = "1", features = ["use_std"] }
 serde = { version = "1", features = ["alloc", "derive", "serde_derive", "std"] }
@@ -51,12 +48,12 @@ uuid = { version = "0.8", features = ["getrandom", "serde", "std", "v4"] }
 ahash = { version = "0.7", features = ["std"] }
 anyhow = { version = "1", features = ["backtrace", "std"] }
 bytes = { version = "1", features = ["serde", "std"] }
+clap = { version = "3", features = ["atty", "color", "std", "strsim", "suggestions", "termcolor"] }
 either = { version = "1", features = ["use_std"] }
 hashbrown = { version = "0.12", features = ["ahash", "inline-more", "raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
-memchr = { version = "2", features = ["std", "use_std"] }
 nom = { version = "7", features = ["alloc", "std"] }
 prost = { version = "0.10", features = ["prost-derive", "std"] }
 regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
