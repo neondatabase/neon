@@ -265,6 +265,7 @@ pub(super) async fn download_timeline_layers<'a>(
                     } else {
                         // no need to remove it, it will be overwritten by fs::rename
                         // after successful download
+                        warn!("Downloaded layer exists already but layer file metadata mismatches: {}, metadata {:?}", layer_destination_path.display(), metadata);
                     }
                 }
                 Ok(m) => {
