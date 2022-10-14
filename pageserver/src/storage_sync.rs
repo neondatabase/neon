@@ -585,15 +585,39 @@ pub fn schedule_layer_download(tenant_id: TenantId, timeline_id: TimelineId) {
     debug!("Download task for tenant {tenant_id}, timeline {timeline_id} sent")
 }
 
+/// Local existing timeline files
+///
+/// Values of this type serve different meanings in different contexts. On startup, collected
+/// timelines come with the full collected information and when signalling readyness to attach
+/// after completed download. After the download the file information is no longer carried, because
+/// it is already merged into [`RemoteTimeline`].
+#[derive(Debug)]
+pub struct TimelineLocalFiles(TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>);
+
+impl TimelineLocalFiles {
+    pub fn metadata(&self) -> &TimelineMetadata {
+        &self.0
+    }
+
+    /// Called during startup, for all of the local files with full metadata.
+    pub(crate) fn collected(
+        metadata: TimelineMetadata,
+        timeline_files: HashMap<PathBuf, LayerFileMetadata>,
+    ) -> TimelineLocalFiles {
+        TimelineLocalFiles(metadata, timeline_files)
+    }
+
+    /// Called near the end of tenant initialization, to signal readyness to attach tenants.
+    pub(crate) fn ready(metadata: TimelineMetadata) -> Self {
+        TimelineLocalFiles(metadata, HashMap::new())
+    }
+}
+
 /// Launch a thread to perform remote storage sync tasks.
 /// See module docs for loop step description.
-#[allow(clippy::type_complexity)]
 pub fn spawn_storage_sync_task(
     conf: &'static PageServerConf,
-    local_timeline_files: HashMap<
-        TenantId,
-        HashMap<TimelineId, (TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>)>,
-    >,
+    local_timeline_files: HashMap<TenantId, HashMap<TimelineId, TimelineLocalFiles>>,
     storage: GenericRemoteStorage,
     max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
@@ -751,7 +775,7 @@ async fn storage_sync_loop(
                                     tenant_entry
                                         .iter()
                                         .map(|(&id, entry)| {
-                                            (id, (entry.metadata.clone(), HashMap::new()))
+                                            (id, TimelineLocalFiles::ready(entry.metadata.clone()))
                                         })
                                         .collect(),
                                 ),
@@ -1310,16 +1334,14 @@ async fn validate_task_retries(
 fn schedule_first_sync_tasks(
     index: &mut RemoteTimelineIndex,
     sync_queue: &SyncQueue,
-    local_timeline_files: HashMap<
-        TenantTimelineId,
-        (TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>),
-    >,
+    local_timeline_files: HashMap<TenantTimelineId, TimelineLocalFiles>,
 ) -> TenantTimelineValues<LocalTimelineInitStatus> {
     let mut local_timeline_init_statuses = TenantTimelineValues::new();
 
     let mut new_sync_tasks = VecDeque::with_capacity(local_timeline_files.len());
 
-    for (sync_id, (local_metadata, local_files)) in local_timeline_files {
+    for (sync_id, local_timeline) in local_timeline_files {
+        let TimelineLocalFiles(local_metadata, local_files) = local_timeline;
         match index.timeline_entry_mut(&sync_id) {
             Some(remote_timeline) => {
                 let (timeline_status, awaits_download) = compare_local_and_remote_timeline(

@@ -15,7 +15,7 @@ use remote_storage::GenericRemoteStorage;
 use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::http::models::TenantInfo;
 use crate::storage_sync::index::{LayerFileMetadata, RemoteIndex, RemoteTimelineIndex};
-use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
+use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData, TimelineLocalFiles};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
@@ -104,7 +104,7 @@ pub fn init_tenant_mgr(
                 if let TenantAttachData::Ready(t) = new_timeline_values {
                     for (timeline_id, old_value) in old_values {
                         if let LocalTimelineInitStatus::LocallyComplete(metadata) = old_value {
-                            t.insert(timeline_id, (metadata, HashMap::new()));
+                            t.insert(timeline_id, TimelineLocalFiles::ready(metadata));
                         }
                     }
                 }
@@ -189,7 +189,7 @@ pub fn attach_local_tenants(
                 let has_timelines = !timelines.is_empty();
                 let timelines_to_attach = timelines
                     .iter()
-                    .map(|(&k, (v, _))| (k, v.clone()))
+                    .map(|(&k, v)| (k, v.metadata().to_owned()))
                     .collect();
                 match tenant.init_attach_timelines(timelines_to_attach) {
                     Ok(()) => {
@@ -483,7 +483,7 @@ pub fn list_tenant_info(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
 
 #[derive(Debug)]
 pub enum TenantAttachData {
-    Ready(HashMap<TimelineId, (TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>)>),
+    Ready(HashMap<TimelineId, TimelineLocalFiles>),
     Broken(anyhow::Error),
 }
 /// Attempts to collect information about all tenant and timelines, existing on the local FS.
@@ -602,7 +602,6 @@ fn is_temporary(path: &Path) -> bool {
     }
 }
 
-#[allow(clippy::type_complexity)]
 fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
@@ -648,7 +647,10 @@ fn collect_timelines_for_tenant(
                 } else {
                     match collect_timeline_files(&timeline_dir) {
                         Ok((timeline_id, metadata, timeline_files)) => {
-                            tenant_timelines.insert(timeline_id, (metadata, timeline_files));
+                            tenant_timelines.insert(
+                                timeline_id,
+                                TimelineLocalFiles::collected(metadata, timeline_files),
+                            );
                         }
                         Err(e) => {
                             error!(
