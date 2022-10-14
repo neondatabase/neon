@@ -80,10 +80,10 @@ pageserver_connect()
 				 errdetail_internal("%s", msg)));
 	}
 
-	if (neon_multiregion_enabled())
+	if (IsMultiRegion())
 	{
-		neon_log(LOG, "multi-region enabled, timelines: %s", neon_region_timelines);
-		query = psprintf("multipagestream %s %s", neon_tenant, neon_region_timelines);
+		neon_log(LOG, "multi-region enabled");
+		query = psprintf("multipagestream %s", neon_tenant);
 	}
 	else
 		query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
@@ -495,8 +495,6 @@ pg_init_libpagestore(void)
 							 PGC_POSTMASTER,
 							 0, /* no flags required */
 							 NULL, NULL, NULL);
-
-	DefineMultiRegionCustomVariables();
 
 	relsize_hash_init();
 

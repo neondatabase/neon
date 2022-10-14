@@ -21,6 +21,7 @@ use pageserver_api::models::{
     PagestreamNblocksResponse,
 };
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
+use std::collections::HashMap;
 use std::io;
 use std::net::TcpListener;
 use std::str;
@@ -33,7 +34,7 @@ use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
-    id::{TenantId, TimelineId},
+    id::{RegionId, TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
     postgres_backend_async::{self, PostgresBackend},
@@ -271,15 +272,11 @@ impl PageServerHandler {
         &self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
-        timeline_ids: Vec<TimelineId>,
+        timeline_id: Option<TimelineId>,
     ) -> anyhow::Result<()> {
-        let dummy_timeline_id = *timeline_ids
-            .get(0)
-            .ok_or_else(|| anyhow::anyhow!("List of timeline ids must not be empty"))?;
-
         // NOTE: pagerequests handler exits when connection is closed,
         //       so there is no need to reset the association
-        task_mgr::associate_with(Some(tenant_id), Some(dummy_timeline_id));
+        task_mgr::associate_with(Some(tenant_id), timeline_id);
 
         // Make request tracer if needed
         let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
@@ -294,17 +291,25 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timelines = timeline_ids
-            .into_iter()
-            .map(|tlid| get_local_timeline(tenant_id, tlid))
-            .collect::<Result<Vec<_>, _>>()
-            .context("Cannot load local timeline")?;
+        let timelines = if let Some(id) = timeline_id {
+            HashMap::from([(RegionId::default(), get_local_timeline(tenant_id, id)?)])
+        } else {
+            get_local_timelines_indexed_by_region_id(tenant_id)?
+        };
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
         pgb.flush().await?;
 
-        let metrics = PageRequestMetrics::new(&tenant_id, &dummy_timeline_id);
+        let empty_timeline_id = TimelineId::from([0u8; 16]);
+        let metrics = PageRequestMetrics::new(
+            &tenant_id,
+            if let Some(ref id) = timeline_id {
+                id
+            } else {
+                &empty_timeline_id
+            },
+        );
 
         loop {
             let msg = tokio::select! {
@@ -339,27 +344,43 @@ impl PageServerHandler {
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
-                    self.handle_get_rel_exists_request(&timelines[req.region as usize], &req)
-                        .await
+                    self.handle_get_rel_exists_request(
+                        &*get_timeline_by_region_id(&timelines, req.region)?,
+                        &req,
+                    )
+                    .await
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.get_rel_size.start_timer();
-                    self.handle_get_nblocks_request(&timelines[req.region as usize], &req)
-                        .await
+                    self.handle_get_nblocks_request(
+                        &*get_timeline_by_region_id(&timelines, req.region)?,
+                        &req,
+                    )
+                    .await
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
-                    self.handle_get_page_at_lsn_request(&timelines[req.region as usize], &req)
-                        .await
+                    self.handle_get_page_at_lsn_request(
+                        &*get_timeline_by_region_id(&timelines, req.region)?,
+                        &req,
+                    )
+                    .await
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
-                    self.handle_db_size_request(&timelines[0], &req).await
+                    self.handle_db_size_request(
+                        &*get_timeline_by_region_id(&timelines, RegionId::default())?,
+                        &req,
+                    )
+                    .await
                 }
                 PagestreamFeMessage::GetSlruPage(req) => {
                     let _timer = metrics.get_slru_page.start_timer();
-                    self.handle_get_slru_page_at_lsn_request(&timelines[req.region as usize], &req)
-                        .await
+                    self.handle_get_slru_page_at_lsn_request(
+                        &*get_timeline_by_region_id(&timelines, req.region)?,
+                        &req,
+                    )
+                    .await
                 }
             };
 
@@ -791,27 +812,21 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            self.handle_pagerequests(pgb, tenant_id, vec![timeline_id])
+            self.handle_pagerequests(pgb, tenant_id, Some(timeline_id))
                 .await?;
         } else if query_string.starts_with("multipagestream ") {
-            // multipagestream <tenant id as hex string> <timelineid>,<timelineid>,...
             let (_, params_raw) = query_string.split_at("multipagestream ".len());
-            let params: Vec<_> = params_raw.split(' ').collect();
+            let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(
-                params.len() == 2,
+                params.len() == 1,
                 "invalid param number for multipagestream command"
             );
 
             let tenant_id = TenantId::from_str(params[0])?;
+
             self.check_permission(Some(tenant_id))?;
 
-            let timeline_ids = params[1]
-                .split(',')
-                .map(TimelineId::from_str)
-                .collect::<Result<_, _>>()?;
-
-            self.handle_pagerequests(pgb, tenant_id, timeline_ids)
-                .await?;
+            self.handle_pagerequests(pgb, tenant_id, None).await?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
@@ -1021,6 +1036,28 @@ impl postgres_backend_async::Handler for PageServerHandler {
 fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
     tenant_mgr::get_tenant(tenant_id, true)
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
+}
+
+fn get_local_timelines_indexed_by_region_id(
+    tenant_id: TenantId,
+) -> Result<HashMap<RegionId, Arc<Timeline>>> {
+    let timelines =
+        tenant_mgr::get_tenant(tenant_id, true).map(|tenant| tenant.list_timelines())?;
+    let mut map = HashMap::new();
+    for timeline in timelines {
+        map.insert(timeline.region_id, timeline);
+    }
+    Ok(map)
+}
+
+fn get_timeline_by_region_id(
+    index: &HashMap<RegionId, Arc<Timeline>>,
+    region_id: RegionId,
+) -> Result<Arc<Timeline>> {
+    index
+        .get(&region_id)
+        .map(Arc::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("Region id {} does not exists", region_id))
 }
 
 ///
