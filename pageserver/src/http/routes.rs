@@ -825,14 +825,14 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
     let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::NotFound)?;
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
-    let _span_guard =
-        info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id).entered();
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
 
     // Use tenant's pitr setting
     let pitr = tenant.get_pitr_interval();
     let result = tenant
         .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
+        .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
+        .await
         // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
         // better once the types support it.
         .map_err(ApiError::InternalServerError)?;
@@ -868,6 +868,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         .map_err(ApiError::NotFound)?;
     timeline
         .checkpoint(CheckpointConfig::Forced)
+        .await
         .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
