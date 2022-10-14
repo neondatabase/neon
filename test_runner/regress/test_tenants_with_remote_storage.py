@@ -245,15 +245,7 @@ def test_tenant_upgrades_index_json_from_v0(
     shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_id))
 
     # downgrade the remote file
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    timeline_path = (
-        env.remote_storage.root
-        / "tenants"
-        / str(tenant_id)
-        / "timelines"
-        / str(timeline_id)
-        / "index_part.json"
-    )
+    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
     with open(timeline_path, "r+") as timeline_file:
         # keep the deserialized for later inspection
         orig_index_part = json.load(timeline_file)
@@ -287,41 +279,40 @@ def test_tenant_upgrades_index_json_from_v0(
     env.postgres.stop_all()
     env.pageserver.stop()
 
-    with open(timeline_path, "r") as timeline_file:
-        index_part = json.load(timeline_file)
+    # make sure the file has been upgraded back to how it started
+    index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    assert index_part["version"] == orig_index_part["version"]
+    assert index_part["missing_layers"] == orig_index_part["missing_layers"]
 
-        assert index_part["version"] == orig_index_part["version"]
-        assert index_part["missing_layers"] == orig_index_part["missing_layers"]
+    # expect one more layer because of the forced checkpoint
+    assert len(index_part["timeline_layers"]) == len(orig_index_part["timeline_layers"]) + 1
 
-        # expect one more layer because of the forced checkpoint
-        assert len(index_part["timeline_layers"]) == len(orig_index_part["timeline_layers"]) + 1
+    # all of the same layer files are there, but they might be shuffled around
+    orig_layers = set(orig_index_part["timeline_layers"])
+    later_layers = set(index_part["timeline_layers"])
+    assert later_layers.issuperset(orig_layers)
 
-        # all of the same layer files are there, but they might be shuffled around
-        orig_layers = set(orig_index_part["timeline_layers"])
-        later_layers = set(index_part["timeline_layers"])
-        assert later_layers.issuperset(orig_layers)
+    added_layers = later_layers - orig_layers
+    assert len(added_layers) == 1
 
-        added_layers = later_layers - orig_layers
-        assert len(added_layers) == 1
-
-        # all of metadata has been regenerated (currently just layer file size)
-        all_metadata_keys = set()
-        for layer in orig_layers:
-            orig_metadata = orig_index_part["layer_metadata"][layer]
-            new_metadata = index_part["layer_metadata"][layer]
-            assert (
-                orig_metadata == new_metadata
-            ), f"metadata for layer {layer} should not have changed {orig_metadata} vs. {new_metadata}"
-            all_metadata_keys |= set(orig_metadata.keys())
-
-        one_new_layer = next(iter(added_layers))
-        assert one_new_layer in index_part["layer_metadata"], "new layer should have metadata"
-
-        only_new_metadata = index_part["layer_metadata"][one_new_layer]
-
+    # all of metadata has been regenerated (currently just layer file size)
+    all_metadata_keys = set()
+    for layer in orig_layers:
+        orig_metadata = orig_index_part["layer_metadata"][layer]
+        new_metadata = index_part["layer_metadata"][layer]
         assert (
-            set(only_new_metadata.keys()).symmetric_difference(all_metadata_keys) == set()
-        ), "new layer metadata has same metadata as others"
+            orig_metadata == new_metadata
+        ), f"metadata for layer {layer} should not have changed {orig_metadata} vs. {new_metadata}"
+        all_metadata_keys |= set(orig_metadata.keys())
+
+    one_new_layer = next(iter(added_layers))
+    assert one_new_layer in index_part["layer_metadata"], "new layer should have metadata"
+
+    only_new_metadata = index_part["layer_metadata"][one_new_layer]
+
+    assert (
+        set(only_new_metadata.keys()).symmetric_difference(all_metadata_keys) == set()
+    ), "new layer metadata has same metadata as others"
 
 
 # FIXME: test index_part.json getting downgraded from imaginary new version
@@ -370,18 +361,8 @@ def test_tenant_redownloads_truncated_file_on_startup(
     (path, expected_size) = local_layer_truncated
 
     # ensure the same size is found from the index_part.json
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    timeline_path = (
-        env.remote_storage.root
-        / "tenants"
-        / str(tenant_id)
-        / "timelines"
-        / str(timeline_id)
-        / "index_part.json"
-    )
-    with open(timeline_path, "r+") as timeline_file:
-        index_part = json.load(timeline_file)
-        assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
+    index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
 
     ##### Start the pageserver, forcing it to download the layer file and load the timeline into memory
     env.pageserver.start()
@@ -403,3 +384,27 @@ def test_tenant_redownloads_truncated_file_on_startup(
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
 
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
+
+
+def local_fs_index_part(env, tenant_id, timeline_id):
+    """
+    Return json.load parsed index_part.json of tenant and timeline from LOCAL_FS
+    """
+    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
+    with open(timeline_path, "r") as timeline_file:
+        return json.load(timeline_file)
+
+
+def local_fs_index_part_path(env, tenant_id, timeline_id):
+    """
+    Return path to the LOCAL_FS index_part.json of the tenant and timeline.
+    """
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    return (
+        env.remote_storage.root
+        / "tenants"
+        / str(tenant_id)
+        / "timelines"
+        / str(timeline_id)
+        / "index_part.json"
+    )
