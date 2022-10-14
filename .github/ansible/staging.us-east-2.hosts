@@ -1,0 +1,17 @@
+[pageservers]
+pageserver-0 console_region_id=aws-test-us-east-1	ansible_host=i-0984e088ee223af29
+
+[safekeepers]
+safekeeper-0 console_region_id=aws-test-us-east-1	ansible_host=i-123213123213
+
+[storage:children]
+pageservers
+safekeepers
+
+[storage:vars]
+env_name = us-stage
+console_mgmt_base_url  = http://console.us-east-2.aws.neon.build
+bucket_name            = v1
+bucket_region          = us-east-2
+etcd_endpoints         = etcd.us-east-2.aws.neon.build:2379
+ansible_aws_ssm_region = us-east-2
