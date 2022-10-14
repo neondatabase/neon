@@ -359,15 +359,29 @@ def test_tenant_redownloads_truncated_file_on_startup(
     local_layer_truncated = None
     for path in Path.iterdir(timeline_dir):
         if path.name.startswith("00000"):
-            # Looks like a layer file. Remove it
             correct_size = os.stat(path).st_size
-
             os.truncate(path, 0)
             local_layer_truncated = (path, correct_size)
             break
     assert (
         local_layer_truncated is not None
     ), f"Found no local layer files to delete in directory {timeline_dir}"
+
+    (path, expected_size) = local_layer_truncated
+
+    # ensure the same size is found from the index_part.json
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    timeline_path = (
+        env.remote_storage.root
+        / "tenants"
+        / str(tenant_id)
+        / "timelines"
+        / str(timeline_id)
+        / "index_part.json"
+    )
+    with open(timeline_path, "r+") as timeline_file:
+        index_part = json.load(timeline_file)
+        assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
 
     ##### Start the pageserver, forcing it to download the layer file and load the timeline into memory
     env.pageserver.start()
@@ -388,5 +402,4 @@ def test_tenant_redownloads_truncated_file_on_startup(
         timeline_id
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
 
-    (path, expected_size) = local_layer_truncated
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
