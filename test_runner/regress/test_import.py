@@ -155,8 +155,8 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     lsn = _generate_data(num_rows, pg)
 
     logical_size = env.pageserver.http_client().timeline_detail(env.initial_tenant, timeline)[
-        "local"
-    ]["current_logical_size"]
+        "current_logical_size"
+    ]
     log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
     assert logical_size > 1024**3  # = 1GB
 

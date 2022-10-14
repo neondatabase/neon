@@ -123,9 +123,15 @@ pub struct TenantInfo {
     pub has_in_progress_downloads: Option<bool>,
 }
 
+/// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LocalTimelineInfo {
+pub struct TimelineInfo {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: TenantId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub timeline_id: TimelineId,
+
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -149,28 +155,33 @@ pub struct LocalTimelineInfo {
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
     pub pg_version: u32,
+
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub remote_consistent_lsn: Option<Lsn>,
+    pub awaits_download: bool,
+
+    // Some of the above fields are duplicated in 'local' and 'remote', for backwards-
+    // compatility with older clients.
+    pub local: LocalTimelineInfo,
+    pub remote: RemoteTimelineInfo,
+}
+
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalTimelineInfo {
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub ancestor_timeline_id: Option<TimelineId>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub ancestor_lsn: Option<Lsn>,
+    pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
+    pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
 }
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RemoteTimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub remote_consistent_lsn: Lsn,
-    pub awaits_download: bool,
-}
-
-///
-/// This represents the output of the "timeline_detail" API call.
-///
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
-    pub timeline_id: TimelineId,
-    pub local: LocalTimelineInfo,
-    pub remote: Option<RemoteTimelineInfo>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub remote_consistent_lsn: Option<Lsn>,
 }
 
 pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;

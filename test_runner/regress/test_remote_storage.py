@@ -10,8 +10,8 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    NeonPageserverHttpClient,
     RemoteStorageKind,
-    assert_timeline_local,
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -125,16 +125,15 @@ def test_remote_storage_backup_and_restore(
     wait_until(
         number_of_iterations=20,
         interval=1,
-        func=lambda: assert_timeline_local(client, tenant_id, timeline_id),
+        func=lambda: expect_tenant_to_download_timeline(client, tenant_id),
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
-    assert detail["local"] is not None
     log.info("Timeline detail after attach completed: %s", detail)
     assert (
-        Lsn(detail["local"]["last_record_lsn"]) >= current_lsn
+        Lsn(detail["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
-    assert not detail["remote"]["awaits_download"]
+    assert not detail["awaits_download"]
 
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
@@ -143,3 +142,16 @@ def test_remote_storage_backup_and_restore(
                 query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
                 == f"{data_secret}|{checkpoint_number}"
             )
+
+
+def expect_tenant_to_download_timeline(
+    client: NeonPageserverHttpClient,
+    tenant_id: TenantId,
+):
+    for tenant in client.tenant_list():
+        if tenant["id"] == str(tenant_id):
+            assert not tenant.get(
+                "has_in_progress_downloads", True
+            ), f"Tenant {tenant_id} should have no downloads in progress"
+            return
+    assert False, f"Tenant {tenant_id} is missing on pageserver"

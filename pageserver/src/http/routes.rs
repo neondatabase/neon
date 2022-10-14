@@ -79,13 +79,13 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
     get_state(request).conf
 }
 
-// Helper functions to construct a LocalTimelineInfo struct for a timeline
-
-fn local_timeline_info_from_timeline(
+// Helper function to construct a TimelineInfo struct for a timeline
+async fn build_timeline_info(
+    state: &State,
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
-) -> anyhow::Result<LocalTimelineInfo> {
+) -> anyhow::Result<TimelineInfo> {
     let last_record_lsn = timeline.get_last_record_lsn();
     let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
         let guard = timeline.last_received_wal.lock().unwrap();
@@ -100,24 +100,47 @@ fn local_timeline_info_from_timeline(
         }
     };
 
-    let info = LocalTimelineInfo {
-        ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
-        ancestor_lsn: {
-            match timeline.get_ancestor_lsn() {
-                Lsn(0) => None,
-                lsn @ Lsn(_) => Some(lsn),
-            }
-        },
+    let (remote_consistent_lsn, awaits_download) = if let Some(remote_entry) = state
+        .remote_index
+        .read()
+        .await
+        .timeline_entry(&TenantTimelineId {
+            tenant_id: timeline.tenant_id,
+            timeline_id: timeline.timeline_id,
+        }) {
+        (
+            Some(remote_entry.metadata.disk_consistent_lsn()),
+            remote_entry.awaits_download,
+        )
+    } else {
+        (None, false)
+    };
+
+    let ancestor_timeline_id = timeline.get_ancestor_timeline_id();
+    let ancestor_lsn = match timeline.get_ancestor_lsn() {
+        Lsn(0) => None,
+        lsn @ Lsn(_) => Some(lsn),
+    };
+    let current_logical_size = match timeline.get_current_logical_size() {
+        Ok(size) => Some(size),
+        Err(err) => {
+            error!("Timeline info creation failed to get current logical size: {err:?}");
+            None
+        }
+    };
+    let current_physical_size = Some(timeline.get_physical_size());
+
+    let info = TimelineInfo {
+        tenant_id: timeline.tenant_id,
+        timeline_id: timeline.timeline_id,
+        ancestor_timeline_id,
+        ancestor_lsn,
         disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
-        current_logical_size: Some(
-            timeline
-                .get_current_logical_size()
-                .context("Timeline info creation failed to get current logical size")?,
-        ),
-        current_physical_size: Some(timeline.get_physical_size()),
+        current_logical_size,
+        current_physical_size,
         current_logical_size_non_incremental: if include_non_incremental_logical_size {
             Some(timeline.get_current_logical_size_non_incremental(last_record_lsn)?)
         } else {
@@ -132,30 +155,23 @@ fn local_timeline_info_from_timeline(
         last_received_msg_lsn,
         last_received_msg_ts,
         pg_version: timeline.pg_version,
+
+        remote_consistent_lsn,
+        awaits_download,
+
+        // Duplicate some fields in 'local' and 'remote' fields, for backwards-compatility
+        // with the control plane.
+        local: LocalTimelineInfo {
+            ancestor_timeline_id,
+            ancestor_lsn,
+            current_logical_size,
+            current_physical_size,
+        },
+        remote: RemoteTimelineInfo {
+            remote_consistent_lsn,
+        },
     };
     Ok(info)
-}
-
-fn list_local_timelines(
-    tenant_id: TenantId,
-    include_non_incremental_logical_size: bool,
-    include_non_incremental_physical_size: bool,
-) -> Result<Vec<(TimelineId, LocalTimelineInfo)>> {
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
-    let timelines = tenant.list_timelines();
-
-    let mut local_timeline_info = Vec::with_capacity(timelines.len());
-    for repository_timeline in timelines {
-        local_timeline_info.push((
-            repository_timeline.timeline_id,
-            local_timeline_info_from_timeline(
-                &repository_timeline,
-                include_non_incremental_logical_size,
-                include_non_incremental_physical_size,
-            )?,
-        ))
-    }
-    Ok(local_timeline_info)
 }
 
 // healthcheck handler
@@ -169,6 +185,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
+    let state = get_state(&request);
+
     let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
     let new_timeline_info = async {
         match tenant.create_timeline(
@@ -179,14 +197,10 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         ).await {
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
-                let local_info = local_timeline_info_from_timeline(&new_timeline, false, false)
+                let timeline_info = build_timeline_info(state, &new_timeline, false, false)
+                    .await
                     .map_err(ApiError::InternalServerError)?;
-                Ok(Some(TimelineInfo {
-                    tenant_id,
-                    timeline_id: new_timeline.timeline_id,
-                    local: local_info,
-                    remote: None,
-                }))
+                Ok(Some(timeline_info))
             }
             Ok(None) => Ok(None), // timeline already exists
             Err(err) => Err(ApiError::InternalServerError(err)),
@@ -209,6 +223,8 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         query_param_present(&request, "include-non-incremental-physical-size");
     check_permission(&request, Some(tenant_id))?;
 
+    let state = get_state(&request);
+
     let timelines = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
         let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
@@ -219,32 +235,17 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
     let mut response_data = Vec::with_capacity(timelines.len());
     for timeline in timelines {
-        let timeline_id = timeline.timeline_id;
-        let local = local_timeline_info_from_timeline(
+        let timeline_info = build_timeline_info(
+            state,
             &timeline,
             include_non_incremental_logical_size,
             include_non_incremental_physical_size,
         )
-            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
-            .map_err(ApiError::InternalServerError)?;
+        .await
+        .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
+        .map_err(ApiError::InternalServerError)?;
 
-        response_data.push(TimelineInfo {
-            tenant_id,
-            timeline_id,
-            local,
-            remote: get_state(&request)
-                .remote_index
-                .read()
-                .await
-                .timeline_entry(&TenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                })
-                .map(|remote_entry| RemoteTimelineInfo {
-                    remote_consistent_lsn: remote_entry.metadata.disk_consistent_lsn(),
-                    awaits_download: remote_entry.awaits_download,
-                }),
-        })
+        response_data.push(timeline_info);
     }
 
     json_response(StatusCode::OK, response_data)
@@ -289,7 +290,9 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         query_param_present(&request, "include-non-incremental-physical-size");
     check_permission(&request, Some(tenant_id))?;
 
-    let (local_timeline_info, remote_timeline_info) = async {
+    let state = get_state(&request);
+
+    let timeline_info = async {
         let timeline = tokio::task::spawn_blocking(move || {
             tenant_mgr::get_tenant(tenant_id, true)?.get_timeline(timeline_id)
         })
@@ -298,40 +301,22 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 
         let timeline = timeline.map_err(ApiError::NotFound)?;
 
-        let local_timeline_info = local_timeline_info_from_timeline(
+        let timeline_info = build_timeline_info(
+            state,
             &timeline,
             include_non_incremental_logical_size,
             include_non_incremental_physical_size,
         )
-            .context("Failed to get local timeline info: {e:#}")
-            .map_err(ApiError::InternalServerError)?;
+        .await
+        .context("Failed to get local timeline info: {e:#}")
+        .map_err(ApiError::InternalServerError)?;
 
-        let remote_timeline_info = {
-            let remote_index_read = get_state(&request).remote_index.read().await;
-            remote_index_read
-                .timeline_entry(&TenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                })
-                .map(|remote_entry| RemoteTimelineInfo {
-                    remote_consistent_lsn: remote_entry.metadata.disk_consistent_lsn(),
-                    awaits_download: remote_entry.awaits_download,
-                })
-        };
-        Ok::<_, ApiError>((local_timeline_info, remote_timeline_info))
+        Ok::<_, ApiError>(timeline_info)
     }
     .instrument(info_span!("timeline_detail", tenant = %tenant_id, timeline = %timeline_id))
     .await?;
 
-    json_response(
-        StatusCode::OK,
-        TimelineInfo {
-            tenant_id,
-            timeline_id,
-            local: local_timeline_info,
-            remote: remote_timeline_info,
-        },
-    )
+    json_response(StatusCode::OK, timeline_info)
 }
 
 async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -553,35 +538,26 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
             false
         });
 
-    let tenant_state = match tenant {
-        Ok(tenant) => tenant.current_state(),
+    let (tenant_state, current_physical_size) = match tenant {
+        Ok(tenant) => {
+            let timelines = tenant.list_timelines();
+            // Calculate total physical size of all timelines
+            let mut current_physical_size = 0;
+            for timeline in timelines {
+                current_physical_size += timeline.get_physical_size();
+            }
+
+            (tenant.current_state(), Some(current_physical_size))
+        }
         Err(e) => {
             error!("Failed to get local tenant state: {e:#}");
             if has_in_progress_downloads {
-                TenantState::Paused
+                (TenantState::Paused, None)
             } else {
-                TenantState::Broken
+                (TenantState::Broken, None)
             }
         }
     };
-
-    let current_physical_size =
-        match tokio::task::spawn_blocking(move || list_local_timelines(tenant_id, false, false))
-            .await
-            .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?
-        {
-            Err(err) => {
-                // Getting local timelines can fail when no local tenant directory is on disk (e.g, when tenant data is being downloaded).
-                // In that case, put a warning message into log and operate normally.
-                warn!("Failed to get local timelines for tenant {tenant_id}: {err}");
-                None
-            }
-            Ok(local_timeline_infos) => Some(
-                local_timeline_infos
-                    .into_iter()
-                    .fold(0, |acc, x| acc + x.1.current_physical_size.unwrap()),
-            ),
-        };
 
     json_response(
         StatusCode::OK,
