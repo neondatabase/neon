@@ -744,9 +744,9 @@ jobs:
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-#    if: |
-#      (github.ref_name == 'main' || github.ref_name == 'release') &&
-#      github.event_name != 'workflow_dispatch'
+    if: |
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.event_name != 'workflow_dispatch'
     defaults:
       run:
         shell: bash
@@ -775,14 +775,14 @@ jobs:
           export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           cd "$(pwd)/.github/ansible"
 
-          #if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             ./get_binaries.sh
-          #elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-          #  RELEASE=true ./get_binaries.sh
-          #else
-          #  echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-          #  exit 1
-          #fi
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            RELEASE=true ./get_binaries.sh
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
 
           ansible-playbook deploy.yaml -i staging.test-us-east-2.hosts -e @ssm_config
           rm -f neon_install.tar.gz .neon_current_version
