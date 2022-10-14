@@ -284,10 +284,10 @@ fn create_tenant_files(
     if creation_result.is_err() {
         error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
         if let Err(e) = fs::remove_dir_all(&temporary_tenant_dir) {
+            error!("Failed to remove temporary tenant directory {temporary_tenant_dir:?}: {e}")
+        } else if let Err(e) = crashsafe_dir::fsync(&temporary_tenant_dir) {
             error!(
-                "Failed to remove temporary tenant directory {}: {}",
-                temporary_tenant_dir.display(),
-                e
+                "Failed to fsync removed temporary tenant directory {temporary_tenant_dir:?}: {e}"
             )
         }
     }

@@ -99,25 +99,17 @@ pub fn fsync_file_and_parent(file_path: &Path) -> io::Result<()> {
 
 pub fn fsync(path: &Path) -> io::Result<()> {
     File::open(path)
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to open the file {path:?}: {e}"),
-            )
-        })
+        .map_err(|e| io::Error::new(e.kind(), format!("Failed to open the file {path:?}: {e}")))
         .and_then(|file| {
             file.sync_all()
                 .map_err(|e| {
                     io::Error::new(
-                        io::ErrorKind::Other,
+                        e.kind(),
                         format!("Failed to sync file {path:?} data and metadata: {e}"),
                     )
                 })
                 .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to fsync file {path:?}: {e}"),
-                    )
+                    io::Error::new(e.kind(), format!("Failed to fsync file {path:?}: {e}"))
                 })
         })
 }

@@ -294,33 +294,36 @@ impl TimelineUninitMark {
 
     fn remove_uninit_mark(mut self) -> anyhow::Result<()> {
         if !self.uninit_mark_deleted {
-            let uninit_mark_file = &self.uninit_mark_path;
-            let uninit_mark_parent = uninit_mark_file.parent().with_context(|| {
+            self.delete_mark_file_if_present()?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_mark_file_if_present(&mut self) -> Result<(), anyhow::Error> {
+        let uninit_mark_file = &self.uninit_mark_path;
+        let uninit_mark_parent = uninit_mark_file.parent().with_context(|| {
+            format!(
+                "Uninit mark file {} has no parent",
+                uninit_mark_file.display()
+            )
+        })?;
+        fs::remove_file(&uninit_mark_file)
+            .or_else(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+            .with_context(|| {
                 format!(
-                    "Uninit mark file {} has no parent",
+                    "Failed to remove uninit mark file at path {}",
                     uninit_mark_file.display()
                 )
             })?;
-
-            fs::remove_file(&uninit_mark_file)
-                .or_else(|e| {
-                    if e.kind() == io::ErrorKind::NotFound {
-                        Ok(())
-                    } else {
-                        Err(e)
-                    }
-                })
-                .with_context(|| {
-                    format!(
-                        "Failed to remove uninit mark file at path {}",
-                        uninit_mark_file.display()
-                    )
-                })?;
-
-            crashsafe_dir::fsync(uninit_mark_parent)
-                .context("Failed to fsync uninit mark parent")?;
-            self.uninit_mark_deleted = true;
-        }
+        crashsafe_dir::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
+        self.uninit_mark_deleted = true;
 
         Ok(())
     }
@@ -341,7 +344,7 @@ impl Drop for TimelineUninitMark {
                     "Removing intermediate uninit mark file {}",
                     self.uninit_mark_path.display()
                 );
-                if let Err(e) = fs::remove_file(&self.uninit_mark_path) {
+                if let Err(e) = self.delete_mark_file_if_present() {
                     error!("Failed to remove the uninit mark file: {e}")
                 }
             }
@@ -1379,15 +1382,6 @@ impl Tenant {
             timelines.get(&timeline_id).is_none(),
             "Timeline {tenant_id}/{timeline_id} already exists in pageserver's memory"
         );
-        let uninit_mark_path = self
-            .conf
-            .timeline_uninit_mark_file_path(tenant_id, timeline_id);
-        anyhow::ensure!(
-            !uninit_mark_path.exists(),
-            "Timeline uninit mark file {} already exists, cannot create it again",
-            uninit_mark_path.display()
-        );
-
         let timeline_path = self.conf.timeline_path(&timeline_id, &tenant_id);
         anyhow::ensure!(
             !timeline_path.exists(),
@@ -1395,6 +1389,9 @@ impl Tenant {
             timeline_path.display()
         );
 
+        let uninit_mark_path = self
+            .conf
+            .timeline_uninit_mark_file_path(tenant_id, timeline_id);
         fs::File::create(&uninit_mark_path)
             .context("Failed to create uninit mark file")
             .and_then(|_| {
