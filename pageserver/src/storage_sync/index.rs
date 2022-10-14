@@ -260,22 +260,12 @@ impl RemoteTimeline {
     pub fn merge_metadata_from_downloaded(
         &mut self,
         downloaded: &HashMap<PathBuf, LayerFileMetadata>,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            downloaded
-                .keys()
-                .all(|key| self.timeline_layers.contains_key(key)),
-            "should not have downloaded layer files which timeline knows nothing about",
-        );
-
+    ) {
         downloaded.iter().for_each(|(path, metadata)| {
-            self.timeline_layers
-                .get_mut(path)
-                .expect("already verified existence of all keys")
-                .merge(metadata);
+            if let Some(upgraded) = self.timeline_layers.get_mut(path) {
+                upgraded.merge(metadata);
+            }
         });
-
-        Ok(())
     }
 
     pub fn from_index_part(timeline_path: &Path, index_part: IndexPart) -> anyhow::Result<Self> {

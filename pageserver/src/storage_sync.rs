@@ -1005,14 +1005,9 @@ async fn download_timeline_data(
                                 .timeline_entry_mut(&sync_id)
                                 .expect("set_awaits_download verified existence");
 
-                            let gathered = &download_data.data.gathered_metadata;
-
-                            if let Err(e) = timeline.merge_metadata_from_downloaded(gathered) {
-                                error!("Merging metadata after successful download for {sync_id:?}: {e:?}");
-                                // FIXME: this is "handling" an assertion error which describes that
-                                // not all layers were downloaded, unsure what to do.
-                                return DownloadStatus::Nothing;
-                            }
+                            timeline.merge_metadata_from_downloaded(
+                                &download_data.data.gathered_metadata,
+                            );
 
                             register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
                             return DownloadStatus::Downloaded;
