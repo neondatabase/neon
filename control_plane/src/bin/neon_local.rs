@@ -358,7 +358,7 @@ fn print_timelines_tree(
 
     // Memorize all direct children of each timeline.
     for timeline in timelines.iter() {
-        if let Some(ancestor_timeline_id) = timeline.local.ancestor_timeline_id {
+        if let Some(ancestor_timeline_id) = timeline.ancestor_timeline_id {
             timelines_hash
                 .get_mut(&ancestor_timeline_id)
                 .context("missing timeline info in the HashMap")?
@@ -369,7 +369,7 @@ fn print_timelines_tree(
 
     for timeline in timelines_hash.values() {
         // Start with root local timelines (no ancestors) first.
-        if timeline.info.local.ancestor_timeline_id.is_none() {
+        if timeline.info.ancestor_timeline_id.is_none() {
             print_timeline(0, &Vec::from([true]), timeline, &timelines_hash)?;
         }
     }
@@ -386,17 +386,8 @@ fn print_timeline(
     timeline: &TimelineTreeEl,
     timelines: &HashMap<TimelineId, TimelineTreeEl>,
 ) -> Result<()> {
-    let local_remote = if timeline.info.remote.is_some() {
-        "(L)"
-    } else {
-        "(L+R)"
-    };
-
-    // Draw main padding
-    print!("{} ", local_remote);
-
     if nesting_level > 0 {
-        let ancestor_lsn = match timeline.info.local.ancestor_lsn {
+        let ancestor_lsn = match timeline.info.ancestor_lsn {
             Some(lsn) => lsn.to_string(),
             None => "Unknown Lsn".to_string(),
         };
@@ -589,7 +580,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 Some(pg_version),
             )?;
             let new_timeline_id = timeline_info.timeline_id;
-            let last_record_lsn = timeline_info.local.last_record_lsn;
+            let last_record_lsn = timeline_info.last_record_lsn;
 
             env.register_branch_mapping(
                 DEFAULT_BRANCH_NAME.to_string(),
@@ -644,7 +635,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 pageserver.timeline_create(tenant_id, None, None, None, Some(pg_version))?;
             let new_timeline_id = timeline_info.timeline_id;
 
-            let last_record_lsn = timeline_info.local.last_record_lsn;
+            let last_record_lsn = timeline_info.last_record_lsn;
             env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
 
             println!(
@@ -724,7 +715,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             )?;
             let new_timeline_id = timeline_info.timeline_id;
 
-            let last_record_lsn = timeline_info.local.last_record_lsn;
+            let last_record_lsn = timeline_info.last_record_lsn;
 
             env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
 
@@ -784,7 +775,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                         // Use the LSN at the end of the timeline.
                         timeline_infos
                             .get(&node.timeline_id)
-                            .map(|bi| bi.local.last_record_lsn.to_string())
+                            .map(|bi| bi.last_record_lsn.to_string())
                             .unwrap_or_else(|| "?".to_string())
                     }
                     Some(lsn) => {

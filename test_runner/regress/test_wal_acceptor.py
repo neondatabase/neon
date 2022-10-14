@@ -127,14 +127,9 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
         for timeline_detail in timeline_details:
             timeline_id = TimelineId(timeline_detail["timeline_id"])
 
-            local_timeline_detail = timeline_detail.get("local")
-            if local_timeline_detail is None:
-                log.debug(f"Timeline {timeline_id} is not present locally, skipping")
-                continue
-
             m = TimelineMetrics(
                 timeline_id=timeline_id,
-                last_record_lsn=Lsn(local_timeline_detail["last_record_lsn"]),
+                last_record_lsn=Lsn(timeline_detail["last_record_lsn"]),
             )
             for sk_m in sk_metrics:
                 m.flush_lsns.append(Lsn(sk_m.flush_lsn_inexact[(tenant_id, timeline_id)]))
@@ -536,7 +531,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
                 )
 
     ps_cli = env.pageserver.http_client()
-    pageserver_lsn = Lsn(ps_cli.timeline_detail(tenant_id, timeline_id)["local"]["last_record_lsn"])
+    pageserver_lsn = Lsn(ps_cli.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
     lag = last_lsn - pageserver_lsn
     log.info(
         f"Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb"
@@ -580,9 +575,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
             raise RuntimeError("Timed out waiting for WAL redo")
 
         pageserver_lsn = Lsn(
-            env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["local"][
-                "last_record_lsn"
-            ]
+            env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["last_record_lsn"]
         )
         lag = last_lsn - pageserver_lsn
 
