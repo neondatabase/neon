@@ -14,7 +14,8 @@
       - safekeeper
 
     - name: inform about versions
-      debug: msg="Version to deploy - {{ current_version }}"
+      debug:
+        msg: "Version to deploy - {{ current_version }}"
       tags:
       - pageserver
       - safekeeper
@@ -63,15 +64,29 @@
       tags:
       - pageserver
 
-    - name: update remote storage (s3) config
-      lineinfile:
-        path: /storage/pageserver/data/pageserver.toml
-        line: "{{ item }}"
-      loop:
-        - "[remote_storage]"
-        - "bucket_name = '{{ bucket_name }}'"
-        - "bucket_region = '{{ bucket_region }}'"
-        - "prefix_in_bucket = '{{ inventory_hostname }}'"
+    - name: read the existing remote pageserver config
+      ansible.builtin.slurp:
+        src: /storage/pageserver/data/pageserver.toml
+      register: _remote_ps_config
+      tags:
+      - pageserver
+
+    - name: parse the existing pageserver configuration
+      ansible.builtin.set_fact:
+        _existing_ps_config: "{{ _remote_ps_config['content'] | b64decode | sivel.toiletwater.from_toml }}"
+      tags:
+      - pageserver
+
+    - name: construct the final pageserver configuration dict
+      ansible.builtin.set_fact:
+        pageserver_config: "{{ pageserver_config_stub | combine({'id': _existing_ps_config.id }) }}"
+      tags:
+      - pageserver
+
+    - name: template the pageserver config
+      template:
+        src: templates/pageserver.toml.j2
+        dest: /storage/pageserver/data/pageserver.toml
       become: true
       tags:
       - pageserver

@@ -712,7 +712,7 @@ jobs:
       - name: Setup ansible
         run: |
           export PATH="/root/.local/bin:$PATH"
-          pip install --progress-bar off --user ansible boto3
+          pip install --progress-bar off --user ansible boto3 toml
 
       - name: Redeploy
         run: |
@@ -734,8 +734,8 @@ jobs:
           chmod 0600 ssh-key
           ssh-add ssh-key
           rm -f ssh-key ssh-key-cert.pub
-
-          ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts
+          ansible-galaxy collection install sivel.toiletwater
+          ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts.yaml
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:

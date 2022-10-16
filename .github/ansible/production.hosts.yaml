@@ -1,0 +1,31 @@
+---
+storage:
+  vars:
+    env_name: prod-1
+    console_mgmt_base_url: http://console-release.local
+    bucket_name: zenith-storage-oregon
+    bucket_region: us-west-2
+    etcd_endpoints: zenith-1-etcd.local:2379
+    pageserver_config_stub:
+      pg_distrib_dir: /usr/local
+      remote_storage:
+        bucket_name: "{{ bucket_name }}"
+        bucket_region: "{{ bucket_region }}"
+        prefix_in_bucket: "{{ inventory_hostname }}"
+
+  children:
+    pageservers:
+      hosts:
+        zenith-1-ps-2:
+          console_region_id: 1
+        zenith-1-ps-3:
+          console_region_id: 1
+
+    safekeepers:
+      hosts:
+        zenith-1-sk-1:
+          console_region_id: 1
+        zenith-1-sk-2:
+          console_region_id: 1
+        zenith-1-sk-3:
+          console_region_id: 1
