@@ -1,6 +1,7 @@
 //! Code to deal with safekeeper control file upgrades
 use crate::safekeeper::{
-    AcceptorState, Peers, PgUuid, SafeKeeperState, ServerInfo, Term, TermHistory, TermSwitchEntry,
+    AcceptorState, PersistedPeers, PgUuid, SafeKeeperState, ServerInfo, Term, TermHistory,
+    TermSwitchEntry,
 };
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -134,7 +135,7 @@ pub struct SafeKeeperStateV4 {
     // fundamental; but state is saved here only for informational purposes and
     // obviously can be stale. (Currently not saved at all, but let's provision
     // place to have less file version upgrades).
-    pub peers: Peers,
+    pub peers: PersistedPeers,
 }
 
 pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState> {
@@ -165,7 +166,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            peers: Peers(vec![]),
+            peers: PersistedPeers(vec![]),
         });
     // migrate to hexing some ids
     } else if version == 2 {
@@ -188,7 +189,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            peers: Peers(vec![]),
+            peers: PersistedPeers(vec![]),
         });
     // migrate to moving tenant_id/timeline_id to the top and adding some lsns
     } else if version == 3 {
@@ -211,7 +212,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            peers: Peers(vec![]),
+            peers: PersistedPeers(vec![]),
         });
     // migrate to having timeline_start_lsn
     } else if version == 4 {
@@ -234,7 +235,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             backup_lsn: Lsn::INVALID,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: Lsn(0),
-            peers: Peers(vec![]),
+            peers: PersistedPeers(vec![]),
         });
     } else if version == 5 {
         info!("reading safekeeper control file version {}", version);

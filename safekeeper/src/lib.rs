@@ -1,4 +1,6 @@
-use defaults::DEFAULT_WAL_BACKUP_RUNTIME_THREADS;
+use defaults::{
+    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
+};
 //
 use remote_storage::RemoteStorageConfig;
 use std::path::PathBuf;
@@ -34,8 +36,9 @@ pub mod defaults {
         DEFAULT_PG_LISTEN_PORT,
     };
 
-    pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(10);
     pub const DEFAULT_WAL_BACKUP_RUNTIME_THREADS: usize = 8;
+    pub const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+    pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +55,6 @@ pub struct SafeKeeperConf {
     pub no_sync: bool,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
-    pub recall_period: Duration,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub backup_runtime_threads: usize,
     pub wal_backup_enabled: bool,
@@ -60,6 +62,8 @@ pub struct SafeKeeperConf {
     pub broker_endpoints: Vec<Url>,
     pub broker_etcd_prefix: String,
     pub auth_validation_public_key_path: Option<PathBuf>,
+    pub heartbeat_timeout: Duration,
+    pub max_offloader_lag_bytes: u64,
 }
 
 impl SafeKeeperConf {
@@ -85,13 +89,14 @@ impl Default for SafeKeeperConf {
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             remote_storage: None,
-            recall_period: defaults::DEFAULT_RECALL_PERIOD,
             my_id: NodeId(0),
             broker_endpoints: Vec::new(),
             broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             backup_runtime_threads: DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
             wal_backup_enabled: true,
             auth_validation_public_key_path: None,
+            heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+            max_offloader_lag_bytes: DEFAULT_MAX_OFFLOADER_LAG_BYTES,
         }
     }
 }
