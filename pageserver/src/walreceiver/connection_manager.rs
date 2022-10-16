@@ -802,6 +802,7 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
                         safekeeper_connstr: None,
                     },
                     etcd_version: 0,
@@ -818,6 +819,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some("no commit_lsn".to_string()),
                     },
                     etcd_version: 0,
@@ -834,6 +837,7 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
                         safekeeper_connstr: Some("no commit_lsn".to_string()),
                     },
                     etcd_version: 0,
@@ -850,6 +854,7 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
                         safekeeper_connstr: None,
                     },
                     etcd_version: 0,
@@ -909,6 +914,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
                     },
                     etcd_version: 0,
@@ -925,6 +932,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some("not advanced Lsn".to_string()),
                     },
                     etcd_version: 0,
@@ -941,6 +950,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some("not enough advanced Lsn".to_string()),
                     },
                     etcd_version: 0,
@@ -975,6 +986,8 @@ mod tests {
                     backup_lsn: None,
                     remote_consistent_lsn: None,
                     peer_horizon_lsn: None,
+                    local_start_lsn: None,
+
                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
                 },
                 etcd_version: 0,
@@ -1007,6 +1020,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some("smaller commit_lsn".to_string()),
                     },
                     etcd_version: 0,
@@ -1023,6 +1038,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
                     },
                     etcd_version: 0,
@@ -1039,6 +1056,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: None,
                     },
                     etcd_version: 0,
@@ -1084,6 +1103,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
                     },
                     etcd_version: 0,
@@ -1100,6 +1121,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
                     },
                     etcd_version: 0,
@@ -1169,6 +1192,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
                     },
                     etcd_version: 0,
@@ -1185,6 +1210,8 @@ mod tests {
                         backup_lsn: None,
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
+                        local_start_lsn: None,
+
                         safekeeper_connstr: Some("advanced by Lsn safekeeper".to_string()),
                     },
                     etcd_version: 0,
@@ -1256,6 +1283,8 @@ mod tests {
                     backup_lsn: None,
                     remote_consistent_lsn: None,
                     peer_horizon_lsn: None,
+                    local_start_lsn: None,
+
                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
                 },
                 etcd_version: 0,
@@ -1327,6 +1356,8 @@ mod tests {
                     backup_lsn: None,
                     remote_consistent_lsn: None,
                     peer_horizon_lsn: None,
+                    local_start_lsn: None,
+
                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
                 },
                 etcd_version: 0,

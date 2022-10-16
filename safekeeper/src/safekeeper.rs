@@ -11,6 +11,7 @@ use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
+
 use tracing::*;
 
 use crate::control_file;
@@ -132,9 +133,8 @@ pub struct ServerInfo {
     pub wal_seg_size: u32,
 }
 
-/// Data published by safekeeper to the peers
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerInfo {
+pub struct PersistedPeerInfo {
     /// LSN up to which safekeeper offloaded WAL to s3.
     backup_lsn: Lsn,
     /// Term of the last entry.
@@ -145,7 +145,7 @@ pub struct PeerInfo {
     commit_lsn: Lsn,
 }
 
-impl PeerInfo {
+impl PersistedPeerInfo {
     fn new() -> Self {
         Self {
             backup_lsn: Lsn::INVALID,
@@ -156,10 +156,8 @@ impl PeerInfo {
     }
 }
 
-// vector-based node id -> peer state map with very limited functionality we
-// need/
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Peers(pub Vec<(NodeId, PeerInfo)>);
+pub struct PersistedPeers(pub Vec<(NodeId, PersistedPeerInfo)>);
 
 /// Persistent information stored on safekeeper node
 /// On disk data is prefixed by magic and format version and followed by checksum.
@@ -203,7 +201,7 @@ pub struct SafeKeeperState {
     // fundamental; but state is saved here only for informational purposes and
     // obviously can be stale. (Currently not saved at all, but let's provision
     // place to have less file version upgrades).
-    pub peers: Peers,
+    pub peers: PersistedPeers,
 }
 
 #[derive(Debug, Clone)]
@@ -240,7 +238,12 @@ impl SafeKeeperState {
             backup_lsn: local_start_lsn,
             peer_horizon_lsn: local_start_lsn,
             remote_consistent_lsn: Lsn(0),
-            peers: Peers(peers.iter().map(|p| (*p, PeerInfo::new())).collect()),
+            peers: PersistedPeers(
+                peers
+                    .iter()
+                    .map(|p| (*p, PersistedPeerInfo::new()))
+                    .collect(),
+            ),
         }
     }
 

@@ -1,4 +1,6 @@
-use defaults::DEFAULT_WAL_BACKUP_RUNTIME_THREADS;
+use defaults::{
+    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_MAX_OFFLOADER_LAG, DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
+};
 //
 use remote_storage::RemoteStorageConfig;
 use std::path::PathBuf;
@@ -36,6 +38,8 @@ pub mod defaults {
 
     pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(10);
     pub const DEFAULT_WAL_BACKUP_RUNTIME_THREADS: usize = 8;
+    pub const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+    pub const DEFAULT_MAX_OFFLOADER_LAG: u64 = 128 * (1 << 20);
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +64,8 @@ pub struct SafeKeeperConf {
     pub broker_endpoints: Vec<Url>,
     pub broker_etcd_prefix: String,
     pub auth_validation_public_key_path: Option<PathBuf>,
+    pub heartbeat_timeout: Duration,
+    pub max_offloader_lag: u64,
 }
 
 impl SafeKeeperConf {
@@ -92,6 +98,8 @@ impl Default for SafeKeeperConf {
             backup_runtime_threads: DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
             wal_backup_enabled: true,
             auth_validation_public_key_path: None,
+            heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+            max_offloader_lag: DEFAULT_MAX_OFFLOADER_LAG,
         }
     }
 }
