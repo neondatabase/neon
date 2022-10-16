@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
-use etcd_broker::subscription_key::{
-    NodeKind, OperationKind, SkOperationKind, SubscriptionKey, SubscriptionKind,
-};
+
 use tokio::task::JoinHandle;
+use utils::id::NodeId;
 
 use std::cmp::min;
 use std::collections::HashMap;
@@ -26,13 +25,10 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-use crate::broker::{Election, ElectionLeader};
-use crate::timeline::Timeline;
-use crate::{broker, GlobalTimelines, SafeKeeperConf};
+use crate::timeline::{PeerInfo, Timeline};
+use crate::{GlobalTimelines, SafeKeeperConf};
 
 use once_cell::sync::OnceCell;
-
-const BROKER_CONNECTION_RETRY_DELAY_MS: u64 = 1000;
 
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
@@ -70,47 +66,104 @@ struct WalBackupTimelineEntry {
     handle: Option<WalBackupTaskHandle>,
 }
 
-/// Start per timeline task, if it makes sense for this safekeeper to offload.
-fn consider_start_task(
+async fn shut_down_task(ttid: TenantTimelineId, entry: &mut WalBackupTimelineEntry) {
+    if let Some(wb_handle) = entry.handle.take() {
+        // Tell the task to shutdown. Error means task exited earlier, that's ok.
+        let _ = wb_handle.shutdown_tx.send(()).await;
+        // Await the task itself. TODO: restart panicked tasks earlier.
+        if let Err(e) = wb_handle.handle.await {
+            warn!("WAL backup task for {} panicked: {}", ttid, e);
+        }
+    }
+}
+
+/// The goal is to ensure that normally only one safekeepers offloads. However,
+/// it is fine (and inevitable, as s3 doesn't provide CAS) that for some short
+/// time we have several ones as they PUT the same files. Also,
+/// - frequently changing the offloader would be bad;
+/// - electing seriously lagging safekeeper is undesirable;
+/// So we deterministically choose among the reasonably caught up candidates.
+/// TODO: take into account failed attempts to deal with hypothetical situation
+/// where s3 is unreachable only for some sks.
+fn determine_offloader(
+    alive_peers: &[PeerInfo],
+    wal_backup_lsn: Lsn,
+    ttid: TenantTimelineId,
+    conf: &SafeKeeperConf,
+) -> (Option<NodeId>, String) {
+    // TODO: remove this once we fill newly joined safekeepers since backup_lsn.
+    let capable_peers = alive_peers
+        .iter()
+        .filter(|p| p.local_start_lsn <= wal_backup_lsn);
+    match alive_peers.iter().map(|p| p.commit_lsn).max() {
+        None => (None, "no connected peers to elect from".to_string()),
+        Some(max_commit_lsn) => {
+            let threshold = max_commit_lsn
+                .checked_sub(conf.max_offloader_lag_bytes)
+                .unwrap_or(Lsn(0));
+            let mut caughtup_peers = capable_peers
+                .clone()
+                .filter(|p| p.commit_lsn >= threshold)
+                .collect::<Vec<_>>();
+            caughtup_peers.sort_by(|p1, p2| p1.sk_id.cmp(&p2.sk_id));
+
+            // To distribute the load, shift by timeline_id.
+            let offloader = caughtup_peers
+                [(u128::from(ttid.timeline_id) % caughtup_peers.len() as u128) as usize]
+                .sk_id;
+
+            let mut capable_peers_dbg = capable_peers
+                .map(|p| (p.sk_id, p.commit_lsn))
+                .collect::<Vec<_>>();
+            capable_peers_dbg.sort_by(|p1, p2| p1.0.cmp(&p2.0));
+            (
+                Some(offloader),
+                format!(
+                    "elected {} among {:?} peers, with {} of them being caughtup",
+                    offloader,
+                    capable_peers_dbg,
+                    caughtup_peers.len()
+                ),
+            )
+        }
+    }
+}
+
+/// Based on peer information determine which safekeeper should offload; if it
+/// is me, run (per timeline) task, if not yet. OTOH, if it is not me and task
+/// is running, kill it.
+async fn update_task(
     conf: &SafeKeeperConf,
     ttid: TenantTimelineId,
-    task: &mut WalBackupTimelineEntry,
+    entry: &mut WalBackupTimelineEntry,
 ) {
-    if !task.timeline.can_wal_backup() {
-        return;
+    let alive_peers = entry.timeline.get_peers(conf);
+    let wal_backup_lsn = entry.timeline.get_wal_backup_lsn();
+    let (offloader, election_dbg_str) =
+        determine_offloader(&alive_peers, wal_backup_lsn, ttid, conf);
+    let elected_me = Some(conf.my_id) == offloader;
+
+    if elected_me != (entry.handle.is_some()) {
+        if elected_me {
+            info!("elected for backup {}: {}", ttid, election_dbg_str);
+
+            let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+            let timeline_dir = conf.timeline_dir(&ttid);
+
+            let handle = tokio::spawn(
+                backup_task_main(ttid, timeline_dir, shutdown_rx)
+                    .instrument(info_span!("WAL backup task", ttid = %ttid)),
+            );
+
+            entry.handle = Some(WalBackupTaskHandle {
+                shutdown_tx,
+                handle,
+            });
+        } else {
+            info!("stepping down from backup {}: {}", ttid, election_dbg_str);
+            shut_down_task(ttid, entry).await;
+        }
     }
-    info!("starting WAL backup task for {}", ttid);
-
-    // TODO: decide who should offload right here by simply checking current
-    // state instead of running elections in offloading task.
-    let election_name = SubscriptionKey {
-        cluster_prefix: conf.broker_etcd_prefix.clone(),
-        kind: SubscriptionKind::Operation(
-            ttid,
-            NodeKind::Safekeeper,
-            OperationKind::Safekeeper(SkOperationKind::WalBackup),
-        ),
-    }
-    .watch_key();
-    let my_candidate_name = broker::get_candiate_name(conf.my_id);
-    let election = broker::Election::new(
-        election_name,
-        my_candidate_name,
-        conf.broker_endpoints.clone(),
-    );
-
-    let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-    let timeline_dir = conf.timeline_dir(&ttid);
-
-    let handle = tokio::spawn(
-        backup_task_main(ttid, timeline_dir, shutdown_rx, election)
-            .instrument(info_span!("WAL backup task", ttid = %ttid)),
-    );
-
-    task.handle = Some(WalBackupTaskHandle {
-        shutdown_tx,
-        handle,
-    });
 }
 
 const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
@@ -158,27 +211,20 @@ async fn wal_backup_launcher_main_loop(
                             timeline,
                             handle: None,
                         });
-                        consider_start_task(&conf, ttid, entry);
+                        update_task(&conf, ttid, entry).await;
                     } else {
                         // need to stop the task
                         info!("stopping WAL backup task for {}", ttid);
-
-                        let entry = tasks.remove(&ttid).unwrap();
-                        if let Some(wb_handle) = entry.handle {
-                            // Tell the task to shutdown. Error means task exited earlier, that's ok.
-                            let _ = wb_handle.shutdown_tx.send(()).await;
-                            // Await the task itself. TODO: restart panicked tasks earlier.
-                            if let Err(e) = wb_handle.handle.await {
-                                warn!("WAL backup task for {} panicked: {}", ttid, e);
-                            }
-                        }
+                        let mut entry = tasks.remove(&ttid).unwrap();
+                        shut_down_task(ttid, &mut entry).await;
                     }
                 }
             }
-            // Start known tasks, if needed and possible.
+            // For each timeline needing offloading, check if this safekeeper
+            // should do the job and start/stop the task accordingly.
             _ = ticker.tick() => {
-                for (ttid, entry) in tasks.iter_mut().filter(|(_, entry)| entry.handle.is_none()) {
-                    consider_start_task(&conf, *ttid, entry);
+                for (ttid, entry) in tasks.iter_mut() {
+                    update_task(&conf, *ttid, entry).await;
                 }
             }
         }
@@ -190,17 +236,13 @@ struct WalBackupTask {
     timeline_dir: PathBuf,
     wal_seg_size: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
-    leader: Option<ElectionLeader>,
-    election: Election,
 }
 
-/// Offload single timeline. Called only after we checked that backup
-/// is required (wal_backup_attend) and possible (can_wal_backup).
+/// Offload single timeline.
 async fn backup_task_main(
     ttid: TenantTimelineId,
     timeline_dir: PathBuf,
     mut shutdown_rx: Receiver<()>,
-    election: Election,
 ) {
     info!("started");
     let res = GlobalTimelines::get(ttid);
@@ -215,8 +257,6 @@ async fn backup_task_main(
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
         timeline: tli,
         timeline_dir,
-        leader: None,
-        election,
     };
 
     // task is spinned up only when wal_seg_size already initialized
@@ -229,9 +269,6 @@ async fn backup_task_main(
             canceled = true;
         }
     }
-    if let Some(l) = wb.leader {
-        l.give_up().await;
-    }
     info!("task {}", if canceled { "canceled" } else { "terminated" });
 }
 
@@ -239,106 +276,71 @@ impl WalBackupTask {
     async fn run(&mut self) {
         let mut backup_lsn = Lsn(0);
 
-        // election loop
+        let mut retry_attempt = 0u32;
+        // offload loop
         loop {
-            let mut retry_attempt = 0u32;
+            if retry_attempt == 0 {
+                // wait for new WAL to arrive
+                if let Err(e) = self.commit_lsn_watch_rx.changed().await {
+                    // should never happen, as we hold Arc to timeline.
+                    error!("commit_lsn watch shut down: {:?}", e);
+                    return;
+                }
+            } else {
+                // or just sleep if we errored previously
+                let mut retry_delay = UPLOAD_FAILURE_RETRY_MAX_MS;
+                if let Some(backoff_delay) = UPLOAD_FAILURE_RETRY_MIN_MS.checked_shl(retry_attempt)
+                {
+                    retry_delay = min(retry_delay, backoff_delay);
+                }
+                sleep(Duration::from_millis(retry_delay)).await;
+            }
 
-            info!("acquiring leadership");
-            if let Err(e) = broker::get_leader(&self.election, &mut self.leader).await {
-                error!("error during leader election {:?}", e);
-                sleep(Duration::from_millis(BROKER_CONNECTION_RETRY_DELAY_MS)).await;
+            let commit_lsn = *self.commit_lsn_watch_rx.borrow();
+
+            // Note that backup_lsn can be higher than commit_lsn if we
+            // don't have much local WAL and others already uploaded
+            // segments we don't even have.
+            if backup_lsn.segment_number(self.wal_seg_size)
+                >= commit_lsn.segment_number(self.wal_seg_size)
+            {
+                retry_attempt = 0;
+                continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
+            }
+            // Perhaps peers advanced the position, check shmem value.
+            backup_lsn = self.timeline.get_wal_backup_lsn();
+            if backup_lsn.segment_number(self.wal_seg_size)
+                >= commit_lsn.segment_number(self.wal_seg_size)
+            {
+                retry_attempt = 0;
                 continue;
             }
-            info!("acquired leadership");
 
-            // offload loop
-            loop {
-                if retry_attempt == 0 {
-                    // wait for new WAL to arrive
-                    if let Err(e) = self.commit_lsn_watch_rx.changed().await {
-                        // should never happen, as we hold Arc to timeline.
-                        error!("commit_lsn watch shut down: {:?}", e);
+            match backup_lsn_range(
+                backup_lsn,
+                commit_lsn,
+                self.wal_seg_size,
+                &self.timeline_dir,
+            )
+            .await
+            {
+                Ok(backup_lsn_result) => {
+                    backup_lsn = backup_lsn_result;
+                    let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
+                    if let Err(e) = res {
+                        error!("failed to set wal_backup_lsn: {}", e);
                         return;
                     }
-                } else {
-                    // or just sleep if we errored previously
-                    let mut retry_delay = UPLOAD_FAILURE_RETRY_MAX_MS;
-                    if let Some(backoff_delay) =
-                        UPLOAD_FAILURE_RETRY_MIN_MS.checked_shl(retry_attempt)
-                    {
-                        retry_delay = min(retry_delay, backoff_delay);
-                    }
-                    sleep(Duration::from_millis(retry_delay)).await;
+                    retry_attempt = 0;
                 }
+                Err(e) => {
+                    error!(
+                        "failed while offloading range {}-{}: {:?}",
+                        backup_lsn, commit_lsn, e
+                    );
 
-                let commit_lsn = *self.commit_lsn_watch_rx.borrow();
-
-                // Note that backup_lsn can be higher than commit_lsn if we
-                // don't have much local WAL and others already uploaded
-                // segments we don't even have.
-                if backup_lsn.segment_number(self.wal_seg_size)
-                    >= commit_lsn.segment_number(self.wal_seg_size)
-                {
-                    continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
-                }
-                // Perhaps peers advanced the position, check shmem value.
-                backup_lsn = self.timeline.get_wal_backup_lsn();
-                if backup_lsn.segment_number(self.wal_seg_size)
-                    >= commit_lsn.segment_number(self.wal_seg_size)
-                {
-                    continue;
-                }
-
-                if let Some(l) = self.leader.as_mut() {
-                    // Optimization idea for later:
-                    //  Avoid checking election leader every time by returning current lease grant expiration time
-                    //  Re-check leadership only after expiration time,
-                    //  such approach would reduce overhead on write-intensive workloads
-
-                    match l
-                        .check_am_i(
-                            self.election.election_name.clone(),
-                            self.election.candidate_name.clone(),
-                        )
-                        .await
-                    {
-                        Ok(leader) => {
-                            if !leader {
-                                info!("lost leadership");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("error validating leader, {:?}", e);
-                            break;
-                        }
-                    }
-                }
-
-                match backup_lsn_range(
-                    backup_lsn,
-                    commit_lsn,
-                    self.wal_seg_size,
-                    &self.timeline_dir,
-                )
-                .await
-                {
-                    Ok(backup_lsn_result) => {
-                        backup_lsn = backup_lsn_result;
-                        let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
-                        if let Err(e) = res {
-                            error!("backup error: {}", e);
-                            return;
-                        }
-                        retry_attempt = 0;
-                    }
-                    Err(e) => {
-                        error!(
-                            "failed while offloading range {}-{}: {:?}",
-                            backup_lsn, commit_lsn, e
-                        );
-
-                        retry_attempt = min(retry_attempt + 1, u32::MAX);
+                    if retry_attempt < u32::MAX {
+                        retry_attempt += 1;
                     }
                 }
             }

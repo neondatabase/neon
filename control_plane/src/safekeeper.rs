@@ -123,7 +123,6 @@ impl SafekeeperNode {
                 .args(&["--id", self.id.to_string().as_ref()])
                 .args(&["--listen-pg", &listen_pg])
                 .args(&["--listen-http", &listen_http])
-                .args(&["--recall", "1 second"])
                 .arg("--daemonize"),
         );
         if !self.conf.sync {

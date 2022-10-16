@@ -75,6 +75,12 @@ impl From<[u8; 16]> for Id {
     }
 }
 
+impl From<Id> for u128 {
+    fn from(id: Id) -> Self {
+        u128::from_le_bytes(id.0)
+    }
+}
+
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.hex_encode())
@@ -133,6 +139,12 @@ macro_rules! id_newtype {
         impl AsRef<[u8]> for $t {
             fn as_ref(&self) -> &[u8] {
                 &self.0 .0
+            }
+        }
+
+        impl From<$t> for u128 {
+            fn from(id: $t) -> Self {
+                u128::from(id.0)
             }
         }
 

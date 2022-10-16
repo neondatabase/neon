@@ -7,7 +7,7 @@ use etcd_broker::subscription_value::SkTimelineInfo;
 
 use postgres_ffi::XLogSegNo;
 
-use tokio::sync::watch;
+use tokio::{sync::watch, time::Instant};
 
 use std::cmp::{max, min};
 
@@ -26,7 +26,7 @@ use utils::{
 
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
-    SafekeeperMemState, ServerInfo,
+    SafekeeperMemState, ServerInfo, Term,
 };
 use crate::send_wal::HotStandbyFeedback;
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
@@ -35,6 +35,53 @@ use crate::metrics::FullTimelineInfo;
 use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
+
+/// Things safekeeper should know about timeline state on peers.
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    pub sk_id: NodeId,
+    /// Term of the last entry.
+    _last_log_term: Term,
+    /// LSN of the last record.
+    _flush_lsn: Lsn,
+    pub commit_lsn: Lsn,
+    /// Since which LSN safekeeper has WAL. TODO: remove this once we fill new
+    /// sk since backup_lsn.
+    pub local_start_lsn: Lsn,
+    /// When info was received.
+    ts: Instant,
+}
+
+impl PeerInfo {
+    fn from_sk_info(sk_id: NodeId, sk_info: &SkTimelineInfo, ts: Instant) -> PeerInfo {
+        PeerInfo {
+            sk_id,
+            _last_log_term: sk_info.last_log_term.unwrap_or(0),
+            _flush_lsn: sk_info.flush_lsn.unwrap_or(Lsn::INVALID),
+            commit_lsn: sk_info.commit_lsn.unwrap_or(Lsn::INVALID),
+            local_start_lsn: sk_info.local_start_lsn.unwrap_or(Lsn::INVALID),
+            ts,
+        }
+    }
+}
+
+// vector-based node id -> peer state map with very limited functionality we
+// need.
+#[derive(Debug, Clone, Default)]
+pub struct PeersInfo(pub Vec<PeerInfo>);
+
+impl PeersInfo {
+    fn get(&mut self, id: NodeId) -> Option<&mut PeerInfo> {
+        self.0.iter_mut().find(|p| p.sk_id == id)
+    }
+
+    fn upsert(&mut self, p: &PeerInfo) {
+        match self.get(p.sk_id) {
+            Some(rp) => *rp = p.clone(),
+            None => self.0.push(p.clone()),
+        }
+    }
+}
 
 /// Replica status update + hot standby feedback
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +121,8 @@ impl ReplicaState {
 pub struct SharedState {
     /// Safekeeper object
     sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
+    /// In memory list containing state of peers sent in latest messages from them.
+    peers_info: PeersInfo,
     /// State of replicas
     replicas: Vec<Option<ReplicaState>>,
     /// True when WAL backup launcher oversees the timeline, making sure WAL is
@@ -123,7 +172,8 @@ impl SharedState {
 
         Ok(Self {
             sk,
-            replicas: Vec::new(),
+            peers_info: PeersInfo(vec![]),
+            replicas: vec![],
             wal_backup_active: false,
             active: false,
             num_computes: 0,
@@ -142,6 +192,7 @@ impl SharedState {
 
         Ok(Self {
             sk: SafeKeeper::new(control_store, wal_store, conf.my_id)?,
+            peers_info: PeersInfo(vec![]),
             replicas: Vec::new(),
             wal_backup_active: false,
             active: false,
@@ -199,12 +250,6 @@ impl SharedState {
     fn wal_backup_attend(&mut self) -> bool {
         self.wal_backup_active = self.is_wal_backup_required();
         self.wal_backup_active
-    }
-
-    // Can this safekeeper offload to s3? Recently joined safekeepers might not
-    // have necessary WAL.
-    fn can_wal_backup(&self) -> bool {
-        self.sk.state.local_start_lsn <= self.sk.inmem.backup_lsn
     }
 
     fn get_wal_seg_size(&self) -> usize {
@@ -267,6 +312,24 @@ impl SharedState {
         let pos = self.replicas.len();
         self.replicas.push(Some(state));
         pos
+    }
+
+    fn get_safekeeper_info(&self, conf: &SafeKeeperConf) -> SkTimelineInfo {
+        SkTimelineInfo {
+            last_log_term: Some(self.sk.get_epoch()),
+            flush_lsn: Some(self.sk.wal_store.flush_lsn()),
+            // note: this value is not flushed to control file yet and can be lost
+            commit_lsn: Some(self.sk.inmem.commit_lsn),
+            // TODO: rework feedbacks to avoid max here
+            remote_consistent_lsn: Some(max(
+                self.get_replicas_state().remote_consistent_lsn,
+                self.sk.inmem.remote_consistent_lsn,
+            )),
+            peer_horizon_lsn: Some(self.sk.inmem.peer_horizon_lsn),
+            safekeeper_connstr: Some(conf.listen_pg_addr.clone()),
+            backup_lsn: Some(self.sk.inmem.backup_lsn),
+            local_start_lsn: Some(self.sk.state.local_start_lsn),
+        }
     }
 }
 
@@ -517,17 +580,6 @@ impl Timeline {
         self.write_shared_state().wal_backup_attend()
     }
 
-    /// Can this safekeeper offload to s3? Recently joined safekeepers might not
-    /// have necessary WAL.
-    pub fn can_wal_backup(&self) -> bool {
-        if self.is_cancelled() {
-            return false;
-        }
-
-        let shared_state = self.write_shared_state();
-        shared_state.can_wal_backup()
-    }
-
     /// Returns full timeline info, required for the metrics. If the timeline is
     /// not active, returns None instead.
     pub fn info_for_metrics(&self) -> Option<FullTimelineInfo> {
@@ -632,36 +684,25 @@ impl Timeline {
         Ok(())
     }
 
-    /// Return public safekeeper info for broadcasting to broker and other peers.
-    pub fn get_public_info(&self, conf: &SafeKeeperConf) -> SkTimelineInfo {
+    /// Get safekeeper info for broadcasting to broker and other peers.
+    pub fn get_safekeeper_info(&self, conf: &SafeKeeperConf) -> SkTimelineInfo {
         let shared_state = self.write_shared_state();
-        SkTimelineInfo {
-            last_log_term: Some(shared_state.sk.get_epoch()),
-            flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
-            // note: this value is not flushed to control file yet and can be lost
-            commit_lsn: Some(shared_state.sk.inmem.commit_lsn),
-            // TODO: rework feedbacks to avoid max here
-            remote_consistent_lsn: Some(max(
-                shared_state.get_replicas_state().remote_consistent_lsn,
-                shared_state.sk.inmem.remote_consistent_lsn,
-            )),
-            peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
-            safekeeper_connstr: Some(conf.listen_pg_addr.clone()),
-            backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
-        }
+        shared_state.get_safekeeper_info(conf)
     }
 
     /// Update timeline state with peer safekeeper data.
     pub async fn record_safekeeper_info(
         &self,
         sk_info: &SkTimelineInfo,
-        _sk_id: NodeId,
+        sk_id: NodeId,
     ) -> Result<()> {
         let is_wal_backup_action_pending: bool;
         let commit_lsn: Lsn;
         {
             let mut shared_state = self.write_shared_state();
             shared_state.sk.record_safekeeper_info(sk_info)?;
+            let peer_info = PeerInfo::from_sk_info(sk_id, sk_info, Instant::now());
+            shared_state.peers_info.upsert(&peer_info);
             is_wal_backup_action_pending = shared_state.update_status(self.ttid);
             commit_lsn = shared_state.sk.inmem.commit_lsn;
         }
@@ -671,6 +712,22 @@ impl Timeline {
             self.wal_backup_launcher_tx.send(self.ttid).await?;
         }
         Ok(())
+    }
+
+    /// Get our latest view of alive peers status on the timeline.
+    /// We pass our own info through the broker as well, so when we don't have connection
+    /// to the broker returned vec is empty.
+    pub fn get_peers(&self, conf: &SafeKeeperConf) -> Vec<PeerInfo> {
+        let shared_state = self.write_shared_state();
+        let now = Instant::now();
+        shared_state
+            .peers_info
+            .0
+            .iter()
+            // Regard peer as absent if we haven't heard from it within heartbeat_timeout.
+            .filter(|p| now.duration_since(p.ts) <= conf.heartbeat_timeout)
+            .cloned()
+            .collect()
     }
 
     /// Add send_wal replica to the in-memory vector of replicas.

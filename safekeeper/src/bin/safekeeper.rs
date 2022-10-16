@@ -21,7 +21,8 @@ use metrics::set_build_info_metric;
 use safekeeper::broker;
 use safekeeper::control_file;
 use safekeeper::defaults::{
-    DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR, DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
+    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
+    DEFAULT_PG_LISTEN_ADDR, DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
 };
 use safekeeper::http;
 use safekeeper::remove_wal;
@@ -72,10 +73,6 @@ fn main() -> anyhow::Result<()> {
         conf.listen_http_addr = addr.to_string();
     }
 
-    if let Some(recall) = arg_matches.get_one::<String>("recall") {
-        conf.recall_period = humantime::parse_duration(recall)?;
-    }
-
     let mut given_id = None;
     if let Some(given_id_str) = arg_matches.get_one::<String>("id") {
         given_id = Some(NodeId(
@@ -93,6 +90,16 @@ fn main() -> anyhow::Result<()> {
         conf.broker_etcd_prefix = prefix.to_string();
     }
 
+    if let Some(heartbeat_timeout_str) = arg_matches.get_one::<String>("heartbeat-timeout") {
+        conf.heartbeat_timeout =
+            humantime::parse_duration(heartbeat_timeout_str).with_context(|| {
+                format!(
+                    "failed to parse heartbeat-timeout {}",
+                    heartbeat_timeout_str
+                )
+            })?;
+    }
+
     if let Some(backup_threads) = arg_matches.get_one::<String>("wal-backup-threads") {
         conf.backup_runtime_threads = backup_threads
             .parse()
@@ -104,6 +111,14 @@ fn main() -> anyhow::Result<()> {
         let parsed_toml = storage_conf_toml.parse::<Document>()?; // parse
         let (_, storage_conf_parsed_toml) = parsed_toml.iter().next().unwrap(); // and strip key off again
         conf.remote_storage = Some(RemoteStorageConfig::from_toml(storage_conf_parsed_toml)?);
+    }
+    if let Some(max_offloader_lag_str) = arg_matches.get_one::<String>("max-offloader-lag") {
+        conf.max_offloader_lag_bytes = max_offloader_lag_str.parse().with_context(|| {
+            format!(
+                "failed to parse max offloader lag {}",
+                max_offloader_lag_str
+            )
+        })?;
     }
     // Seems like there is no better way to accept bool values explicitly in clap.
     conf.wal_backup_enabled = arg_matches
@@ -362,11 +377,6 @@ fn cli() -> Command {
                 .long("pageserver"),
         )
         .arg(
-            Arg::new("recall")
-                .long("recall")
-                .help("Period for requestion pageserver to call for replication"),
-        )
-        .arg(
             Arg::new("daemonize")
                 .short('d')
                 .long("daemonize")
@@ -398,11 +408,21 @@ fn cli() -> Command {
             .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
         )
         .arg(
+            Arg::new("heartbeat-timeout")
+                .long("heartbeat-timeout")
+                .help(formatcp!("Peer is considered dead after not receiving heartbeats from it during this period (default {}s), passed as a human readable duration.", DEFAULT_HEARTBEAT_TIMEOUT.as_secs()))
+        )
+        .arg(
             Arg::new("wal-backup-threads").long("backup-threads").help(formatcp!("number of threads for wal backup (default {DEFAULT_WAL_BACKUP_RUNTIME_THREADS}")),
         ).arg(
             Arg::new("remote-storage")
                 .long("remote-storage")
                 .help("Remote storage configuration for WAL backup (offloading to s3) as TOML inline table, e.g. {\"max_concurrent_syncs\" = 17, \"max_sync_errors\": 13, \"bucket_name\": \"<BUCKETNAME>\", \"bucket_region\":\"<REGION>\", \"concurrency_limit\": 119}.\nSafekeeper offloads WAL to [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring structure on the file system.")
+        )
+        .arg(
+            Arg::new("max-offloader-lag")
+                .long("max-offloader-lag")
+                .help(formatcp!("Safekeeper won't be elected for WAL offloading if it is lagging for more than this value (default {}MB) in bytes", DEFAULT_MAX_OFFLOADER_LAG_BYTES / (1 << 20)))
         )
         .arg(
             Arg::new("enable-wal-backup")
