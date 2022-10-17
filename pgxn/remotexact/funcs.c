@@ -5,6 +5,7 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "rwset.h"
+#include "storage/proc.h"
 
 PG_FUNCTION_INFO_V1(validate_and_apply_xact);
 
@@ -31,10 +32,22 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 
 	ereport(LOG, errmsg("%s", RWSetToString(rwset)));
 
+	// Mark the xact as remote before starting validation. 
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+	MyProc->statusFlags |= PROC_IS_REMOTEXACT;
+	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+	LWLockRelease(ProcArrayLock);
+
 	// Apply the writes
 	apply_writes(rwset);
 
 	RWSetFree(rwset);
+
+	// Unset REMOTEXACT flag after validation is complete. 
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+	MyProc->statusFlags &= ~PROC_IS_REMOTEXACT;
+	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+	LWLockRelease(ProcArrayLock);
 
 	PG_RETURN_BOOL(true);
 }
