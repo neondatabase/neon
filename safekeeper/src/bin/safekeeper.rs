@@ -2,7 +2,7 @@
 // Main entry point for the safekeeper executable
 //
 use anyhow::{bail, Context, Result};
-use clap::{App, Arg};
+use clap::{value_parser, Arg, ArgAction, Command};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use fs2::FileExt;
@@ -40,145 +40,44 @@ const ID_FILE_NAME: &str = "safekeeper.id";
 project_git_version!(GIT_VERSION);
 
 fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("Neon safekeeper")
-        .about("Store WAL stream to local file system and push it to WAL receivers")
-        .version(GIT_VERSION)
-        .arg(
-            Arg::new("datadir")
-                .short('D')
-                .long("dir")
-                .takes_value(true)
-                .help("Path to the safekeeper data directory"),
-        )
-        .arg(
-            Arg::new("init")
-                .long("init")
-                .takes_value(false)
-                .help("Initialize safekeeper with ID"),
-        )
-        .arg(
-            Arg::new("listen-pg")
-                .short('l')
-                .long("listen-pg")
-                .alias("listen") // for compatibility
-                .takes_value(true)
-                .help(formatcp!("listen for incoming WAL data connections on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
-        )
-        .arg(
-            Arg::new("listen-http")
-                .long("listen-http")
-                .takes_value(true)
-                .help(formatcp!("http endpoint address for metrics on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
-        )
-        // FIXME this argument is no longer needed since pageserver address is forwarded from compute.
-        // However because this argument is in use by console's e2e tests let's keep it for now and remove separately.
-        // So currently it is a noop.
-        .arg(
-            Arg::new("pageserver")
-                .short('p')
-                .long("pageserver")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::new("recall")
-                .long("recall")
-                .takes_value(true)
-                .help("Period for requestion pageserver to call for replication"),
-        )
-        .arg(
-            Arg::new("daemonize")
-                .short('d')
-                .long("daemonize")
-                .takes_value(false)
-                .help("Run in the background"),
-        )
-        .arg(
-            Arg::new("no-sync")
-                .short('n')
-                .long("no-sync")
-                .takes_value(false)
-                .help("Do not wait for changes to be written safely to disk"),
-        )
-        .arg(
-            Arg::new("dump-control-file")
-                .long("dump-control-file")
-                .takes_value(true)
-                .help("Dump control file at path specified by this argument and exit"),
-        )
-        .arg(
-            Arg::new("id").long("id").takes_value(true).help("safekeeper node id: integer")
-        ).arg(
-            Arg::new("broker-endpoints")
-            .long("broker-endpoints")
-            .takes_value(true)
-            .help("a comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'"),
-        )
-        .arg(
-            Arg::new("broker-etcd-prefix")
-            .long("broker-etcd-prefix")
-            .takes_value(true)
-            .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
-        )
-        .arg(
-            Arg::new("wal-backup-threads").long("backup-threads").takes_value(true).help(formatcp!("number of threads for wal backup (default {DEFAULT_WAL_BACKUP_RUNTIME_THREADS}")),
-        ).arg(
-            Arg::new("remote-storage")
-                .long("remote-storage")
-                .takes_value(true)
-                .help("Remote storage configuration for WAL backup (offloading to s3) as TOML inline table, e.g. {\"max_concurrent_syncs\" = 17, \"max_sync_errors\": 13, \"bucket_name\": \"<BUCKETNAME>\", \"bucket_region\":\"<REGION>\", \"concurrency_limit\": 119}.\nSafekeeper offloads WAL to [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring structure on the file system.")
-        )
-        .arg(
-            Arg::new("enable-wal-backup")
-                .long("enable-wal-backup")
-                .takes_value(true)
-                .default_value("true")
-                .default_missing_value("true")
-                .help("Enable/disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring WAL backup horizon."),
-        )
-        .arg(
-            Arg::new("auth-validation-public-key-path")
-                .long("auth-validation-public-key-path")
-                .takes_value(true)
-                .help("Path to an RSA .pem public key which is used to check JWT tokens")
-        )
-        .get_matches();
+    let arg_matches = cli().get_matches();
 
-    if let Some(addr) = arg_matches.value_of("dump-control-file") {
+    if let Some(addr) = arg_matches.get_one::<String>("dump-control-file") {
         let state = control_file::FileStorage::load_control_file(Path::new(addr))?;
         let json = serde_json::to_string(&state)?;
-        print!("{}", json);
+        print!("{json}");
         return Ok(());
     }
 
     let mut conf = SafeKeeperConf::default();
 
-    if let Some(dir) = arg_matches.value_of("datadir") {
+    if let Some(dir) = arg_matches.get_one::<PathBuf>("datadir") {
         // change into the data directory.
-        std::env::set_current_dir(PathBuf::from(dir))?;
+        std::env::set_current_dir(dir)?;
     }
 
-    if arg_matches.is_present("no-sync") {
+    if arg_matches.get_flag("no-sync") {
         conf.no_sync = true;
     }
 
-    if arg_matches.is_present("daemonize") {
+    if arg_matches.get_flag("daemonize") {
         conf.daemonize = true;
     }
 
-    if let Some(addr) = arg_matches.value_of("listen-pg") {
-        conf.listen_pg_addr = addr.to_owned();
+    if let Some(addr) = arg_matches.get_one::<String>("listen-pg") {
+        conf.listen_pg_addr = addr.to_string();
     }
 
-    if let Some(addr) = arg_matches.value_of("listen-http") {
-        conf.listen_http_addr = addr.to_owned();
+    if let Some(addr) = arg_matches.get_one::<String>("listen-http") {
+        conf.listen_http_addr = addr.to_string();
     }
 
-    if let Some(recall) = arg_matches.value_of("recall") {
+    if let Some(recall) = arg_matches.get_one::<String>("recall") {
         conf.recall_period = humantime::parse_duration(recall)?;
     }
 
     let mut given_id = None;
-    if let Some(given_id_str) = arg_matches.value_of("id") {
+    if let Some(given_id_str) = arg_matches.get_one::<String>("id") {
         given_id = Some(NodeId(
             given_id_str
                 .parse()
@@ -186,20 +85,20 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let Some(addr) = arg_matches.value_of("broker-endpoints") {
+    if let Some(addr) = arg_matches.get_one::<String>("broker-endpoints") {
         let collected_ep: Result<Vec<Url>, ParseError> = addr.split(',').map(Url::parse).collect();
         conf.broker_endpoints = collected_ep.context("Failed to parse broker endpoint urls")?;
     }
-    if let Some(prefix) = arg_matches.value_of("broker-etcd-prefix") {
+    if let Some(prefix) = arg_matches.get_one::<String>("broker-etcd-prefix") {
         conf.broker_etcd_prefix = prefix.to_string();
     }
 
-    if let Some(backup_threads) = arg_matches.value_of("wal-backup-threads") {
+    if let Some(backup_threads) = arg_matches.get_one::<String>("wal-backup-threads") {
         conf.backup_runtime_threads = backup_threads
             .parse()
             .with_context(|| format!("Failed to parse backup threads {}", backup_threads))?;
     }
-    if let Some(storage_conf) = arg_matches.value_of("remote-storage") {
+    if let Some(storage_conf) = arg_matches.get_one::<String>("remote-storage") {
         // funny toml doesn't consider plain inline table as valid document, so wrap in a key to parse
         let storage_conf_toml = format!("remote_storage = {}", storage_conf);
         let parsed_toml = storage_conf_toml.parse::<Document>()?; // parse
@@ -208,16 +107,16 @@ fn main() -> anyhow::Result<()> {
     }
     // Seems like there is no better way to accept bool values explicitly in clap.
     conf.wal_backup_enabled = arg_matches
-        .value_of("enable-wal-backup")
+        .get_one::<String>("enable-wal-backup")
         .unwrap()
         .parse()
         .context("failed to parse bool enable-s3-offload bool")?;
 
     conf.auth_validation_public_key_path = arg_matches
-        .value_of("auth-validation-public-key-path")
+        .get_one::<String>("auth-validation-public-key-path")
         .map(PathBuf::from);
 
-    start_safekeeper(conf, given_id, arg_matches.is_present("init"))
+    start_safekeeper(conf, given_id, arg_matches.get_flag("init"))
 }
 
 fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bool) -> Result<()> {
@@ -423,4 +322,103 @@ fn set_id(conf: &mut SafeKeeperConf, given_id: Option<NodeId>) -> Result<()> {
     }
     conf.my_id = my_id;
     Ok(())
+}
+
+fn cli() -> Command {
+    Command::new("Neon safekeeper")
+        .about("Store WAL stream to local file system and push it to WAL receivers")
+        .version(GIT_VERSION)
+        .arg(
+            Arg::new("datadir")
+                .short('D')
+                .long("dir")
+                .value_parser(value_parser!(PathBuf))
+                .help("Path to the safekeeper data directory"),
+        )
+        .arg(
+            Arg::new("init")
+                .long("init")
+                .action(ArgAction::SetTrue)
+                .help("Initialize safekeeper with ID"),
+        )
+        .arg(
+            Arg::new("listen-pg")
+                .short('l')
+                .long("listen-pg")
+                .alias("listen") // for compatibility
+                .help(formatcp!("listen for incoming WAL data connections on ip:port (default: {DEFAULT_PG_LISTEN_ADDR})")),
+        )
+        .arg(
+            Arg::new("listen-http")
+                .long("listen-http")
+                .help(formatcp!("http endpoint address for metrics on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
+        )
+        // FIXME this argument is no longer needed since pageserver address is forwarded from compute.
+        // However because this argument is in use by console's e2e tests let's keep it for now and remove separately.
+        // So currently it is a noop.
+        .arg(
+            Arg::new("pageserver")
+                .short('p')
+                .long("pageserver"),
+        )
+        .arg(
+            Arg::new("recall")
+                .long("recall")
+                .help("Period for requestion pageserver to call for replication"),
+        )
+        .arg(
+            Arg::new("daemonize")
+                .short('d')
+                .long("daemonize")
+                .action(ArgAction::SetTrue)
+                .help("Run in the background"),
+        )
+        .arg(
+            Arg::new("no-sync")
+                .short('n')
+                .long("no-sync")
+                .action(ArgAction::SetTrue)
+                .help("Do not wait for changes to be written safely to disk"),
+        )
+        .arg(
+            Arg::new("dump-control-file")
+                .long("dump-control-file")
+                .help("Dump control file at path specified by this argument and exit"),
+        )
+        .arg(
+            Arg::new("id").long("id").help("safekeeper node id: integer")
+        ).arg(
+            Arg::new("broker-endpoints")
+            .long("broker-endpoints")
+            .help("a comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'"),
+        )
+        .arg(
+            Arg::new("broker-etcd-prefix")
+            .long("broker-etcd-prefix")
+            .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
+        )
+        .arg(
+            Arg::new("wal-backup-threads").long("backup-threads").help(formatcp!("number of threads for wal backup (default {DEFAULT_WAL_BACKUP_RUNTIME_THREADS}")),
+        ).arg(
+            Arg::new("remote-storage")
+                .long("remote-storage")
+                .help("Remote storage configuration for WAL backup (offloading to s3) as TOML inline table, e.g. {\"max_concurrent_syncs\" = 17, \"max_sync_errors\": 13, \"bucket_name\": \"<BUCKETNAME>\", \"bucket_region\":\"<REGION>\", \"concurrency_limit\": 119}.\nSafekeeper offloads WAL to [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring structure on the file system.")
+        )
+        .arg(
+            Arg::new("enable-wal-backup")
+                .long("enable-wal-backup")
+                .default_value("true")
+                .default_missing_value("true")
+                .help("Enable/disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring WAL backup horizon."),
+        )
+        .arg(
+            Arg::new("auth-validation-public-key-path")
+                .long("auth-validation-public-key-path")
+                .help("Path to an RSA .pem public key which is used to check JWT tokens")
+        )
+}
+
+#[test]
+fn verify_cli() {
+    cli().debug_assert();
 }

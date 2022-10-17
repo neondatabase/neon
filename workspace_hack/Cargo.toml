@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "workspace-hack package, managed by hakari"
 # You can choose to publish this crate: see https://docs.rs/cargo-hakari/latest/cargo_hakari/publishing.
 publish = false
-
 # The parts of the file between the BEGIN HAKARI SECTION and END HAKARI SECTION comments
 # are managed by hakari.
 
@@ -18,7 +17,7 @@ ahash = { version = "0.7", features = ["std"] }
 anyhow = { version = "1", features = ["backtrace", "std"] }
 bytes = { version = "1", features = ["serde", "std"] }
 chrono = { version = "0.4", features = ["clock", "iana-time-zone", "js-sys", "oldtime", "serde", "std", "time", "wasm-bindgen", "wasmbind", "winapi"] }
-clap = { version = "3", features = ["atty", "color", "std", "strsim", "suggestions", "termcolor"] }
+clap = { version = "4", features = ["color", "error-context", "help", "std", "string", "suggestions", "usage"] }
 crossbeam-utils = { version = "0.8", features = ["once_cell", "std"] }
 either = { version = "1", features = ["use_std"] }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
@@ -26,6 +25,7 @@ hashbrown = { version = "0.12", features = ["ahash", "inline-more", "raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
+memchr = { version = "2", features = ["std"] }
 nom = { version = "7", features = ["alloc", "std"] }
 num-bigint = { version = "0.4", features = ["std"] }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
@@ -42,18 +42,17 @@ tokio = { version = "1", features = ["bytes", "fs", "io-std", "io-util", "libc",
 tokio-util = { version = "0.7", features = ["codec", "io", "io-util", "tracing"] }
 tracing = { version = "0.1", features = ["attributes", "log", "std", "tracing-attributes"] }
 tracing-core = { version = "0.1", features = ["once_cell", "std"] }
-uuid = { version = "0.8", features = ["getrandom", "serde", "std", "v4"] }
 
 [build-dependencies]
 ahash = { version = "0.7", features = ["std"] }
 anyhow = { version = "1", features = ["backtrace", "std"] }
 bytes = { version = "1", features = ["serde", "std"] }
-clap = { version = "3", features = ["atty", "color", "std", "strsim", "suggestions", "termcolor"] }
 either = { version = "1", features = ["use_std"] }
 hashbrown = { version = "0.12", features = ["ahash", "inline-more", "raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
+memchr = { version = "2", features = ["std"] }
 nom = { version = "7", features = ["alloc", "std"] }
 prost = { version = "0.10", features = ["prost-derive", "std"] }
 regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
