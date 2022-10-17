@@ -216,6 +216,9 @@ pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
+/* From remotexact.h */
+pub const MAX_REGIONS: u32 = 64;
+
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c
 pub const PGDATA_SUBDIRS: [&str; 23] = [
