@@ -52,7 +52,10 @@ use crate::task_mgr::TaskKind;
 use crate::walreceiver::{is_etcd_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::{page_cache, storage_sync};
+use crate::{
+    page_cache,
+    storage_sync::{self, index::LayerFileMetadata},
+};
 
 pub struct Timeline {
     conf: &'static PageServerConf,
@@ -1190,8 +1193,8 @@ impl Timeline {
                 self.create_image_layers(&partitioning, self.initdb_lsn, true)?
             } else {
                 // normal case, write out a L0 delta layer file.
-                let delta_path = self.create_delta_layer(&frozen_layer)?;
-                HashSet::from([delta_path])
+                let (delta_path, metadata) = self.create_delta_layer(&frozen_layer)?;
+                HashMap::from([(delta_path, metadata)])
             };
 
         fail_point!("flush-frozen-before-sync");
@@ -1226,7 +1229,7 @@ impl Timeline {
     fn update_disk_consistent_lsn(
         &self,
         disk_consistent_lsn: Lsn,
-        layer_paths_to_upload: HashSet<PathBuf>,
+        layer_paths_to_upload: HashMap<PathBuf, LayerFileMetadata>,
     ) -> Result<()> {
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
@@ -1295,7 +1298,10 @@ impl Timeline {
     }
 
     // Write out the given frozen in-memory layer as a new L0 delta file
-    fn create_delta_layer(&self, frozen_layer: &InMemoryLayer) -> Result<PathBuf> {
+    fn create_delta_layer(
+        &self,
+        frozen_layer: &InMemoryLayer,
+    ) -> Result<(PathBuf, LayerFileMetadata)> {
         // Write it out
         let new_delta = frozen_layer.write_to_disk()?;
         let new_delta_path = new_delta.path();
@@ -1321,12 +1327,13 @@ impl Timeline {
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
+
         self.metrics.current_physical_size_gauge.add(sz);
         // update metrics
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
-        Ok(new_delta_path)
+        Ok((new_delta_path, LayerFileMetadata::new(sz)))
     }
 
     pub fn compact(&self) -> anyhow::Result<()> {
@@ -1392,7 +1399,7 @@ impl Timeline {
                     storage_sync::schedule_layer_upload(
                         self.tenant_id,
                         self.timeline_id,
-                        HashSet::from_iter(layer_paths_to_upload),
+                        layer_paths_to_upload,
                         None,
                     );
                 }
@@ -1473,10 +1480,9 @@ impl Timeline {
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         force: bool,
-    ) -> Result<HashSet<PathBuf>> {
+    ) -> Result<HashMap<PathBuf, LayerFileMetadata>> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
-        let mut layer_paths_to_upload = HashSet::new();
         for partition in partitioning.parts.iter() {
             if force || self.time_for_new_image_layer(partition, lsn)? {
                 let img_range =
@@ -1498,7 +1504,6 @@ impl Timeline {
                     }
                 }
                 let image_layer = image_layer_writer.finish()?;
-                layer_paths_to_upload.insert(image_layer.path());
                 image_layers.push(image_layer);
             }
         }
@@ -1512,15 +1517,25 @@ impl Timeline {
         //
         // Compaction creates multiple image layers. It would be better to create them all
         // and fsync them all in parallel.
-        let mut all_paths = Vec::from_iter(layer_paths_to_upload.clone());
-        all_paths.push(self.conf.timeline_path(&self.timeline_id, &self.tenant_id));
+        let all_paths = image_layers
+            .iter()
+            .map(|layer| layer.path())
+            .chain(std::iter::once(
+                self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
+            ))
+            .collect::<Vec<_>>();
         par_fsync::par_fsync(&all_paths)?;
+
+        let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
         let mut layers = self.layers.write().unwrap();
         for l in image_layers {
-            self.metrics
-                .current_physical_size_gauge
-                .add(l.path().metadata()?.len());
+            let path = l.path();
+            let metadata = path.metadata()?;
+
+            layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
+
+            self.metrics.current_physical_size_gauge.add(metadata.len());
             layers.insert_historic(Arc::new(l));
         }
         drop(layers);
@@ -1771,16 +1786,16 @@ impl Timeline {
         }
 
         let mut layers = self.layers.write().unwrap();
-        let mut new_layer_paths = HashSet::with_capacity(new_layers.len());
+        let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
             let new_delta_path = l.path();
 
-            // update the timeline's physical size
-            self.metrics
-                .current_physical_size_gauge
-                .add(new_delta_path.metadata()?.len());
+            let metadata = new_delta_path.metadata()?;
 
-            new_layer_paths.insert(new_delta_path);
+            // update the timeline's physical size
+            self.metrics.current_physical_size_gauge.add(metadata.len());
+
+            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             layers.insert_historic(Arc::new(l));
         }
 

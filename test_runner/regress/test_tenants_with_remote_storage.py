@@ -7,13 +7,16 @@
 #
 
 import asyncio
+import json
 import os
+import shutil
 from pathlib import Path
 from typing import List, Tuple
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserverHttpClient,
@@ -189,3 +192,246 @@ def expect_tenant_to_download_timeline(
             ), f"Tenant {tenant_id} should have no downloads in progress"
             return
     assert False, f"Tenant {tenant_id} is missing on pageserver"
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_tenant_upgrades_index_json_from_v0(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    # the "image" for the v0 index_part.json. the fields themselves are
+    # replaced with values read from the later version because of #2592 (initdb
+    # lsn not reproducible).
+    v0_skeleton = json.loads(
+        """{
+        "timeline_layers":[
+            "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"
+        ],
+        "missing_layers":[],
+        "disk_consistent_lsn":"0/16960E8",
+        "metadata_bytes":[]
+    }"""
+    )
+
+    # getting a too eager compaction happening for this test would not play
+    # well with the strict assertions.
+    neon_env_builder.pageserver_config_override = "tenant_config.compaction_period='1h'"
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind, "test_tenant_upgrades_index_json_from_v0"
+    )
+
+    # launch pageserver, populate the default tenants timeline, wait for it to be uploaded,
+    # then go ahead and modify the "remote" version as if it was downgraded, needing upgrade
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+    pg = env.postgres.create_start("main")
+
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+
+    with pg.cursor() as cur:
+        cur.execute("CREATE TABLE t0 AS VALUES (123, 'second column as text');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    # flush, wait until in remote storage
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    env.postgres.stop_all()
+    env.pageserver.stop()
+
+    # remove all local data for the tenant to force redownloading and subsequent upgrade
+    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_id))
+
+    # downgrade the remote file
+    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
+    with open(timeline_path, "r+") as timeline_file:
+        # keep the deserialized for later inspection
+        orig_index_part = json.load(timeline_file)
+
+        v0_index_part = {key: orig_index_part[key] for key in v0_skeleton}
+
+        timeline_file.seek(0)
+        json.dump(v0_index_part, timeline_file)
+
+    env.pageserver.start()
+    pageserver_http = env.pageserver.http_client()
+    pageserver_http.tenant_attach(tenant_id)
+
+    wait_until(
+        number_of_iterations=5,
+        interval=1,
+        func=lambda: expect_tenant_to_download_timeline(pageserver_http, tenant_id),
+    )
+
+    pg = env.postgres.create_start("main")
+
+    with pg.cursor() as cur:
+        cur.execute("INSERT INTO t0 VALUES (234, 'test data');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    # not needed anymore
+    env.postgres.stop_all()
+    env.pageserver.stop()
+
+    # make sure the file has been upgraded back to how it started
+    index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    assert index_part["version"] == orig_index_part["version"]
+    assert index_part["missing_layers"] == orig_index_part["missing_layers"]
+
+    # expect one more layer because of the forced checkpoint
+    assert len(index_part["timeline_layers"]) == len(orig_index_part["timeline_layers"]) + 1
+
+    # all of the same layer files are there, but they might be shuffled around
+    orig_layers = set(orig_index_part["timeline_layers"])
+    later_layers = set(index_part["timeline_layers"])
+    assert later_layers.issuperset(orig_layers)
+
+    added_layers = later_layers - orig_layers
+    assert len(added_layers) == 1
+
+    # all of metadata has been regenerated (currently just layer file size)
+    all_metadata_keys = set()
+    for layer in orig_layers:
+        orig_metadata = orig_index_part["layer_metadata"][layer]
+        new_metadata = index_part["layer_metadata"][layer]
+        assert (
+            orig_metadata == new_metadata
+        ), f"metadata for layer {layer} should not have changed {orig_metadata} vs. {new_metadata}"
+        all_metadata_keys |= set(orig_metadata.keys())
+
+    one_new_layer = next(iter(added_layers))
+    assert one_new_layer in index_part["layer_metadata"], "new layer should have metadata"
+
+    only_new_metadata = index_part["layer_metadata"][one_new_layer]
+
+    assert (
+        set(only_new_metadata.keys()).symmetric_difference(all_metadata_keys) == set()
+    ), "new layer metadata has same metadata as others"
+
+
+# FIXME: test index_part.json getting downgraded from imaginary new version
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_tenant_redownloads_truncated_file_on_startup(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    # since we now store the layer file length metadata, we notice on startup that a layer file is of wrong size, and proceed to redownload it.
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_tenant_redownloads_truncated_file_on_startup",
+    )
+
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+    pg = env.postgres.create_start("main")
+
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+
+    with pg.cursor() as cur:
+        cur.execute("CREATE TABLE t1 AS VALUES (123, 'foobar');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    env.postgres.stop_all()
+    env.pageserver.stop()
+
+    timeline_dir = Path(env.repo_dir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    local_layer_truncated = None
+    for path in Path.iterdir(timeline_dir):
+        if path.name.startswith("00000"):
+            correct_size = os.stat(path).st_size
+            os.truncate(path, 0)
+            local_layer_truncated = (path, correct_size)
+            break
+    assert (
+        local_layer_truncated is not None
+    ), f"Found no local layer files to delete in directory {timeline_dir}"
+
+    (path, expected_size) = local_layer_truncated
+
+    # ensure the same size is found from the index_part.json
+    index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
+
+    ##### Start the pageserver, forcing it to download the layer file and load the timeline into memory
+    env.pageserver.start()
+    client = env.pageserver.http_client()
+
+    wait_until(
+        number_of_iterations=5,
+        interval=1,
+        func=lambda: expect_tenant_to_download_timeline(client, tenant_id),
+    )
+
+    restored_timelines = client.timeline_list(tenant_id)
+    assert (
+        len(restored_timelines) == 1
+    ), f"Tenant {tenant_id} should have its timeline reattached after its layer is downloaded from the remote storage"
+    retored_timeline = restored_timelines[0]
+    assert retored_timeline["timeline_id"] == str(
+        timeline_id
+    ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
+
+    assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
+
+    # the remote side of local_layer_truncated
+    remote_layer_path = local_fs_index_part_path(env, tenant_id, timeline_id).parent / path.name
+
+    # if the upload ever was ongoing, this check would be racy, but at least one
+    # extra http request has been made in between so assume it's enough delay
+    assert (
+        os.stat(remote_layer_path).st_size == expected_size
+    ), "truncated file should not had been uploaded around re-download"
+
+    pg = env.postgres.create_start("main")
+
+    with pg.cursor() as cur:
+        cur.execute("INSERT INTO t1 VALUES (234, 'test data');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    # now that the upload is complete, make sure the file hasn't been
+    # re-uploaded truncated. this is a rather bogus check given the current
+    # implementation, but it's critical it doesn't happen so wasting a few
+    # lines of python to do this.
+    assert (
+        os.stat(remote_layer_path).st_size == expected_size
+    ), "truncated file should not had been uploaded after next checkpoint"
+
+
+def local_fs_index_part(env, tenant_id, timeline_id):
+    """
+    Return json.load parsed index_part.json of tenant and timeline from LOCAL_FS
+    """
+    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
+    with open(timeline_path, "r") as timeline_file:
+        return json.load(timeline_file)
+
+
+def local_fs_index_part_path(env, tenant_id, timeline_id):
+    """
+    Return path to the LOCAL_FS index_part.json of the tenant and timeline.
+    """
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    return (
+        env.remote_storage.root
+        / "tenants"
+        / str(tenant_id)
+        / "timelines"
+        / str(timeline_id)
+        / "index_part.json"
+    )

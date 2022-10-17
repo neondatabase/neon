@@ -171,7 +171,7 @@ use self::{
 use crate::{
     config::PageServerConf,
     exponential_backoff,
-    storage_sync::index::RemoteIndex,
+    storage_sync::index::{LayerFileMetadata, RemoteIndex},
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
@@ -193,7 +193,7 @@ static SYNC_QUEUE: OnceCell<SyncQueue> = OnceCell::new();
 
 /// A timeline status to share with pageserver's sync counterpart,
 /// after comparing local and remote timeline state.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum LocalTimelineInitStatus {
     /// The timeline has every remote layer present locally.
     /// There could be some layers requiring uploading,
@@ -316,7 +316,7 @@ impl SyncQueue {
 
 /// A task to run in the async download/upload loop.
 /// Limited by the number of retries, after certain threshold the failing task gets evicted and the timeline disabled.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SyncTask {
     /// A checkpoint outcome with possible local file updates that need actualization in the remote storage.
     /// Not necessary more fresh than the one already uploaded.
@@ -427,7 +427,7 @@ impl SyncTaskBatch {
                             .extend(new_delete.data.deleted_layers.iter().cloned());
                     }
                     if let Some(batch_upload) = &mut self.upload {
-                        let not_deleted = |layer: &PathBuf| {
+                        let not_deleted = |layer: &PathBuf, _: &mut LayerFileMetadata| {
                             !new_delete.data.layers_to_delete.contains(layer)
                                 && !new_delete.data.deleted_layers.contains(layer)
                         };
@@ -455,21 +455,35 @@ impl SyncTaskBatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LayersUpload {
     /// Layer file path in the pageserver workdir, that were added for the corresponding checkpoint.
-    layers_to_upload: HashSet<PathBuf>,
+    layers_to_upload: HashMap<PathBuf, LayerFileMetadata>,
     /// Already uploaded layers. Used to store the data about the uploads between task retries
     /// and to record the data into the remote index after the task got completed or evicted.
-    uploaded_layers: HashSet<PathBuf>,
+    uploaded_layers: HashMap<PathBuf, LayerFileMetadata>,
     metadata: Option<TimelineMetadata>,
 }
 
 /// A timeline download task.
 /// Does not contain the file list to download, to allow other
 /// parts of the pageserer code to schedule the task
-/// without using the remote index or any other ways to list the remote timleine files.
+/// without using the remote index or any other ways to list the remote timeline files.
 /// Skips the files that are already downloaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LayersDownload {
     layers_to_skip: HashSet<PathBuf>,
+
+    /// Paths which have been downloaded, and had their metadata verified or generated.
+    ///
+    /// Metadata generation happens when upgrading from past version of `IndexPart`.
+    gathered_metadata: HashMap<PathBuf, LayerFileMetadata>,
+}
+
+impl LayersDownload {
+    fn from_skipped_layers(layers_to_skip: HashSet<PathBuf>) -> Self {
+        LayersDownload {
+            layers_to_skip,
+            gathered_metadata: HashMap::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,7 +505,7 @@ struct LayersDeletion {
 pub fn schedule_layer_upload(
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    layers_to_upload: HashSet<PathBuf>,
+    layers_to_upload: HashMap<PathBuf, LayerFileMetadata>,
     metadata: Option<TimelineMetadata>,
 ) {
     let sync_queue = match SYNC_QUEUE.get() {
@@ -508,7 +522,7 @@ pub fn schedule_layer_upload(
         },
         SyncTask::upload(LayersUpload {
             layers_to_upload,
-            uploaded_layers: HashSet::new(),
+            uploaded_layers: HashMap::new(),
             metadata,
         }),
     );
@@ -566,21 +580,44 @@ pub fn schedule_layer_download(tenant_id: TenantId, timeline_id: TimelineId) {
             tenant_id,
             timeline_id,
         },
-        SyncTask::download(LayersDownload {
-            layers_to_skip: HashSet::new(),
-        }),
+        SyncTask::download(LayersDownload::from_skipped_layers(HashSet::new())),
     );
     debug!("Download task for tenant {tenant_id}, timeline {timeline_id} sent")
+}
+
+/// Local existing timeline files
+///
+/// Values of this type serve different meanings in different contexts. On startup, collected
+/// timelines come with the full collected information and when signalling readyness to attach
+/// after completed download. After the download the file information is no longer carried, because
+/// it is already merged into [`RemoteTimeline`].
+#[derive(Debug)]
+pub struct TimelineLocalFiles(TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>);
+
+impl TimelineLocalFiles {
+    pub fn metadata(&self) -> &TimelineMetadata {
+        &self.0
+    }
+
+    /// Called during startup, for all of the local files with full metadata.
+    pub(crate) fn collected(
+        metadata: TimelineMetadata,
+        timeline_files: HashMap<PathBuf, LayerFileMetadata>,
+    ) -> TimelineLocalFiles {
+        TimelineLocalFiles(metadata, timeline_files)
+    }
+
+    /// Called near the end of tenant initialization, to signal readyness to attach tenants.
+    pub(crate) fn ready(metadata: TimelineMetadata) -> Self {
+        TimelineLocalFiles(metadata, HashMap::new())
+    }
 }
 
 /// Launch a thread to perform remote storage sync tasks.
 /// See module docs for loop step description.
 pub fn spawn_storage_sync_task(
     conf: &'static PageServerConf,
-    local_timeline_files: HashMap<
-        TenantId,
-        HashMap<TimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
-    >,
+    local_timeline_files: HashMap<TenantId, HashMap<TimelineId, TimelineLocalFiles>>,
     storage: GenericRemoteStorage,
     max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
@@ -738,7 +775,7 @@ async fn storage_sync_loop(
                                     tenant_entry
                                         .iter()
                                         .map(|(&id, entry)| {
-                                            (id, (entry.metadata.clone(), HashSet::new()))
+                                            (id, TimelineLocalFiles::ready(entry.metadata.clone()))
                                         })
                                         .collect(),
                                 ),
@@ -983,15 +1020,27 @@ async fn download_timeline_data(
         }
         DownloadedTimeline::Successful(mut download_data) => {
             match update_local_metadata(conf, sync_id, current_remote_timeline).await {
-                Ok(()) => match index.write().await.set_awaits_download(&sync_id, false) {
-                    Ok(()) => {
-                        register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
-                        return DownloadStatus::Downloaded;
-                    }
-                    Err(e) => {
-                        error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
-                    }
-                },
+                Ok(()) => {
+                    let mut g = index.write().await;
+
+                    match g.set_awaits_download(&sync_id, false) {
+                        Ok(()) => {
+                            let timeline = g
+                                .timeline_entry_mut(&sync_id)
+                                .expect("set_awaits_download verified existence");
+
+                            timeline.merge_metadata_from_downloaded(
+                                &download_data.data.gathered_metadata,
+                            );
+
+                            register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
+                            return DownloadStatus::Downloaded;
+                        }
+                        Err(e) => {
+                            error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
+                        }
+                    };
+                }
                 Err(e) => {
                     error!("Failed to update local timeline metadata: {e:?}");
                     download_data.retries += 1;
@@ -1194,11 +1243,18 @@ async fn update_remote_data(
                         }
                         if upload_failed {
                             existing_entry.add_upload_failures(
-                                uploaded_data.layers_to_upload.iter().cloned(),
+                                uploaded_data
+                                    .layers_to_upload
+                                    .iter()
+                                    .map(|(k, v)| (k.to_owned(), v.to_owned())),
                             );
                         } else {
-                            existing_entry
-                                .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
+                            existing_entry.add_timeline_layers(
+                                uploaded_data
+                                    .uploaded_layers
+                                    .iter()
+                                    .map(|(k, v)| (k.to_owned(), v.to_owned())),
+                            );
                         }
                     }
                     RemoteDataUpdate::Delete(layers_to_remove) => {
@@ -1218,11 +1274,19 @@ async fn update_remote_data(
                     };
                     let mut new_remote_timeline = RemoteTimeline::new(new_metadata.clone());
                     if upload_failed {
-                        new_remote_timeline
-                            .add_upload_failures(uploaded_data.layers_to_upload.iter().cloned());
+                        new_remote_timeline.add_upload_failures(
+                            uploaded_data
+                                .layers_to_upload
+                                .iter()
+                                .map(|(k, v)| (k.to_owned(), v.to_owned())),
+                        );
                     } else {
-                        new_remote_timeline
-                            .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
+                        new_remote_timeline.add_timeline_layers(
+                            uploaded_data
+                                .uploaded_layers
+                                .iter()
+                                .map(|(k, v)| (k.to_owned(), v.to_owned())),
+                        );
                     }
 
                     index_accessor.add_timeline_entry(sync_id, new_remote_timeline.clone());
@@ -1270,13 +1334,14 @@ async fn validate_task_retries(
 fn schedule_first_sync_tasks(
     index: &mut RemoteTimelineIndex,
     sync_queue: &SyncQueue,
-    local_timeline_files: HashMap<TenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
+    local_timeline_files: HashMap<TenantTimelineId, TimelineLocalFiles>,
 ) -> TenantTimelineValues<LocalTimelineInitStatus> {
     let mut local_timeline_init_statuses = TenantTimelineValues::new();
 
     let mut new_sync_tasks = VecDeque::with_capacity(local_timeline_files.len());
 
-    for (sync_id, (local_metadata, local_files)) in local_timeline_files {
+    for (sync_id, local_timeline) in local_timeline_files {
+        let TimelineLocalFiles(local_metadata, local_files) = local_timeline;
         match index.timeline_entry_mut(&sync_id) {
             Some(remote_timeline) => {
                 let (timeline_status, awaits_download) = compare_local_and_remote_timeline(
@@ -1320,7 +1385,7 @@ fn schedule_first_sync_tasks(
                     sync_id,
                     SyncTask::upload(LayersUpload {
                         layers_to_upload: local_files,
-                        uploaded_layers: HashSet::new(),
+                        uploaded_layers: HashMap::new(),
                         metadata: Some(local_metadata.clone()),
                     }),
                 ));
@@ -1347,20 +1412,46 @@ fn compare_local_and_remote_timeline(
     new_sync_tasks: &mut VecDeque<(TenantTimelineId, SyncTask)>,
     sync_id: TenantTimelineId,
     local_metadata: TimelineMetadata,
-    local_files: HashSet<PathBuf>,
+    local_files: HashMap<PathBuf, LayerFileMetadata>,
     remote_entry: &RemoteTimeline,
 ) -> (LocalTimelineInitStatus, bool) {
     let _entered = info_span!("compare_local_and_remote_timeline", sync_id = %sync_id).entered();
 
-    let remote_files = remote_entry.stored_files();
+    let needed_to_download_files = remote_entry
+        .stored_files()
+        .iter()
+        .filter_map(|(layer_file, remote_metadata)| {
+            if let Some(local_metadata) = local_files.get(layer_file) {
+                match (remote_metadata.file_size(), local_metadata.file_size()) {
+                    (Some(x), Some(y)) if x == y => { None },
+                    (None, Some(_)) => {
+                        // upgrading from an earlier IndexPart without metadata
+                        None
+                    },
+                    _ => {
+                        // having to deal with other than (Some(x), Some(y)) where x != y here is a
+                        // bummer, but see #2582 and #2610 for attempts and discussion.
+                        warn!("Redownloading locally existing {layer_file:?} due to size mismatch, size on index: {:?}, on disk: {:?}", remote_metadata.file_size(), local_metadata.file_size());
+                        Some(layer_file)
+                    },
+                }
+            } else {
+                // doesn't exist locally
+                Some(layer_file)
+            }
+        })
+        .collect::<HashSet<_>>();
 
-    let number_of_layers_to_download = remote_files.difference(&local_files).count();
-    let (initial_timeline_status, awaits_download) = if number_of_layers_to_download > 0 {
+    let (initial_timeline_status, awaits_download) = if !needed_to_download_files.is_empty() {
         new_sync_tasks.push_back((
             sync_id,
-            SyncTask::download(LayersDownload {
-                layers_to_skip: local_files.clone(),
-            }),
+            SyncTask::download(LayersDownload::from_skipped_layers(
+                local_files
+                    .keys()
+                    .filter(|path| !needed_to_download_files.contains(path))
+                    .cloned()
+                    .collect(),
+            )),
         ));
         info!("NeedsSync");
         (LocalTimelineInitStatus::NeedsSync, true)
@@ -1375,15 +1466,22 @@ fn compare_local_and_remote_timeline(
     };
 
     let layers_to_upload = local_files
-        .difference(remote_files)
-        .cloned()
-        .collect::<HashSet<_>>();
+        .iter()
+        .filter_map(|(local_file, metadata)| {
+            if !remote_entry.stored_files().contains_key(local_file) {
+                Some((local_file.to_owned(), metadata.to_owned()))
+            } else {
+                None
+            }
+        })
+        .collect::<HashMap<_, _>>();
+
     if !layers_to_upload.is_empty() {
         new_sync_tasks.push_back((
             sync_id,
             SyncTask::upload(LayersUpload {
                 layers_to_upload,
-                uploaded_layers: HashSet::new(),
+                uploaded_layers: HashMap::new(),
                 metadata: Some(local_metadata),
             }),
         ));
@@ -1439,11 +1537,12 @@ mod test_utils {
         let timeline_path = harness.timeline_path(&timeline_id);
         fs::create_dir_all(&timeline_path).await?;
 
-        let mut layers_to_upload = HashSet::with_capacity(filenames.len());
+        let mut layers_to_upload = HashMap::with_capacity(filenames.len());
         for &file in filenames {
             let file_path = timeline_path.join(file);
             fs::write(&file_path, dummy_contents(file).into_bytes()).await?;
-            layers_to_upload.insert(file_path);
+            let metadata = LayerFileMetadata::new(file_path.metadata()?.len());
+            layers_to_upload.insert(file_path, metadata);
         }
 
         fs::write(
@@ -1454,7 +1553,7 @@ mod test_utils {
 
         Ok(LayersUpload {
             layers_to_upload,
-            uploaded_layers: HashSet::new(),
+            uploaded_layers: HashMap::new(),
             metadata: Some(metadata),
         })
     }
@@ -1509,12 +1608,13 @@ mod tests {
         assert!(sync_id_2 != sync_id_3);
         assert!(sync_id_3 != TEST_SYNC_ID);
 
-        let download_task = SyncTask::download(LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk")]),
-        });
+        let download_task =
+            SyncTask::download(LayersDownload::from_skipped_layers(HashSet::from([
+                PathBuf::from("sk"),
+            ])));
         let upload_task = SyncTask::upload(LayersUpload {
-            layers_to_upload: HashSet::from([PathBuf::from("up")]),
-            uploaded_layers: HashSet::from([PathBuf::from("upl")]),
+            layers_to_upload: HashMap::from([(PathBuf::from("up"), LayerFileMetadata::new(123))]),
+            uploaded_layers: HashMap::from([(PathBuf::from("upl"), LayerFileMetadata::new(123))]),
             metadata: Some(dummy_metadata(Lsn(2))),
         });
         let delete_task = SyncTask::delete(LayersDeletion {
@@ -1558,12 +1658,10 @@ mod tests {
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         assert_eq!(sync_queue.len(), 0);
 
-        let download = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk")]),
-        };
+        let download = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk")]));
         let upload = LayersUpload {
-            layers_to_upload: HashSet::from([PathBuf::from("up")]),
-            uploaded_layers: HashSet::from([PathBuf::from("upl")]),
+            layers_to_upload: HashMap::from([(PathBuf::from("up"), LayerFileMetadata::new(123))]),
+            uploaded_layers: HashMap::from([(PathBuf::from("upl"), LayerFileMetadata::new(123))]),
             metadata: Some(dummy_metadata(Lsn(2))),
         };
         let delete = LayersDeletion {
@@ -1611,18 +1709,10 @@ mod tests {
     #[tokio::test]
     async fn same_task_id_same_tasks_batch() {
         let sync_queue = SyncQueue::new(NonZeroUsize::new(1).unwrap());
-        let download_1 = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk1")]),
-        };
-        let download_2 = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk2")]),
-        };
-        let download_3 = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk3")]),
-        };
-        let download_4 = LayersDownload {
-            layers_to_skip: HashSet::from([PathBuf::from("sk4")]),
-        };
+        let download_1 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk1")]));
+        let download_2 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk2")]));
+        let download_3 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk3")]));
+        let download_4 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk4")]));
 
         let sync_id_2 = TenantTimelineId {
             tenant_id: TenantId::from_array(hex!("22223344556677881122334455667788")),
@@ -1646,15 +1736,15 @@ mod tests {
             Some(SyncTaskBatch {
                 download: Some(SyncData {
                     retries: 0,
-                    data: LayersDownload {
-                        layers_to_skip: {
+                    data: LayersDownload::from_skipped_layers(
+                        {
                             let mut set = HashSet::new();
                             set.extend(download_1.layers_to_skip.into_iter());
                             set.extend(download_2.layers_to_skip.into_iter());
                             set.extend(download_4.layers_to_skip.into_iter());
                             set
                         },
-                    }
+                    )
                 }),
                 upload: None,
                 delete: None,
@@ -1669,5 +1759,149 @@ mod tests {
             1,
             "Should have one task left out of the batch"
         );
+    }
+
+    mod local_and_remote_comparisons {
+        use super::*;
+
+        #[test]
+        fn ready() {
+            let mut new_sync_tasks = VecDeque::default();
+            let sync_id = TenantTimelineId::generate();
+            let local_metadata = dummy_metadata(0x02.into());
+            let local_files =
+                HashMap::from([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
+            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
+            remote_entry
+                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
+
+            let (status, sync_needed) = compare_local_and_remote_timeline(
+                &mut new_sync_tasks,
+                sync_id,
+                local_metadata.clone(),
+                local_files,
+                &remote_entry,
+            );
+
+            assert_eq!(
+                status,
+                LocalTimelineInitStatus::LocallyComplete(local_metadata)
+            );
+            assert!(!sync_needed);
+
+            assert!(new_sync_tasks.is_empty(), "{:?}", new_sync_tasks);
+        }
+
+        #[test]
+        fn needs_download() {
+            let mut new_sync_tasks = VecDeque::default();
+            let sync_id = TenantTimelineId::generate();
+            let local_metadata = dummy_metadata(0x02.into());
+            let local_files = HashMap::default();
+            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
+            remote_entry
+                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
+
+            let (status, sync_needed) = compare_local_and_remote_timeline(
+                &mut new_sync_tasks,
+                sync_id,
+                local_metadata,
+                local_files.clone(),
+                &remote_entry,
+            );
+
+            assert_eq!(status, LocalTimelineInitStatus::NeedsSync);
+            assert!(sync_needed);
+
+            let new_sync_tasks = new_sync_tasks.into_iter().collect::<Vec<_>>();
+
+            assert_eq!(
+                &new_sync_tasks,
+                &[(
+                    sync_id,
+                    SyncTask::download(LayersDownload::from_skipped_layers(
+                        local_files.keys().cloned().collect()
+                    ))
+                )]
+            );
+        }
+
+        #[test]
+        fn redownload_is_not_needed_on_upgrade() {
+            // originally the implementation missed the `(None, Some(_))` case in the match, and
+            // proceeded to always redownload if the remote metadata was not available.
+
+            let mut new_sync_tasks = VecDeque::default();
+            let sync_id = TenantTimelineId::generate();
+
+            let local_metadata = dummy_metadata(0x02.into());
+
+            // type system would in general allow that LayerFileMetadata would be created with
+            // file_size: None, however `LayerFileMetadata::default` is only allowed from tests,
+            // and so everywhere within the system valid LayerFileMetadata is being created, it is
+            // created through `::new`.
+            let local_files =
+                HashMap::from([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
+
+            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
+
+            // RemoteTimeline is constructed out of an older version IndexPart, which didn't carry
+            // any metadata.
+            remote_entry
+                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::default())]);
+
+            let (status, sync_needed) = compare_local_and_remote_timeline(
+                &mut new_sync_tasks,
+                sync_id,
+                local_metadata.clone(),
+                local_files,
+                &remote_entry,
+            );
+
+            assert_eq!(
+                status,
+                LocalTimelineInitStatus::LocallyComplete(local_metadata)
+            );
+            assert!(!sync_needed);
+        }
+
+        #[test]
+        fn needs_upload() {
+            let mut new_sync_tasks = VecDeque::default();
+            let sync_id = TenantTimelineId::generate();
+            let local_metadata = dummy_metadata(0x02.into());
+            let local_files =
+                HashMap::from([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
+            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
+            remote_entry.add_timeline_layers([]);
+
+            let (status, sync_needed) = compare_local_and_remote_timeline(
+                &mut new_sync_tasks,
+                sync_id,
+                local_metadata.clone(),
+                local_files.clone(),
+                &remote_entry,
+            );
+
+            assert_eq!(
+                status,
+                LocalTimelineInitStatus::LocallyComplete(local_metadata.clone())
+            );
+            assert!(!sync_needed);
+
+            let new_sync_tasks = new_sync_tasks.into_iter().collect::<Vec<_>>();
+
+            assert_eq!(
+                &new_sync_tasks,
+                &[(
+                    sync_id,
+                    SyncTask::upload(LayersUpload {
+                        layers_to_upload: local_files,
+                        uploaded_layers: HashMap::default(),
+                        metadata: Some(local_metadata),
+                    })
+                )]
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,8 @@ use remote_storage::GenericRemoteStorage;
 
 use crate::config::{PageServerConf, METADATA_FILE_NAME};
 use crate::http::models::TenantInfo;
-use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
-use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
+use crate::storage_sync::index::{LayerFileMetadata, RemoteIndex, RemoteTimelineIndex};
+use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData, TimelineLocalFiles};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
@@ -104,7 +104,7 @@ pub fn init_tenant_mgr(
                 if let TenantAttachData::Ready(t) = new_timeline_values {
                     for (timeline_id, old_value) in old_values {
                         if let LocalTimelineInitStatus::LocallyComplete(metadata) = old_value {
-                            t.insert(timeline_id, (metadata, HashSet::new()));
+                            t.insert(timeline_id, TimelineLocalFiles::ready(metadata));
                         }
                     }
                 }
@@ -189,7 +189,7 @@ pub fn attach_local_tenants(
                 let has_timelines = !timelines.is_empty();
                 let timelines_to_attach = timelines
                     .iter()
-                    .map(|(&k, (v, _))| (k, v.clone()))
+                    .map(|(&k, v)| (k, v.metadata().to_owned()))
                     .collect();
                 match tenant.init_attach_timelines(timelines_to_attach) {
                     Ok(()) => {
@@ -483,7 +483,7 @@ pub fn list_tenant_info(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
 
 #[derive(Debug)]
 pub enum TenantAttachData {
-    Ready(HashMap<TimelineId, (TimelineMetadata, HashSet<PathBuf>)>),
+    Ready(HashMap<TimelineId, TimelineLocalFiles>),
     Broken(anyhow::Error),
 }
 /// Attempts to collect information about all tenant and timelines, existing on the local FS.
@@ -602,7 +602,6 @@ fn is_temporary(path: &Path) -> bool {
     }
 }
 
-#[allow(clippy::type_complexity)]
 fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
@@ -648,7 +647,10 @@ fn collect_timelines_for_tenant(
                 } else {
                     match collect_timeline_files(&timeline_dir) {
                         Ok((timeline_id, metadata, timeline_files)) => {
-                            tenant_timelines.insert(timeline_id, (metadata, timeline_files));
+                            tenant_timelines.insert(
+                                timeline_id,
+                                TimelineLocalFiles::collected(metadata, timeline_files),
+                            );
                         }
                         Err(e) => {
                             error!(
@@ -690,8 +692,12 @@ fn collect_timelines_for_tenant(
 //  NOTE: ephemeral files are excluded from the list
 fn collect_timeline_files(
     timeline_dir: &Path,
-) -> anyhow::Result<(TimelineId, TimelineMetadata, HashSet<PathBuf>)> {
-    let mut timeline_files = HashSet::new();
+) -> anyhow::Result<(
+    TimelineId,
+    TimelineMetadata,
+    HashMap<PathBuf, LayerFileMetadata>,
+)> {
+    let mut timeline_files = HashMap::new();
     let mut timeline_metadata_path = None;
 
     let timeline_id = timeline_dir
@@ -704,7 +710,9 @@ fn collect_timeline_files(
         fs::read_dir(&timeline_dir).context("Failed to list timeline dir contents")?;
     for entry in timeline_dir_entries {
         let entry_path = entry.context("Failed to list timeline dir entry")?.path();
-        if entry_path.is_file() {
+        let metadata = entry_path.metadata()?;
+
+        if metadata.is_file() {
             if entry_path.file_name().and_then(OsStr::to_str) == Some(METADATA_FILE_NAME) {
                 timeline_metadata_path = Some(entry_path);
             } else if is_ephemeral_file(&entry_path.file_name().unwrap().to_string_lossy()) {
@@ -719,7 +727,8 @@ fn collect_timeline_files(
                     )
                 })?;
             } else {
-                timeline_files.insert(entry_path);
+                let layer_metadata = LayerFileMetadata::new(metadata.len());
+                timeline_files.insert(entry_path, layer_metadata);
             }
         }
     }
