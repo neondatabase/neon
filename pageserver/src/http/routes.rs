@@ -129,6 +129,7 @@ async fn build_timeline_info(
         }
     };
     let current_physical_size = Some(timeline.get_physical_size());
+    let state = timeline.current_state();
 
     let info = TimelineInfo {
         tenant_id: timeline.tenant_id,
@@ -158,6 +159,7 @@ async fn build_timeline_info(
 
         remote_consistent_lsn,
         awaits_download,
+        state,
 
         // Duplicate some fields in 'local' and 'remote' fields, for backwards-compatility
         // with the control plane.
@@ -294,7 +296,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 
     let timeline_info = async {
         let timeline = tokio::task::spawn_blocking(move || {
-            tenant_mgr::get_tenant(tenant_id, true)?.get_timeline(timeline_id)
+            tenant_mgr::get_tenant(tenant_id, true)?.get_timeline(timeline_id, false)
         })
         .await
         .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
@@ -331,14 +333,13 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
     let timeline = tenant_mgr::get_tenant(tenant_id, true)
-        .and_then(|tenant| tenant.get_timeline(timeline_id))
-        .with_context(|| format!("No timeline {timeline_id} in repository for tenant {tenant_id}"))
+        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
         .map_err(ApiError::NotFound)?;
     let result = match timeline
         .find_lsn_for_timestamp(timestamp_pg)
         .map_err(ApiError::InternalServerError)?
     {
-        LsnForTimestamp::Present(lsn) => format!("{}", lsn),
+        LsnForTimestamp::Present(lsn) => format!("{lsn}"),
         LsnForTimestamp::Future(_lsn) => "future".into(),
         LsnForTimestamp::Past(_lsn) => "past".into(),
         LsnForTimestamp::NoData(_lsn) => "nodata".into(),
@@ -788,16 +789,16 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     // FIXME: currently this will return a 500 error on bad tenant id; it should be 4XX
-    let repo = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::NotFound)?;
+    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::NotFound)?;
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
     let _span_guard =
         info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id).entered();
-    let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| repo.get_gc_horizon());
+    let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
 
     // Use tenant's pitr setting
-    let pitr = repo.get_pitr_interval();
-    let result = repo
+    let pitr = tenant.get_pitr_interval();
+    let result = tenant
         .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
         // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
         // better once the types support it.
@@ -812,10 +813,9 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let repo = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
-    let timeline = repo
-        .get_timeline(timeline_id)
-        .with_context(|| format!("No timeline {timeline_id} in repository for tenant {tenant_id}"))
+    let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
     timeline.compact().map_err(ApiError::InternalServerError)?;
 
@@ -829,10 +829,9 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let repo = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
-    let timeline = repo
-        .get_timeline(timeline_id)
-        .with_context(|| format!("No timeline {timeline_id} in repository for tenant {tenant_id}"))
+    let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
     timeline
         .checkpoint(CheckpointConfig::Forced)
