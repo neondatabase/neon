@@ -2514,13 +2514,13 @@ neon_slru_kind_check(SlruCtl ctl)
  * NOTE: Never call ereport(ERROR) in here to comply with the behavior expected in slru.c
  */
 bool
-neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, char *buffer)
+neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, XLogRecPtr min_lsn, char *buffer)
 {
 	NeonResponse 				*resp;
 	NeonGetSlruPageResponse 	*get_slru_page_resp;
 	NeonSlruKind	kind;
 	bool			latest;
-	XLogRecPtr		request_lsn;
+	XLogRecPtr		request_lsn = min_lsn;
 	bool 			read_ok = false;
 	// FIXME: select the right region for specific slru kinds
 	int				region = current_region;
@@ -2533,8 +2533,12 @@ neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, char *buffer)
 	}
 
 	// FIXME: select the right region for specific slru kinds
-	request_lsn = neon_get_request_lsn(&latest, region, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
-
+	// IF the caller has set a min_lsn, then use the same for the request.
+	if (min_lsn == InvalidXLogRecPtr) {
+        request_lsn =
+            neon_get_request_lsn(&latest, region, dummy_node, MAIN_FORKNUM,
+                                REL_METADATA_PSEUDO_BLOCKNO);
+    }
 	/**
 	 * During recovery, if there is no WAL redoing, the function GetXLogReplayRecPtr will return
 	 * a lsn 0, causing zenith_get_request_lsn to give out an invalid lsn with "latest" being false,
