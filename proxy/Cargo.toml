@@ -9,7 +9,7 @@ atty = "0.2.14"
 base64 = "0.13.0"
 bstr = "0.2.17"
 bytes = { version = "1.0.1", features = ['serde'] }
-clap = "3.0"
+clap = "4.0"
 futures = "0.3.13"
 git-version = "0.3.5"
 hashbrown = "0.12"

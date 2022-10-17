@@ -45,98 +45,43 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let arg_matches = clap::App::new("Neon proxy/router")
-        .version(GIT_VERSION)
-        .arg(
-            Arg::new("proxy")
-                .short('p')
-                .long("proxy")
-                .takes_value(true)
-                .help("listen for incoming client connections on ip:port")
-                .default_value("127.0.0.1:4432"),
-        )
-        .arg(
-            Arg::new("auth-backend")
-                .long("auth-backend")
-                .takes_value(true)
-                .possible_values(["console", "postgres", "link"])
-                .default_value("link"),
-        )
-        .arg(
-            Arg::new("mgmt")
-                .short('m')
-                .long("mgmt")
-                .takes_value(true)
-                .help("listen for management callback connection on ip:port")
-                .default_value("127.0.0.1:7000"),
-        )
-        .arg(
-            Arg::new("http")
-                .short('h')
-                .long("http")
-                .takes_value(true)
-                .help("listen for incoming http connections (metrics, etc) on ip:port")
-                .default_value("127.0.0.1:7001"),
-        )
-        .arg(
-            Arg::new("uri")
-                .short('u')
-                .long("uri")
-                .takes_value(true)
-                .help("redirect unauthenticated users to the given uri in case of link auth")
-                .default_value("http://localhost:3000/psql_session/"),
-        )
-        .arg(
-            Arg::new("auth-endpoint")
-                .short('a')
-                .long("auth-endpoint")
-                .takes_value(true)
-                .help("cloud API endpoint for authenticating users")
-                .default_value("http://localhost:3000/authenticate_proxy_request/"),
-        )
-        .arg(
-            Arg::new("tls-key")
-                .short('k')
-                .long("tls-key")
-                .alias("ssl-key") // backwards compatibility
-                .takes_value(true)
-                .help("path to TLS key for client postgres connections"),
-        )
-        .arg(
-            Arg::new("tls-cert")
-                .short('c')
-                .long("tls-cert")
-                .alias("ssl-cert") // backwards compatibility
-                .takes_value(true)
-                .help("path to TLS cert for client postgres connections"),
-        )
-        .get_matches();
+    let arg_matches = cli().get_matches();
 
     let tls_config = match (
-        arg_matches.value_of("tls-key"),
-        arg_matches.value_of("tls-cert"),
+        arg_matches.get_one::<String>("tls-key"),
+        arg_matches.get_one::<String>("tls-cert"),
     ) {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(key_path, cert_path)?),
         (None, None) => None,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    let proxy_address: SocketAddr = arg_matches.value_of("proxy").unwrap().parse()?;
-    let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
-    let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
+    let proxy_address: SocketAddr = arg_matches.get_one::<String>("proxy").unwrap().parse()?;
+    let mgmt_address: SocketAddr = arg_matches.get_one::<String>("mgmt").unwrap().parse()?;
+    let http_address: SocketAddr = arg_matches.get_one::<String>("http").unwrap().parse()?;
 
-    let auth_backend = match arg_matches.value_of("auth-backend").unwrap() {
+    let auth_backend = match arg_matches
+        .get_one::<String>("auth-backend")
+        .unwrap()
+        .as_str()
+    {
         "console" => {
-            let url = arg_matches.value_of("auth-endpoint").unwrap().parse()?;
+            let url = arg_matches
+                .get_one::<String>("auth-endpoint")
+                .unwrap()
+                .parse()?;
             let endpoint = http::Endpoint::new(url, reqwest::Client::new());
             auth::BackendType::Console(Cow::Owned(endpoint), ())
         }
         "postgres" => {
-            let url = arg_matches.value_of("auth-endpoint").unwrap().parse()?;
+            let url = arg_matches
+                .get_one::<String>("auth-endpoint")
+                .unwrap()
+                .parse()?;
             auth::BackendType::Postgres(Cow::Owned(url), ())
         }
         "link" => {
-            let url = arg_matches.value_of("uri").unwrap().parse()?;
+            let url = arg_matches.get_one::<String>("uri").unwrap().parse()?;
             auth::BackendType::Link(Cow::Owned(url))
         }
         other => bail!("unsupported auth backend: {other}"),
@@ -173,4 +118,69 @@ async fn main() -> anyhow::Result<()> {
     let _: Vec<()> = futures::future::try_join_all(tasks).await?;
 
     Ok(())
+}
+
+fn cli() -> clap::Command {
+    clap::Command::new("Neon proxy/router")
+        .disable_help_flag(true)
+        .version(GIT_VERSION)
+        .arg(
+            Arg::new("proxy")
+                .short('p')
+                .long("proxy")
+                .help("listen for incoming client connections on ip:port")
+                .default_value("127.0.0.1:4432"),
+        )
+        .arg(
+            Arg::new("auth-backend")
+                .long("auth-backend")
+                .value_parser(["console", "postgres", "link"])
+                .default_value("link"),
+        )
+        .arg(
+            Arg::new("mgmt")
+                .short('m')
+                .long("mgmt")
+                .help("listen for management callback connection on ip:port")
+                .default_value("127.0.0.1:7000"),
+        )
+        .arg(
+            Arg::new("http")
+                .long("http")
+                .help("listen for incoming http connections (metrics, etc) on ip:port")
+                .default_value("127.0.0.1:7001"),
+        )
+        .arg(
+            Arg::new("uri")
+                .short('u')
+                .long("uri")
+                .help("redirect unauthenticated users to the given uri in case of link auth")
+                .default_value("http://localhost:3000/psql_session/"),
+        )
+        .arg(
+            Arg::new("auth-endpoint")
+                .short('a')
+                .long("auth-endpoint")
+                .help("cloud API endpoint for authenticating users")
+                .default_value("http://localhost:3000/authenticate_proxy_request/"),
+        )
+        .arg(
+            Arg::new("tls-key")
+                .short('k')
+                .long("tls-key")
+                .alias("ssl-key") // backwards compatibility
+                .help("path to TLS key for client postgres connections"),
+        )
+        .arg(
+            Arg::new("tls-cert")
+                .short('c')
+                .long("tls-cert")
+                .alias("ssl-cert") // backwards compatibility
+                .help("path to TLS cert for client postgres connections"),
+        )
+}
+
+#[test]
+fn verify_cli() {
+    cli().debug_assert();
 }

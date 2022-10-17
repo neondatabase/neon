@@ -6,7 +6,7 @@
 //! rely on `neon_local` to set up the environment for each test.
 //!
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{App, AppSettings, Arg, ArgMatches};
+use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env::{EtcdBroker, LocalEnv};
 use control_plane::safekeeper::SafekeeperNode;
@@ -85,212 +85,7 @@ struct TimelineTreeEl {
 //   * Providing CLI api to the pageserver
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
-    let branch_name_arg = Arg::new("branch-name")
-        .long("branch-name")
-        .takes_value(true)
-        .help("Name of the branch to be created or used as an alias for other services")
-        .required(false);
-
-    let pg_node_arg = Arg::new("node").help("Postgres node name").required(false);
-
-    let safekeeper_id_arg = Arg::new("id").help("safekeeper id").required(false);
-
-    let tenant_id_arg = Arg::new("tenant-id")
-        .long("tenant-id")
-        .help("Tenant id. Represented as a hexadecimal string 32 symbols length")
-        .takes_value(true)
-        .required(false);
-
-    let timeline_id_arg = Arg::new("timeline-id")
-        .long("timeline-id")
-        .help("Timeline id. Represented as a hexadecimal string 32 symbols length")
-        .takes_value(true)
-        .required(false);
-
-    let pg_version_arg = Arg::new("pg-version")
-        .long("pg-version")
-        .help("Postgres version to use for the initial tenant")
-        .required(false)
-        .takes_value(true)
-        .default_value(DEFAULT_PG_VERSION);
-
-    let port_arg = Arg::new("port")
-        .long("port")
-        .required(false)
-        .value_name("port");
-
-    let stop_mode_arg = Arg::new("stop-mode")
-        .short('m')
-        .takes_value(true)
-        .possible_values(&["fast", "immediate"])
-        .help("If 'immediate', don't flush repository data at shutdown")
-        .required(false)
-        .value_name("stop-mode");
-
-    let pageserver_config_args = Arg::new("pageserver-config-override")
-        .long("pageserver-config-override")
-        .takes_value(true)
-        .number_of_values(1)
-        .multiple_occurrences(true)
-        .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
-        .required(false);
-
-    let lsn_arg = Arg::new("lsn")
-        .long("lsn")
-        .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
-        .takes_value(true)
-        .required(false);
-
-    let matches = App::new("Neon CLI")
-        .setting(AppSettings::ArgRequiredElseHelp)
-        .version(GIT_VERSION)
-        .subcommand(
-            App::new("init")
-                .about("Initialize a new Neon repository")
-                .arg(pageserver_config_args.clone())
-                .arg(timeline_id_arg.clone().help("Use a specific timeline id when creating a tenant and its initial timeline"))
-                .arg(
-                    Arg::new("config")
-                        .long("config")
-                        .required(false)
-                        .value_name("config"),
-                )
-                .arg(pg_version_arg.clone())
-        )
-        .subcommand(
-            App::new("timeline")
-            .about("Manage timelines")
-            .subcommand(App::new("list")
-                .about("List all timelines, available to this pageserver")
-                .arg(tenant_id_arg.clone()))
-            .subcommand(App::new("branch")
-                .about("Create a new timeline, using another timeline as a base, copying its data")
-                .arg(tenant_id_arg.clone())
-                .arg(branch_name_arg.clone())
-                .arg(Arg::new("ancestor-branch-name").long("ancestor-branch-name").takes_value(true)
-                    .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(false))
-                .arg(Arg::new("ancestor-start-lsn").long("ancestor-start-lsn").takes_value(true)
-                    .help("When using another timeline as base, use a specific Lsn in it instead of the latest one").required(false)))
-            .subcommand(App::new("create")
-                .about("Create a new blank timeline")
-                .arg(tenant_id_arg.clone())
-                .arg(branch_name_arg.clone())
-                .arg(pg_version_arg.clone())
-            )
-            .subcommand(App::new("import")
-                .about("Import timeline from basebackup directory")
-                .arg(tenant_id_arg.clone())
-                .arg(timeline_id_arg.clone())
-                .arg(Arg::new("node-name").long("node-name").takes_value(true)
-                    .help("Name to assign to the imported timeline"))
-                .arg(Arg::new("base-tarfile").long("base-tarfile").takes_value(true)
-                    .help("Basebackup tarfile to import"))
-                .arg(Arg::new("base-lsn").long("base-lsn").takes_value(true)
-                    .help("Lsn the basebackup starts at"))
-                .arg(Arg::new("wal-tarfile").long("wal-tarfile").takes_value(true)
-                    .help("Wal to add after base"))
-                .arg(Arg::new("end-lsn").long("end-lsn").takes_value(true)
-                    .help("Lsn the basebackup ends at"))
-                .arg(pg_version_arg.clone())
-            )
-        ).subcommand(
-            App::new("tenant")
-            .setting(AppSettings::ArgRequiredElseHelp)
-            .about("Manage tenants")
-            .subcommand(App::new("list"))
-            .subcommand(App::new("create")
-                .arg(tenant_id_arg.clone())
-                .arg(timeline_id_arg.clone().help("Use a specific timeline id when creating a tenant and its initial timeline"))
-                .arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
-                .arg(pg_version_arg.clone())
-                )
-            .subcommand(App::new("config")
-                .arg(tenant_id_arg.clone())
-                .arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
-                )
-        )
-        .subcommand(
-            App::new("pageserver")
-                .setting(AppSettings::ArgRequiredElseHelp)
-                .about("Manage pageserver")
-                .subcommand(App::new("status"))
-                .subcommand(App::new("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
-                .subcommand(App::new("stop").about("Stop local pageserver")
-                            .arg(stop_mode_arg.clone()))
-                .subcommand(App::new("restart").about("Restart local pageserver").arg(pageserver_config_args.clone()))
-        )
-        .subcommand(
-            App::new("safekeeper")
-                .setting(AppSettings::ArgRequiredElseHelp)
-                .about("Manage safekeepers")
-                .subcommand(App::new("start")
-                            .about("Start local safekeeper")
-                            .arg(safekeeper_id_arg.clone())
-                )
-                .subcommand(App::new("stop")
-                            .about("Stop local safekeeper")
-                            .arg(safekeeper_id_arg.clone())
-                            .arg(stop_mode_arg.clone())
-                )
-                .subcommand(App::new("restart")
-                            .about("Restart local safekeeper")
-                            .arg(safekeeper_id_arg.clone())
-                            .arg(stop_mode_arg.clone())
-                )
-        )
-        .subcommand(
-            App::new("pg")
-                .setting(AppSettings::ArgRequiredElseHelp)
-                .about("Manage postgres instances")
-                .subcommand(App::new("list").arg(tenant_id_arg.clone()))
-                .subcommand(App::new("create")
-                    .about("Create a postgres compute node")
-                    .arg(pg_node_arg.clone())
-                    .arg(branch_name_arg.clone())
-                    .arg(tenant_id_arg.clone())
-                    .arg(lsn_arg.clone())
-                    .arg(port_arg.clone())
-                    .arg(
-                        Arg::new("config-only")
-                            .help("Don't do basebackup, create compute node with only config files")
-                            .long("config-only")
-                            .required(false))
-                    .arg(pg_version_arg.clone())
-                )
-                .subcommand(App::new("start")
-                    .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
-                    .arg(pg_node_arg.clone())
-                    .arg(tenant_id_arg.clone())
-                    .arg(branch_name_arg.clone())
-                    .arg(timeline_id_arg.clone())
-                    .arg(lsn_arg.clone())
-                    .arg(port_arg.clone())
-                    .arg(pg_version_arg.clone())
-                )
-                .subcommand(
-                    App::new("stop")
-                    .arg(pg_node_arg.clone())
-                    .arg(tenant_id_arg.clone())
-                    .arg(
-                        Arg::new("destroy")
-                            .help("Also delete data directory (now optional, should be default in future)")
-                            .long("destroy")
-                            .required(false)
-                    )
-                    )
-
-        )
-        .subcommand(
-            App::new("start")
-                .about("Start page server and safekeepers")
-                .arg(pageserver_config_args)
-        )
-        .subcommand(
-            App::new("stop")
-                .about("Stop page server and safekeepers")
-                .arg(stop_mode_arg.clone())
-        )
-        .get_matches();
+    let matches = cli().get_matches();
 
     let (sub_name, sub_args) = match matches.subcommand() {
         Some(subcommand_data) => subcommand_data,
@@ -475,16 +270,16 @@ fn get_tenant_id(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::R
 
 fn parse_tenant_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TenantId>> {
     sub_match
-        .value_of("tenant-id")
-        .map(TenantId::from_str)
+        .get_one::<String>("tenant-id")
+        .map(|tenant_id| TenantId::from_str(tenant_id))
         .transpose()
         .context("Failed to parse tenant id from the argument string")
 }
 
 fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId>> {
     sub_match
-        .value_of("timeline-id")
-        .map(TimelineId::from_str)
+        .get_one::<String>("timeline-id")
+        .map(|timeline_id| TimelineId::from_str(timeline_id))
         .transpose()
         .context("Failed to parse timeline id from the argument string")
 }
@@ -493,19 +288,22 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     let initial_timeline_id_arg = parse_timeline_id(init_match)?;
 
     // Create config file
-    let toml_file: String = if let Some(config_path) = init_match.value_of("config") {
+    let toml_file: String = if let Some(config_path) = init_match.get_one::<PathBuf>("config") {
         // load and parse the file
-        std::fs::read_to_string(std::path::Path::new(config_path))
-            .with_context(|| format!("Could not read configuration file '{config_path}'"))?
+        std::fs::read_to_string(config_path).with_context(|| {
+            format!(
+                "Could not read configuration file '{}'",
+                config_path.display()
+            )
+        })?
     } else {
         // Built-in default config
         default_conf(&EtcdBroker::locate_etcd()?)
     };
 
     let pg_version = init_match
-        .value_of("pg-version")
-        .unwrap()
-        .parse::<u32>()
+        .get_one::<u32>("pg-version")
+        .copied()
         .context("Failed to parse postgres version from the argument string")?;
 
     let mut env =
@@ -541,9 +339,10 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
 
 fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
     init_match
-        .values_of("pageserver-config-override")
+        .get_many::<String>("pageserver-config-override")
         .into_iter()
         .flatten()
+        .map(|s| s.as_str())
         .collect()
 }
 
@@ -558,7 +357,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
         Some(("create", create_match)) => {
             let initial_tenant_id = parse_tenant_id(create_match)?;
             let tenant_conf: HashMap<_, _> = create_match
-                .values_of("config")
+                .get_many::<String>("config")
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
             let new_tenant_id = pageserver.tenant_create(initial_tenant_id, tenant_conf)?;
@@ -567,9 +366,8 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
             // Create an initial timeline for the new tenant
             let new_timeline_id = parse_timeline_id(create_match)?;
             let pg_version = create_match
-                .value_of("pg-version")
-                .unwrap()
-                .parse::<u32>()
+                .get_one::<u32>("pg-version")
+                .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
             let timeline_info = pageserver.timeline_create(
@@ -595,7 +393,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
         Some(("config", create_match)) => {
             let tenant_id = get_tenant_id(create_match, env)?;
             let tenant_conf: HashMap<_, _> = create_match
-                .values_of("config")
+                .get_many::<String>("config")
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
 
@@ -622,13 +420,12 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
         Some(("create", create_match)) => {
             let tenant_id = get_tenant_id(create_match, env)?;
             let new_branch_name = create_match
-                .value_of("branch-name")
+                .get_one::<String>("branch-name")
                 .ok_or_else(|| anyhow!("No branch name provided"))?;
 
             let pg_version = create_match
-                .value_of("pg-version")
-                .unwrap()
-                .parse::<u32>()
+                .get_one::<u32>("pg-version")
+                .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
             let timeline_info =
@@ -647,35 +444,32 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let tenant_id = get_tenant_id(import_match, env)?;
             let timeline_id = parse_timeline_id(import_match)?.expect("No timeline id provided");
             let name = import_match
-                .value_of("node-name")
+                .get_one::<String>("node-name")
                 .ok_or_else(|| anyhow!("No node name provided"))?;
 
             // Parse base inputs
             let base_tarfile = import_match
-                .value_of("base-tarfile")
-                .map(|s| PathBuf::from_str(s).unwrap())
-                .ok_or_else(|| anyhow!("No base-tarfile provided"))?;
+                .get_one::<PathBuf>("base-tarfile")
+                .ok_or_else(|| anyhow!("No base-tarfile provided"))?
+                .to_owned();
             let base_lsn = Lsn::from_str(
                 import_match
-                    .value_of("base-lsn")
+                    .get_one::<String>("base-lsn")
                     .ok_or_else(|| anyhow!("No base-lsn provided"))?,
             )?;
             let base = (base_lsn, base_tarfile);
 
             // Parse pg_wal inputs
-            let wal_tarfile = import_match
-                .value_of("wal-tarfile")
-                .map(|s| PathBuf::from_str(s).unwrap());
+            let wal_tarfile = import_match.get_one::<PathBuf>("wal-tarfile").cloned();
             let end_lsn = import_match
-                .value_of("end-lsn")
+                .get_one::<String>("end-lsn")
                 .map(|s| Lsn::from_str(s).unwrap());
             // TODO validate both or none are provided
             let pg_wal = end_lsn.zip(wal_tarfile);
 
             let pg_version = import_match
-                .value_of("pg-version")
-                .unwrap()
-                .parse::<u32>()
+                .get_one::<u32>("pg-version")
+                .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
             let mut cplane = ComputeControlPlane::load(env.clone())?;
@@ -690,10 +484,11 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
         Some(("branch", branch_match)) => {
             let tenant_id = get_tenant_id(branch_match, env)?;
             let new_branch_name = branch_match
-                .value_of("branch-name")
+                .get_one::<String>("branch-name")
                 .ok_or_else(|| anyhow!("No branch name provided"))?;
             let ancestor_branch_name = branch_match
-                .value_of("ancestor-branch-name")
+                .get_one::<String>("ancestor-branch-name")
+                .map(|s| s.as_str())
                 .unwrap_or(DEFAULT_BRANCH_NAME);
             let ancestor_timeline_id = env
                 .get_branch_timeline_id(ancestor_branch_name, tenant_id)
@@ -702,8 +497,8 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 })?;
 
             let start_lsn = branch_match
-                .value_of("ancestor-start-lsn")
-                .map(Lsn::from_str)
+                .get_one::<String>("ancestor-start-lsn")
+                .map(|lsn_str| Lsn::from_str(lsn_str))
                 .transpose()
                 .context("Failed to parse ancestor start Lsn from the request")?;
             let timeline_info = pageserver.timeline_create(
@@ -804,45 +599,39 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
         }
         "create" => {
             let branch_name = sub_args
-                .value_of("branch-name")
+                .get_one::<String>("branch-name")
+                .map(|s| s.as_str())
                 .unwrap_or(DEFAULT_BRANCH_NAME);
             let node_name = sub_args
-                .value_of("node")
-                .map(ToString::to_string)
-                .unwrap_or_else(|| format!("{}_node", branch_name));
+                .get_one::<String>("node")
+                .map(|node_name| node_name.to_string())
+                .unwrap_or_else(|| format!("{branch_name}_node"));
 
             let lsn = sub_args
-                .value_of("lsn")
-                .map(Lsn::from_str)
+                .get_one::<String>("lsn")
+                .map(|lsn_str| Lsn::from_str(lsn_str))
                 .transpose()
                 .context("Failed to parse Lsn from the request")?;
             let timeline_id = env
                 .get_branch_timeline_id(branch_name, tenant_id)
-                .ok_or_else(|| anyhow!("Found no timeline id for branch name '{}'", branch_name))?;
+                .ok_or_else(|| anyhow!("Found no timeline id for branch name '{branch_name}'"))?;
 
-            let port: Option<u16> = match sub_args.value_of("port") {
-                Some(p) => Some(p.parse()?),
-                None => None,
-            };
+            let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
 
             let pg_version = sub_args
-                .value_of("pg-version")
-                .unwrap()
-                .parse::<u32>()
+                .get_one::<u32>("pg-version")
+                .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
             cplane.new_node(tenant_id, &node_name, timeline_id, lsn, port, pg_version)?;
         }
         "start" => {
-            let port: Option<u16> = match sub_args.value_of("port") {
-                Some(p) => Some(p.parse()?),
-                None => None,
-            };
+            let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
             let node_name = sub_args
-                .value_of("node")
+                .get_one::<String>("node")
                 .ok_or_else(|| anyhow!("No node name was provided to start"))?;
 
-            let node = cplane.nodes.get(&(tenant_id, node_name.to_owned()));
+            let node = cplane.nodes.get(&(tenant_id, node_name.to_string()));
 
             let auth_token = if matches!(env.pageserver.auth_type, AuthType::NeonJWT) {
                 let claims = Claims::new(Some(tenant_id), Scope::Tenant);
@@ -853,36 +642,33 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             };
 
             if let Some(node) = node {
-                println!("Starting existing postgres {}...", node_name);
+                println!("Starting existing postgres {node_name}...");
                 node.start(&auth_token)?;
             } else {
                 let branch_name = sub_args
-                    .value_of("branch-name")
+                    .get_one::<String>("branch-name")
+                    .map(|s| s.as_str())
                     .unwrap_or(DEFAULT_BRANCH_NAME);
                 let timeline_id = env
                     .get_branch_timeline_id(branch_name, tenant_id)
                     .ok_or_else(|| {
-                        anyhow!("Found no timeline id for branch name '{}'", branch_name)
+                        anyhow!("Found no timeline id for branch name '{branch_name}'")
                     })?;
                 let lsn = sub_args
-                    .value_of("lsn")
-                    .map(Lsn::from_str)
+                    .get_one::<String>("lsn")
+                    .map(|lsn_str| Lsn::from_str(lsn_str))
                     .transpose()
                     .context("Failed to parse Lsn from the request")?;
                 let pg_version = sub_args
-                    .value_of("pg-version")
-                    .unwrap()
-                    .parse::<u32>()
-                    .context("Failed to parse postgres version from the argument string")?;
+                    .get_one::<u32>("pg-version")
+                    .copied()
+                    .context("Failed to `pg-version` from the argument string")?;
                 // when used with custom port this results in non obvious behaviour
                 // port is remembered from first start command, i e
                 // start --port X
                 // stop
                 // start <-- will also use port X even without explicit port argument
-                println!(
-                    "Starting new postgres (v{}) {} on timeline {} ...",
-                    pg_version, node_name, timeline_id
-                );
+                println!("Starting new postgres (v{pg_version}) {node_name} on timeline {timeline_id} ...");
 
                 let node =
                     cplane.new_node(tenant_id, node_name, timeline_id, lsn, port, pg_version)?;
@@ -891,18 +677,18 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
         }
         "stop" => {
             let node_name = sub_args
-                .value_of("node")
+                .get_one::<String>("node")
                 .ok_or_else(|| anyhow!("No node name was provided to stop"))?;
-            let destroy = sub_args.is_present("destroy");
+            let destroy = sub_args.get_flag("destroy");
 
             let node = cplane
                 .nodes
-                .get(&(tenant_id, node_name.to_owned()))
-                .with_context(|| format!("postgres {} is not found", node_name))?;
+                .get(&(tenant_id, node_name.to_string()))
+                .with_context(|| format!("postgres {node_name} is not found"))?;
             node.stop(destroy)?;
         }
 
-        _ => bail!("Unexpected pg subcommand '{}'", sub_name),
+        _ => bail!("Unexpected pg subcommand '{sub_name}'"),
     }
 
     Ok(())
@@ -920,7 +706,10 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         }
 
         Some(("stop", stop_match)) => {
-            let immediate = stop_match.value_of("stop-mode") == Some("immediate");
+            let immediate = stop_match
+                .get_one::<String>("stop-mode")
+                .map(|s| s.as_str())
+                == Some("immediate");
 
             if let Err(e) = pageserver.stop(immediate) {
                 eprintln!("pageserver stop failed: {}", e);
@@ -970,7 +759,7 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     };
 
     // All the commands take an optional safekeeper name argument
-    let sk_id = if let Some(id_str) = sub_args.value_of("id") {
+    let sk_id = if let Some(id_str) = sub_args.get_one::<String>("id") {
         NodeId(id_str.parse().context("while parsing safekeeper id")?)
     } else {
         DEFAULT_SAFEKEEPER_ID
@@ -986,7 +775,8 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         }
 
         "stop" => {
-            let immediate = sub_args.value_of("stop-mode") == Some("immediate");
+            let immediate =
+                sub_args.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
 
             if let Err(e) = safekeeper.stop(immediate) {
                 eprintln!("safekeeper stop failed: {}", e);
@@ -995,7 +785,8 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         }
 
         "restart" => {
-            let immediate = sub_args.value_of("stop-mode") == Some("immediate");
+            let immediate =
+                sub_args.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
 
             if let Err(e) = safekeeper.stop(immediate) {
                 eprintln!("safekeeper stop failed: {}", e);
@@ -1039,7 +830,8 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 }
 
 fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    let immediate = sub_match.value_of("stop-mode") == Some("immediate");
+    let immediate =
+        sub_match.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
 
     let pageserver = PageServerNode::from_env(env);
 
@@ -1071,4 +863,220 @@ fn try_stop_etcd_process(env: &local_env::LocalEnv) {
     if let Err(e) = etcd::stop_etcd_process(env) {
         eprintln!("etcd stop failed: {e}");
     }
+}
+
+fn cli() -> Command {
+    let branch_name_arg = Arg::new("branch-name")
+        .long("branch-name")
+        .help("Name of the branch to be created or used as an alias for other services")
+        .required(false);
+
+    let pg_node_arg = Arg::new("node").help("Postgres node name").required(false);
+
+    let safekeeper_id_arg = Arg::new("id").help("safekeeper id").required(false);
+
+    let tenant_id_arg = Arg::new("tenant-id")
+        .long("tenant-id")
+        .help("Tenant id. Represented as a hexadecimal string 32 symbols length")
+        .required(false);
+
+    let timeline_id_arg = Arg::new("timeline-id")
+        .long("timeline-id")
+        .help("Timeline id. Represented as a hexadecimal string 32 symbols length")
+        .required(false);
+
+    let pg_version_arg = Arg::new("pg-version")
+        .long("pg-version")
+        .help("Postgres version to use for the initial tenant")
+        .required(false)
+        .value_parser(value_parser!(u32))
+        .default_value(DEFAULT_PG_VERSION);
+
+    let port_arg = Arg::new("port")
+        .long("port")
+        .required(false)
+        .value_parser(value_parser!(u16))
+        .value_name("port");
+
+    let stop_mode_arg = Arg::new("stop-mode")
+        .short('m')
+        .value_parser(["fast", "immediate"])
+        .help("If 'immediate', don't flush repository data at shutdown")
+        .required(false)
+        .value_name("stop-mode");
+
+    let pageserver_config_args = Arg::new("pageserver-config-override")
+        .long("pageserver-config-override")
+        .num_args(1)
+        .action(ArgAction::Append)
+        .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
+        .required(false);
+
+    let lsn_arg = Arg::new("lsn")
+        .long("lsn")
+        .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
+        .required(false);
+
+    Command::new("Neon CLI")
+        .arg_required_else_help(true)
+        .version(GIT_VERSION)
+        .subcommand(
+            Command::new("init")
+                .about("Initialize a new Neon repository")
+                .arg(pageserver_config_args.clone())
+                .arg(timeline_id_arg.clone().help("Use a specific timeline id when creating a tenant and its initial timeline"))
+                .arg(
+                    Arg::new("config")
+                        .long("config")
+                        .required(false)
+                        .value_parser(value_parser!(PathBuf))
+                        .value_name("config"),
+                )
+                .arg(pg_version_arg.clone())
+        )
+        .subcommand(
+            Command::new("timeline")
+            .about("Manage timelines")
+            .subcommand(Command::new("list")
+                .about("List all timelines, available to this pageserver")
+                .arg(tenant_id_arg.clone()))
+            .subcommand(Command::new("branch")
+                .about("Create a new timeline, using another timeline as a base, copying its data")
+                .arg(tenant_id_arg.clone())
+                .arg(branch_name_arg.clone())
+                .arg(Arg::new("ancestor-branch-name").long("ancestor-branch-name")
+                    .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(false))
+                .arg(Arg::new("ancestor-start-lsn").long("ancestor-start-lsn")
+                    .help("When using another timeline as base, use a specific Lsn in it instead of the latest one").required(false)))
+            .subcommand(Command::new("create")
+                .about("Create a new blank timeline")
+                .arg(tenant_id_arg.clone())
+                .arg(branch_name_arg.clone())
+                .arg(pg_version_arg.clone())
+            )
+            .subcommand(Command::new("import")
+                .about("Import timeline from basebackup directory")
+                .arg(tenant_id_arg.clone())
+                .arg(timeline_id_arg.clone())
+                .arg(Arg::new("node-name").long("node-name")
+                    .help("Name to assign to the imported timeline"))
+                .arg(Arg::new("base-tarfile")
+                    .long("base-tarfile")
+                    .value_parser(value_parser!(PathBuf))
+                    .help("Basebackup tarfile to import")
+                )
+                .arg(Arg::new("base-lsn").long("base-lsn")
+                    .help("Lsn the basebackup starts at"))
+                .arg(Arg::new("wal-tarfile")
+                    .long("wal-tarfile")
+                    .value_parser(value_parser!(PathBuf))
+                    .help("Wal to add after base")
+                )
+                .arg(Arg::new("end-lsn").long("end-lsn")
+                    .help("Lsn the basebackup ends at"))
+                .arg(pg_version_arg.clone())
+            )
+        ).subcommand(
+            Command::new("tenant")
+            .arg_required_else_help(true)
+            .about("Manage tenants")
+            .subcommand(Command::new("list"))
+            .subcommand(Command::new("create")
+                .arg(tenant_id_arg.clone())
+                .arg(timeline_id_arg.clone().help("Use a specific timeline id when creating a tenant and its initial timeline"))
+                .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false))
+                .arg(pg_version_arg.clone())
+                )
+            .subcommand(Command::new("config")
+                .arg(tenant_id_arg.clone())
+                .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false))
+                )
+        )
+        .subcommand(
+            Command::new("pageserver")
+                .arg_required_else_help(true)
+                .about("Manage pageserver")
+                .subcommand(Command::new("status"))
+                .subcommand(Command::new("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
+                .subcommand(Command::new("stop").about("Stop local pageserver")
+                            .arg(stop_mode_arg.clone()))
+                .subcommand(Command::new("restart").about("Restart local pageserver").arg(pageserver_config_args.clone()))
+        )
+        .subcommand(
+            Command::new("safekeeper")
+                .arg_required_else_help(true)
+                .about("Manage safekeepers")
+                .subcommand(Command::new("start")
+                            .about("Start local safekeeper")
+                            .arg(safekeeper_id_arg.clone())
+                )
+                .subcommand(Command::new("stop")
+                            .about("Stop local safekeeper")
+                            .arg(safekeeper_id_arg.clone())
+                            .arg(stop_mode_arg.clone())
+                )
+                .subcommand(Command::new("restart")
+                            .about("Restart local safekeeper")
+                            .arg(safekeeper_id_arg)
+                            .arg(stop_mode_arg.clone())
+                )
+        )
+        .subcommand(
+            Command::new("pg")
+                .arg_required_else_help(true)
+                .about("Manage postgres instances")
+                .subcommand(Command::new("list").arg(tenant_id_arg.clone()))
+                .subcommand(Command::new("create")
+                    .about("Create a postgres compute node")
+                    .arg(pg_node_arg.clone())
+                    .arg(branch_name_arg.clone())
+                    .arg(tenant_id_arg.clone())
+                    .arg(lsn_arg.clone())
+                    .arg(port_arg.clone())
+                    .arg(
+                        Arg::new("config-only")
+                            .help("Don't do basebackup, create compute node with only config files")
+                            .long("config-only")
+                            .required(false))
+                    .arg(pg_version_arg.clone())
+                )
+                .subcommand(Command::new("start")
+                    .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
+                    .arg(pg_node_arg.clone())
+                    .arg(tenant_id_arg.clone())
+                    .arg(branch_name_arg)
+                    .arg(timeline_id_arg)
+                    .arg(lsn_arg)
+                    .arg(port_arg)
+                    .arg(pg_version_arg)
+                )
+                .subcommand(
+                    Command::new("stop")
+                    .arg(pg_node_arg)
+                    .arg(tenant_id_arg)
+                    .arg(
+                        Arg::new("destroy")
+                            .help("Also delete data directory (now optional, should be default in future)")
+                            .long("destroy")
+                            .action(ArgAction::SetTrue)
+                            .required(false)
+                        )
+                )
+
+        )
+        .subcommand(
+            Command::new("start")
+                .about("Start page server and safekeepers")
+                .arg(pageserver_config_args)
+        )
+        .subcommand(
+            Command::new("stop")
+                .about("Stop page server and safekeepers")
+                .arg(stop_mode_arg)
+        )
+}
+
+#[test]
+fn verify_cli() {
+    cli().debug_assert();
 }
