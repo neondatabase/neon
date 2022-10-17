@@ -127,7 +127,7 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
  * all prefetch responses has to be consumed.
  */
 
-#define MAX_PREFETCH_REQUESTS 128
+#define MAX_PREFETCH_REQUESTS 1024
 
 BufferTag	prefetch_requests[MAX_PREFETCH_REQUESTS];
 BufferTag	prefetch_responses[MAX_PREFETCH_REQUESTS];
