@@ -23,8 +23,6 @@ storage:
           console_region_id: aws-us-east-1
         zenith-us-stage-ps-4:
           console_region_id: aws-us-east-1
-        zenith-us-stage-test-ps-1:
-          console_region_id: aws-test-us-east-1
 
     safekeepers:
       hosts:
@@ -34,9 +32,3 @@ storage:
           console_region_id: aws-us-east-1
         zenith-us-stage-sk-6:
           console_region_id: aws-us-east-1
-        zenith-us-stage-test-sk-1:
-          console_region_id: aws-test-us-east-1
-        zenith-us-stage-test-sk-2:
-          console_region_id: aws-test-us-east-1
-        zenith-us-stage-test-sk-3:
-          console_region_id: aws-test-us-east-1
