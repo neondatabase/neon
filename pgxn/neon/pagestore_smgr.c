@@ -1130,6 +1130,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 				n_prefetch_hits += 1;
 				n_prefetch_requests = 0;
 				memcpy(buffer, page, BLCKSZ);
+				lfc_write(rnode, forkNum, blkno, buffer);
 				pfree(resp);
 				return;
 			}
