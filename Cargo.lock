@@ -40,8 +40,7 @@ dependencies = [
 [[package]]
 name = "amplify_num"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f27d3d00d3d115395a7a8a4dc045feb7aa82b641e485f7e15f4e67ac16f4f56d"
+source = "git+https://github.com/hlinnaka/rust-amplify.git?branch=unsigned-int-perf#bd49b737c2e6e623ab8e9ba5ceaed5712d3a3940"
 
 [[package]]
 name = "android_system_properties"
