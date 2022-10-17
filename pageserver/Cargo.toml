@@ -69,5 +69,10 @@ close_fds = "0.3.2"
 walkdir = "2.3.2"
 
 [dev-dependencies]
+criterion = "0.4"
 hex-literal = "0.3"
 tempfile = "3.2"
+
+[[bench]]
+name = "bench_layer_map"
+harness = false
