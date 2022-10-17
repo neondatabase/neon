@@ -15,14 +15,13 @@ from fixtures.neon_fixtures import (
     NeonPageserverHttpClient,
     PortDistributor,
     Postgres,
-    assert_no_in_progress_downloads_for_tenant,
     base_dir,
     neon_binpath,
     pg_distrib_dir,
     wait_for_last_record_lsn,
-    wait_for_upload,
     wait_until,
 )
+from fixtures.remote_storage import assert_no_in_progress_downloads_for_tenant, wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, subprocess_capture
 

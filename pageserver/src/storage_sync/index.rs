@@ -9,11 +9,12 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{anyhow, Context, Ok};
+use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::RwLock;
 use tracing::log::warn;
+use tracing::{error, info_span};
 
 use crate::{config::PageServerConf, tenant::metadata::TimelineMetadata};
 use utils::{
@@ -96,21 +97,28 @@ impl RemoteIndex {
         let mut entries: HashMap<TenantId, TenantEntry> = HashMap::new();
 
         for (tenant_id, index_parts) in index_parts {
+            let _entered = info_span!("build_remote_index", tenant = %tenant_id).entered();
             match index_parts {
                 // TODO: should we schedule a retry so it can be recovered? otherwise we can revive it only through detach/attach or pageserver restart
                 TenantIndexParts::Poisoned { missing, ..} => warn!("skipping tenant_id set up for remote index because the index download has failed for timeline(s): {missing:?}"),
                 TenantIndexParts::Present(timelines) => {
+                    // Do not stop on the first error, report errors for all timelines
+                    let mut tenant_entry = TenantEntry::default();
                     for (timeline_id, index_part) in timelines {
                         let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
-                        let remote_timeline =
-                            RemoteTimeline::from_index_part(&timeline_path, index_part)
-                                .context("Failed to restore remote timeline data from index part")?;
 
-                        entries
-                            .entry(tenant_id)
-                            .or_default()
-                            .insert(timeline_id, remote_timeline);
+                        match RemoteTimeline::from_index_part(&timeline_path, index_part) {
+                            Ok(remote_timeline) => {
+                                tenant_entry
+                                    .insert(timeline_id, remote_timeline);
+                            },
+                            Err(e) => {
+                                error!("Failed to restore remote data from index part for timeline {timeline_id}: {e:?}");
+                            },
+                        }
                     }
+
+                    entries.insert(tenant_id, tenant_entry);
                 },
             }
         }

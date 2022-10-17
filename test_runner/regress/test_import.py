@@ -15,8 +15,8 @@ from fixtures.neon_fixtures import (
     Postgres,
     pg_distrib_dir,
     wait_for_last_record_lsn,
-    wait_for_upload,
 )
+from fixtures.remote_storage import wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 

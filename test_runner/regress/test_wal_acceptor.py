@@ -31,8 +31,8 @@ from fixtures.neon_fixtures import (
     available_remote_storages,
     neon_binpath,
     wait_for_last_record_lsn,
-    wait_for_upload,
 )
+from fixtures.remote_storage import wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar
 

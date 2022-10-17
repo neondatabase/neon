@@ -16,16 +16,19 @@ from typing import List, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
     Postgres,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_record_lsn,
-    wait_for_upload,
     wait_until,
+)
+from fixtures.remote_storage import (
+    assert_no_in_progress_downloads_for_tenant,
+    local_fs_index_part_path,
+    read_local_fs_index_part,
+    wait_for_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
@@ -267,7 +270,7 @@ def test_tenant_upgrades_index_json_from_v0(
     env.pageserver.stop()
 
     # make sure the file has been upgraded back to how it started
-    index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    index_part = read_local_fs_index_part(env, tenant_id, timeline_id)
     assert index_part["version"] == orig_index_part["version"]
     assert index_part["missing_layers"] == orig_index_part["missing_layers"]
 
@@ -348,7 +351,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     (path, expected_size) = local_layer_truncated
 
     # ensure the same size is found from the index_part.json
-    index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    index_part = read_local_fs_index_part(env, tenant_id, timeline_id)
     assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
 
     ##### Start the pageserver, forcing it to download the layer file and load the timeline into memory
@@ -398,27 +401,3 @@ def test_tenant_redownloads_truncated_file_on_startup(
     assert (
         os.stat(remote_layer_path).st_size == expected_size
     ), "truncated file should not had been uploaded after next checkpoint"
-
-
-def local_fs_index_part(env, tenant_id, timeline_id):
-    """
-    Return json.load parsed index_part.json of tenant and timeline from LOCAL_FS
-    """
-    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
-    with open(timeline_path, "r") as timeline_file:
-        return json.load(timeline_file)
-
-
-def local_fs_index_part_path(env, tenant_id, timeline_id):
-    """
-    Return path to the LOCAL_FS index_part.json of the tenant and timeline.
-    """
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    return (
-        env.remote_storage.root
-        / "tenants"
-        / str(tenant_id)
-        / "timelines"
-        / str(timeline_id)
-        / "index_part.json"
-    )

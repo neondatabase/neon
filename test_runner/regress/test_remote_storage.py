@@ -5,20 +5,67 @@ import os
 import shutil
 import time
 from pathlib import Path
+from typing import List
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    NeonCli,
     NeonEnvBuilder,
+    NeonPageserverHttpClient,
+    Postgres,
+    PostgresFactory,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_record_lsn,
-    wait_for_upload,
     wait_until,
+)
+from fixtures.remote_storage import (
+    assert_no_in_progress_downloads_for_tenant,
+    read_local_fs_index_part,
+    wait_for_upload,
+    write_local_fs_index_part,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
+
+FILLER_STRING = "long string to consume some space"
+CHECKPOINT_ROWS = 100
+
+
+def populate_checkpoints(
+    pg: Postgres,
+    ps: NeonPageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    checkpoint_ids: List[int],
+):
+    with pg.cursor() as cur:
+        cur.execute("CREATE TABLE foo (c int, t text)")
+
+        for checkpoint_id in checkpoint_ids:
+            cur.execute(
+                f"""
+                INSERT INTO foo
+                    SELECT {checkpoint_id}, '{FILLER_STRING}'
+                    FROM generate_series(1, {CHECKPOINT_ROWS}) g
+            """
+            )
+
+            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+            # wait until pageserver receives that data
+            wait_for_last_record_lsn(ps, tenant_id, timeline_id, current_lsn)
+
+            # run checkpoint manually to be sure that data landed in remote storage
+            ps.timeline_checkpoint(tenant_id, timeline_id)
+
+            log.info(f"waiting for checkpoint {checkpoint_id} upload")
+            # wait until pageserver successfully uploaded a checkpoint to remote storage
+            wait_for_upload(ps, tenant_id, timeline_id, current_lsn)
+            log.info(f"upload of checkpoint {checkpoint_id} is done")
+
+    return current_lsn
 
 
 #
@@ -52,41 +99,23 @@ def test_remote_storage_backup_and_restore(
         test_name="test_remote_storage_backup_and_restore",
     )
 
-    data_id = 1
-    data_secret = "very secret secret"
-
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
+    ps_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
-
-    client = env.pageserver.http_client()
 
     tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
-    checkpoint_numbers = range(1, 3)
+    checkpoint_ids = list(range(1, 3))
 
-    for checkpoint_number in checkpoint_numbers:
-        with pg.cursor() as cur:
-            cur.execute(
-                f"""
-                CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
-                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
-            """
-            )
-            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
-
-        # wait until pageserver receives that data
-        wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
-
-        # run checkpoint manually to be sure that data landed in remote storage
-        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-
-        log.info(f"waiting for checkpoint {checkpoint_number} upload")
-        # wait until pageserver successfully uploaded a checkpoint to remote storage
-        wait_for_upload(client, tenant_id, timeline_id, current_lsn)
-        log.info(f"upload of checkpoint {checkpoint_number} is done")
+    current_lsn = populate_checkpoints(
+        pg=pg,
+        ps=ps_http,
+        tenant_id=tenant_id,
+        timeline_id=timeline_id,
+        checkpoint_ids=checkpoint_ids,
+    )
 
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()
@@ -100,45 +129,155 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # Introduce failpoint in download
-    pageserver_http.configure_failpoints(("remote-storage-download-pre-rename", "return"))
+    ps_http.configure_failpoints(("remote-storage-download-pre-rename", "return"))
 
-    client.tenant_attach(tenant_id)
+    ps_http.tenant_attach(tenant_id)
 
     # is there a better way to assert that failpoint triggered?
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
     with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
-        client.tenant_attach(tenant_id)
+        ps_http.tenant_attach(tenant_id)
 
-    tenant_status = client.tenant_status(tenant_id)
-    log.info("Tenant status with active failpoint: %s", tenant_status)
-    assert tenant_status["has_in_progress_downloads"] is True
+    detail = ps_http.timeline_detail(tenant_id, timeline_id)
+    log.info("Timeline detail with active failpoint: %s", detail)
+    assert detail["local"] is None
+    assert detail["remote"]["awaits_download"]
 
     # trigger temporary download files removal
     env.pageserver.stop()
     env.pageserver.start()
 
-    client.tenant_attach(tenant_id)
+    ps_http.tenant_attach(tenant_id)
 
     log.info("waiting for timeline redownload")
     wait_until(
         number_of_iterations=20,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=lambda: assert_no_in_progress_downloads_for_tenant(ps_http, tenant_id),
     )
 
-    detail = client.timeline_detail(tenant_id, timeline_id)
+    detail = ps_http.timeline_detail(tenant_id, timeline_id)
+    assert detail["local"] is not None
     log.info("Timeline detail after attach completed: %s", detail)
     assert (
-        Lsn(detail["last_record_lsn"]) >= current_lsn
+        Lsn(detail["local"]["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
-    assert not detail["awaits_download"]
+    assert not detail["remote"]["awaits_download"]
 
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
-        for checkpoint_number in checkpoint_numbers:
+        for checkpoint_id in checkpoint_ids:
             assert (
-                query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
-                == f"{data_secret}|{checkpoint_number}"
+                query_scalar(
+                    cur,
+                    f"SELECT COUNT(*) FROM foo WHERE c = {checkpoint_id} AND t = '{FILLER_STRING}'",
+                )
+                == CHECKPOINT_ROWS
             )
+
+
+def populate_tenant(
+    ps_http: NeonPageserverHttpClient,
+    cli: NeonCli,
+    postgres_factory: PostgresFactory,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    checkpoint_ids: List[int],
+):
+    cli.create_tenant(tenant_id=tenant_id, timeline_id=timeline_id)
+
+    # should get the same timeline id because it is the only one
+    pg = postgres_factory.create_start("main", tenant_id=tenant_id)
+
+    populate_checkpoints(
+        pg=pg,
+        ps=ps_http,
+        tenant_id=tenant_id,
+        timeline_id=timeline_id,
+        checkpoint_ids=checkpoint_ids,
+    )
+    return pg
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_remote_storage_corrupt_index_part(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    """
+    create two tenants
+    corrupt metadata in the remote index part json on one of them
+    check that pageserver loaded, and non corrupted timeline works as expected
+    """
+
+    # populate data
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_remote_storage_corrupt_index_part",
+    )
+
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+
+    tenant_id1 = TenantId.generate()
+    timeline_id1 = TimelineId.generate()
+
+    checkpoint_ids = list(range(1, 3))
+
+    pg1 = populate_tenant(
+        ps_http=ps_http,
+        cli=env.neon_cli,
+        postgres_factory=env.postgres,
+        tenant_id=tenant_id1,
+        timeline_id=timeline_id1,
+        checkpoint_ids=checkpoint_ids,
+    )
+    pg1.stop()
+
+    tenant_id2 = TenantId.generate()
+    timeline_id2 = TimelineId.generate()
+
+    pg2 = populate_tenant(
+        ps_http=ps_http,
+        cli=env.neon_cli,
+        postgres_factory=env.postgres,
+        tenant_id=tenant_id2,
+        timeline_id=timeline_id2,
+        checkpoint_ids=checkpoint_ids,
+    )
+    pg2.stop()
+
+    # stop pageserver, corrupt metadata
+    env.pageserver.stop()
+
+    index_part = read_local_fs_index_part(env, tenant_id1, timeline_id1)
+    # corrupt metadata body, so it is not header but real body
+
+    # XXX: should we check for header corruptions too?
+    index_part["metadata_bytes"][16] += 1
+
+    write_local_fs_index_part(env, tenant_id1, timeline_id1, index_part)
+
+    env.pageserver.start()
+
+    # I would imagine that tenant with corrupted remote metadata wont be registered as healthy one
+    # but in fact because error occurs only during remote index build error does not get propagated to the
+    # registration code, so pageserver starts this timeline with all the background threads active
+
+    # check that tenant2 data
+    pg2.start()
+    with pg2.cursor() as cur:
+        for checkpoint_id in checkpoint_ids:
+            assert (
+                query_scalar(
+                    cur,
+                    f"SELECT COUNT(*) FROM foo WHERE c = {checkpoint_id} AND t = '{FILLER_STRING}'",
+                )
+                == CHECKPOINT_ROWS
+            )
+
+    # TODO check list of tenants, broken one should be either missing or broken
+    #   check timeline detail
+    #   pg1 should fail to start

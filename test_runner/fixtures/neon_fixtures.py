@@ -2702,53 +2702,6 @@ def wait_until(number_of_iterations: int, interval: float, func):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def assert_no_in_progress_downloads_for_tenant(
-    pageserver_http_client: NeonPageserverHttpClient,
-    tenant: TenantId,
-):
-    tenant_status = pageserver_http_client.tenant_status(tenant)
-    assert tenant_status["has_in_progress_downloads"] is False, tenant_status
-
-
-def remote_consistent_lsn(
-    pageserver_http_client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
-) -> Lsn:
-    detail = pageserver_http_client.timeline_detail(tenant, timeline)
-
-    lsn_str = detail["remote_consistent_lsn"]
-    if lsn_str is None:
-        # No remote information at all. This happens right after creating
-        # a timeline, before any part of it has been uploaded to remote
-        # storage yet.
-        return Lsn(0)
-    assert isinstance(lsn_str, str)
-    return Lsn(lsn_str)
-
-
-def wait_for_upload(
-    pageserver_http_client: NeonPageserverHttpClient,
-    tenant: TenantId,
-    timeline: TimelineId,
-    lsn: Lsn,
-):
-    """waits for local timeline upload up to specified lsn"""
-    for i in range(20):
-        current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
-        if current_lsn >= lsn:
-            return
-        log.info(
-            "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
-                lsn, current_lsn, i + 1
-            )
-        )
-        time.sleep(1)
-    raise Exception(
-        "timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
-            lsn, current_lsn
-        )
-    )
-
-
 def last_record_lsn(
     pageserver_http_client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
