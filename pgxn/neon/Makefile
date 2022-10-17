@@ -11,6 +11,7 @@ OBJS = \
 	relsize_cache.o \
 	neon.o \
 	walproposer.o \
+	file_cache.o \
 	walproposer_utils.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
