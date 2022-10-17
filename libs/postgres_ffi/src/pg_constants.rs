@@ -226,6 +226,9 @@ pub const SLOTS_PER_FSM_PAGE: u32 = FSM_LEAF_NODES_PER_PAGE as u32;
 pub const VM_HEAPBLOCKS_PER_PAGE: u32 =
     (BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA) as u32 * (8 / 2); // MAPSIZE * (BITS_PER_BYTE / BITS_PER_HEAPBLOCK)
 
+/* From remotexact.h */
+pub const MAX_REGIONS: u32 = 64;
+
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c
 pub const PGDATA_SUBDIRS: [&str; 23] = [

@@ -3,7 +3,7 @@
 //!
 use crate::pg_constants;
 use crate::transaction_id_precedes;
-use byteorder::{LittleEndian, ByteOrder};
+use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
 use log::*;
 
@@ -95,9 +95,13 @@ pub fn mx_offset_to_member_segment(xid: u32) -> i32 {
 
 // See CSNLogPagePrecedes in csn_log.c
 pub const fn csnlogpage_precedes(page1: u32, page2: u32) -> bool {
-    let mut xid1: u32 = page1 * pg_constants::CSN_LOG_XACTS_PER_PAGE;
+    if (page1 % pg_constants::MAX_REGIONS) != (page2 % pg_constants::MAX_REGIONS) {
+        // The two pages don't belong to the same region.
+        return false;
+    }
+    let mut xid1: u32 = (page1 / pg_constants::MAX_REGIONS) * pg_constants::CSN_LOG_XACTS_PER_PAGE;
     xid1 += pg_constants::FIRST_NORMAL_TRANSACTION_ID + 1;
-    let mut xid2: u32 = page2 * pg_constants::CSN_LOG_XACTS_PER_PAGE;
+    let mut xid2: u32 = (page2 / pg_constants::MAX_REGIONS) * pg_constants::CSN_LOG_XACTS_PER_PAGE;
     xid2 += pg_constants::FIRST_NORMAL_TRANSACTION_ID + 1;
 
     transaction_id_precedes(xid1, xid2)

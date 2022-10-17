@@ -787,14 +787,19 @@ impl<'a> WalIngest<'a> {
         )?;
 
         // Record update of CSN pages.
-        let mut csn_pageno = parsed.xid / pg_constants::CSN_LOG_XACTS_PER_PAGE;
+        let region: u32 = self.timeline.region_id.0 as u32;
+        let mut csn_pageno = ((parsed.xid / pg_constants::CSN_LOG_XACTS_PER_PAGE)
+            * pg_constants::MAX_REGIONS)
+            + region;
         let mut csn_segno = csn_pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut csn_rpageno = csn_pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut csn_page_xids: Vec<TransactionId> = vec![parsed.xid];
         let lsn: XidCSN = modification.lsn.0;
 
         for subxact in &parsed.subxacts {
-            let csn_subxact_pageno = subxact / pg_constants::CSN_LOG_XACTS_PER_PAGE;
+            let csn_subxact_pageno = ((subxact / pg_constants::CSN_LOG_XACTS_PER_PAGE)
+                * pg_constants::MAX_REGIONS)
+                + region;
             if csn_subxact_pageno != csn_pageno {
                 // This subxact goes to different page. Write the record
                 // for all the XIDs on the previous page, and continue
@@ -806,11 +811,13 @@ impl<'a> WalIngest<'a> {
                     if is_commit {
                         NeonWalRecord::CsnLogSetCommitted {
                             xids: csn_page_xids,
+                            region: region,
                             lsn: lsn,
                         }
                     } else {
                         NeonWalRecord::CsnLogSetAborted {
                             xids: csn_page_xids,
+                            region: region,
                         }
                     },
                 )?;
@@ -828,11 +835,13 @@ impl<'a> WalIngest<'a> {
             if is_commit {
                 NeonWalRecord::CsnLogSetCommitted {
                     xids: csn_page_xids,
+                    region: region,
                     lsn: lsn,
                 }
             } else {
                 NeonWalRecord::CsnLogSetAborted {
                     xids: csn_page_xids,
+                    region: region,
                 }
             },
         )?;
