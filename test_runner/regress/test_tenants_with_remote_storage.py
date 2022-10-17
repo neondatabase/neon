@@ -19,9 +19,9 @@ from fixtures.neon_fixtures import (
     LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverHttpClient,
     Postgres,
     RemoteStorageKind,
+    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -168,7 +168,7 @@ def test_tenants_attached_after_download(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: expect_tenant_to_download_timeline(client, tenant_id),
+        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
@@ -179,19 +179,6 @@ def test_tenants_attached_after_download(
     assert retored_timeline["timeline_id"] == str(
         timeline_id
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
-
-
-def expect_tenant_to_download_timeline(
-    client: NeonPageserverHttpClient,
-    tenant_id: TenantId,
-):
-    for tenant in client.tenant_list():
-        if tenant["id"] == str(tenant_id):
-            assert not tenant.get(
-                "has_in_progress_downloads", True
-            ), f"Tenant {tenant_id} should have no downloads in progress"
-            return
-    assert False, f"Tenant {tenant_id} is missing on pageserver"
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
@@ -262,7 +249,7 @@ def test_tenant_upgrades_index_json_from_v0(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: expect_tenant_to_download_timeline(pageserver_http, tenant_id),
+        func=lambda: assert_no_in_progress_downloads_for_tenant(pageserver_http, tenant_id),
     )
 
     pg = env.postgres.create_start("main")
@@ -371,7 +358,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: expect_tenant_to_download_timeline(client, tenant_id),
+        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
