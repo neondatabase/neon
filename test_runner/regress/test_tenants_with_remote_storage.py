@@ -385,6 +385,33 @@ def test_tenant_redownloads_truncated_file_on_startup(
 
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
 
+    # the remote side of local_layer_truncated
+    remote_layer_path = local_fs_index_part_path(env, tenant_id, timeline_id).parent / path.name
+
+    # if the upload ever was ongoing, this check would be racy, but at least one
+    # extra http request has been made in between so assume it's enough delay
+    assert (
+        os.stat(remote_layer_path).st_size == expected_size
+    ), "truncated file should not had been uploaded around re-download"
+
+    pg = env.postgres.create_start("main")
+
+    with pg.cursor() as cur:
+        cur.execute("INSERT INTO t1 VALUES (234, 'test data');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    # now that the upload is complete, make sure the file hasn't been
+    # re-uploaded truncated. this is a rather bogus check given the current
+    # implementation, but it's critical it doesn't happen so wasting a few
+    # lines of python to do this.
+    assert (
+        os.stat(remote_layer_path).st_size == expected_size
+    ), "truncated file should not had been uploaded after next checkpoint"
+
 
 def local_fs_index_part(env, tenant_id, timeline_id):
     """
