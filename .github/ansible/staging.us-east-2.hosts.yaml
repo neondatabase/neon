@@ -10,7 +10,7 @@ storage:
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
-        prefix_in_bucket: "v1"
+        prefix_in_bucket: "pageserver/v1"
     hostname_suffix: ""
     remote_user: ssm-user
     ansible_aws_ssm_region: us-east-2
