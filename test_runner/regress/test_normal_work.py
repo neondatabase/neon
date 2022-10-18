@@ -39,7 +39,7 @@ def test_normal_work(neon_env_builder: NeonEnvBuilder, num_timelines: int, num_s
     * restart compute
     * check that the data is there
     * stop compute
-    * detach timeline
+    * detach tenant
 
     Repeat check for several tenants/timelines.
     """

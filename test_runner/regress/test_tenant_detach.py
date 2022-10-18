@@ -70,7 +70,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
             break
     # else is called if the loop finished without reaching "break"
     else:
-        pytest.fail(f"could not detach timeline: {last_error}")
+        pytest.fail(f"could not detach tenant: {last_error}")
 
     gc_thread.join(timeout=10)
 

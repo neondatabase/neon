@@ -1,7 +1,7 @@
 use crate::auth;
 use crate::cancellation::{self, CancelMap};
 use crate::config::{ProxyConfig, TlsConfig};
-use crate::stream::{MetricsStream, PqStream, Stream};
+use crate::stream::{MeasuredStream, PqStream, Stream};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use metrics::{register_int_counter, IntCounter};
@@ -64,7 +64,7 @@ pub async fn task_main(
     let cancel_map = Arc::new(CancelMap::default());
     loop {
         let (socket, peer_addr) = listener.accept().await?;
-        info!("accepted connection from {peer_addr}");
+        info!("accepted postgres client connection from {peer_addr}");
 
         let session_id = uuid::Uuid::new_v4();
         let cancel_map = Arc::clone(&cancel_map);
@@ -270,8 +270,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
 
         // Starting from here we only proxy the client's traffic.
         info!("performing the proxy pass...");
-        let mut db = MetricsStream::new(db.stream, inc_proxied);
-        let mut client = MetricsStream::new(stream.into_inner(), inc_proxied);
+        let mut db = MeasuredStream::new(db.stream, inc_proxied);
+        let mut client = MeasuredStream::new(stream.into_inner(), inc_proxied);
         let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
 
         Ok(())

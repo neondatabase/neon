@@ -179,9 +179,7 @@ async def run_restarts_under_load(
         log.info(f"Postgres flush_lsn {flush_lsn}")
 
         pageserver_lsn = Lsn(
-            env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["local"][
-                "last_record_lsn"
-            ]
+            env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["last_record_lsn"]
         )
         sk_ps_lag = flush_lsn - pageserver_lsn
         log.info(f"Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb")

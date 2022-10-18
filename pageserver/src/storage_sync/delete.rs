@@ -171,7 +171,7 @@ mod tests {
         let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
         let timeline_upload =
             create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
-        for local_path in timeline_upload.layers_to_upload {
+        for (local_path, _metadata) in timeline_upload.layers_to_upload {
             let remote_path =
                 local_storage.resolve_in_storage(&local_storage.remote_object_id(&local_path)?)?;
             let remote_parent_dir = remote_path.parent().unwrap();

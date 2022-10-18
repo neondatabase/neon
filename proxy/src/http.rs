@@ -17,6 +17,7 @@ impl Endpoint {
         Self { endpoint, client }
     }
 
+    #[inline(always)]
     pub fn url(&self) -> &ApiUrl {
         &self.endpoint
     }
@@ -35,6 +36,16 @@ impl Endpoint {
         request: reqwest::Request,
     ) -> Result<reqwest::Response, reqwest::Error> {
         self.client.execute(request).await
+    }
+
+    /// Execute a [request](reqwest::Request) and raise an error if status != 200.
+    pub async fn checked_execute(
+        &self,
+        request: reqwest::Request,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        self.execute(request)
+            .await
+            .and_then(|r| r.error_for_status())
     }
 }
 

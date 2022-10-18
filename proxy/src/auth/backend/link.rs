@@ -1,7 +1,7 @@
 use crate::{auth, compute, error::UserFacingError, stream::PqStream, waiters};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::{info, info_span};
 use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 #[derive(Debug, Error)]
@@ -51,11 +51,12 @@ pub async fn handle_user(
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<compute::NodeInfo> {
     let psql_session_id = new_psql_session_id();
+    let span = info_span!("link", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
 
     let db_info = super::with_waiter(psql_session_id, |waiter| async {
         // Give user a URL to spawn a new database.
-        info!("sending the auth URL to the user");
+        info!(parent: &span, "sending the auth URL to the user");
         client
             .write_message_noflush(&Be::AuthenticationOk)?
             .write_message_noflush(&BeParameterStatusMessage::encoding())?
@@ -63,7 +64,7 @@ pub async fn handle_user(
             .await?;
 
         // Wait for web console response (see `mgmt`).
-        info!("waiting for console's reply...");
+        info!(parent: &span, "waiting for console's reply...");
         waiter.await?.map_err(LinkAuthError::AuthFailed)
     })
     .await?;

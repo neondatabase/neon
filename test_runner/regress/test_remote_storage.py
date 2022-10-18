@@ -11,7 +11,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
-    assert_timeline_local,
+    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -111,10 +111,9 @@ def test_remote_storage_backup_and_restore(
     with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
         client.tenant_attach(tenant_id)
 
-    detail = client.timeline_detail(tenant_id, timeline_id)
-    log.info("Timeline detail with active failpoint: %s", detail)
-    assert detail["local"] is None
-    assert detail["remote"]["awaits_download"]
+    tenant_status = client.tenant_status(tenant_id)
+    log.info("Tenant status with active failpoint: %s", tenant_status)
+    assert tenant_status["has_in_progress_downloads"] is True
 
     # trigger temporary download files removal
     env.pageserver.stop()
@@ -126,16 +125,15 @@ def test_remote_storage_backup_and_restore(
     wait_until(
         number_of_iterations=20,
         interval=1,
-        func=lambda: assert_timeline_local(client, tenant_id, timeline_id),
+        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
-    assert detail["local"] is not None
     log.info("Timeline detail after attach completed: %s", detail)
     assert (
-        Lsn(detail["local"]["last_record_lsn"]) >= current_lsn
+        Lsn(detail["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
-    assert not detail["remote"]["awaits_download"]
+    assert not detail["awaits_download"]
 
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:

@@ -69,14 +69,25 @@ pub(super) async fn upload_timeline_layers<'a>(
         .map(|meta| meta.disk_consistent_lsn());
 
     let already_uploaded_layers = remote_timeline
-        .map(|timeline| timeline.stored_files())
-        .cloned()
+        .map(|timeline| {
+            timeline
+                .stored_files()
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        })
         .unwrap_or_default();
 
     let layers_to_upload = upload
         .layers_to_upload
-        .difference(&already_uploaded_layers)
-        .cloned()
+        .iter()
+        .filter_map(|(k, v)| {
+            if !already_uploaded_layers.contains(k) {
+                Some((k.to_owned(), v.to_owned()))
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     if layers_to_upload.is_empty() {
@@ -98,7 +109,7 @@ pub(super) async fn upload_timeline_layers<'a>(
 
     let mut upload_tasks = layers_to_upload
         .into_iter()
-        .map(|source_path| async move {
+        .map(|(source_path, known_metadata)| async move {
             let source_file = match fs::File::open(&source_path).await.with_context(|| {
                 format!(
                     "Failed to upen a source file for layer '{}'",
@@ -109,7 +120,7 @@ pub(super) async fn upload_timeline_layers<'a>(
                 Err(e) => return Err(UploadError::MissingLocalFile(source_path, e)),
             };
 
-            let source_size = source_file
+            let fs_size = source_file
                 .metadata()
                 .await
                 .with_context(|| {
@@ -119,10 +130,24 @@ pub(super) async fn upload_timeline_layers<'a>(
                     )
                 })
                 .map_err(UploadError::Other)?
-                .len() as usize;
+                .len();
+
+            // FIXME: this looks bad
+            if let Some(metadata_size) = known_metadata.file_size() {
+                if metadata_size != fs_size {
+                    return Err(UploadError::Other(anyhow::anyhow!(
+                        "File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}"
+                    )));
+                }
+            } else {
+                // this is a silly state we would like to avoid
+            }
+
+            let fs_size = usize::try_from(fs_size).with_context(|| format!("File {source_path:?} size {fs_size} could not be converted to usize"))
+                .map_err(UploadError::Other)?;
 
             match storage
-                .upload_storage_object(Box::new(source_file), source_size, &source_path)
+                .upload_storage_object(Box::new(source_file), fs_size, &source_path)
                 .await
                 .with_context(|| format!("Failed to upload layer file for {sync_id}"))
             {
@@ -136,8 +161,11 @@ pub(super) async fn upload_timeline_layers<'a>(
     while let Some(upload_result) = upload_tasks.next().await {
         match upload_result {
             Ok(uploaded_path) => {
-                upload.layers_to_upload.remove(&uploaded_path);
-                upload.uploaded_layers.insert(uploaded_path);
+                let metadata = upload
+                    .layers_to_upload
+                    .remove(&uploaded_path)
+                    .expect("metadata should always exist, assuming no double uploads");
+                upload.uploaded_layers.insert(uploaded_path, metadata);
             }
             Err(e) => match e {
                 UploadError::Other(e) => {
@@ -262,7 +290,7 @@ mod tests {
         assert_eq!(
             upload
                 .uploaded_layers
-                .iter()
+                .keys()
                 .cloned()
                 .collect::<BTreeSet<_>>(),
             layer_files
@@ -357,7 +385,7 @@ mod tests {
         assert_eq!(
             upload
                 .uploaded_layers
-                .iter()
+                .keys()
                 .cloned()
                 .collect::<BTreeSet<_>>(),
             layer_files

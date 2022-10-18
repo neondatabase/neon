@@ -317,13 +317,13 @@ def remote_consistent_lsn(
 ) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    if detail["remote"] is None:
+    lsn_str = detail["remote_consistent_lsn"]
+    if lsn_str is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return 0
     else:
-        lsn_str = detail["remote"]["remote_consistent_lsn"]
         assert isinstance(lsn_str, str)
         return lsn_from_hex(lsn_str)
 
@@ -577,7 +577,7 @@ def main(args: argparse.Namespace):
                 args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar"
             )
 
-            pg_version = timeline["local"]["pg_version"]
+            pg_version = timeline["pg_version"]
 
             # Export timeline from old pageserver
             if args.only_import is False:

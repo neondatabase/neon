@@ -56,12 +56,12 @@ jobs:
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
-        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v14)
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
         shell: bash -euxo pipefail {0}
 
       - name: Set pg 15 revision for caching
         id: pg_v15_rev
-        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v15)
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
         shell: bash -euxo pipefail {0}
 
       - name: Cache postgres v14 build

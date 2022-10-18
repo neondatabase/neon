@@ -62,6 +62,8 @@ pub struct LayerMap {
 
 struct LayerRTreeObject {
     layer: Arc<dyn Layer>,
+
+    envelope: AABB<[IntKey; 2]>,
 }
 
 // Representation of Key as numeric type.
@@ -197,9 +199,16 @@ impl PartialEq for LayerRTreeObject {
 impl RTreeObject for LayerRTreeObject {
     type Envelope = AABB<[IntKey; 2]>;
     fn envelope(&self) -> Self::Envelope {
-        let key_range = self.layer.get_key_range();
-        let lsn_range = self.layer.get_lsn_range();
-        AABB::from_corners(
+        self.envelope
+    }
+}
+
+impl LayerRTreeObject {
+    fn new(layer: Arc<dyn Layer>) -> Self {
+        let key_range = layer.get_key_range();
+        let lsn_range = layer.get_lsn_range();
+
+        let envelope = AABB::from_corners(
             [
                 IntKey::from(key_range.start.to_i128()),
                 IntKey::from(lsn_range.start.0 as i128),
@@ -208,7 +217,8 @@ impl RTreeObject for LayerRTreeObject {
                 IntKey::from(key_range.end.to_i128() - 1),
                 IntKey::from(lsn_range.end.0 as i128 - 1),
             ], // AABB::upper is inclusive, while `key_range.end` and `lsn_range.end` are exclusive
-        )
+        );
+        LayerRTreeObject { layer, envelope }
     }
 }
 
@@ -338,7 +348,7 @@ impl LayerMap {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
         }
-        self.historic_layers.insert(LayerRTreeObject { layer });
+        self.historic_layers.insert(LayerRTreeObject::new(layer));
         NUM_ONDISK_LAYERS.inc();
     }
 
@@ -362,7 +372,7 @@ impl LayerMap {
         }
         assert!(self
             .historic_layers
-            .remove(&LayerRTreeObject { layer })
+            .remove(&LayerRTreeObject::new(layer))
             .is_some());
         NUM_ONDISK_LAYERS.dec();
     }

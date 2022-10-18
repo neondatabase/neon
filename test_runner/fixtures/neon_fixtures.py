@@ -1179,7 +1179,7 @@ CREATE_TIMELINE_ID_EXTRACTOR = re.compile(
     r"^Created timeline '(?P<timeline_id>[^']+)'", re.MULTILINE
 )
 TIMELINE_DATA_EXTRACTOR = re.compile(
-    r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
+    r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
 )
 
 
@@ -1430,8 +1430,8 @@ class NeonCli(AbstractNeonCli):
         Returns a list of (branch_name, timeline_id) tuples out of parsed `neon timeline list` CLI output.
         """
 
-        # (L) main [b49f7954224a0ad25cc0013ea107b54b]
-        # (L) ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
+        # main [b49f7954224a0ad25cc0013ea107b54b]
+        # ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
         res = self.raw_cli(
             ["timeline", "list", "--tenant-id", str(tenant_id or self.env.initial_tenant)]
         )
@@ -2339,6 +2339,7 @@ class Safekeeper:
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
+    pg_version: int
     flush_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
@@ -2367,6 +2368,18 @@ class SafekeeperHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def timeline_create(
+        self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
+    ):
+        body = {
+            "tenant_id": str(tenant_id),
+            "timeline_id": str(timeline_id),
+            "pg_version": pg_version,
+            "commit_lsn": str(commit_lsn),
+        }
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/timeline", json=body)
+        res.raise_for_status()
+
     def timeline_status(
         self, tenant_id: TenantId, timeline_id: TimelineId
     ) -> SafekeeperTimelineStatus:
@@ -2375,6 +2388,7 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         return SafekeeperTimelineStatus(
             acceptor_epoch=resj["acceptor_state"]["epoch"],
+            pg_version=resj["pg_info"]["pg_version"],
             flush_lsn=Lsn(resj["flush_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
@@ -2688,19 +2702,6 @@ def wait_until(number_of_iterations: int, interval: float, func):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def assert_timeline_local(
-    pageserver_http_client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
-):
-    timeline_detail = pageserver_http_client.timeline_detail(
-        tenant,
-        timeline,
-        include_non_incremental_logical_size=True,
-        include_non_incremental_physical_size=True,
-    )
-    assert timeline_detail.get("local", {}).get("disk_consistent_lsn"), timeline_detail
-    return timeline_detail
-
-
 def assert_no_in_progress_downloads_for_tenant(
     pageserver_http_client: NeonPageserverHttpClient,
     tenant: TenantId,
@@ -2714,15 +2715,14 @@ def remote_consistent_lsn(
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    if detail["remote"] is None:
+    lsn_str = detail["remote_consistent_lsn"]
+    if lsn_str is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return Lsn(0)
-    else:
-        lsn_str = detail["remote"]["remote_consistent_lsn"]
-        assert isinstance(lsn_str, str)
-        return Lsn(lsn_str)
+    assert isinstance(lsn_str, str)
+    return Lsn(lsn_str)
 
 
 def wait_for_upload(
@@ -2754,7 +2754,7 @@ def last_record_lsn(
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail["local"]["last_record_lsn"]
+    lsn_str = detail["last_record_lsn"]
     assert isinstance(lsn_str, str)
     return Lsn(lsn_str)
 

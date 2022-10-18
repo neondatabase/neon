@@ -59,13 +59,14 @@ pub mod block_io;
 mod delta_layer;
 mod disk_btree;
 pub(crate) mod ephemeral_file;
-mod filename;
+pub mod filename;
 mod image_layer;
 mod inmemory_layer;
-mod layer_map;
+pub mod layer_map;
+
 pub mod metadata;
 mod par_fsync;
-mod storage_layer;
+pub mod storage_layer;
 
 mod timeline;
 
@@ -144,17 +145,18 @@ impl Tenant {
 
     /// Lists timelines the tenant contains.
     /// Up to tenant's implementation to omit certain timelines that ar not considered ready for use.
-    pub fn list_timelines(&self) -> Vec<(TimelineId, Arc<Timeline>)> {
+    pub fn list_timelines(&self) -> Vec<Arc<Timeline>> {
         self.timelines
             .lock()
             .unwrap()
-            .iter()
-            .map(|(timeline_id, timeline_entry)| (*timeline_id, Arc::clone(timeline_entry)))
+            .values()
+            .map(Arc::clone)
             .collect()
     }
 
-    /// Create a new, empty timeline. The caller is responsible for loading data into it
-    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
+    /// This is used to create the initial 'main' timeline during bootstrapping,
+    /// or when importing a new base backup. The caller is expected to load an
+    /// initial image of the datadir to the new timeline after this.
     pub fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -345,7 +347,7 @@ impl Tenant {
 
         ensure!(
             !children_exist,
-            "Cannot detach timeline which has child timelines"
+            "Cannot delete timeline which has child timelines"
         );
         let timeline_entry = match timelines.entry(timeline_id) {
             Entry::Occupied(e) => e,
@@ -906,6 +908,7 @@ impl Tenant {
         Ok(totals)
     }
 
+    /// Branch an existing timeline
     fn branch_timeline(
         &self,
         src: TimelineId,
@@ -981,7 +984,7 @@ impl Tenant {
             dst_prev,
             Some(src),
             start_lsn,
-            *src_timeline.latest_gc_cutoff_lsn.read(),
+            *src_timeline.latest_gc_cutoff_lsn.read(), // FIXME: should we hold onto this guard longer?
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );

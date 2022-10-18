@@ -1,8 +1,8 @@
-use anyhow::anyhow;
 use hyper::{Body, Request, Response, StatusCode, Uri};
 
 use anyhow::Context;
 use once_cell::sync::Lazy;
+use postgres_ffi::WAL_SEGMENT_SIZE;
 use serde::Serialize;
 use serde::Serializer;
 use std::collections::{HashMap, HashSet};
@@ -10,6 +10,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use tokio::task::JoinError;
 
+use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
 
@@ -77,6 +78,7 @@ struct TimelineStatus {
     #[serde(serialize_with = "display_serialize")]
     timeline_id: TimelineId,
     acceptor_state: AcceptorStateStatus,
+    pg_info: ServerInfo,
     #[serde(serialize_with = "display_serialize")]
     flush_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
@@ -121,6 +123,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         tenant_id: ttid.tenant_id,
         timeline_id: ttid.timeline_id,
         acceptor_state: acc_state,
+        pg_info: state.server,
         flush_lsn,
         timeline_start_lsn: state.timeline_start_lsn,
         local_start_lsn: state.local_start_lsn,
@@ -136,12 +139,29 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
 
     let ttid = TenantTimelineId {
-        tenant_id: parse_request_param(&request, "tenant_id")?,
+        tenant_id: request_data.tenant_id,
         timeline_id: request_data.timeline_id,
     };
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    Err(ApiError::BadRequest(anyhow!("not implemented")))
+    let server_info = ServerInfo {
+        pg_version: request_data.pg_version,
+        system_id: request_data.system_id.unwrap_or(0),
+        wal_seg_size: request_data.wal_seg_size.unwrap_or(WAL_SEGMENT_SIZE as u32),
+    };
+    let local_start_lsn = request_data.local_start_lsn.unwrap_or_else(|| {
+        request_data
+            .commit_lsn
+            .segment_lsn(server_info.wal_seg_size as usize)
+    });
+    tokio::task::spawn_blocking(move || {
+        GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(e.into()))?
+    .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -241,7 +261,7 @@ pub fn make_router(
         .data(auth)
         .get("/v1/status", status_handler)
         // Will be used in the future instead of implicit timeline creation
-        .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
+        .post("/v1/tenant/timeline", timeline_create_handler)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_status_handler,
