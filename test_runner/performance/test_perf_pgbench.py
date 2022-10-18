@@ -9,7 +9,7 @@ from typing import Dict, List
 import pytest
 from fixtures.benchmark_fixture import MetricReport, PgBenchInitResult, PgBenchRunResult
 from fixtures.compare_fixtures import NeonCompare, PgCompare
-from fixtures.neon_fixtures import profiling_supported
+from fixtures.neon_fixtures import NeonPageserverVersion
 from fixtures.utils import get_scale_for_db
 
 
@@ -187,8 +187,7 @@ def test_pgbench_flamegraph(zenbenchmark, pg_bin, neon_env_builder, scale: int, 
     neon_env_builder.pageserver_config_override = """
 profiling="page_requests"
 """
-    if not profiling_supported():
-        pytest.skip("pageserver was built without 'profiling' feature")
+    NeonPageserverVersion.is_profiling_enabled_or_skip()
 
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("empty", "main")

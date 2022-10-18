@@ -4,6 +4,7 @@ import abc
 import asyncio
 import enum
 import filecmp
+import functools
 import json
 import os
 import re
@@ -147,19 +148,6 @@ def pytest_configure(config):
     log.info(f"neon_binpath is {neon_binpath}")
     if not os.path.exists(os.path.join(neon_binpath, "pageserver")):
         raise Exception('neon binaries not found at "{}"'.format(neon_binpath))
-
-
-def profiling_supported():
-    """Return True if the pageserver was compiled with the 'profiling' feature"""
-    bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
-    res = subprocess.run(
-        [bin_pageserver, "--version"],
-        check=True,
-        universal_newlines=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return "profiling:true" in res.stdout
 
 
 def shareable_scope(fixture_name, config) -> Literal["session", "function"]:
@@ -994,6 +982,8 @@ class NeonPageserverHttpClient(requests.Session):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
     def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]) -> None:
+        NeonPageserverVersion.is_testing_enabled_or_skip()
+
         if isinstance(config_strings, tuple):
             pairs = [config_strings]
         else:
@@ -1111,6 +1101,8 @@ class NeonPageserverHttpClient(requests.Session):
     def timeline_gc(
         self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
     ) -> dict[str, Any]:
+        NeonPageserverVersion.is_testing_enabled_or_skip()
+
         log.info(
             f"Requesting GC: tenant {tenant_id}, timeline {timeline_id}, gc_horizon {repr(gc_horizon)}"
         )
@@ -1126,6 +1118,8 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_compact(self, tenant_id: TenantId, timeline_id: TimelineId):
+        NeonPageserverVersion.is_testing_enabled_or_skip()
+
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact"
@@ -1150,6 +1144,8 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
+        NeonPageserverVersion.is_testing_enabled_or_skip()
+
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint"
@@ -1469,21 +1465,6 @@ class NeonCli(AbstractNeonCli):
             res.check_returncode()
             return res
 
-    def pageserver_enabled_features(self) -> Any:
-        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
-        args = [bin_pageserver, "--enabled-features"]
-        log.info('Running command "{}"'.format(" ".join(args)))
-
-        res = subprocess.run(
-            args,
-            check=True,
-            universal_newlines=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        log.info(f"pageserver_enabled_features success: {res.stdout}")
-        return json.loads(res.stdout)
-
     def pageserver_start(
         self,
         overrides=(),
@@ -1601,6 +1582,31 @@ class NeonCli(AbstractNeonCli):
             args.append(node_name)
 
         return self.raw_cli(args, check_return_code=check_return_code)
+
+
+class NeonPageserverVersion:
+    @staticmethod
+    @functools.cache
+    def get_version() -> str:
+        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
+        res = subprocess.run(
+            [bin_pageserver, "--version"],
+            check=True,
+            universal_newlines=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return res.stdout
+
+    @staticmethod
+    def is_testing_enabled_or_skip():
+        if "testing:true" not in NeonPageserverVersion.get_version():
+            pytest.skip("pageserver was built without 'testing' feature")
+
+    @staticmethod
+    def is_profiling_enabled_or_skip():
+        if "profiling:true" not in NeonPageserverVersion.get_version():
+            pytest.skip("pageserver was built without 'profiling' feature")
 
 
 class WalCraft(AbstractNeonCli):

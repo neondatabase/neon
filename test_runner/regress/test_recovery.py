@@ -2,7 +2,7 @@ import time
 from contextlib import closing
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserverVersion
 
 
 #
@@ -14,12 +14,8 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init()
 
-    # Check if failpoints enables. Otherwise the test doesn't make sense
-    f = env.neon_cli.pageserver_enabled_features()
+    NeonPageserverVersion.is_testing_enabled_or_skip()
 
-    assert (
-        "testing" in f["features"]
-    ), "Build pageserver with --features=testing option to run this test"
     neon_env_builder.start()
 
     # Create a branch for us
