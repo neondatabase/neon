@@ -11,6 +11,7 @@ use crate::{
     compute, http, mgmt, stream, url,
     waiters::{self, Waiter, Waiters},
 };
+use metrics::{register_int_counter_vec, IntCounterVec};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -18,6 +19,15 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
 static CPLANE_WAITERS: Lazy<Waiters<mgmt::ComputeReady>> = Lazy::new(Default::default);
+
+static AUTH_METHOD_USED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_auth_method_used_total",
+        "Number of authentication requests served.",
+        &["method_name"],
+    )
+    .unwrap()
+});
 
 /// Give caller an opportunity to wait for the cloud's reply.
 pub async fn with_waiter<R, T, E>(
@@ -172,8 +182,11 @@ impl BackendType<'_, ClientCredentials<'_>> {
             // support SNI or other means of passing the project name.
             // We now expect to see a very specific payload in the place of password.
             if creds.project().is_none() {
-                warn!("project name not specified, resorting to the password hack auth flow");
+                AUTH_METHOD_USED_COUNTER
+                    .with_label_values(&["password_hack"])
+                    .inc();
 
+                warn!("project name not specified, resorting to the password hack auth flow");
                 let payload = AuthFlow::new(client)
                     .begin(auth::PasswordHack)
                     .await?
@@ -210,6 +223,10 @@ impl BackendType<'_, ClientCredentials<'_>> {
 
         let res = match self {
             Console(endpoint, creds) => {
+                AUTH_METHOD_USED_COUNTER
+                    .with_label_values(&["console"])
+                    .inc();
+
                 info!(
                     user = creds.user,
                     project = creds.project(),
@@ -220,6 +237,10 @@ impl BackendType<'_, ClientCredentials<'_>> {
                     .await
             }
             Postgres(endpoint, creds) => {
+                AUTH_METHOD_USED_COUNTER
+                    .with_label_values(&["postgres"])
+                    .inc();
+
                 info!("performing mock authentication using a local postgres instance");
                 postgres::Api::new(&endpoint, &creds)
                     .handle_user(client)
@@ -227,6 +248,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
+                AUTH_METHOD_USED_COUNTER.with_label_values(&["link"]).inc();
                 info!("performing link authentication");
                 link::handle_user(&url, client).await
             }
