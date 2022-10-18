@@ -380,10 +380,6 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
         info!("grant query {}", &query);
 
         client.execute(query.as_str(), &[])?;
-
-        // Explicitly grant CREATE ON SCHEMA PUBLIC to the web_access user.
-        // This is needed since postgres 15, where this privilege is removed by default.
-        client.execute("GRANT CREATE ON SCHEMA public TO web_access", &[])?;
     }
 
     // Do some per-database access adjustments. We'd better do this at db creation time,
@@ -426,6 +422,12 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
             db.owner.quote()
         );
         db_client.simple_query(&alter_query)?;
+
+        // Explicitly grant CREATE ON SCHEMA PUBLIC to the web_access user.
+        // This is needed since postgres 15, where this privilege is removed by default.
+        let grant_query: String = "GRANT CREATE ON SCHEMA public TO web_access".to_string();
+        info!("grant query for db {} : {}", &db.name, &grant_query);
+        db_client.simple_query(&grant_query)?;
     }
 
     Ok(())
