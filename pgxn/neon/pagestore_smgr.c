@@ -127,7 +127,7 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
  * all prefetch responses has to be consumed.
  */
 
-#define MAX_PREFETCH_REQUESTS 128
+#define MAX_PREFETCH_REQUESTS 1024
 
 BufferTag	prefetch_requests[MAX_PREFETCH_REQUESTS];
 BufferTag	prefetch_responses[MAX_PREFETCH_REQUESTS];
@@ -1006,12 +1006,12 @@ neon_close(SMgrRelation reln, ForkNumber forknum)
 
 
 /*
- *	neon_reset_prefetch() -- reoe all previously rgistered prefeth requests
+ *	neon_prefetch_in_progress() -- reoe all previously rgistered prefeth requests
  */
-void
-neon_reset_prefetch(SMgrRelation reln)
+bool
+neon_prefetch_in_progress(SMgrRelation reln)
 {
-	n_prefetch_requests = 0;
+	return n_prefetch_requests + n_prefetch_responses != 0;
 }
 
 /*
@@ -1816,7 +1816,7 @@ static const struct f_smgr neon_smgr =
 	.smgr_unlink = neon_unlink,
 	.smgr_extend = neon_extend,
 	.smgr_prefetch = neon_prefetch,
-	.smgr_reset_prefetch = neon_reset_prefetch,
+	.smgr_prefetch_in_progress = neon_prefetch_in_progress,
 	.smgr_read = neon_read,
 	.smgr_write = neon_write,
 	.smgr_writeback = neon_writeback,
