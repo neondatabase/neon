@@ -430,3 +430,14 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
 
     Ok(())
 }
+
+pub fn create_system_extensions(client: &mut Client) -> Result<()> {
+    for ext in ["pg_stat_statements", "neon"].iter() {
+        let query: String = format!("CREATE EXTENSION IF NOT EXISTS {}", ext);
+
+        info!("creating extension '{}'", ext);
+        client.execute(query.as_str(), &[])?;
+    }
+
+    Ok(())
+}

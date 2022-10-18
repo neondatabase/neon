@@ -26,6 +26,7 @@ use chrono::{DateTime, Utc};
 use log::info;
 use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
+use tokio_postgres;
 
 use crate::checker::create_writablity_check_data;
 use crate::config;
@@ -48,6 +49,19 @@ pub struct ComputeNode {
     /// to allow HTTP API server to serve status requests, while configuration
     /// is in progress.
     pub state: RwLock<ComputeState>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InsightsRow {
+    pub query: String,
+    pub total_runtime: String,
+    pub mean_runtime: String,
+}
+
+#[derive(Serialize)]
+pub struct Insights {
+    count: u64,
+    statements: Vec<InsightsRow>,
 }
 
 fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
@@ -288,6 +302,7 @@ impl ComputeNode {
             Ok(client) => client,
         };
 
+        create_system_extensions(&mut client)?;
         handle_roles(&self.spec, &mut client)?;
         handle_databases(&self.spec, &mut client)?;
         handle_role_deletions(self, &mut client)?;
@@ -342,5 +357,39 @@ impl ComputeNode {
 
         self.prepare_pgdata()?;
         self.run()
+    }
+
+    pub async fn collect_insights(&self) -> String {
+        let mut result_rows: Vec<String> = Vec::new();
+        let connect_result = tokio_postgres::connect(self.connstr.as_str(), NoTls).await;
+        let (client, connection) = connect_result.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+        for message in (client
+            .simple_query(
+                "
+SELECT
+    row_to_json(pg_stat_statements)
+FROM
+    pg_stat_statements
+WHERE
+    userid != 'cloud_admin'::regrole::oid
+ORDER BY
+    (mean_exec_time + mean_plan_time) DESC
+LIMIT 100",
+            )
+            .await)
+            .unwrap()
+            .iter()
+        {
+            if let postgres::SimpleQueryMessage::Row(row) = message {
+                result_rows.push(row.get(0).unwrap().to_string());
+            }
+        }
+
+        format!("{{\"pg_stat_statements\": [{}]}}", result_rows.join(","))
     }
 }
