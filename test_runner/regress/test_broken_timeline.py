@@ -157,11 +157,8 @@ def test_timeline_create_break_after_uninit_mark(neon_simple_env: NeonEnv):
     with pytest.raises(Exception, match="after-timeline-uninit-mark-creation"):
         _ = env.neon_cli.create_timeline("test_timeline_create_break_after_uninit_mark", tenant_id)
 
-    # Restart the page server
-    env.neon_cli.pageserver_stop(immediate=True)
-    env.neon_cli.pageserver_start()
-
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
+    # "New" timeline is not present in the list, allowing pageserver to retry the same request
     new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
     assert (
         new_tenant_timelines == old_tenant_timelines

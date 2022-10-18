@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
-        utils::crashsafe_dir::create_dir_all(conf.tenants_path()).with_context(|| {
+        utils::crashsafe::create_dir_all(conf.tenants_path()).with_context(|| {
             format!(
                 "Failed to create tenants root dir at '{}'",
                 tenants_path.display()

@@ -101,17 +101,14 @@ pub fn fsync(path: &Path) -> io::Result<()> {
     File::open(path)
         .map_err(|e| io::Error::new(e.kind(), format!("Failed to open the file {path:?}: {e}")))
         .and_then(|file| {
-            file.sync_all()
-                .map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
-                        format!("Failed to sync file {path:?} data and metadata: {e}"),
-                    )
-                })
-                .map_err(|e| {
-                    io::Error::new(e.kind(), format!("Failed to fsync file {path:?}: {e}"))
-                })
+            file.sync_all().map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("Failed to sync file {path:?} data and metadata: {e}"),
+                )
+            })
         })
+        .map_err(|e| io::Error::new(e.kind(), format!("Failed to fsync file {path:?}: {e}")))
 }
 
 #[cfg(test)]

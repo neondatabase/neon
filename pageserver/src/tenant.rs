@@ -14,7 +14,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use tokio::sync::watch;
 use tracing::*;
-use utils::crashsafe_dir::path_with_suffix_extension;
+use utils::crashsafe::path_with_suffix_extension;
 
 use std::cmp::min;
 use std::collections::hash_map::Entry;
@@ -51,7 +51,7 @@ pub use pageserver_api::models::TenantState;
 
 use toml_edit;
 use utils::{
-    crashsafe_dir,
+    crashsafe,
     id::{TenantId, TimelineId},
     lsn::{Lsn, RecordLsn},
 };
@@ -154,7 +154,7 @@ impl UninitializedTimeline<'_> {
 
     fn initialize_with_lock(
         mut self,
-        timelines: &mut MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
         load_layer_map: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
@@ -184,15 +184,15 @@ impl UninitializedTimeline<'_> {
                             )
                         })?;
                 }
-                new_timeline.launch_wal_receiver().with_context(|| {
-                    format!("Failed to launch walreceiver for timeline {tenant_id}/{timeline_id}")
-                })?;
                 uninit_mark.remove_uninit_mark().with_context(|| {
                     format!(
                         "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
                     )
                 })?;
                 v.insert(Arc::clone(&new_timeline));
+                new_timeline.launch_wal_receiver().with_context(|| {
+                    format!("Failed to launch walreceiver for timeline {tenant_id}/{timeline_id}")
+                })?;
             }
         }
 
@@ -247,31 +247,24 @@ impl UninitializedTimeline<'_> {
 impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
         if let Some((_, uninit_mark)) = self.raw_timeline.take() {
-            let tenant_id = self.owning_tenant.tenant_id;
-            let timeline_id = self.timeline_id;
-            let _entered = info_span!("drop_uninitialized_timeline", tenant = %tenant_id, timeline = %timeline_id).entered();
+            let _entered = info_span!("drop_uninitialized_timeline", tenant = %self.owning_tenant.tenant_id, timeline = %self.timeline_id).entered();
             error!("Timeline got dropped without initializing, cleaning its files");
-
-            let raw_timeline_dir = &uninit_mark.timeline_path;
-            let mut should_remove_uninit_mark = true;
-            match fs::remove_dir_all(raw_timeline_dir) {
-                Ok(()) => info!("Timeline dir removed successfully, removing the uninit mark"),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    info!("Timeline dir is absent, skipping and removing the uninit mark")
-                }
-                Err(e) => {
-                    should_remove_uninit_mark = false;
-                    error!("Failed to clean up uninitialized timeline directory: {e:?}");
-                }
-            }
-
-            if should_remove_uninit_mark {
-                if let Err(e) = uninit_mark.remove_uninit_mark() {
-                    error!("Failed to remove the ininit mark file: {e:?}");
-                }
-            }
+            cleanup_timeline_directory(uninit_mark);
         }
     }
+}
+
+fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
+    let timeline_path = &uninit_mark.timeline_path;
+    match ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
+        Ok(()) => {
+            info!("Timeline dir {timeline_path:?} removed successfully, removing the uninit mark")
+        }
+        Err(e) => {
+            error!("Failed to clean up uninitialized timeline directory {timeline_path:?}: {e:?}")
+        }
+    }
+    drop(uninit_mark); // mark handles its deletion on drop, gets retained if timeline dir exists
 }
 
 impl TimelineUninitMark {
@@ -302,27 +295,13 @@ impl TimelineUninitMark {
 
     fn delete_mark_file_if_present(&mut self) -> Result<(), anyhow::Error> {
         let uninit_mark_file = &self.uninit_mark_path;
-        let uninit_mark_parent = uninit_mark_file.parent().with_context(|| {
-            format!(
-                "Uninit mark file {} has no parent",
-                uninit_mark_file.display()
-            )
+        let uninit_mark_parent = uninit_mark_file
+            .parent()
+            .with_context(|| format!("Uninit mark file {uninit_mark_file:?} has no parent"))?;
+        ignore_absent_files(|| fs::remove_file(&uninit_mark_file)).with_context(|| {
+            format!("Failed to remove uninit mark file at path {uninit_mark_file:?}")
         })?;
-        fs::remove_file(&uninit_mark_file)
-            .or_else(|e| {
-                if e.kind() == io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })
-            .with_context(|| {
-                format!(
-                    "Failed to remove uninit mark file at path {}",
-                    uninit_mark_file.display()
-                )
-            })?;
-        crashsafe_dir::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
+        crashsafe::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
         self.uninit_mark_deleted = true;
 
         Ok(())
@@ -1328,12 +1307,52 @@ impl Tenant {
         init_layers: bool,
         ancestor: Option<Arc<Timeline>>,
     ) -> anyhow::Result<UninitializedTimeline> {
-        crashsafe_dir::create_dir_all(&uninit_mark.timeline_path).with_context(|| {
-            format!(
-                "Failed to create timeline {}/{} directory",
-                self.tenant_id, new_timeline_id
-            )
-        })?;
+        let tenant_id = self.tenant_id;
+
+        match self.create_timeline_files(
+            &uninit_mark.timeline_path,
+            new_timeline_id,
+            new_metadata,
+            ancestor,
+        ) {
+            Ok(new_timeline) => {
+                if init_layers {
+                    new_timeline.layers.write().unwrap().next_open_layer_at =
+                        Some(new_timeline.initdb_lsn);
+                }
+                debug!(
+                    "Successfully created initial files for timeline {tenant_id}/{new_timeline_id}"
+                );
+                Ok(UninitializedTimeline {
+                    owning_tenant: self,
+                    timeline_id: new_timeline_id,
+                    raw_timeline: Some((new_timeline, uninit_mark)),
+                })
+            }
+            Err(e) => {
+                error!("Failed to create initial files for timeline {tenant_id}/{new_timeline_id}, cleaning up: {e:?}");
+                cleanup_timeline_directory(uninit_mark);
+                Err(e)
+            }
+        }
+    }
+
+    fn create_timeline_files(
+        &self,
+        timeline_path: &Path,
+        new_timeline_id: TimelineId,
+        new_metadata: TimelineMetadata,
+        ancestor: Option<Arc<Timeline>>,
+    ) -> anyhow::Result<Timeline> {
+        let timeline_data = self
+            .create_timeline_data(new_timeline_id, new_metadata.clone(), ancestor)
+            .context("Failed to create timeline data structure")?;
+        crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
+
+        fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
+            anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
+        });
+
         save_metadata(
             self.conf,
             new_timeline_id,
@@ -1341,30 +1360,9 @@ impl Tenant {
             &new_metadata,
             true,
         )
-        .with_context(|| {
-            format!(
-                "Failed to create timeline {}/{} metadata",
-                self.tenant_id, new_timeline_id
-            )
-        })?;
+        .context("Failed to create timeline metadata")?;
 
-        let new_timeline = self
-            .create_timeline_data(new_timeline_id, new_metadata, ancestor)
-            .with_context(|| {
-                format!(
-                    "Failed to create timeline data {}/{}",
-                    self.tenant_id, new_timeline_id,
-                )
-            })?;
-        if init_layers {
-            new_timeline.layers.write().unwrap().next_open_layer_at = Some(new_timeline.initdb_lsn);
-        }
-
-        Ok(UninitializedTimeline {
-            owning_tenant: self,
-            timeline_id: new_timeline_id,
-            raw_timeline: Some((new_timeline, uninit_mark)),
-        })
+        Ok(timeline_data)
     }
 
     /// Attempts to create an uninit mark file for the timeline initialization.
@@ -1395,7 +1393,7 @@ impl Tenant {
         fs::File::create(&uninit_mark_path)
             .context("Failed to create uninit mark file")
             .and_then(|_| {
-                crashsafe_dir::fsync_file_and_parent(&uninit_mark_path)
+                crashsafe::fsync_file_and_parent(&uninit_mark_path)
                     .context("Failed to fsync uninit mark file")
             })
             .with_context(|| {
@@ -1403,10 +1401,6 @@ impl Tenant {
             })?;
 
         let uninit_mark = TimelineUninitMark::new(uninit_mark_path, timeline_path);
-
-        fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
-            anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
-        });
 
         Ok(uninit_mark)
     }
@@ -1484,6 +1478,19 @@ pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn ignore_absent_files<F>(fs_operation: F) -> io::Result<()>
+where
+    F: Fn() -> io::Result<()>,
+{
+    fs_operation().or_else(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            Ok(())
+        } else {
+            Err(e)
+        }
+    })
 }
 
 #[cfg(test)]

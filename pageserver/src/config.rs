@@ -7,7 +7,7 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use remote_storage::RemoteStorageConfig;
 use std::env;
-use utils::crashsafe_dir::path_with_suffix_extension;
+use utils::crashsafe::path_with_suffix_extension;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

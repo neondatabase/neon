@@ -24,7 +24,7 @@ use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
 
-use utils::crashsafe_dir::{self, path_with_suffix_extension};
+use utils::crashsafe::{self, path_with_suffix_extension};
 use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
@@ -266,7 +266,7 @@ fn create_tenant_files(
     );
 
     // top-level dir may exist if we are creating it through CLI
-    crashsafe_dir::create_dir_all(&temporary_tenant_dir).with_context(|| {
+    crashsafe::create_dir_all(&temporary_tenant_dir).with_context(|| {
         format!(
             "could not create temporary tenant directory {}",
             temporary_tenant_dir.display()
@@ -285,7 +285,7 @@ fn create_tenant_files(
         error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
         if let Err(e) = fs::remove_dir_all(&temporary_tenant_dir) {
             error!("Failed to remove temporary tenant directory {temporary_tenant_dir:?}: {e}")
-        } else if let Err(e) = crashsafe_dir::fsync(&temporary_tenant_dir) {
+        } else if let Err(e) = crashsafe::fsync(&temporary_tenant_dir) {
             error!(
                 "Failed to fsync removed temporary tenant directory {temporary_tenant_dir:?}: {e}"
             )
@@ -324,7 +324,7 @@ fn try_create_target_tenant_dir(
             )
         },
     )?;
-    crashsafe_dir::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
+    crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
             "could not create tenant {} temporary timelines directory {}",
             tenant_id,
@@ -350,7 +350,7 @@ fn try_create_target_tenant_dir(
             target_tenant_directory.display()
         )
     })?;
-    crashsafe_dir::fsync(target_dir_parent).with_context(|| {
+    crashsafe::fsync(target_dir_parent).with_context(|| {
         format!(
             "Failed to fsync renamed directory's parent {} for tenant {}",
             target_dir_parent.display(),
