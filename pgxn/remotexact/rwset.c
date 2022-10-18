@@ -8,7 +8,6 @@
 #include "replication/logicalproto.h"
 #include "rwset.h"
 #include "utils/memutils.h"
-#include "utils/snapmgr.h"
 
 static void decode_header(RWSet *rwset, StringInfo msg);
 static RWSetRelation *decode_relation(RWSet *rwset, StringInfo msg);
@@ -26,7 +25,6 @@ RWSetAllocate(void)
 {
 	RWSet	   *rwset;
 	MemoryContext new_ctx;
-	Snapshot snapshot;
 
 	new_ctx = AllocSetContextCreate(CurrentMemoryContext,
 									"Read/write set",
@@ -36,9 +34,6 @@ RWSetAllocate(void)
 	rwset->context = new_ctx;
 
 	rwset->header.dbid = 0;
-	rwset->header.xid = InvalidTransactionId;
-	snapshot = GetLatestSnapshot();
-	rwset->header.csn = snapshot->snapshot_csn;
 
 	dlist_init(&rwset->relations);
 
@@ -96,8 +91,6 @@ void
 decode_header(RWSet *rwset, StringInfo msg)
 {
 	rwset->header.dbid = pq_getmsgint(msg, 4);
-	rwset->header.xid = pq_getmsgint(msg, 4);
-	rwset->header.csn = pq_getmsgint64(msg);
 	rwset->header.region_set = pq_getmsgint64(msg);
 }
 
@@ -122,6 +115,7 @@ decode_relation(RWSet *rwset, StringInfo msg)
 
 	rel->relid = pq_getmsgint(msg, 4);
 	rel->region = pq_getmsgbyte(msg);
+	rel->csn = pq_getmsgint64(msg);
 	nitems = pq_getmsgint(msg, 4);
 
 	if (rel->is_index)
@@ -172,7 +166,6 @@ decode_page(RWSet *rwset, StringInfo msg)
 	page = alloc_page(rwset);
 
 	page->blkno = pq_getmsgint(msg, 4);
-	page->csn = pq_getmsgint64(msg);
 
 	return page;
 }
@@ -238,9 +231,8 @@ RWSetToString(RWSet *rwset)
 	/* Header */
 	header = &rwset->header;
 	appendStringInfoString(&s, "{\n\"header\": ");
-	appendStringInfo(&s, 
-				"{ \"dbid\": %d, \"xid\": %d, \"csn\": %ld, \"region_set\": %ld }",
-				header->dbid, header->xid, header->csn, header->region_set);
+	appendStringInfo(&s, "{ \"dbid\": %d, \"region_set\": %ld }", 
+					 header->dbid, header->region_set);
 
 	/* Relations */
 	appendStringInfoString(&s, ",\n\"relations\": [");
@@ -257,6 +249,7 @@ RWSetToString(RWSet *rwset)
 		appendStringInfoString(&s, "\n\t{");
 		appendStringInfo(&s, "\"relid\": %d", rel->relid);
 		appendStringInfo(&s, ", \"region\": %d", rel->region);
+		appendStringInfo(&s, ", \"csn\": %ld", rel->csn);
 		appendStringInfo(&s, ", \"is_index\": %d", rel->is_index);
 
 		/* Pages */
@@ -274,7 +267,6 @@ RWSetToString(RWSet *rwset)
 
 				appendStringInfoString(&s, "\n\t\t{");
 				appendStringInfo(&s, "\"blkno\": %d, ", page->blkno);
-				appendStringInfo(&s, "\"csn\": %ld", page->csn);
 				appendStringInfoString(&s, "}");
 			}
 			appendStringInfoString(&s, "\n\t ]");
