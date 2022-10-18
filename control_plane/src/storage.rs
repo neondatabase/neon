@@ -11,7 +11,7 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{
+use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
 use postgres::{Config, NoTls};
@@ -21,9 +21,9 @@ use thiserror::Error;
 use utils::{
     connstring::connection_address,
     http::error::HttpErrorBody,
+    id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::local_env::LocalEnv;
@@ -57,7 +57,7 @@ impl ResponseErrorMessageExt for Response {
             return Ok(self);
         }
 
-        // reqwest do not export it's error construction utility functions, so lets craft the message ourselves
+        // reqwest does not export its error construction utility functions, so let's craft the message ourselves
         let url = self.url().to_owned();
         Err(PageserverHttpError::Response(
             match self.json::<HttpErrorBody>() {
@@ -83,7 +83,7 @@ pub struct PageServerNode {
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let password = if env.pageserver.auth_type == AuthType::ZenithJWT {
+        let password = if env.pageserver.auth_type == AuthType::NeonJWT {
             &env.pageserver.auth_token
         } else {
             ""
@@ -109,14 +109,18 @@ impl PageServerNode {
 
     pub fn initialize(
         &self,
-        create_tenant: Option<ZTenantId>,
-        initial_timeline_id: Option<ZTimelineId>,
+        create_tenant: Option<TenantId>,
+        initial_timeline_id: Option<TimelineId>,
         config_overrides: &[&str],
-    ) -> anyhow::Result<ZTimelineId> {
+        pg_version: u32,
+    ) -> anyhow::Result<TimelineId> {
         let id = format!("id={}", self.env.pageserver.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
-        let pg_distrib_dir_param =
-            format!("pg_distrib_dir='{}'", self.env.pg_distrib_dir.display());
+        let pg_distrib_dir_param = format!(
+            "pg_distrib_dir='{}'",
+            self.env.pg_distrib_dir_raw().display()
+        );
+
         let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
         let listen_http_addr_param = format!(
             "listen_http_addr='{}'",
@@ -159,7 +163,7 @@ impl PageServerNode {
 
         self.start_node(&init_config_overrides, &self.env.base_data_dir, true)?;
         let init_result = self
-            .try_init_timeline(create_tenant, initial_timeline_id)
+            .try_init_timeline(create_tenant, initial_timeline_id, pg_version)
             .context("Failed to create initial tenant and timeline for pageserver");
         match &init_result {
             Ok(initial_timeline_id) => {
@@ -173,12 +177,18 @@ impl PageServerNode {
 
     fn try_init_timeline(
         &self,
-        new_tenant_id: Option<ZTenantId>,
-        new_timeline_id: Option<ZTimelineId>,
-    ) -> anyhow::Result<ZTimelineId> {
+        new_tenant_id: Option<TenantId>,
+        new_timeline_id: Option<TimelineId>,
+        pg_version: u32,
+    ) -> anyhow::Result<TimelineId> {
         let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())?;
-        let initial_timeline_info =
-            self.timeline_create(initial_tenant_id, new_timeline_id, None, None)?;
+        let initial_timeline_info = self.timeline_create(
+            initial_tenant_id,
+            new_timeline_id,
+            None,
+            None,
+            Some(pg_version),
+        )?;
         Ok(initial_timeline_info.timeline_id)
     }
 
@@ -345,7 +355,7 @@ impl PageServerNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
         let mut builder = self.http_client.request(method, url);
-        if self.env.pageserver.auth_type == AuthType::ZenithJWT {
+        if self.env.pageserver.auth_type == AuthType::NeonJWT {
             builder = builder.bearer_auth(&self.env.pageserver.auth_token)
         }
         builder
@@ -368,46 +378,53 @@ impl PageServerNode {
 
     pub fn tenant_create(
         &self,
-        new_tenant_id: Option<ZTenantId>,
+        new_tenant_id: Option<TenantId>,
         settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<ZTenantId> {
+    ) -> anyhow::Result<TenantId> {
+        let mut settings = settings.clone();
+        let request = TenantCreateRequest {
+            new_tenant_id,
+            checkpoint_distance: settings
+                .remove("checkpoint_distance")
+                .map(|x| x.parse::<u64>())
+                .transpose()?,
+            checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
+            compaction_target_size: settings
+                .remove("compaction_target_size")
+                .map(|x| x.parse::<u64>())
+                .transpose()?,
+            compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
+            compaction_threshold: settings
+                .remove("compaction_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()?,
+            gc_horizon: settings
+                .remove("gc_horizon")
+                .map(|x| x.parse::<u64>())
+                .transpose()?,
+            gc_period: settings.remove("gc_period").map(|x| x.to_string()),
+            image_creation_threshold: settings
+                .remove("image_creation_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()?,
+            pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
+            walreceiver_connect_timeout: settings
+                .remove("walreceiver_connect_timeout")
+                .map(|x| x.to_string()),
+            lagging_wal_timeout: settings
+                .remove("lagging_wal_timeout")
+                .map(|x| x.to_string()),
+            max_lsn_wal_lag: settings
+                .remove("max_lsn_wal_lag")
+                .map(|x| x.parse::<NonZeroU64>())
+                .transpose()
+                .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
+        };
+        if !settings.is_empty() {
+            bail!("Unrecognized tenant settings: {settings:?}")
+        }
         self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))
-            .json(&TenantCreateRequest {
-                new_tenant_id,
-                checkpoint_distance: settings
-                    .get("checkpoint_distance")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()?,
-                checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
-                compaction_target_size: settings
-                    .get("compaction_target_size")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()?,
-                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
-                compaction_threshold: settings
-                    .get("compaction_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()?,
-                gc_horizon: settings
-                    .get("gc_horizon")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()?,
-                gc_period: settings.get("gc_period").map(|x| x.to_string()),
-                image_creation_threshold: settings
-                    .get("image_creation_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()?,
-                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
-                walreceiver_connect_timeout: settings
-                    .get("walreceiver_connect_timeout")
-                    .map(|x| x.to_string()),
-                lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
-                max_lsn_wal_lag: settings
-                    .get("max_lsn_wal_lag")
-                    .map(|x| x.parse::<NonZeroU64>())
-                    .transpose()
-                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-            })
+            .json(&request)
             .send()?
             .error_from_body()?
             .json::<Option<String>>()
@@ -422,7 +439,7 @@ impl PageServerNode {
             })
     }
 
-    pub fn tenant_config(&self, tenant_id: ZTenantId, settings: HashMap<&str, &str>) -> Result<()> {
+    pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
         self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))
             .json(&TenantConfigRequest {
                 tenant_id,
@@ -471,7 +488,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {
+    pub fn timeline_list(&self, tenant_id: &TenantId) -> anyhow::Result<Vec<TimelineInfo>> {
         let timeline_infos: Vec<TimelineInfo> = self
             .http_request(
                 Method::GET,
@@ -486,10 +503,11 @@ impl PageServerNode {
 
     pub fn timeline_create(
         &self,
-        tenant_id: ZTenantId,
-        new_timeline_id: Option<ZTimelineId>,
+        tenant_id: TenantId,
+        new_timeline_id: Option<TimelineId>,
         ancestor_start_lsn: Option<Lsn>,
-        ancestor_timeline_id: Option<ZTimelineId>,
+        ancestor_timeline_id: Option<TimelineId>,
+        pg_version: Option<u32>,
     ) -> anyhow::Result<TimelineInfo> {
         self.http_request(
             Method::POST,
@@ -499,6 +517,7 @@ impl PageServerNode {
             new_timeline_id,
             ancestor_start_lsn,
             ancestor_timeline_id,
+            pg_version,
         })
         .send()?
         .error_from_body()?
@@ -524,10 +543,11 @@ impl PageServerNode {
     /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
     pub fn timeline_import(
         &self,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         base: (Lsn, PathBuf),
         pg_wal: Option<(Lsn, PathBuf)>,
+        pg_version: u32,
     ) -> anyhow::Result<()> {
         let mut client = self.pg_connection_config.connect(NoTls).unwrap();
 
@@ -546,8 +566,9 @@ impl PageServerNode {
         };
 
         // Import base
-        let import_cmd =
-            format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+        let import_cmd = format!(
+            "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
+        );
         let mut writer = client.copy_in(&import_cmd)?;
         io::copy(&mut base_reader, &mut writer)?;
         writer.finish()?;

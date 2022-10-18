@@ -8,14 +8,9 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
-use crate::config::PageServerConf;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
-use std::path::PathBuf;
 use std::time::Duration;
-use utils::zid::ZTenantId;
-
-pub const TENANT_CONFIG_NAME: &str = "config";
 
 pub mod defaults {
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
@@ -29,7 +24,7 @@ pub mod defaults {
     // This parameter determines L1 layer file size.
     pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
 
-    pub const DEFAULT_COMPACTION_PERIOD: &str = "1 s";
+    pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
@@ -213,12 +208,6 @@ impl TenantConf {
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
         }
-    }
-
-    /// Points to a place in pageserver's local directory,
-    /// where certain tenant's tenantconf file should be located.
-    pub fn path(conf: &'static PageServerConf, tenantid: ZTenantId) -> PathBuf {
-        conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME)
     }
 
     #[cfg(test)]

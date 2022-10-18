@@ -11,9 +11,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use postgres_ffi::v14::xlog_utils::{XLogFileName, XLogSegNo, XLogSegNoOffsetToRecPtr};
-use postgres_ffi::PG_TLI;
-use remote_storage::{GenericRemoteStorage, RemoteStorage};
+use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
+use postgres_ffi::XLogFileName;
+use postgres_ffi::{XLogSegNo, PG_TLI};
+use remote_storage::GenericRemoteStorage;
 use tokio::fs::File;
 use tokio::runtime::Builder;
 
@@ -23,11 +24,11 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::*;
 
-use utils::{lsn::Lsn, zid::ZTenantTimelineId};
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::broker::{Election, ElectionLeader};
-use crate::timeline::{GlobalTimelines, Timeline};
-use crate::{broker, SafeKeeperConf};
+use crate::timeline::Timeline;
+use crate::{broker, GlobalTimelines, SafeKeeperConf};
 
 use once_cell::sync::OnceCell;
 
@@ -38,7 +39,7 @@ const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
 
 pub fn wal_backup_launcher_thread_main(
     conf: SafeKeeperConf,
-    wal_backup_launcher_rx: Receiver<ZTenantTimelineId>,
+    wal_backup_launcher_rx: Receiver<TenantTimelineId>,
 ) {
     let rt = Builder::new_multi_thread()
         .worker_threads(conf.backup_runtime_threads)
@@ -53,8 +54,10 @@ pub fn wal_backup_launcher_thread_main(
 
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
-fn is_wal_backup_required(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
-    GlobalTimelines::get_loaded(zttid).filter(|t| t.wal_backup_attend())
+fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
+    GlobalTimelines::get(ttid)
+        .ok()
+        .filter(|tli| tli.wal_backup_attend())
 }
 
 struct WalBackupTaskHandle {
@@ -70,20 +73,20 @@ struct WalBackupTimelineEntry {
 /// Start per timeline task, if it makes sense for this safekeeper to offload.
 fn consider_start_task(
     conf: &SafeKeeperConf,
-    zttid: ZTenantTimelineId,
+    ttid: TenantTimelineId,
     task: &mut WalBackupTimelineEntry,
 ) {
     if !task.timeline.can_wal_backup() {
         return;
     }
-    info!("starting WAL backup task for {}", zttid);
+    info!("starting WAL backup task for {}", ttid);
 
     // TODO: decide who should offload right here by simply checking current
     // state instead of running elections in offloading task.
     let election_name = SubscriptionKey {
         cluster_prefix: conf.broker_etcd_prefix.clone(),
         kind: SubscriptionKind::Operation(
-            zttid,
+            ttid,
             NodeKind::Safekeeper,
             OperationKind::Safekeeper(SkOperationKind::WalBackup),
         ),
@@ -97,11 +100,11 @@ fn consider_start_task(
     );
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-    let timeline_dir = conf.timeline_dir(&zttid);
+    let timeline_dir = conf.timeline_dir(&ttid);
 
     let handle = tokio::spawn(
-        backup_task_main(zttid, timeline_dir, shutdown_rx, election)
-            .instrument(info_span!("WAL backup task", zttid = %zttid)),
+        backup_task_main(ttid, timeline_dir, shutdown_rx, election)
+            .instrument(info_span!("WAL backup task", ttid = %ttid)),
     );
 
     task.handle = Some(WalBackupTaskHandle {
@@ -117,7 +120,7 @@ const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 /// panics and separate elections from offloading itself.
 async fn wal_backup_launcher_main_loop(
     conf: SafeKeeperConf,
-    mut wal_backup_launcher_rx: Receiver<ZTenantTimelineId>,
+    mut wal_backup_launcher_rx: Receiver<TenantTimelineId>,
 ) {
     info!(
         "WAL backup launcher started, remote config {:?}",
@@ -127,45 +130,46 @@ async fn wal_backup_launcher_main_loop(
     let conf_ = conf.clone();
     REMOTE_STORAGE.get_or_init(|| {
         conf_.remote_storage.as_ref().map(|c| {
-            GenericRemoteStorage::new(conf_.workdir, c).expect("failed to create remote storage")
+            GenericRemoteStorage::from_config(conf_.workdir, c)
+                .expect("failed to create remote storage")
         })
     });
 
     // Presense in this map means launcher is aware s3 offloading is needed for
     // the timeline, but task is started only if it makes sense for to offload
     // from this safekeeper.
-    let mut tasks: HashMap<ZTenantTimelineId, WalBackupTimelineEntry> = HashMap::new();
+    let mut tasks: HashMap<TenantTimelineId, WalBackupTimelineEntry> = HashMap::new();
 
     let mut ticker = tokio::time::interval(Duration::from_millis(CHECK_TASKS_INTERVAL_MSEC));
     loop {
         tokio::select! {
-            zttid = wal_backup_launcher_rx.recv() => {
+            ttid = wal_backup_launcher_rx.recv() => {
                 // channel is never expected to get closed
-                let zttid = zttid.unwrap();
+                let ttid = ttid.unwrap();
                 if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
                     continue; /* just drain the channel and do nothing */
                 }
-                let timeline = is_wal_backup_required(zttid);
+                let timeline = is_wal_backup_required(ttid);
                 // do we need to do anything at all?
-                if timeline.is_some() != tasks.contains_key(&zttid) {
+                if timeline.is_some() != tasks.contains_key(&ttid) {
                     if let Some(timeline) = timeline {
                         // need to start the task
-                        let entry = tasks.entry(zttid).or_insert(WalBackupTimelineEntry {
+                        let entry = tasks.entry(ttid).or_insert(WalBackupTimelineEntry {
                             timeline,
                             handle: None,
                         });
-                        consider_start_task(&conf, zttid, entry);
+                        consider_start_task(&conf, ttid, entry);
                     } else {
                         // need to stop the task
-                        info!("stopping WAL backup task for {}", zttid);
+                        info!("stopping WAL backup task for {}", ttid);
 
-                        let entry = tasks.remove(&zttid).unwrap();
+                        let entry = tasks.remove(&ttid).unwrap();
                         if let Some(wb_handle) = entry.handle {
                             // Tell the task to shutdown. Error means task exited earlier, that's ok.
                             let _ = wb_handle.shutdown_tx.send(()).await;
                             // Await the task itself. TODO: restart panicked tasks earlier.
                             if let Err(e) = wb_handle.handle.await {
-                                warn!("WAL backup task for {} panicked: {}", zttid, e);
+                                warn!("WAL backup task for {} panicked: {}", ttid, e);
                             }
                         }
                     }
@@ -173,8 +177,8 @@ async fn wal_backup_launcher_main_loop(
             }
             // Start known tasks, if needed and possible.
             _ = ticker.tick() => {
-                for (zttid, entry) in tasks.iter_mut().filter(|(_, entry)| entry.handle.is_none()) {
-                    consider_start_task(&conf, *zttid, entry);
+                for (ttid, entry) in tasks.iter_mut().filter(|(_, entry)| entry.handle.is_none()) {
+                    consider_start_task(&conf, *ttid, entry);
                 }
             }
         }
@@ -190,26 +194,26 @@ struct WalBackupTask {
     election: Election,
 }
 
-/// Offload single timeline.
+/// Offload single timeline. Called only after we checked that backup
+/// is required (wal_backup_attend) and possible (can_wal_backup).
 async fn backup_task_main(
-    zttid: ZTenantTimelineId,
+    ttid: TenantTimelineId,
     timeline_dir: PathBuf,
     mut shutdown_rx: Receiver<()>,
     election: Election,
 ) {
     info!("started");
-    let timeline: Arc<Timeline> = if let Some(tli) = GlobalTimelines::get_loaded(zttid) {
-        tli
-    } else {
-        /* Timeline could get deleted while task was starting, just exit then. */
-        info!("no timeline, exiting");
+    let res = GlobalTimelines::get(ttid);
+    if let Err(e) = res {
+        error!("backup error for timeline {}: {}", ttid, e);
         return;
-    };
+    }
+    let tli = res.unwrap();
 
     let mut wb = WalBackupTask {
-        wal_seg_size: timeline.get_wal_seg_size(),
-        commit_lsn_watch_rx: timeline.get_commit_lsn_watch_rx(),
-        timeline,
+        wal_seg_size: tli.get_wal_seg_size(),
+        commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
+        timeline: tli,
         timeline_dir,
         leader: None,
         election,
@@ -321,7 +325,11 @@ impl WalBackupTask {
                 {
                     Ok(backup_lsn_result) => {
                         backup_lsn = backup_lsn_result;
-                        self.timeline.set_wal_backup_lsn(backup_lsn_result);
+                        let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
+                        if let Err(e) = res {
+                            error!("backup error: {}", e);
+                            return;
+                        }
                         retry_attempt = 0;
                     }
                     Err(e) => {
@@ -417,75 +425,48 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
 async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
-    let storage = REMOTE_STORAGE.get().expect("failed to get remote storage");
+    let storage = REMOTE_STORAGE
+        .get()
+        .expect("failed to get remote storage")
+        .as_ref()
+        .unwrap();
 
-    let file = File::open(&source_file).await?;
+    let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
+        format!(
+            "Failed to open file {} for wal backup",
+            source_file.display()
+        )
+    })?);
 
-    // Storage is initialized by launcher at this point.
-    match storage.as_ref().unwrap() {
-        GenericRemoteStorage::Local(local_storage) => {
-            let destination = local_storage.remote_object_id(source_file)?;
-
-            debug!(
-                "local upload about to start from {} to {}",
-                source_file.display(),
-                destination.display()
-            );
-            local_storage.upload(file, size, &destination, None).await
-        }
-        GenericRemoteStorage::S3(s3_storage) => {
-            let s3key = s3_storage.remote_object_id(source_file)?;
-
-            debug!(
-                "S3 upload about to start from {} to {:?}",
-                source_file.display(),
-                s3key
-            );
-            s3_storage.upload(file, size, &s3key, None).await
-        }
-    }?;
-
-    Ok(())
+    storage
+        .upload_storage_object(Box::new(file), size, source_file)
+        .await
 }
 
 pub async fn read_object(
     file_path: PathBuf,
     offset: u64,
 ) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead>>> {
-    let download = match REMOTE_STORAGE
+    let storage = REMOTE_STORAGE
         .get()
         .context("Failed to get remote storage")?
         .as_ref()
-        .context("No remote storage configured")?
-    {
-        GenericRemoteStorage::Local(local_storage) => {
-            let source = local_storage.remote_object_id(&file_path)?;
+        .context("No remote storage configured")?;
 
-            info!(
-                "local download about to start from {} at offset {}",
-                source.display(),
-                offset
-            );
-            local_storage
-                .download_byte_range(&source, offset, None)
-                .await
-        }
-        GenericRemoteStorage::S3(s3_storage) => {
-            let s3key = s3_storage.remote_object_id(&file_path)?;
-
-            info!(
-                "S3 download about to start from {:?} at offset {}",
-                s3key, offset
-            );
-            s3_storage.download_byte_range(&s3key, offset, None).await
-        }
-    }
-    .with_context(|| {
-        format!(
-            "Failed to open WAL segment download stream for local storage path {}",
-            file_path.display()
-        )
-    })?;
+    info!(
+        "segment download about to start for local path {} at offset {}",
+        file_path.display(),
+        offset
+    );
+    let download = storage
+        .download_storage_object(Some((offset, None)), &file_path)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to open WAL segment download stream for local path {}",
+                file_path.display()
+            )
+        })?;
 
     Ok(download.download_stream)
 }

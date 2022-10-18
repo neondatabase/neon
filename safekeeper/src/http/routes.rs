@@ -1,15 +1,21 @@
 use hyper::{Body, Request, Response, StatusCode, Uri};
 
+use anyhow::Context;
 use once_cell::sync::Lazy;
+use postgres_ffi::WAL_SEGMENT_SIZE;
 use serde::Serialize;
 use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
+use tokio::task::JoinError;
 
+use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
-use crate::timeline::{GlobalTimelines, TimelineDeleteForceResult};
+
+use crate::timelines_global_map::TimelineDeleteForceResult;
+use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 use etcd_broker::subscription_value::SkTimelineInfo;
 use utils::{
@@ -21,8 +27,8 @@ use utils::{
         request::{ensure_no_body, parse_request_param},
         RequestExt, RouterBuilder,
     },
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use super::models::TimelineCreateRequest;
@@ -68,10 +74,11 @@ struct AcceptorStateStatus {
 #[derive(Debug, Serialize)]
 struct TimelineStatus {
     #[serde(serialize_with = "display_serialize")]
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     #[serde(serialize_with = "display_serialize")]
-    timeline_id: ZTimelineId,
+    timeline_id: TimelineId,
     acceptor_state: AcceptorStateStatus,
+    pg_info: ServerInfo,
     #[serde(serialize_with = "display_serialize")]
     flush_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
@@ -90,15 +97,20 @@ struct TimelineStatus {
 
 /// Report info about timeline.
 async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let zttid = ZTenantTimelineId::new(
+    let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
-    check_permission(&request, Some(zttid.tenant_id))?;
+    check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
+    let tli = GlobalTimelines::get(ttid)
+        // FIXME: Currently, the only errors from `GlobalTimelines::get` will be client errors
+        // because the provided timeline isn't there. However, the method can in theory change and
+        // fail from internal errors later. Remove this comment once it the method returns
+        // something other than `anyhow::Result`.
+        .map_err(ApiError::InternalServerError)?;
     let (inmem, state) = tli.get_state();
-    let flush_lsn = tli.get_end_of_wal();
+    let flush_lsn = tli.get_flush_lsn();
 
     let acc_state = AcceptorStateStatus {
         term: state.acceptor_state.term,
@@ -108,9 +120,10 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
 
     // Note: we report in memory values which can be lost.
     let status = TimelineStatus {
-        tenant_id: zttid.tenant_id,
-        timeline_id: zttid.timeline_id,
+        tenant_id: ttid.tenant_id,
+        timeline_id: ttid.timeline_id,
         acceptor_state: acc_state,
+        pg_info: state.server,
         flush_lsn,
         timeline_start_lsn: state.timeline_start_lsn,
         local_start_lsn: state.local_start_lsn,
@@ -125,39 +138,50 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
 
-    let zttid = ZTenantTimelineId {
-        tenant_id: parse_request_param(&request, "tenant_id")?,
+    let ttid = TenantTimelineId {
+        tenant_id: request_data.tenant_id,
         timeline_id: request_data.timeline_id,
     };
-    check_permission(&request, Some(zttid.tenant_id))?;
-    GlobalTimelines::create(get_conf(&request), zttid, request_data.peer_ids)
-        .map_err(ApiError::from_err)?;
+    check_permission(&request, Some(ttid.tenant_id))?;
 
-    json_response(StatusCode::CREATED, ())
+    let server_info = ServerInfo {
+        pg_version: request_data.pg_version,
+        system_id: request_data.system_id.unwrap_or(0),
+        wal_seg_size: request_data.wal_seg_size.unwrap_or(WAL_SEGMENT_SIZE as u32),
+    };
+    let local_start_lsn = request_data.local_start_lsn.unwrap_or_else(|| {
+        request_data
+            .commit_lsn
+            .segment_lsn(server_info.wal_seg_size as usize)
+    });
+    tokio::task::spawn_blocking(move || {
+        GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(e.into()))?
+    .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
 }
 
 /// Deactivates the timeline and removes its data directory.
-///
-/// It does not try to stop any processing of the timeline; there is no such code at the time of writing.
-/// However, it tries to check whether the timeline was active and report it to caller just in case.
-/// Note that this information is inaccurate:
-/// 1. There is a race condition between checking the timeline for activity and actual directory deletion.
-/// 2. At the time of writing Safekeeper rarely marks a timeline inactive. E.g. disconnecting the compute node does nothing.
 async fn timeline_delete_force_handler(
     mut request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let zttid = ZTenantTimelineId::new(
+    let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
-    check_permission(&request, Some(zttid.tenant_id))?;
+    check_permission(&request, Some(ttid.tenant_id))?;
     ensure_no_body(&mut request).await?;
-    json_response(
-        StatusCode::OK,
-        GlobalTimelines::delete_force(get_conf(&request), &zttid)
-            .await
-            .map_err(ApiError::from_err)?,
-    )
+    let resp = tokio::task::spawn_blocking(move || {
+        // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
+        // error handling here when we're able to.
+        GlobalTimelines::delete_force(&ttid).map_err(ApiError::InternalServerError)
+    })
+    .await
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+    json_response(StatusCode::OK, resp)
 }
 
 /// Deactivates all timelines for the tenant and removes its data directory.
@@ -168,29 +192,44 @@ async fn tenant_delete_force_handler(
     let tenant_id = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     ensure_no_body(&mut request).await?;
+    let delete_info = tokio::task::spawn_blocking(move || {
+        // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
+        // Using an `InternalServerError` should be fixed when the types support it
+        GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
+            .map_err(ApiError::InternalServerError)
+    })
+    .await
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
     json_response(
         StatusCode::OK,
-        GlobalTimelines::delete_force_all_for_tenant(get_conf(&request), &tenant_id)
-            .await
-            .map_err(ApiError::from_err)?
+        delete_info
             .iter()
-            .map(|(zttid, resp)| (format!("{}", zttid.timeline_id), *resp))
+            .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
             .collect::<HashMap<String, TimelineDeleteForceResult>>(),
     )
 }
 
 /// Used only in tests to hand craft required data.
 async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let zttid = ZTenantTimelineId::new(
+    let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
-    check_permission(&request, Some(zttid.tenant_id))?;
+    check_permission(&request, Some(ttid.tenant_id))?;
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
-    let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
+    let tli = GlobalTimelines::get(ttid)
+        // `GlobalTimelines::get` returns an error when it can't find the timeline.
+        .with_context(|| {
+            format!(
+                "Couldn't get timeline {} for tenant {}",
+                ttid.timeline_id, ttid.tenant_id
+            )
+        })
+        .map_err(ApiError::NotFound)?;
     tli.record_safekeeper_info(&safekeeper_info, NodeId(1))
-        .await?;
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -222,7 +261,7 @@ pub fn make_router(
         .data(auth)
         .get("/v1/status", status_handler)
         // Will be used in the future instead of implicit timeline creation
-        .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
+        .post("/v1/tenant/timeline", timeline_create_handler)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_status_handler,

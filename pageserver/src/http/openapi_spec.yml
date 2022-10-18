@@ -1,7 +1,11 @@
 openapi: "3.0.2"
 info:
   title: Page Server API
+  description: Neon Pageserver API
   version: "1.0"
+  license:
+    name: "Apache"
+    url: https://github.com/neondatabase/neon/blob/main/LICENSE
 servers:
   - url: ""
 paths:
@@ -207,6 +211,61 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: Get LSN by a timestamp
+      parameters:
+        - name: timestamp
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: A timestamp to get the LSN
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Error when no tenant id found in path, no timeline id or invalid timestamp
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/tenant/{tenant_id}/attach:
     parameters:
       - name: tenant_id
@@ -250,51 +309,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/detach:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-      - name: timeline_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-    post:
-      description: Deprecated, use DELETE /v1/tenant/{tenant_id}/timeline/{timeline_id} instead
-      deprecated: true
-      responses:
-        "200":
-          description: Ok
-        "400":
-          description: Error when no tenant id found in path or no timeline id
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
         "500":
           description: Generic operation error
           content:
@@ -352,6 +366,7 @@ paths:
       description: |
         Create a timeline. Returns new timeline id on success.\
         If no new timeline id is specified in parameters, it would be generated. It's an error to recreate the same timeline.
+        If no pg_version is specified, assume DEFAULT_PG_VERSION hardcoded in the pageserver.
       requestBody:
         content:
           application/json:
@@ -367,6 +382,8 @@ paths:
                 ancestor_start_lsn:
                   type: string
                   format: hex
+                pg_version:
+                  type: integer
       responses:
         "201":
           description: TimelineInfo
@@ -534,11 +551,18 @@ components:
       type: object
       required:
         - id
+        - state
       properties:
         id:
           type: string
         state:
-          type: string
+            oneOf:
+              - type: string
+              - type: object
+                properties:
+                  background_jobs_running:
+                    type: boolean
+
         current_physical_size:
           type: integer
         has_in_progress_downloads:
@@ -591,6 +615,9 @@ components:
       required:
         - timeline_id
         - tenant_id
+        - last_record_lsn
+        - disk_consistent_lsn
+        - awaits_download
       properties:
         timeline_id:
           type: string
@@ -598,36 +625,15 @@ components:
         tenant_id:
           type: string
           format: hex
-        local:
-          $ref: "#/components/schemas/LocalTimelineInfo"
-        remote:
-          $ref: "#/components/schemas/RemoteTimelineInfo"
-    RemoteTimelineInfo:
-      type: object
-      required:
-        - awaits_download
-        - remote_consistent_lsn
-      properties:
-        awaits_download:
-          type: boolean
-        remote_consistent_lsn:
-          type: string
-          format: hex
-    LocalTimelineInfo:
-      type: object
-      required:
-        - last_record_lsn
-        - disk_consistent_lsn
-        - timeline_state
-      properties:
         last_record_lsn:
           type: string
           format: hex
         disk_consistent_lsn:
           type: string
           format: hex
-        timeline_state:
+        remote_consistent_lsn:
           type: string
+          format: hex
         ancestor_timeline_id:
           type: string
           format: hex
@@ -652,7 +658,39 @@ components:
           format: hex
         last_received_msg_ts:
           type: integer
+        awaits_download:
+          type: boolean
 
+        # These 'local' and 'remote' fields just duplicate some of the fields
+        # above. They are kept for backwards-compatibility. They can be removed,
+        # when the control plane has been updated to look at the above fields
+        # directly.
+        local:
+          $ref: "#/components/schemas/LocalTimelineInfo"
+        remote:
+          $ref: "#/components/schemas/RemoteTimelineInfo"
+
+    LocalTimelineInfo:
+      type: object
+      properties:
+        ancestor_timeline_id:
+          type: string
+          format: hex
+        ancestor_lsn:
+          type: string
+          format: hex
+        current_logical_size:
+          type: integer
+        current_physical_size:
+          type: integer
+    RemoteTimelineInfo:
+      type: object
+      required:
+        - remote_consistent_lsn
+      properties:
+        remote_consistent_lsn:
+          type: string
+          format: hex
     Error:
       type: object
       required:

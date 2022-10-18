@@ -178,7 +178,6 @@ impl ComputeNode {
             .args(&["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .expect("postgres --sync-safekeepers failed to start");
 
@@ -191,10 +190,10 @@ impl ComputeNode {
 
         if !sync_output.status.success() {
             anyhow::bail!(
-                "postgres --sync-safekeepers exited with non-zero status: {}. stdout: {}, stderr: {}",
+                "postgres --sync-safekeepers exited with non-zero status: {}. stdout: {}",
                 sync_output.status,
-                String::from_utf8(sync_output.stdout).expect("postgres --sync-safekeepers exited, and stdout is not utf-8"),
-                String::from_utf8(sync_output.stderr).expect("postgres --sync-safekeepers exited, and stderr is not utf-8"),
+                String::from_utf8(sync_output.stdout)
+                    .expect("postgres --sync-safekeepers exited, and stdout is not utf-8"),
             );
         }
 
@@ -258,14 +257,7 @@ impl ComputeNode {
             .spawn()
             .expect("cannot start postgres process");
 
-        // Try default Postgres port if it is not provided
-        let port = self
-            .spec
-            .cluster
-            .settings
-            .find("port")
-            .unwrap_or_else(|| "5432".to_string());
-        wait_for_postgres(&mut pg, &port, pgdata_path)?;
+        wait_for_postgres(&mut pg, pgdata_path)?;
 
         // If connection fails,
         // it may be the old node with `zenith_admin` superuser.

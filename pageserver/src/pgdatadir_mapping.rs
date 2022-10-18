@@ -7,16 +7,15 @@
 //! Clarify that)
 //!
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::layered_repository::Timeline;
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
-use crate::walrecord::ZenithWalRecord;
+use crate::tenant::Timeline;
+use crate::walrecord::NeonWalRecord;
 use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
-use postgres_ffi::v14::pg_constants;
-use postgres_ffi::v14::xlog_utils::TimestampTz;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{Oid, TransactionId};
+use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::Range;
@@ -83,10 +82,16 @@ impl Timeline {
     //------------------------------------------------------------------------------
 
     /// Look up given page version.
-    pub fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_rel_page_at_lsn(
+        &self,
+        tag: RelTag,
+        blknum: BlockNumber,
+        lsn: Lsn,
+        latest: bool,
+    ) -> Result<Bytes> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
-        let nblocks = self.get_rel_size(tag, lsn)?;
+        let nblocks = self.get_rel_size(tag, lsn, latest)?;
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
@@ -100,29 +105,28 @@ impl Timeline {
     }
 
     // Get size of a database in blocks
-    pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
+    pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn, latest: bool) -> Result<usize> {
         let mut total_blocks = 0;
 
         let rels = self.list_rels(spcnode, dbnode, lsn)?;
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, lsn)?;
+            let n_blocks = self.get_rel_size(rel, lsn, latest)?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
     }
 
     /// Get size of a relation file
-    pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
+    pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn, latest: bool) -> Result<BlockNumber> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
             return Ok(nblocks);
         }
 
-        if (tag.forknum == pg_constants::FSM_FORKNUM
-            || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, lsn)?
+        if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
+            && !self.get_rel_exists(tag, lsn, latest)?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -135,13 +139,21 @@ impl Timeline {
         let mut buf = self.get(key, lsn)?;
         let nblocks = buf.get_u32_le();
 
-        // Update relation size cache
-        self.update_cached_rel_size(tag, lsn, nblocks);
+        if latest {
+            // Update relation size cache only if "latest" flag is set.
+            // This flag is set by compute when it is working with most recent version of relation.
+            // Typically master compute node always set latest=true.
+            // Please notice, that even if compute node "by mistake" specifies old LSN but set
+            // latest=true, then it can not cause cache corruption, because with latest=true
+            // pageserver choose max(request_lsn, last_written_lsn) and so cached value will be
+            // associated with most recent value of LSN.
+            self.update_cached_rel_size(tag, lsn, nblocks);
+        }
         Ok(nblocks)
     }
 
     /// Does relation exist?
-    pub fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
+    pub fn get_rel_exists(&self, tag: RelTag, lsn: Lsn, _latest: bool) -> Result<bool> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
         // first try to lookup relation in cache
@@ -557,7 +569,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         rel: RelTag,
         blknum: BlockNumber,
-        rec: ZenithWalRecord,
+        rec: NeonWalRecord,
     ) -> Result<()> {
         ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
@@ -570,7 +582,7 @@ impl<'a> DatadirModification<'a> {
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
-        rec: ZenithWalRecord,
+        rec: NeonWalRecord,
     ) -> Result<()> {
         self.put(
             slru_block_to_key(kind, segno, blknum),
@@ -660,7 +672,7 @@ impl<'a> DatadirModification<'a> {
     pub fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> Result<()> {
         let req_lsn = self.tline.get_last_record_lsn();
 
-        let total_blocks = self.tline.get_db_size(spcnode, dbnode, req_lsn)?;
+        let total_blocks = self.tline.get_db_size(spcnode, dbnode, req_lsn, true)?;
 
         // Remove entry from dbdir
         let buf = self.get(DBDIR_KEY)?;
@@ -733,7 +745,7 @@ impl<'a> DatadirModification<'a> {
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
         ensure!(rel.relnode != 0, "invalid relnode");
         let last_lsn = self.tline.get_last_record_lsn();
-        if self.tline.get_rel_exists(rel, last_lsn)? {
+        if self.tline.get_rel_exists(rel, last_lsn, true)? {
             let size_key = rel_size_to_key(rel);
             // Fetch the old size first
             let old_size = self.get(size_key)?.get_u32_le();
@@ -936,7 +948,7 @@ impl<'a> DatadirModification<'a> {
         result?;
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * BLCKSZ as i64);
+            writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
             self.pending_nblocks = 0;
         }
 
@@ -948,7 +960,7 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> Result<()> {
+    pub fn commit(&mut self) -> anyhow::Result<()> {
         let writer = self.tline.writer();
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
@@ -964,7 +976,7 @@ impl<'a> DatadirModification<'a> {
         writer.finish_write(lsn);
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * BLCKSZ as i64);
+            writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
         }
 
         Ok(())
@@ -1077,6 +1089,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // 03 misc
 //    controlfile
 //    checkpoint
+//    pg_version
 //
 // Below is a full list of the keyspace allocation:
 //
@@ -1115,7 +1128,6 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
-
 //-- Section 01: relation data and metadata
 
 const DBDIR_KEY: Key = Key {
@@ -1385,16 +1397,13 @@ fn is_slru_block_key(key: Key) -> bool {
         && key.field6 != 0xffffffff // and not SlruSegSize
 }
 
-//
-//-- Tests that should work the same with any Repository/Timeline implementation.
-//
-
 #[cfg(test)]
 pub fn create_test_timeline(
-    repo: &crate::layered_repository::Repository,
-    timeline_id: utils::zid::ZTimelineId,
+    tenant: &crate::tenant::Tenant,
+    timeline_id: utils::id::TimelineId,
+    pg_version: u32,
 ) -> Result<std::sync::Arc<Timeline>> {
-    let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
+    let tline = tenant.create_empty_timeline(timeline_id, Lsn(8), pg_version)?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;
@@ -1499,19 +1508,19 @@ mod tests {
         writer.finish()?;
 
         // Test read before rel creation. Should error out.
-        assert!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x10)).is_err());
+        assert!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x10), false).is_err());
 
         // Read block beyond end of relation at different points in time.
         // These reads should fall into different delta, image, and in-memory layers.
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x20))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x25))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x30))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x35))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x45))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x55))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60))?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x20), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x25), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x30), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x35), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x45), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x55), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)?, ZERO_PAGE);
 
         // Test on an in-memory layer with no preceding layer
         let mut writer = tline.begin_record(Lsn(0x70));
@@ -1523,7 +1532,7 @@ mod tests {
         )?;
         writer.finish()?;
 
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_B, 1, Lsn(0x70))?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_B, 1, Lsn(0x70), false)?6, ZERO_PAGE);
 
         Ok(())
     }

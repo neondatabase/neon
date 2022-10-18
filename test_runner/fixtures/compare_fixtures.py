@@ -89,15 +89,12 @@ class NeonCompare(PgCompare):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
+        self.pageserver_http_client = self.env.pageserver.http_client()
 
         # We only use one branch and one timeline
         self.env.neon_cli.create_branch(branch_name, "empty")
         self._pg = self.env.postgres.create_start(branch_name)
         self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
-
-        # Long-lived cursor, useful for flushing
-        self.psconn = self.env.pageserver.connect()
-        self.pscur = self.psconn.cursor()
 
     @property
     def pg(self):
@@ -112,10 +109,10 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
-        self.pscur.execute(f"do_gc {self.env.initial_tenant.hex} {self.timeline} 0")
+        self.pageserver_http_client.timeline_gc(self.env.initial_tenant, self.timeline, 0)
 
     def compact(self):
-        self.pscur.execute(f"compact {self.env.initial_tenant.hex} {self.timeline}")
+        self.pageserver_http_client.timeline_compact(self.env.initial_tenant, self.timeline)
 
     def report_peak_memory_use(self) -> None:
         self.zenbenchmark.record(
@@ -133,11 +130,12 @@ class NeonCompare(PgCompare):
             "size", timeline_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
 
+        params = f'{{tenant_id="{self.env.initial_tenant}",timeline_id="{self.timeline}"}}'
         total_files = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_created_persistent_files_total"
+            self.env.pageserver, "pageserver_created_persistent_files_total" + params
         )
         total_bytes = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_written_persistent_bytes_total"
+            self.env.pageserver, "pageserver_written_persistent_bytes_total" + params
         )
         self.zenbenchmark.record(
             "data_uploaded", total_bytes / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER

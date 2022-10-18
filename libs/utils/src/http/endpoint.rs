@@ -1,6 +1,6 @@
 use crate::auth::{self, Claims, JwtAuth};
 use crate::http::error;
-use crate::zid::ZTenantId;
+use crate::id::TenantId;
 use anyhow::anyhow;
 use hyper::header::AUTHORIZATION;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
@@ -9,6 +9,7 @@ use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
+use tokio::task::JoinError;
 use tracing::info;
 
 use std::future::Future;
@@ -35,7 +36,13 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
 
-    let metrics = metrics::gather();
+    let metrics = tokio::task::spawn_blocking(move || {
+        // Currently we take a lot of mutexes while collecting metrics, so it's
+        // better to spawn a blocking task to avoid blocking the event loop.
+        metrics::gather()
+    })
+    .await
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
     encoder.encode(&metrics, &mut buffer).unwrap();
 
     let response = Response::builder()
@@ -137,9 +144,9 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
     })
 }
 
-pub fn check_permission(req: &Request<Body>, tenantid: Option<ZTenantId>) -> Result<(), ApiError> {
+pub fn check_permission(req: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
     match req.context::<Claims>() {
-        Some(claims) => Ok(auth::check_permission(&claims, tenantid)
+        Some(claims) => Ok(auth::check_permission(&claims, tenant_id)
             .map_err(|err| ApiError::Forbidden(err.to_string()))?),
         None => Ok(()), // claims is None because auth is disabled
     }

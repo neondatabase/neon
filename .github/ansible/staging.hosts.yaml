@@ -1,0 +1,34 @@
+storage:
+  vars:
+    bucket_name: zenith-staging-storage-us-east-1
+    bucket_region: us-east-1
+    console_mgmt_base_url: http://console-staging.local
+    env_name: us-stage
+    etcd_endpoints: zenith-us-stage-etcd.local:2379
+    pageserver_config_stub:
+      pg_distrib_dir: /usr/local
+      remote_storage:
+        bucket_name: "{{ bucket_name }}"
+        bucket_region: "{{ bucket_region }}"
+        prefix_in_bucket: "{{ inventory_hostname }}"
+    hostname_suffix: ".local"
+    remote_user: admin
+
+  children:
+    pageservers:
+      hosts:
+        zenith-us-stage-ps-2:
+          console_region_id: aws-us-east-1
+        zenith-us-stage-ps-3:
+          console_region_id: aws-us-east-1
+        zenith-us-stage-ps-4:
+          console_region_id: aws-us-east-1
+
+    safekeepers:
+      hosts:
+        zenith-us-stage-sk-4:
+          console_region_id: aws-us-east-1
+        zenith-us-stage-sk-5:
+          console_region_id: aws-us-east-1
+        zenith-us-stage-sk-6:
+          console_region_id: aws-us-east-1

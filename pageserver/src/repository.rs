@@ -1,12 +1,10 @@
-use crate::layered_repository::metadata::TimelineMetadata;
-use crate::walrecord::ZenithWalRecord;
+use crate::walrecord::NeonWalRecord;
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{AddAssign, Range};
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -26,6 +24,19 @@ pub struct Key {
 pub const KEY_SIZE: usize = 18;
 
 impl Key {
+    /// 'field2' is used to store tablespaceid for relations and small enum numbers for other relish.
+    /// As long as Neon does not support tablespace (because of lack of access to local file system),
+    /// we can assume that only some predefined namespace OIDs are used which can fit in u16
+    pub fn to_i128(&self) -> i128 {
+        assert!(self.field2 < 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
+        (((self.field1 & 0xf) as i128) << 120)
+            | (((self.field2 & 0xFFFF) as i128) << 104)
+            | ((self.field3 as i128) << 72)
+            | ((self.field4 as i128) << 40)
+            | ((self.field5 as i128) << 32)
+            | self.field6 as i128
+    }
+
     pub fn next(&self) -> Key {
         self.add(1)
     }
@@ -159,7 +170,7 @@ pub enum Value {
     /// replayed get the full value. Replaying the WAL record
     /// might need a previous version of the value (if will_init()
     /// returns false), or it may be replayed stand-alone (true).
-    WalRecord(ZenithWalRecord),
+    WalRecord(NeonWalRecord),
 }
 
 impl Value {
@@ -175,34 +186,10 @@ impl Value {
     }
 }
 
-/// A timeline, that belongs to the current repository.
-pub enum RepositoryTimeline<T> {
-    /// Timeline, with its files present locally in pageserver's working directory.
-    /// Loaded into pageserver's memory and ready to be used.
-    Loaded(Arc<T>),
-
-    /// All the data is available locally, but not loaded into memory, so loading have to be done before actually using the timeline
-    Unloaded {
-        // It is ok to keep metadata here, because it is not changed when timeline is unloaded.
-        // FIXME can s3 sync actually change it? It can change it when timeline is in awaiting download state.
-        //  but we currently do not download something for the timeline once it is local (even if there are new checkpoints) is it correct?
-        // also it is not that good to keep TimelineMetadata here, because it is layered repo implementation detail
-        metadata: TimelineMetadata,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LocalTimelineState {
-    // timeline is loaded into memory (with layer map and all the bits),
-    Loaded,
-    // timeline is on disk locally and ready to be loaded into memory.
-    Unloaded,
-}
-
 ///
 /// Result of performing GC
 ///
-#[derive(Default)]
+#[derive(Default, Serialize)]
 pub struct GcResult {
     pub layers_total: u64,
     pub layers_needed_by_cutoff: u64,
@@ -211,7 +198,16 @@ pub struct GcResult {
     pub layers_not_updated: u64,
     pub layers_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
 
+    #[serde(serialize_with = "serialize_duration_as_millis")]
     pub elapsed: Duration,
+}
+
+// helper function for `GcResult`, serializing a `Duration` as an integer number of milliseconds
+fn serialize_duration_as_millis<S>(d: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    d.as_millis().serialize(serializer)
 }
 
 impl AddAssign for GcResult {

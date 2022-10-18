@@ -9,7 +9,7 @@ from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnvBuilder, PgBin
-from fixtures.utils import lsn_from_hex
+from fixtures.types import Lsn
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
 
 
@@ -198,8 +198,8 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
         return
 
     lsn_write_lags = []
-    last_received_lsn = 0
-    last_pg_flush_lsn = 0
+    last_received_lsn = Lsn(0)
+    last_pg_flush_lsn = Lsn(0)
 
     with env.pg.connect().cursor() as cur:
         cur.execute("CREATE EXTENSION neon")
@@ -218,11 +218,11 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
             res = cur.fetchone()
             lsn_write_lags.append(res[0])
 
-            curr_received_lsn = lsn_from_hex(res[3])
+            curr_received_lsn = Lsn(res[3])
             lsn_process_speed = (curr_received_lsn - last_received_lsn) / (1024**2)
             last_received_lsn = curr_received_lsn
 
-            curr_pg_flush_lsn = lsn_from_hex(res[2])
+            curr_pg_flush_lsn = Lsn(res[2])
             lsn_produce_speed = (curr_pg_flush_lsn - last_pg_flush_lsn) / (1024**2)
             last_pg_flush_lsn = curr_pg_flush_lsn
 

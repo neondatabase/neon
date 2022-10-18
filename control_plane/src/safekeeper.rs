@@ -12,13 +12,8 @@ use nix::unistd::Pid;
 use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
-use safekeeper::http::models::TimelineCreateRequest;
 use thiserror::Error;
-use utils::{
-    connstring::connection_address,
-    http::error::HttpErrorBody,
-    zid::{NodeId, ZTenantId, ZTimelineId},
-};
+use utils::{connstring::connection_address, http::error::HttpErrorBody, id::NodeId};
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
@@ -46,7 +41,7 @@ impl ResponseErrorMessageExt for Response {
             return Ok(self);
         }
 
-        // reqwest do not export it's error construction utility functions, so lets craft the message ourselves
+        // reqwest does not export its error construction utility functions, so let's craft the message ourselves
         let url = self.url().to_owned();
         Err(SafekeeperHttpError::Response(
             match self.json::<HttpErrorBody>() {
@@ -269,7 +264,7 @@ impl SafekeeperNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
         // TODO: authentication
-        //if self.env.auth_type == AuthType::ZenithJWT {
+        //if self.env.auth_type == AuthType::NeonJWT {
         //    builder = builder.bearer_auth(&self.env.safekeeper_auth_token)
         //}
         self.http_client.request(method, url)
@@ -280,25 +275,5 @@ impl SafekeeperNode {
             .send()?
             .error_from_body()?;
         Ok(())
-    }
-
-    pub fn timeline_create(
-        &self,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
-        peer_ids: Vec<NodeId>,
-    ) -> Result<()> {
-        Ok(self
-            .http_request(
-                Method::POST,
-                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
-            )
-            .json(&TimelineCreateRequest {
-                timeline_id,
-                peer_ids,
-            })
-            .send()?
-            .error_from_body()?
-            .json()?)
     }
 }

@@ -51,53 +51,19 @@ fn main() -> Result<()> {
     // TODO: re-use `utils::logging` later
     init_logger(DEFAULT_LOG_LEVEL)?;
 
-    // Env variable is set by `cargo`
-    let version: Option<&str> = option_env!("CARGO_PKG_VERSION");
-    let matches = clap::App::new("compute_ctl")
-        .version(version.unwrap_or("unknown"))
-        .arg(
-            Arg::new("connstr")
-                .short('C')
-                .long("connstr")
-                .value_name("DATABASE_URL")
-                .required(true),
-        )
-        .arg(
-            Arg::new("pgdata")
-                .short('D')
-                .long("pgdata")
-                .value_name("DATADIR")
-                .required(true),
-        )
-        .arg(
-            Arg::new("pgbin")
-                .short('b')
-                .long("pgbin")
-                .value_name("POSTGRES_PATH"),
-        )
-        .arg(
-            Arg::new("spec")
-                .short('s')
-                .long("spec")
-                .value_name("SPEC_JSON"),
-        )
-        .arg(
-            Arg::new("spec-path")
-                .short('S')
-                .long("spec-path")
-                .value_name("SPEC_PATH"),
-        )
-        .get_matches();
+    let matches = cli().get_matches();
 
-    let pgdata = matches.value_of("pgdata").expect("PGDATA path is required");
+    let pgdata = matches
+        .get_one::<String>("pgdata")
+        .expect("PGDATA path is required");
     let connstr = matches
-        .value_of("connstr")
+        .get_one::<String>("connstr")
         .expect("Postgres connection string is required");
-    let spec = matches.value_of("spec");
-    let spec_path = matches.value_of("spec-path");
+    let spec = matches.get_one::<String>("spec");
+    let spec_path = matches.get_one::<String>("spec-path");
 
     // Try to use just 'postgres' if no path is provided
-    let pgbin = matches.value_of("pgbin").unwrap_or("postgres");
+    let pgbin = matches.get_one::<String>("pgbin").unwrap();
 
     let spec: ComputeSpec = match spec {
         // First, try to get cluster spec from the cli argument
@@ -172,4 +138,49 @@ fn main() -> Result<()> {
             Err(error)
         }
     }
+}
+
+fn cli() -> clap::Command {
+    // Env variable is set by `cargo`
+    let version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
+    clap::Command::new("compute_ctl")
+        .version(version)
+        .arg(
+            Arg::new("connstr")
+                .short('C')
+                .long("connstr")
+                .value_name("DATABASE_URL")
+                .required(true),
+        )
+        .arg(
+            Arg::new("pgdata")
+                .short('D')
+                .long("pgdata")
+                .value_name("DATADIR")
+                .required(true),
+        )
+        .arg(
+            Arg::new("pgbin")
+                .short('b')
+                .long("pgbin")
+                .default_value("postgres")
+                .value_name("POSTGRES_PATH"),
+        )
+        .arg(
+            Arg::new("spec")
+                .short('s')
+                .long("spec")
+                .value_name("SPEC_JSON"),
+        )
+        .arg(
+            Arg::new("spec-path")
+                .short('S')
+                .long("spec-path")
+                .value_name("SPEC_PATH"),
+        )
+}
+
+#[test]
+fn verify_cli() {
+    cli().debug_assert()
 }

@@ -3,7 +3,7 @@
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
 use once_cell::sync::Lazy;
-use prometheus::core::{AtomicU64, GenericGauge, GenericGaugeVec};
+use prometheus::core::{AtomicU64, Collector, GenericGauge, GenericGaugeVec};
 pub use prometheus::opts;
 pub use prometheus::register;
 pub use prometheus::{core, default_registry, proto};
@@ -17,6 +17,7 @@ pub use prometheus::{register_int_counter_vec, IntCounterVec};
 pub use prometheus::{register_int_gauge, IntGauge};
 pub use prometheus::{register_int_gauge_vec, IntGaugeVec};
 pub use prometheus::{Encoder, TextEncoder};
+use prometheus::{Registry, Result};
 
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
@@ -32,13 +33,27 @@ macro_rules! register_uint_gauge_vec {
     }};
 }
 
+/// Special internal registry, to collect metrics independently from the default registry.
+/// Was introduced to fix deadlock with lazy registration of metrics in the default registry.
+static INTERNAL_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
+
+/// Register a collector in the internal registry. MUST be called before the first call to `gather()`.
+/// Otherwise, we can have a deadlock in the `gather()` call, trying to register a new collector
+/// while holding the lock.
+pub fn register_internal(c: Box<dyn Collector>) -> Result<()> {
+    INTERNAL_REGISTRY.register(c)
+}
+
 /// Gathers all Prometheus metrics and records the I/O stats just before that.
 ///
 /// Metrics gathering is a relatively simple and standalone operation, so
 /// it might be fine to do it this way to keep things simple.
 pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
     update_rusage_metrics();
-    prometheus::gather()
+    let mut mfs = prometheus::gather();
+    let mut internal_mfs = INTERNAL_REGISTRY.gather();
+    mfs.append(&mut internal_mfs);
+    mfs
 }
 
 static DISK_IO_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
@@ -61,6 +76,16 @@ static MAXRSS_KB: Lazy<IntGauge> = Lazy::new(|| {
 pub const DISK_WRITE_SECONDS_BUCKETS: &[f64] = &[
     0.000_050, 0.000_100, 0.000_500, 0.001, 0.003, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5,
 ];
+
+pub fn set_build_info_metric(revision: &str) {
+    let metric = register_int_gauge_vec!(
+        "libmetrics_build_info",
+        "Build/version information",
+        &["revision"]
+    )
+    .expect("Failed to register build info metric");
+    metric.with_label_values(&[revision]).set(1);
+}
 
 // Records I/O stats in a "cross-platform" way.
 // Compiles both on macOS and Linux, but current macOS implementation always returns 0 as values for I/O stats.

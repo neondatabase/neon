@@ -14,11 +14,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use utils::{
     auth::{encode_from_key_file, Claims, Scope},
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     postgres_backend::AuthType,
-    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use crate::safekeeper::SafekeeperNode;
+
+pub const DEFAULT_PG_VERSION: u32 = 14;
 
 //
 // This data structures represents neon_local CLI config
@@ -48,13 +50,13 @@ pub struct LocalEnv {
 
     // Path to pageserver binary.
     #[serde(default)]
-    pub zenith_distrib_dir: PathBuf,
+    pub neon_distrib_dir: PathBuf,
 
-    // Default tenant ID to use with the 'zenith' command line utility, when
-    // --tenantid is not explicitly specified.
+    // Default tenant ID to use with the 'neon_local' command line utility, when
+    // --tenant_id is not explicitly specified.
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
-    pub default_tenant_id: Option<ZTenantId>,
+    pub default_tenant_id: Option<TenantId>,
 
     // used to issue tokens during e.g pg start
     #[serde(default)]
@@ -69,11 +71,11 @@ pub struct LocalEnv {
 
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     #[serde(default)]
-    // A `HashMap<String, HashMap<ZTenantId, ZTimelineId>>` would be more appropriate here,
+    // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
     #[serde_as(as = "HashMap<_, Vec<(DisplayFromStr, DisplayFromStr)>>")]
-    branch_name_mappings: HashMap<String, Vec<(ZTenantId, ZTimelineId)>>,
+    branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
 }
 
 /// Etcd broker config for cluster internal communication.
@@ -195,29 +197,50 @@ impl Default for SafekeeperConf {
 }
 
 impl LocalEnv {
-    // postgres installation paths
-    pub fn pg_bin_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("bin")
+    pub fn pg_distrib_dir_raw(&self) -> PathBuf {
+        self.pg_distrib_dir.clone()
     }
-    pub fn pg_lib_dir(&self) -> PathBuf {
-        self.pg_distrib_dir.join("lib")
+
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> PathBuf {
+        let path = self.pg_distrib_dir.clone();
+
+        match pg_version {
+            14 => path.join(format!("v{pg_version}")),
+            15 => path.join(format!("v{pg_version}")),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
+    }
+
+    pub fn pg_bin_dir(&self, pg_version: u32) -> PathBuf {
+        match pg_version {
+            14 => self.pg_distrib_dir(pg_version).join("bin"),
+            15 => self.pg_distrib_dir(pg_version).join("bin"),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
+    }
+    pub fn pg_lib_dir(&self, pg_version: u32) -> PathBuf {
+        match pg_version {
+            14 => self.pg_distrib_dir(pg_version).join("lib"),
+            15 => self.pg_distrib_dir(pg_version).join("lib"),
+            _ => panic!("Unsupported postgres version: {}", pg_version),
+        }
     }
 
     pub fn pageserver_bin(&self) -> anyhow::Result<PathBuf> {
-        Ok(self.zenith_distrib_dir.join("pageserver"))
+        Ok(self.neon_distrib_dir.join("pageserver"))
     }
 
     pub fn safekeeper_bin(&self) -> anyhow::Result<PathBuf> {
-        Ok(self.zenith_distrib_dir.join("safekeeper"))
+        Ok(self.neon_distrib_dir.join("safekeeper"))
     }
 
     pub fn pg_data_dirs_path(&self) -> PathBuf {
         self.base_data_dir.join("pgdatadirs").join("tenants")
     }
 
-    pub fn pg_data_dir(&self, tenantid: &ZTenantId, branch_name: &str) -> PathBuf {
+    pub fn pg_data_dir(&self, tenant_id: &TenantId, branch_name: &str) -> PathBuf {
         self.pg_data_dirs_path()
-            .join(tenantid.to_string())
+            .join(tenant_id.to_string())
             .join(branch_name)
     }
 
@@ -233,8 +256,8 @@ impl LocalEnv {
     pub fn register_branch_mapping(
         &mut self,
         branch_name: String,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
         let existing_values = self
             .branch_name_mappings
@@ -260,22 +283,22 @@ impl LocalEnv {
     pub fn get_branch_timeline_id(
         &self,
         branch_name: &str,
-        tenant_id: ZTenantId,
-    ) -> Option<ZTimelineId> {
+        tenant_id: TenantId,
+    ) -> Option<TimelineId> {
         self.branch_name_mappings
             .get(branch_name)?
             .iter()
             .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
             .map(|&(_, timeline_id)| timeline_id)
-            .map(ZTimelineId::from)
+            .map(TimelineId::from)
     }
 
-    pub fn timeline_name_mappings(&self) -> HashMap<ZTenantTimelineId, String> {
+    pub fn timeline_name_mappings(&self) -> HashMap<TenantTimelineId, String> {
         self.branch_name_mappings
             .iter()
             .flat_map(|(name, tenant_timelines)| {
                 tenant_timelines.iter().map(|&(tenant_id, timeline_id)| {
-                    (ZTenantTimelineId::new(tenant_id, timeline_id), name.clone())
+                    (TenantTimelineId::new(tenant_id, timeline_id), name.clone())
                 })
             })
             .collect()
@@ -289,24 +312,26 @@ impl LocalEnv {
         let mut env: LocalEnv = toml::from_str(toml)?;
 
         // Find postgres binaries.
-        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "tmp_install".
+        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install".
+        // Note that later in the code we assume, that distrib dirs follow the same pattern
+        // for all postgres versions.
         if env.pg_distrib_dir == Path::new("") {
             if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
                 env.pg_distrib_dir = postgres_bin.into();
             } else {
                 let cwd = env::current_dir()?;
-                env.pg_distrib_dir = cwd.join("tmp_install")
+                env.pg_distrib_dir = cwd.join("pg_install")
             }
         }
 
-        // Find zenith binaries.
-        if env.zenith_distrib_dir == Path::new("") {
-            env.zenith_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
+        // Find neon binaries.
+        if env.neon_distrib_dir == Path::new("") {
+            env.neon_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
         }
 
         // If no initial tenant ID was given, generate it.
         if env.default_tenant_id.is_none() {
-            env.default_tenant_id = Some(ZTenantId::generate());
+            env.default_tenant_id = Some(TenantId::generate());
         }
 
         env.base_data_dir = base_path();
@@ -320,12 +345,12 @@ impl LocalEnv {
 
         if !repopath.exists() {
             bail!(
-                "Zenith config is not found in {}. You need to run 'neon_local init' first",
+                "Neon config is not found in {}. You need to run 'neon_local init' first",
                 repopath.to_str().unwrap()
             );
         }
 
-        // TODO: check that it looks like a zenith repository
+        // TODO: check that it looks like a neon repository
 
         // load and parse file
         let config = fs::read_to_string(repopath.join("config"))?;
@@ -384,7 +409,7 @@ impl LocalEnv {
     //
     // Initialize a new Neon repository
     //
-    pub fn init(&mut self) -> anyhow::Result<()> {
+    pub fn init(&mut self, pg_version: u32) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         ensure!(
@@ -397,17 +422,17 @@ impl LocalEnv {
             "directory '{}' already exists. Perhaps already initialized?",
             base_path.display()
         );
-        if !self.pg_distrib_dir.join("bin/postgres").exists() {
+        if !self.pg_bin_dir(pg_version).join("postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
-                self.pg_distrib_dir.display()
+                self.pg_bin_dir(pg_version).display()
             );
         }
         for binary in ["pageserver", "safekeeper"] {
-            if !self.zenith_distrib_dir.join(binary).exists() {
+            if !self.neon_distrib_dir.join(binary).exists() {
                 bail!(
-                    "Can't find binary '{binary}' in zenith distrib dir '{}'",
-                    self.zenith_distrib_dir.display()
+                    "Can't find binary '{binary}' in neon distrib dir '{}'",
+                    self.neon_distrib_dir.display()
                 );
             }
         }

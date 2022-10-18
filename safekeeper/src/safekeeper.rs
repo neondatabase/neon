@@ -5,7 +5,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use etcd_broker::subscription_value::SkTimelineInfo;
-use postgres_ffi::v14::xlog_utils::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
+use postgres_ffi::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -19,15 +19,15 @@ use crate::send_wal::HotStandbyFeedback;
 use crate::wal_storage;
 use utils::{
     bin_ser::LeSer,
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
     pq_proto::{ReplicationFeedback, SystemId},
-    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 6;
+pub const SK_FORMAT_VERSION: u32 = 7;
 const SK_PROTOCOL_VERSION: u32 = 2;
-const UNKNOWN_SERVER_VERSION: u32 = 0;
+pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 /// Consensus logical timestamp.
 pub type Term = u64;
@@ -166,10 +166,9 @@ pub struct Peers(pub Vec<(NodeId, PeerInfo)>);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperState {
     #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
-    /// Zenith timelineid
+    pub tenant_id: TenantId,
     #[serde(with = "hex")]
-    pub timeline_id: ZTimelineId,
+    pub timeline_id: TimelineId,
     /// persistent acceptor state
     pub acceptor_state: AcceptorState,
     /// information about server
@@ -219,25 +218,27 @@ pub struct SafekeeperMemState {
 }
 
 impl SafeKeeperState {
-    pub fn new(zttid: &ZTenantTimelineId, peers: Vec<NodeId>) -> SafeKeeperState {
+    pub fn new(
+        ttid: &TenantTimelineId,
+        server_info: ServerInfo,
+        peers: Vec<NodeId>,
+        commit_lsn: Lsn,
+        local_start_lsn: Lsn,
+    ) -> SafeKeeperState {
         SafeKeeperState {
-            tenant_id: zttid.tenant_id,
-            timeline_id: zttid.timeline_id,
+            tenant_id: ttid.tenant_id,
+            timeline_id: ttid.timeline_id,
             acceptor_state: AcceptorState {
                 term: 0,
                 term_history: TermHistory::empty(),
             },
-            server: ServerInfo {
-                pg_version: UNKNOWN_SERVER_VERSION, /* Postgres server version */
-                system_id: 0,                       /* Postgres system identifier */
-                wal_seg_size: 0,
-            },
+            server: server_info,
             proposer_uuid: [0; 16],
             timeline_start_lsn: Lsn(0),
-            local_start_lsn: Lsn(0),
-            commit_lsn: Lsn(0),
-            backup_lsn: Lsn::INVALID,
-            peer_horizon_lsn: Lsn(0),
+            local_start_lsn,
+            commit_lsn,
+            backup_lsn: local_start_lsn,
+            peer_horizon_lsn: local_start_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(peers.iter().map(|p| (*p, PeerInfo::new())).collect()),
         }
@@ -245,7 +246,17 @@ impl SafeKeeperState {
 
     #[cfg(test)]
     pub fn empty() -> Self {
-        SafeKeeperState::new(&ZTenantTimelineId::empty(), vec![])
+        SafeKeeperState::new(
+            &TenantTimelineId::empty(),
+            ServerInfo {
+                pg_version: UNKNOWN_SERVER_VERSION, /* Postgres server version */
+                system_id: 0,                       /* Postgres system identifier */
+                wal_seg_size: 0,
+            },
+            vec![],
+            Lsn::INVALID,
+            Lsn::INVALID,
+        )
     }
 }
 
@@ -260,9 +271,8 @@ pub struct ProposerGreeting {
     pub pg_version: u32,
     pub proposer_id: PgUuid,
     pub system_id: SystemId,
-    /// Zenith timelineid
-    pub ztli: ZTimelineId,
-    pub tenant_id: ZTenantId,
+    pub timeline_id: TimelineId,
+    pub tenant_id: TenantId,
     pub tli: TimeLineID,
     pub wal_seg_size: u32,
 }
@@ -332,7 +342,7 @@ pub struct AppendRequestHeader {
 }
 
 /// Report safekeeper state to proposer
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AppendResponse {
     // Current term of the safekeeper; if it is higher than proposer's, the
     // compute is out of date.
@@ -481,8 +491,12 @@ impl AcceptorProposerMessage {
     }
 }
 
-/// SafeKeeper which consumes events (messages from compute) and provides
-/// replies.
+/// Safekeeper implements consensus to reliably persist WAL across nodes.
+/// It controls all WAL disk writes and updates of control file.
+///
+/// Currently safekeeper processes:
+/// - messages from compute (proposers) and provides replies
+/// - messages from broker peers
 pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
     /// Maximum commit_lsn between all nodes, can be ahead of local flush_lsn.
     /// Note: be careful to set only if we are sure our WAL (term history) matches
@@ -505,19 +519,19 @@ where
     CTRL: control_file::Storage,
     WAL: wal_storage::Storage,
 {
-    // constructor
-    pub fn new(
-        ztli: ZTimelineId,
-        state: CTRL,
-        mut wal_store: WAL,
-        node_id: NodeId,
-    ) -> Result<SafeKeeper<CTRL, WAL>> {
-        if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
-            bail!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
+    /// Accepts a control file storage containing the safekeeper state.
+    /// State must be initialized, i.e. contain filled `tenant_id`, `timeline_id`
+    /// and `server` (`wal_seg_size` inside it) fields.
+    pub fn new(state: CTRL, wal_store: WAL, node_id: NodeId) -> Result<SafeKeeper<CTRL, WAL>> {
+        if state.tenant_id == TenantId::from([0u8; 16])
+            || state.timeline_id == TimelineId::from([0u8; 16])
+        {
+            bail!(
+                "Calling SafeKeeper::new with empty tenant_id ({}) or timeline_id ({})",
+                state.tenant_id,
+                state.timeline_id
+            );
         }
-
-        // initialize wal_store, if state is already initialized
-        wal_store.init_storage(&state)?;
 
         Ok(SafeKeeper {
             global_commit_lsn: state.commit_lsn,
@@ -576,7 +590,7 @@ where
         &mut self,
         msg: &ProposerGreeting,
     ) -> Result<Option<AcceptorProposerMessage>> {
-        /* Check protocol compatibility */
+        // Check protocol compatibility
         if msg.protocol_version != SK_PROTOCOL_VERSION {
             bail!(
                 "incompatible protocol version {}, expected {}",
@@ -584,15 +598,20 @@ where
                 SK_PROTOCOL_VERSION
             );
         }
-        /* Postgres upgrade is not treated as fatal error */
-        if msg.pg_version != self.state.server.pg_version
+        /* Postgres major version mismatch is treated as fatal error
+         * because safekeepers parse WAL headers and the format
+         * may change between versions.
+         */
+        if msg.pg_version / 10000 != self.state.server.pg_version / 10000
             && self.state.server.pg_version != UNKNOWN_SERVER_VERSION
         {
-            info!(
+            bail!(
                 "incompatible server version {}, expected {}",
-                msg.pg_version, self.state.server.pg_version
+                msg.pg_version,
+                self.state.server.pg_version
             );
         }
+
         if msg.tenant_id != self.state.tenant_id {
             bail!(
                 "invalid tenant ID, got {}, expected {}",
@@ -600,24 +619,35 @@ where
                 self.state.tenant_id
             );
         }
-        if msg.ztli != self.state.timeline_id {
+        if msg.timeline_id != self.state.timeline_id {
             bail!(
                 "invalid timeline ID, got {}, expected {}",
-                msg.ztli,
+                msg.timeline_id,
                 self.state.timeline_id
             );
         }
-
-        // set basic info about server, if not yet
-        // TODO: verify that is doesn't change after
-        {
-            let mut state = self.state.clone();
-            state.server.system_id = msg.system_id;
-            state.server.wal_seg_size = msg.wal_seg_size;
-            self.state.persist(&state)?;
+        if self.state.server.wal_seg_size != msg.wal_seg_size {
+            bail!(
+                "invalid wal_seg_size, got {}, expected {}",
+                msg.wal_seg_size,
+                self.state.server.wal_seg_size
+            );
         }
 
-        self.wal_store.init_storage(&self.state)?;
+        // system_id will be updated on mismatch
+        if self.state.server.system_id != msg.system_id {
+            warn!(
+                "unexpected system ID arrived, got {}, expected {}",
+                msg.system_id, self.state.server.system_id
+            );
+
+            let mut state = self.state.clone();
+            state.server.system_id = msg.system_id;
+            if msg.pg_version != UNKNOWN_SERVER_VERSION {
+                state.server.pg_version = msg.pg_version;
+            }
+            self.state.persist(&state)?;
+        }
 
         info!(
             "processed greeting from proposer {:?}, sending term {:?}",
@@ -667,16 +697,6 @@ where
         Ok(Some(AcceptorProposerMessage::VoteResponse(resp)))
     }
 
-    /// Bump our term if received a note from elected proposer with higher one
-    fn bump_if_higher(&mut self, term: Term) -> Result<()> {
-        if self.state.acceptor_state.term < term {
-            let mut state = self.state.clone();
-            state.acceptor_state.term = term;
-            self.state.persist(&state)?;
-        }
-        Ok(())
-    }
-
     /// Form AppendResponse from current state.
     fn append_response(&self) -> AppendResponse {
         let ar = AppendResponse {
@@ -693,7 +713,12 @@ where
 
     fn handle_elected(&mut self, msg: &ProposerElected) -> Result<Option<AcceptorProposerMessage>> {
         info!("received ProposerElected {:?}", msg);
-        self.bump_if_higher(msg.term)?;
+        if self.state.acceptor_state.term < msg.term {
+            let mut state = self.state.clone();
+            state.acceptor_state.term = msg.term;
+            self.state.persist(&state)?;
+        }
+
         // If our term is higher, ignore the message (next feedback will inform the compute)
         if self.state.acceptor_state.term > msg.term {
             return Ok(None);
@@ -719,7 +744,8 @@ where
                     "setting timeline_start_lsn to {:?}",
                     state.timeline_start_lsn
                 );
-
+            }
+            if state.local_start_lsn == Lsn(0) {
                 state.local_start_lsn = msg.start_streaming_at;
                 info!("setting local_start_lsn to {:?}", state.local_start_lsn);
             }
@@ -750,7 +776,7 @@ where
     }
 
     /// Advance commit_lsn taking into account what we have locally
-    pub fn update_commit_lsn(&mut self) -> Result<()> {
+    fn update_commit_lsn(&mut self) -> Result<()> {
         let commit_lsn = min(self.global_commit_lsn, self.flush_lsn());
         assert!(commit_lsn >= self.inmem.commit_lsn);
 
@@ -768,6 +794,11 @@ where
         }
 
         Ok(())
+    }
+
+    /// Persist control file to disk, called only after timeline creation (bootstrap).
+    pub fn persist(&mut self) -> Result<()> {
+        self.persist_control_file(self.state.clone())
     }
 
     /// Persist in-memory state to the disk, taking other data from state.
@@ -920,6 +951,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use postgres_ffi::WAL_SEGMENT_SIZE;
+
     use super::*;
     use crate::wal_storage::Storage;
     use std::ops::Deref;
@@ -944,6 +977,14 @@ mod tests {
         }
     }
 
+    fn test_sk_state() -> SafeKeeperState {
+        let mut state = SafeKeeperState::empty();
+        state.server.wal_seg_size = WAL_SEGMENT_SIZE as u32;
+        state.tenant_id = TenantId::from([1u8; 16]);
+        state.timeline_id = TimelineId::from([1u8; 16]);
+        state
+    }
+
     struct DummyWalStore {
         lsn: Lsn,
     }
@@ -951,10 +992,6 @@ mod tests {
     impl wal_storage::Storage for DummyWalStore {
         fn flush_lsn(&self) -> Lsn {
             self.lsn
-        }
-
-        fn init_storage(&mut self, _state: &SafeKeeperState) -> Result<()> {
-            Ok(())
         }
 
         fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
@@ -974,17 +1011,19 @@ mod tests {
         fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
             Box::new(move |_segno_up_to: XLogSegNo| Ok(()))
         }
+
+        fn get_metrics(&self) -> crate::metrics::WalStorageMetrics {
+            crate::metrics::WalStorageMetrics::default()
+        }
     }
 
     #[test]
     fn test_voting() {
         let storage = InMemoryState {
-            persisted_state: SafeKeeperState::empty(),
+            persisted_state: test_sk_state(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
-        let ztli = ZTimelineId::from([0u8; 16]);
-
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(storage, wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -1000,7 +1039,7 @@ mod tests {
             persisted_state: state,
         };
 
-        sk = SafeKeeper::new(ztli, storage, sk.wal_store, NodeId(0)).unwrap();
+        sk = SafeKeeper::new(storage, sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -1013,12 +1052,11 @@ mod tests {
     #[test]
     fn test_epoch_switch() {
         let storage = InMemoryState {
-            persisted_state: SafeKeeperState::empty(),
+            persisted_state: test_sk_state(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
-        let ztli = ZTimelineId::from([0u8; 16]);
 
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(storage, wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
