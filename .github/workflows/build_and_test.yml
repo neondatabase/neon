@@ -774,6 +774,7 @@ jobs:
             exit 1
           fi
 
+          ansible-galaxy collection install sivel.toiletwater
           ansible-playbook deploy.yaml -i staging.us-east-2.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{secrets.NEON_STAGING_API_KEY}}
           rm -f neon_install.tar.gz .neon_current_version
 
