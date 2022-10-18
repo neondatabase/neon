@@ -11,6 +11,7 @@
 
 #include "postgres.h"
 
+#include "access/csn_snapshot.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
 #include "storage/block.h"
@@ -22,8 +23,6 @@
 typedef struct RWSetHeader
 {
 	Oid			dbid;
-	TransactionId xid;
-	uint64 		csn;
 	uint64 		region_set;
 } RWSetHeader;
 
@@ -33,7 +32,6 @@ typedef struct RWSetHeader
 typedef struct RWSetPage
 {
 	BlockNumber blkno;
-	uint64		csn;
 
 	dlist_node	node;
 } RWSetPage;
@@ -55,6 +53,7 @@ typedef struct RWSetRelation
 {
 	Oid			relid;
 	int8		region;
+	SnapshotCSN	csn;
 	bool		is_index;
 	dlist_head	pages;
 	dlist_head	tuples;

@@ -16,7 +16,6 @@
 #include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
-#include "utils/snapmgr.h"
 #include "utils/rel.h"
 #include "utils/wait_event.h"
 #include "miscadmin.h"
@@ -104,7 +103,6 @@ init_rwset_collection_buffer(Oid dbid)
 {
 	MemoryContext old_context;
 	HASHCTL		hash_ctl;
-	Snapshot 	snapshot;
 
 	if (rwset_collection_buffer)
 	{
@@ -124,9 +122,6 @@ init_rwset_collection_buffer(Oid dbid)
 
 	/* Initialize the header */
 	rwset_collection_buffer->header.dbid = dbid;
-	rwset_collection_buffer->header.xid = InvalidTransactionId;
-	snapshot = GetLatestSnapshot();
-	rwset_collection_buffer->header.csn = snapshot->snapshot_csn;
 	/* The current region is always a participant of the transaction */
 	rwset_collection_buffer->header.region_set = SingleRegion(current_region);
 
@@ -196,7 +191,6 @@ rx_collect_page(Oid dbid, Oid relid, BlockNumber blkno)
 {
 	CollectedRelation *collected_relation;
 	StringInfo	buf = NULL;
-	Snapshot snapshot;
 
 	init_rwset_collection_buffer(dbid);
 
@@ -204,11 +198,8 @@ rx_collect_page(Oid dbid, Oid relid, BlockNumber blkno)
 	collected_relation->is_index = true;
 	collected_relation->nitems++;
 
-	snapshot = GetLatestSnapshot();
-
 	buf = &collected_relation->pages;
 	pq_sendint32(buf, blkno);
-	pq_sendint64(buf, snapshot->snapshot_csn);
 }
 
 static void
@@ -373,7 +364,7 @@ static void
 rx_execute_remote_xact(void)
 {
 	RWSetHeader			*header;
-	CollectedRelation	*collected_relation;
+	CollectedRelation	*relation;
 	HASH_SEQ_STATUS		status;
 	StringInfoData		buf, resp_buf;
 	int		read_len = 0;
@@ -395,8 +386,6 @@ rx_execute_remote_xact(void)
 
 	/* Assemble the header */
 	pq_sendint32(&buf, header->dbid);
-	pq_sendint32(&buf, header->xid);
-	pq_sendint64(&buf, header->csn);
 	pq_sendint64(&buf, header->region_set);
 
 	/* Cursor now points to where the length of the read section is stored */
@@ -406,28 +395,37 @@ rx_execute_remote_xact(void)
 
 	/* Assemble the read set */
 	hash_seq_init(&status, rwset_collection_buffer->collected_relations);
-	while ((collected_relation = (CollectedRelation *) hash_seq_search(&status)) != NULL)
+	while ((relation = (CollectedRelation *) hash_seq_search(&status)) != NULL)
 	{
+		Oid			relid = relation->key.relid;
+		int8		region = relation->region;
+		SnapshotCSN	csn = InvalidXLogRecPtr;
+		int			nitems = relation->nitems;
 		StringInfo	items = NULL;
+		
+		if (RegionIsRemote(region))
+			csn = GetRegionLsn(region);
 
 		/* Accumulate the length of the buffer used by each relation */
 		read_len -= buf.len;
 
-		if (collected_relation->is_index)
+		if (relation->is_index)
 		{
 			pq_sendbyte(&buf, 'I');
-			pq_sendint32(&buf, collected_relation->key.relid);
-			pq_sendbyte(&buf, collected_relation->region);
-			pq_sendint32(&buf, collected_relation->nitems);
-			items = &collected_relation->pages;
+			pq_sendint32(&buf, relid);
+			pq_sendbyte(&buf, region);
+			pq_sendint64(&buf, csn);
+			pq_sendint32(&buf, nitems);
+			items = &relation->pages;
 		}
 		else
 		{
 			pq_sendbyte(&buf, 'T');
-			pq_sendint32(&buf, collected_relation->key.relid);
-			pq_sendbyte(&buf, collected_relation->region);
-			pq_sendint32(&buf, collected_relation->nitems);
-			items = &collected_relation->tuples;
+			pq_sendint32(&buf, relid);
+			pq_sendbyte(&buf, region);
+			pq_sendint64(&buf, csn);
+			pq_sendint32(&buf, nitems);
+			items = &relation->tuples;
 		}
 
 		pq_sendbytes(&buf, items->data, items->len);
