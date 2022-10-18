@@ -10,51 +10,12 @@ struct WalProposerConn
 	PGconn	   *pg_conn;
 	bool		is_nonblocking; /* whether the connection is non-blocking */
 	char	   *recvbuf;		/* last received data from
-								 * libpqprop_async_read */
+								 * walprop_async_read */
 };
-
-/* Prototypes for exported functions */
-static char *libpqprop_error_message(WalProposerConn * conn);
-static WalProposerConnStatusType libpqprop_status(WalProposerConn * conn);
-static WalProposerConn * libpqprop_connect_start(char *conninfo);
-static WalProposerConnectPollStatusType libpqprop_connect_poll(WalProposerConn * conn);
-static bool libpqprop_send_query(WalProposerConn * conn, char *query);
-static WalProposerExecStatusType libpqprop_get_query_result(WalProposerConn * conn);
-static pgsocket libpqprop_socket(WalProposerConn * conn);
-static int	libpqprop_flush(WalProposerConn * conn);
-static void libpqprop_finish(WalProposerConn * conn);
-static PGAsyncReadResult libpqprop_async_read(WalProposerConn * conn, char **buf, int *amount);
-static PGAsyncWriteResult libpqprop_async_write(WalProposerConn * conn, void const *buf, size_t size);
-static bool libpqprop_blocking_write(WalProposerConn * conn, void const *buf, size_t size);
-
-static WalProposerFunctionsType PQWalProposerFunctions =
-{
-	libpqprop_error_message,
-		libpqprop_status,
-		libpqprop_connect_start,
-		libpqprop_connect_poll,
-		libpqprop_send_query,
-		libpqprop_get_query_result,
-		libpqprop_socket,
-		libpqprop_flush,
-		libpqprop_finish,
-		libpqprop_async_read,
-		libpqprop_async_write,
-		libpqprop_blocking_write,
-};
-
-/* Module initialization */
-void
-pg_init_libpqwalproposer(void)
-{
-	if (WalProposerFunctions != NULL)
-		elog(ERROR, "libpqwalproposer already loaded");
-	WalProposerFunctions = &PQWalProposerFunctions;
-}
 
 /* Helper function */
 static bool
-ensure_nonblocking_status(WalProposerConn * conn, bool is_nonblocking)
+ensure_nonblocking_status(WalProposerConn *conn, bool is_nonblocking)
 {
 	/* If we're already correctly blocking or nonblocking, all good */
 	if (is_nonblocking == conn->is_nonblocking)
@@ -69,14 +30,14 @@ ensure_nonblocking_status(WalProposerConn * conn, bool is_nonblocking)
 }
 
 /* Exported function definitions */
-static char *
-libpqprop_error_message(WalProposerConn * conn)
+char *
+walprop_error_message(WalProposerConn *conn)
 {
 	return PQerrorMessage(conn->pg_conn);
 }
 
-static WalProposerConnStatusType
-libpqprop_status(WalProposerConn * conn)
+WalProposerConnStatusType
+walprop_status(WalProposerConn *conn)
 {
 	switch (PQstatus(conn->pg_conn))
 	{
@@ -89,8 +50,8 @@ libpqprop_status(WalProposerConn * conn)
 	}
 }
 
-static WalProposerConn *
-libpqprop_connect_start(char *conninfo)
+WalProposerConn *
+walprop_connect_start(char *conninfo)
 {
 	WalProposerConn *conn;
 	PGconn	   *pg_conn;
@@ -119,8 +80,8 @@ libpqprop_connect_start(char *conninfo)
 	return conn;
 }
 
-static WalProposerConnectPollStatusType
-libpqprop_connect_poll(WalProposerConn * conn)
+WalProposerConnectPollStatusType
+walprop_connect_poll(WalProposerConn *conn)
 {
 	WalProposerConnectPollStatusType return_val;
 
@@ -160,8 +121,8 @@ libpqprop_connect_poll(WalProposerConn * conn)
 	return return_val;
 }
 
-static bool
-libpqprop_send_query(WalProposerConn * conn, char *query)
+bool
+walprop_send_query(WalProposerConn *conn, char *query)
 {
 	/*
 	 * We need to be in blocking mode for sending the query to run without
@@ -177,8 +138,8 @@ libpqprop_send_query(WalProposerConn * conn, char *query)
 	return true;
 }
 
-static WalProposerExecStatusType
-libpqprop_get_query_result(WalProposerConn * conn)
+WalProposerExecStatusType
+walprop_get_query_result(WalProposerConn *conn)
 {
 	PGresult   *result;
 	WalProposerExecStatusType return_val;
@@ -255,20 +216,20 @@ libpqprop_get_query_result(WalProposerConn * conn)
 	return return_val;
 }
 
-static pgsocket
-libpqprop_socket(WalProposerConn * conn)
+pgsocket
+walprop_socket(WalProposerConn *conn)
 {
 	return PQsocket(conn->pg_conn);
 }
 
-static int
-libpqprop_flush(WalProposerConn * conn)
+int
+walprop_flush(WalProposerConn *conn)
 {
 	return (PQflush(conn->pg_conn));
 }
 
-static void
-libpqprop_finish(WalProposerConn * conn)
+void
+walprop_finish(WalProposerConn *conn)
 {
 	if (conn->recvbuf != NULL)
 		PQfreemem(conn->recvbuf);
@@ -282,8 +243,8 @@ libpqprop_finish(WalProposerConn * conn)
  * On success, the data is placed in *buf. It is valid until the next call
  * to this function.
  */
-static PGAsyncReadResult
-libpqprop_async_read(WalProposerConn * conn, char **buf, int *amount)
+PGAsyncReadResult
+walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 {
 	int			result;
 
@@ -353,8 +314,8 @@ libpqprop_async_read(WalProposerConn * conn, char **buf, int *amount)
 	}
 }
 
-static PGAsyncWriteResult
-libpqprop_async_write(WalProposerConn * conn, void const *buf, size_t size)
+PGAsyncWriteResult
+walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
 {
 	int			result;
 
@@ -408,8 +369,12 @@ libpqprop_async_write(WalProposerConn * conn, void const *buf, size_t size)
 	}
 }
 
-static bool
-libpqprop_blocking_write(WalProposerConn * conn, void const *buf, size_t size)
+/*
+ * This function is very similar to walprop_async_write. For more
+ * information, refer to the comments there.
+ */
+bool
+walprop_blocking_write(WalProposerConn *conn, void const *buf, size_t size)
 {
 	int			result;
 
@@ -417,10 +382,6 @@ libpqprop_blocking_write(WalProposerConn * conn, void const *buf, size_t size)
 	if (!ensure_nonblocking_status(conn, false))
 		return false;
 
-	/*
-	 * Ths function is very similar to libpqprop_async_write. For more
-	 * information, refer to the comments there
-	 */
 	if ((result = PQputCopyData(conn->pg_conn, buf, size)) == -1)
 		return false;
 
