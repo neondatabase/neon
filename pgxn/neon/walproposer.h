@@ -446,31 +446,31 @@ typedef enum
 }			WalProposerConnStatusType;
 
 /* Re-exported PQerrorMessage */
-typedef char *(*walprop_error_message_fn) (WalProposerConn * conn);
+extern char *walprop_error_message(WalProposerConn *conn);
 
 /* Re-exported PQstatus */
-typedef WalProposerConnStatusType(*walprop_status_fn) (WalProposerConn * conn);
+extern WalProposerConnStatusType walprop_status(WalProposerConn *conn);
 
 /* Re-exported PQconnectStart */
-typedef WalProposerConn * (*walprop_connect_start_fn) (char *conninfo);
+extern WalProposerConn * walprop_connect_start(char *conninfo);
 
 /* Re-exported PQconectPoll */
-typedef WalProposerConnectPollStatusType(*walprop_connect_poll_fn) (WalProposerConn * conn);
+extern WalProposerConnectPollStatusType walprop_connect_poll(WalProposerConn *conn);
 
 /* Blocking wrapper around PQsendQuery */
-typedef bool (*walprop_send_query_fn) (WalProposerConn * conn, char *query);
+extern bool walprop_send_query(WalProposerConn *conn, char *query);
 
 /* Wrapper around PQconsumeInput + PQisBusy + PQgetResult */
-typedef WalProposerExecStatusType(*walprop_get_query_result_fn) (WalProposerConn * conn);
+extern WalProposerExecStatusType walprop_get_query_result(WalProposerConn *conn);
 
 /* Re-exported PQsocket */
-typedef pgsocket (*walprop_socket_fn) (WalProposerConn * conn);
+extern pgsocket walprop_socket(WalProposerConn *conn);
 
 /* Wrapper around PQconsumeInput (if socket's read-ready) + PQflush */
-typedef int (*walprop_flush_fn) (WalProposerConn * conn);
+extern int	walprop_flush(WalProposerConn *conn);
 
 /* Re-exported PQfinish */
-typedef void (*walprop_finish_fn) (WalProposerConn * conn);
+extern void walprop_finish(WalProposerConn *conn);
 
 /*
  * Ergonomic wrapper around PGgetCopyData
@@ -486,9 +486,7 @@ typedef void (*walprop_finish_fn) (WalProposerConn * conn);
  * performs a bit of extra checking work that's always required and is normally
  * somewhat verbose.
  */
-typedef PGAsyncReadResult(*walprop_async_read_fn) (WalProposerConn * conn,
-												   char **buf,
-												   int *amount);
+extern PGAsyncReadResult walprop_async_read(WalProposerConn *conn, char **buf, int *amount);
 
 /*
  * Ergonomic wrapper around PQputCopyData + PQflush
@@ -497,69 +495,14 @@ typedef PGAsyncReadResult(*walprop_async_read_fn) (WalProposerConn * conn,
  *
  * For information on the meaning of return codes, refer to PGAsyncWriteResult.
  */
-typedef PGAsyncWriteResult(*walprop_async_write_fn) (WalProposerConn * conn,
-													 void const *buf,
-													 size_t size);
+extern PGAsyncWriteResult walprop_async_write(WalProposerConn *conn, void const *buf, size_t size);
 
 /*
  * Blocking equivalent to walprop_async_write_fn
  *
  * Returns 'true' if successful, 'false' on failure.
  */
-typedef bool (*walprop_blocking_write_fn) (WalProposerConn * conn, void const *buf, size_t size);
-
-/* All libpqwalproposer exported functions collected together. */
-typedef struct WalProposerFunctionsType
-{
-	walprop_error_message_fn walprop_error_message;
-	walprop_status_fn walprop_status;
-	walprop_connect_start_fn walprop_connect_start;
-	walprop_connect_poll_fn walprop_connect_poll;
-	walprop_send_query_fn walprop_send_query;
-	walprop_get_query_result_fn walprop_get_query_result;
-	walprop_socket_fn walprop_socket;
-	walprop_flush_fn walprop_flush;
-	walprop_finish_fn walprop_finish;
-	walprop_async_read_fn walprop_async_read;
-	walprop_async_write_fn walprop_async_write;
-	walprop_blocking_write_fn walprop_blocking_write;
-}			WalProposerFunctionsType;
-
-/* Allow the above functions to be "called" with normal syntax */
-#define walprop_error_message(conn) \
-	WalProposerFunctions->walprop_error_message(conn)
-#define walprop_status(conn) \
-	WalProposerFunctions->walprop_status(conn)
-#define walprop_connect_start(conninfo) \
-	WalProposerFunctions->walprop_connect_start(conninfo)
-#define walprop_connect_poll(conn) \
-	WalProposerFunctions->walprop_connect_poll(conn)
-#define walprop_send_query(conn, query) \
-	WalProposerFunctions->walprop_send_query(conn, query)
-#define walprop_get_query_result(conn) \
-	WalProposerFunctions->walprop_get_query_result(conn)
-#define walprop_set_nonblocking(conn, arg) \
-	WalProposerFunctions->walprop_set_nonblocking(conn, arg)
-#define walprop_socket(conn) \
-	WalProposerFunctions->walprop_socket(conn)
-#define walprop_flush(conn) \
-	WalProposerFunctions->walprop_flush(conn)
-#define walprop_finish(conn) \
-	WalProposerFunctions->walprop_finish(conn)
-#define walprop_async_read(conn, buf, amount) \
-	WalProposerFunctions->walprop_async_read(conn, buf, amount)
-#define walprop_async_write(conn, buf, size) \
-	WalProposerFunctions->walprop_async_write(conn, buf, size)
-#define walprop_blocking_write(conn, buf, size) \
-	WalProposerFunctions->walprop_blocking_write(conn, buf, size)
-
-/*
- * The runtime location of the libpqwalproposer functions.
- *
- * This pointer is set by the initializer in libpqwalproposer, so that we
- * can use it later.
- */
-extern PGDLLIMPORT WalProposerFunctionsType * WalProposerFunctions;
+extern bool walprop_blocking_write(WalProposerConn *conn, void const *buf, size_t size);
 
 extern uint64 BackpressureThrottlingTime(void);
 
