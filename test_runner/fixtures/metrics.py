@@ -60,4 +60,6 @@ PAGESERVER_PER_TENANT_METRICS = [
     "pageserver_wait_lsn_seconds_bucket",
     "pageserver_wait_lsn_seconds_count",
     "pageserver_wait_lsn_seconds_sum",
+    "pageserver_created_persistent_files_total",
+    "pageserver_written_persistent_bytes_total",
 ]

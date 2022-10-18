@@ -107,18 +107,20 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
-static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "pageserver_created_persistent_files_total",
         "Number of files created that are meant to be uploaded to cloud storage",
+        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
 
-static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
+        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -386,8 +388,12 @@ impl TimelineMetrics {
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED.clone();
-        let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN.clone();
+        let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
+        let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
 
         TimelineMetrics {
             tenant_id,
@@ -419,6 +425,8 @@ impl Drop for TimelineMetrics {
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = CURRENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
 
         for op in STORAGE_TIME_OPERATIONS {
             let _ = STORAGE_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
