@@ -12,18 +12,19 @@ cat <<EOF | tee /tmp/payload
   "version": 1,
   "host": "${HOST}",
   "port": 6400,
-  "region_id": {{ console_region_id }},
+  "region_id": "{{ console_region_id }}",
   "instance_id": "${INSTANCE_ID}",
   "http_host": "${HOST}",
-  "http_port": 9898
+  "http_port": 9898,
+  "active": false
 }
 EOF
 
 # check if pageserver already registered or not
-if ! curl -sf -X PATCH -d '{}' {{ console_mgmt_base_url }}/api/v1/pageservers/${INSTANCE_ID} -o /dev/null; then
+if ! curl -sf -H "Authorization: Bearer {{ CONSOLE_API_TOKEN }}" {{ console_mgmt_base_url }}/management/api/v2/pageservers/${INSTANCE_ID} -o /dev/null; then
 
     # not registered, so register it now
-    ID=$(curl -sf -X POST {{ console_mgmt_base_url }}/api/v1/pageservers -d@/tmp/payload | jq -r '.ID')
+    ID=$(curl -sf -X POST -H "Authorization: Bearer {{ CONSOLE_API_TOKEN }}" {{ console_mgmt_base_url }}/management/api/v2/pageservers -d@/tmp/payload | jq -r '.id')
 
     # init pageserver
     sudo -u pageserver /usr/local/bin/pageserver -c "id=${ID}" -c "pg_distrib_dir='/usr/local'" --init -D /storage/pageserver/data

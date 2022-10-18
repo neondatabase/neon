@@ -671,11 +671,11 @@ jobs:
       - id: set-matrix
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA"}'
-            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA"}'
+            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA", "console_api_key_secret": "NEON_STAGING_API_KEY"}'
+            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA", "console_api_key_secret": "NEON_CAPTEST_API_KEY"}'
             echo "include=[$STAGING, $NEON_STRESS]" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA"}'
+            PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
             echo "include=[$PRODUCTION]" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
@@ -735,7 +735,46 @@ jobs:
           ssh-add ssh-key
           rm -f ssh-key ssh-key-cert.pub
           ansible-galaxy collection install sivel.toiletwater
-          ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts.yaml
+          ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts.yaml -e CONSOLE_API_TOKEN=${{ secrets[matrix.console_api_key_secret] }}
+          rm -f neon_install.tar.gz .neon_current_version
+
+  deploy-new:
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
+    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    if: |
+      (github.ref_name == 'main') &&
+      github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Redeploy
+        run: |
+          export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+          cd "$(pwd)/.github/ansible"
+
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            ./get_binaries.sh
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            RELEASE=true ./get_binaries.sh
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+
+          ansible-playbook deploy.yaml -i staging.us-east-2.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{secrets.NEON_STAGING_API_KEY}}
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:

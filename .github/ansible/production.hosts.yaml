@@ -12,20 +12,22 @@ storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
         prefix_in_bucket: "{{ inventory_hostname }}"
+    hostname_suffix: ".local"
+    remote_user: admin
 
   children:
     pageservers:
       hosts:
         zenith-1-ps-2:
-          console_region_id: 1
+          console_region_id: aws-us-west-2
         zenith-1-ps-3:
-          console_region_id: 1
+          console_region_id: aws-us-west-2
 
     safekeepers:
       hosts:
         zenith-1-sk-1:
-          console_region_id: 1
+          console_region_id: aws-us-west-2
         zenith-1-sk-2:
-          console_region_id: 1
+          console_region_id: aws-us-west-2
         zenith-1-sk-3:
-          console_region_id: 1
+          console_region_id: aws-us-west-2

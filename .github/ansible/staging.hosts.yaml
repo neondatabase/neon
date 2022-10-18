@@ -11,30 +11,24 @@ storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
         prefix_in_bucket: "{{ inventory_hostname }}"
+    hostname_suffix: ".local"
+    remote_user: admin
 
   children:
     pageservers:
       hosts:
         zenith-us-stage-ps-2:
-          console_region_id: 27
+          console_region_id: aws-us-east-1
         zenith-us-stage-ps-3:
-          console_region_id: 27
+          console_region_id: aws-us-east-1
         zenith-us-stage-ps-4:
-          console_region_id: 27
-        zenith-us-stage-test-ps-1:
-          console_region_id: 28
+          console_region_id: aws-us-east-1
 
     safekeepers:
       hosts:
         zenith-us-stage-sk-4:
-          console_region_id: 27
+          console_region_id: aws-us-east-1
         zenith-us-stage-sk-5:
-          console_region_id: 27
+          console_region_id: aws-us-east-1
         zenith-us-stage-sk-6:
-          console_region_id: 27
-        zenith-us-stage-test-sk-1:
-          console_region_id: 28
-        zenith-us-stage-test-sk-2:
-          console_region_id: 28
-        zenith-us-stage-test-sk-3:
-          console_region_id: 28
+          console_region_id: aws-us-east-1

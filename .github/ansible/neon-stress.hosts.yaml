@@ -12,19 +12,20 @@ storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
         prefix_in_bucket: "{{ inventory_hostname }}"
-
+    hostname_suffix: ".local"
+    remote_user: admin
   children:
     pageservers:
       hosts:
         neon-stress-ps-1:
-          console_region_id: 1
+          console_region_id: aws-eu-west-1
         neon-stress-ps-2:
-          console_region_id: 1
+          console_region_id: aws-eu-west-1
     safekeepers:
       hosts:
         neon-stress-sk-1:
-          console_region_id: 1
+          console_region_id: aws-eu-west-1
         neon-stress-sk-2:
-          console_region_id: 1
+          console_region_id: aws-eu-west-1
         neon-stress-sk-3:
-          console_region_id: 1
+          console_region_id: aws-eu-west-1
