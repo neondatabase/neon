@@ -44,7 +44,7 @@ jobs:
         # neon-captest-new: Run pgbench in a freshly created project
         # neon-captest-reuse: Same, but reusing existing project
         # neon-captest-prefetch: Same, with prefetching enabled (new project)
-        platform: [ neon-captest-reuse ]
+        platform: [ neon-captest-new ]
         db_size: [ 10gb ]
 
     env:
@@ -137,14 +137,6 @@ jobs:
       with:
         action: generate
         build_type: ${{ env.BUILD_TYPE }}
-
-    - name: Delete Neon Project
-      if: ${{ steps.create-neon-project.outputs.project_id && always() }}
-      uses: ./.github/actions/neon-project-delete
-      with:
-        environment: dev
-        project_id: ${{ steps.create-neon-project.outputs.project_id }}
-        api_key: ${{ secrets.NEON_CAPTEST_API_KEY }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
