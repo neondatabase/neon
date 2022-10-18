@@ -1006,7 +1006,7 @@ neon_close(SMgrRelation reln, ForkNumber forknum)
 
 
 /*
- *	neon_prefetch_in_progress() -- reoe all previously rgistered prefeth requests
+ *	neon_prefetch_in_progress() -- Check if there are active prefetch requests.
  */
 bool
 neon_prefetch_in_progress(SMgrRelation reln)
