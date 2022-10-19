@@ -4,7 +4,6 @@ import abc
 import asyncio
 import enum
 import filecmp
-import functools
 import json
 import os
 import re
@@ -568,17 +567,6 @@ class NeonEnvBuilder:
         self.start()
         return env
 
-    def get_pageserver_version(self) -> str:
-        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
-        res = subprocess.run(
-            [bin_pageserver, "--version"],
-            check=True,
-            universal_newlines=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        return res.stdout
-
     def enable_remote_storage(
         self,
         remote_storage_kind: RemoteStorageKind,
@@ -820,7 +808,6 @@ class NeonEnv:
         self.pageserver = NeonPageserver(
             self, port=pageserver_port, config_override=config.pageserver_config_override
         )
-        self.pageserver_version = config.get_pageserver_version()
 
         # Create config and a Safekeeper object for each safekeeper
         for i in range(1, config.num_safekeepers + 1):
@@ -873,6 +860,17 @@ class NeonEnv:
     def timeline_dir(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
         return self.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+
+    def get_pageserver_version(self) -> str:
+        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
+        res = subprocess.run(
+            [bin_pageserver, "--version"],
+            check=True,
+            universal_newlines=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return res.stdout
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
@@ -1597,31 +1595,6 @@ class NeonCli(AbstractNeonCli):
         return self.raw_cli(args, check_return_code=check_return_code)
 
 
-class NeonPageserverVersion:
-    @staticmethod
-    @functools.cache
-    def get_version() -> str:
-        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
-        res = subprocess.run(
-            [bin_pageserver, "--version"],
-            check=True,
-            universal_newlines=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        return res.stdout
-
-    @staticmethod
-    def is_testing_enabled_or_skip():
-        if "testing:true" not in NeonPageserverVersion.get_version():
-            pytest.skip("pageserver was built without 'testing' feature")
-
-    @staticmethod
-    def is_profiling_enabled_or_skip():
-        if "profiling:true" not in NeonPageserverVersion.get_version():
-            pytest.skip("pageserver was built without 'profiling' feature")
-
-
 class WalCraft(AbstractNeonCli):
     """
     A typed wrapper around the `wal_craft` CLI tool.
@@ -1661,6 +1634,7 @@ class NeonPageserver(PgProtocol):
         self.running = False
         self.service_port = port
         self.config_override = config_override
+        self.version = env.get_pageserver_version()
 
     def start(self, overrides=()) -> "NeonPageserver":
         """
@@ -1691,11 +1665,11 @@ class NeonPageserver(PgProtocol):
         self.stop(immediate=True)
 
     def is_testing_enabled_or_skip(self):
-        if "testing:true" not in self.env.pageserver_version:
+        if "testing:true" not in self.version:
             pytest.skip("pageserver was built without 'testing' feature")
 
     def is_profiling_enabled_or_skip(self):
-        if "profiling:true" not in self.env.pageserver_version:
+        if "profiling:true" not in self.version:
             pytest.skip("pageserver was built without 'profiling' feature")
 
     def http_client(self, auth_token: Optional[str] = None) -> NeonPageserverHttpClient:
