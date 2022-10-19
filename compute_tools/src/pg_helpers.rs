@@ -8,10 +8,10 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
 use serde::Deserialize;
-
-use notify::{RecursiveMode, Watcher};
+use urlencoding::encode;
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
@@ -169,7 +169,7 @@ impl Database {
     /// it may require a proper quoting too.
     pub fn to_pg_options(&self) -> String {
         let mut params: String = self.options.as_pg_options();
-        write!(params, " OWNER {}", &self.owner.quote())
+        write!(params, " OWNER {}", &self.owner.pg_quote())
             .expect("String is documented to not to error during write operations");
 
         params
@@ -180,20 +180,32 @@ impl Database {
 /// intended to be used for DB / role names.
 pub type PgIdent = String;
 
-/// Generic trait used to provide quoting for strings used in the
-/// Postgres SQL queries. Currently used only to implement quoting
-/// of identifiers, but could be used for literals in the future.
-pub trait PgQuote {
-    fn quote(&self) -> String;
+/// Generic trait used to provide quoting / encoding for strings used in the
+/// Postgres SQL queries and DATABASE_URL.
+pub trait Escaping {
+    fn pg_quote(&self) -> String;
+    fn url_encode(&self) -> String;
 }
 
-impl PgQuote for PgIdent {
+impl Escaping for PgIdent {
     /// This is intended to mimic Postgres quote_ident(), but for simplicity it
-    /// always quotes provided string with `""` and escapes every `"`. Not idempotent,
-    /// i.e. if string is already escaped it will be escaped again.
-    fn quote(&self) -> String {
+    /// always quotes provided string with `""` and escapes every `"`.
+    /// **Not idempotent**, i.e. if string is already escaped it will be escaped again.
+    fn pg_quote(&self) -> String {
         let result = format!("\"{}\"", self.replace('"', "\"\""));
         result
+    }
+
+    /// We use `url` crate for manipulating the DATABASE_URL, but it uses a standard
+    /// that doesn't fit really well with Postgres. For example, it trims all trailing
+    /// spaces from the path:
+    ///   > Remove any leading and trailing C0 control or space from input.
+    ///   > https://url.spec.whatwg.org/#url-parsing
+    /// But we use path for database name and it's totally valid to have trailing spaces
+    /// in the database name in Postgres. Thus, use this helper to pre-escape
+    /// the database name before putting it as a path into the DATABASE_URL.
+    fn url_encode(&self) -> String {
+        encode(self).into_owned()
     }
 }
 

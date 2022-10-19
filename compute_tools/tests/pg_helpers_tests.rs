@@ -3,6 +3,8 @@ mod pg_helpers_tests {
 
     use std::fs::File;
 
+    use url::Url;
+
     use compute_tools::pg_helpers::*;
     use compute_tools::spec::ComputeSpec;
 
@@ -33,9 +35,43 @@ mod pg_helpers_tests {
     }
 
     #[test]
-    fn quote_ident() {
+    fn ident_pg_quote() {
         let ident: PgIdent = PgIdent::from("\"name\";\\n select 1;");
 
-        assert_eq!(ident.quote(), "\"\"\"name\"\";\\n select 1;\"");
+        assert_eq!(ident.pg_quote(), "\"\"\"name\"\";\\n select 1;\"");
+    }
+
+    fn test_one_ident_encode(url: &Url, base_url: &str, ident: &str, expected_ident: &str) {
+        let ident: PgIdent = PgIdent::from(ident);
+        let escaped_ident = ident.url_encode();
+        assert_eq!(escaped_ident, expected_ident);
+
+        // Also test that after setting the escaped ident as a path in the URL,
+        // returned result matches our expectations.
+        let expected_url = format!("{base_url}/{expected_ident}");
+        let mut url = url.clone();
+        url.set_path(&escaped_ident);
+        assert_eq!(url.as_str(), expected_url);
+    }
+
+    #[test]
+    fn ident_url_encode() {
+        let base_url = "postgres://admin:asdasdasd@localhost:5432";
+        let original_url = format!("{base_url}/postgres");
+        let url = Url::parse(&original_url).unwrap();
+
+        // Bellow are all valid database names that you can create in Postgres
+        // and connect to via DATABASE_URL after encoding.
+        test_one_ident_encode(
+            &url,
+            base_url,
+            "mydb🤦%20\\  ",
+            "mydb%F0%9F%A4%A6%2520%5C%E2%80%81%20",
+        );
+        test_one_ident_encode(&url, base_url, " ", "%E2%80%81");
+        test_one_ident_encode(&url, base_url, " ", "%20");
+        test_one_ident_encode(&url, base_url, "kinda/path/like/", "kinda%2Fpath%2Flike%2F");
+        test_one_ident_encode(&url, base_url, "?", "%3F");
+        test_one_ident_encode(&url, base_url, "+", "%2B");
     }
 }
