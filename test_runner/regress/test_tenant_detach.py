@@ -6,6 +6,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     NeonPageserverApiException,
     NeonPageserverHttpClient,
+    wait_until,
 )
 from fixtures.types import TenantId, TimelineId
 
@@ -20,6 +21,19 @@ def do_gc_target(
         log.error("do_gc failed: %s", e)
 
 
+def check_tenant_exists(
+    pageserver_http_client: NeonPageserverHttpClient,
+    tenant_id: TenantId,
+):
+    log.info("polling")
+    with pytest.raises(
+        expected_exception=NeonPageserverApiException, match=f"Tenant {tenant_id} not found"
+    ):
+        tenant_status = pageserver_http_client.tenant_status(tenant_id)
+        log.info(f"tenant status: {tenant_status}")
+        raise Exception("still running")
+
+
 def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -28,7 +42,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     tenant_id = TenantId.generate()
     with pytest.raises(
         expected_exception=NeonPageserverApiException,
-        match=f"Tenant not found for id {tenant_id}",
+        match=f"Tenant {tenant_id} not found",
     ):
         pageserver_http.tenant_detach(tenant_id)
 
@@ -73,6 +87,13 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         pytest.fail(f"could not detach tenant: {last_error}")
 
     gc_thread.join(timeout=10)
+
+    # Wait for the detach operation to finish
+    wait_until(
+        number_of_iterations=300,
+        interval=0.1,
+        func=lambda: check_tenant_exists(pageserver_http, tenant_id),
+    )
 
     # check that nothing is left on disk for deleted tenant
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()

@@ -1165,6 +1165,15 @@ class NeonPageserverHttpClient(requests.Session):
         self.verbose_error(res)
         return res.text
 
+    def get_metric_value(self, name: str) -> Optional[str]:
+        metrics = self.get_metrics()
+        relevant = [line for line in metrics.splitlines() if line.startswith(name)]
+        if len(relevant) == 0:
+            log.info(f'could not find metric "{name}"')
+            return None
+        assert len(relevant) == 1
+        return relevant[0].lstrip(name).strip()
+
 
 @dataclass
 class PageserverPort:
@@ -1465,7 +1474,12 @@ class NeonCli(AbstractNeonCli):
                 pageserver_config_override=self.env.pageserver.config_override,
             )
 
-            res = self.raw_cli(cmd)
+            s3_env_vars = None
+            if self.env.remote_storage is not None and isinstance(
+                self.env.remote_storage, S3Storage
+            ):
+                s3_env_vars = self.env.remote_storage.access_env_vars()
+            res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
             return res
 
@@ -2702,12 +2716,28 @@ def wait_until(number_of_iterations: int, interval: float, func):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def assert_no_in_progress_downloads_for_tenant(
-    pageserver_http_client: NeonPageserverHttpClient,
-    tenant: TenantId,
+def wait_while(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns false, or throws an exception.
+    """
+    for i in range(number_of_iterations):
+        try:
+            if not func():
+                return
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            time.sleep(interval)
+            continue
+        except Exception:
+            return
+    raise Exception("timed out while waiting for %s" % func)
+
+
+def assert_tenant_status(
+    pageserver_http_client: NeonPageserverHttpClient, tenant: TenantId, expected_status: str
 ):
     tenant_status = pageserver_http_client.tenant_status(tenant)
-    assert tenant_status["has_in_progress_downloads"] is False, tenant_status
+    log.info(f"tenant_status: {tenant_status}")
+    assert tenant_status["state"] == expected_status, tenant_status
 
 
 def remote_consistent_lsn(
@@ -2715,14 +2745,15 @@ def remote_consistent_lsn(
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail["remote_consistent_lsn"]
-    if lsn_str is None:
+    if detail["remote_consistent_lsn"] is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return Lsn(0)
-    assert isinstance(lsn_str, str)
-    return Lsn(lsn_str)
+    else:
+        lsn_str = detail["remote_consistent_lsn"]
+        assert isinstance(lsn_str, str)
+        return Lsn(lsn_str)
 
 
 def wait_for_upload(
@@ -2735,6 +2766,7 @@ def wait_for_upload(
     for i in range(20):
         current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
+            log.info("wait finished")
             return
         log.info(
             "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(

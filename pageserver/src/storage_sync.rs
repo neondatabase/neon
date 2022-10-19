@@ -1,79 +1,73 @@
-//! There are a few components the storage machinery consists of:
+//! This module manages synchronizing local fs with remote storage. It consists of:
 //!
-//! * [`RemoteStorage`] that is used to interact with an arbitrary external storage
+//! * [`RemoteTimelineClient`] provides functions related to upload/download of a particular timeline.
+//!   It contains a queue of pending uploads, and manages the queue, performing uploads in parallel
+//!   when it's safe to do so.
 //!
-//! * synchronization logic at [`storage_sync`] module that keeps pageserver state (both runtime one and the workdir files) and storage state in sync.
-//! Synchronization internals are split into submodules
-//!     * [`storage_sync::index`] to keep track of remote tenant files, the metadata and their mappings to local files
-//!     * [`storage_sync::upload`] and [`storage_sync::download`] to manage archive creation and upload; download and extraction, respectively
+//! * Stand-alone function, [`list_remote_timelines`], to get list of timelines of a tenant.
 //!
-//! * public API via to interact with the external world:
-//!     * [`start_local_timeline_sync`] to launch a background async loop to handle the synchronization
-//!     * [`schedule_layer_upload`], [`schedule_layer_download`], and[`schedule_layer_delete`] to enqueue a new task
-//!       to be processed by the async loop
+//! These functions use the low-level remote storage client, [`RemoteStorage`], which is defined
+//! in the remote_storage crate (see libs/remote_storage).
 //!
-//! Here's a schematic overview of all interactions backup and the rest of the pageserver perform:
+
+//! FIXME: Update below as needed
 //!
-//! +------------------------+                                    +--------->-------+
-//! |                        |  - - - (init async loop) - - - ->  |                 |
-//! |                        |                                    |                 |
-//! |                        |  ------------------------------->  |      async      |
-//! |       pageserver       |    (enqueue timeline sync task)    | upload/download |
-//! |                        |                                    |      loop       |
-//! |                        |  <-------------------------------  |                 |
-//! |                        |  (apply new timeline sync states)  |                 |
-//! +------------------------+                                    +---------<-------+
-//!                                                                         |
-//!                                                                         |
-//!                                          CRUD layer file operations     |
-//!                                     (upload/download/delete/list, etc.) |
-//!                                                                         V
-//!                                                            +------------------------+
-//!                                                            |                        |
-//!                                                            | [`RemoteStorage`] impl |
-//!                                                            |                        |
-//!                                                            | pageserver assumes it  |
-//!                                                            | owns exclusive write   |
-//!                                                            | access to this storage |
-//!                                                            +------------------------+
+//! At system startup, the pageserver will load all tenants that are found on
+//! local disk. A RemoteTimelineClient is initialized for each timeline. The
+//! upload queue of each RemoteTimelineClient is initially empty, but if there
+//! are any files on local filesystem that don't exist remotely, they are added
+//! to the upload queue at startup.
 //!
-//! First, during startup, the pageserver inits the storage sync task with the async loop, or leaves the loop uninitialised, if configured so.
-//! The loop inits the storage connection and checks the remote files stored.
-//! This is done once at startup only, relying on the fact that pageserver uses the storage alone (ergo, nobody else uploads the files to the storage but this server).
-//! Based on the remote storage data, the sync logic immediately schedules sync tasks for local timelines and reports about remote only timelines to pageserver, so it can
-//! query their downloads later if they are accessed.
+//! Some time later, during pageserver checkpoints, in-memory data is flushed to
+//! disk along with its metadata.  Whenever a new layer file is created, the
+//! pageserver also schedules it for upload, by calling schedule_layer_upload.
+//! At a checkpoint, after all the new layer files have been created, the
+//! updated metadata file is also scheduled for upload, by calling
+//! schedule_index_upload.  See [`crate::tenant::timeline`] for the upload calls
+//! and the adjacent logic.
 //!
-//! Some time later, during pageserver checkpoints, in-memory data is flushed onto disk along with its metadata.
-//! If the storage sync loop was successfully started before, pageserver schedules the layer files and the updated metadata file for upload, every time a layer is flushed to disk.
-//! The uploads are disabled, if no remote storage configuration is provided (no sync loop is started this way either).
-//! See [`crate::tenant`] for the upload calls and the adjacent logic.
+//! If no remote storage configuration is provided, the RemoetTimelineClient is
+//! not created and the uploads are skipped.
 //!
-//! Synchronization logic is able to communicate back with updated timeline sync states, submitted via [`crate::tenant_mgr::attach_local_tenants`] function.
-//! Tenant manager applies corresponding timeline updates in pageserver's in-memory state.
-//! Such submissions happen in two cases:
-//! * once after the sync loop startup, to signal pageserver which timelines will be synchronized in the near future
-//! * after every loop step, in case a timeline needs to be reloaded or evicted from pageserver's memory
+//! If a timeline is deleted, its RemoteTimelineClient is dropped, cancelling
+//! all pending uploads.  If a timeline is detached, TODO what happens ???
 //!
-//! When the pageserver terminates, the sync loop finishes current sync task (if any) and exits.
+//! If the pageserver terminates, TODO what happens ???
 //!
-//! The storage logic considers `image` as a set of local files (layers), fully representing a certain timeline at given moment (identified with `disk_consistent_lsn` from the corresponding `metadata` file).
-//! Timeline can change its state, by adding more files on disk and advancing its `disk_consistent_lsn`: this happens after pageserver checkpointing and is followed
-//! by the storage upload, if enabled.
-//! Yet timeline cannot alter already existing files, and cannot remove those too: only a GC process is capable of removing unused files.
-//! This way, remote storage synchronization relies on the fact that every checkpoint is incremental and local files are "immutable":
-//! * when a certain checkpoint gets uploaded, the sync loop remembers the fact, preventing further reuploads of the same state
-//! * no files are deleted from either local or remote storage, only the missing ones locally/remotely get downloaded/uploaded, local metadata file will be overwritten
-//! when the newer image is downloaded
+//! To have a consistent set of files, it's important that uploads and deletions
+//! are performed in the right order. For example, the index file contains a
+//! list of layer files, so it must not be uploaded until all the layer files
+//! that are in its list have been succesfully uploaded. RemoteTimelineClient
+//! maintains a queue of operations, and it knows which operations can be
+//! performed in parallel, and which operations act like a "barrier" that
+//! require preceding operations to finish. The calling code just needs to call
+//! the schedule-functions in the correct order, and RemoteTimelineClient will
+//! parallelize the operations in a way that's safe.
 //!
-//! Pageserver maintains similar to the local file structure remotely: all layer files are uploaded with the same names under the same directory structure.
+//! The caller should be careful with deletion, though. You should not delete
+//! files locally that haven't been uploaded yet. Otherwise the upload will
+//! fail. After scheduling uploads, you can use the 'wait_completion' function
+//! to wait for them to finish.
+//!
+//! - We rely on read-after write consistency in the remote storage.
+//! - Layer files are immutable
+
+//!
+//! The "directory structure" in the remote storage mirrors the local directory structure, with paths
+//! like `tenants/<tenant_id>/timelines/<timeline_id>/<layer filename>.
 //! Yet instead of keeping the `metadata` file remotely, we wrap it with more data in [`IndexPart`], containing the list of remote files.
 //! This file gets read to populate the cache, if the remote timeline data is missing from it and gets updated after every successful download.
 //! This way, we optimize S3 storage access by not running the `S3 list` command that could be expencive and slow: knowing both [`TenantId`] and [`TimelineId`],
 //! we can always reconstruct the path to the timeline, use this to get the same path on the remote storage and retrieve its shard contents, if needed, same as any layer files.
+//! TODO: update this paragraph with more details on how the list of remote files is kept up-to-date
 //!
-//! By default, pageserver reads the remote storage index data only for timelines located locally, to synchronize those, if needed.
-//! Bulk index data download happens only initially, on pageserver startup. The rest of the remote storage stays unknown to pageserver and loaded on demand only,
-//! when a new timeline is scheduled for the download.
+//! At pageserver startup, it downloads the index files of every locally-present
+//! tenant, to synchronize the local state with remote storage. Other tenants
+//! that might be present in the remote storage are ignored. When a tenant is
+//! attached to the pageserver, the directory structure for the tenant and all
+//! its timelines are created on local disk, and the timeline index files are
+//! downloaded, to create the local metadata files. The layer files containing
+//! the actual data are downloaded on-demand.
 //!
 //! NOTES:
 //! * pageserver assumes it has exclusive write access to the remote storage. If supported, the way multiple pageservers can be separated in the same storage
@@ -82,22 +76,14 @@
 //! * the sync tasks may not processed immediately after the submission: if they error and get re-enqueued, their execution might be backed off to ensure error cap is not exceeded too fast.
 //! The sync queue processing also happens in batches, so the sync tasks can wait in the queue for some time.
 //!
-//! A synchronization logic for the [`RemoteStorage`] and pageserver in-memory state to ensure correct synchronizations
-//! between local tenant files and their counterparts from the remote storage.
+//! Uploads are queued and executed in the background and in parallel, enforcing the ordering rules.
+//! Downloads are performed immediately, and independently of the uploads.
 //!
-//! The synchronization does not aim to be immediate, yet eventually consistent.
-//! Synchronization is done with the queue being emptied via separate thread asynchronously,
-//! attempting to fully store pageserver's local data on the remote storage in a custom format, beneficial for storing.
-//!
-//! A queue is implemented in the [`sync_queue`] module as a VecDeque to hold the tasks, and a condition variable for blocking when the queue is empty.
-//!
-//! The queue gets emptied by a single thread with the loop, that polls the tasks in batches of deduplicated tasks.
-//! A task from the batch corresponds to a single timeline, with its files to sync merged together: given that only one task sync loop step is active at a time,
-//! timeline uploads and downloads can happen concurrently, in no particular order due to incremental nature of the timeline layers.
 //! Deletion happens only after a successful upload only, otherwise the compaction output might make the timeline inconsistent until both tasks are fully processed without errors.
 //! Upload and download update the remote data (inmemory index and S3 json index part file) only after every layer is successfully synchronized, while the deletion task
 //! does otherwise: it requires to have the remote data updated first successfully: blob files will be invisible to pageserver this way.
 //!
+//! FIXME: how is the initial list of remote files created now? Update this paragraph
 //! During the loop startup, an initial [`RemoteTimelineIndex`] state is constructed via downloading and merging the index data for all timelines,
 //! present locally.
 //! It's enough to poll such timelines' remote state once on startup only, due to an agreement that only one pageserver at a time has an exclusive
@@ -117,10 +103,9 @@
 //! If the index part does not contain some file path but it's present remotely, such file is invisible to pageserver and ignored.
 //! Among other tasks, the index is used to prevent invalid uploads and non-existing downloads on demand, refer to [`index`] for more details.
 //!
+//! FIXME: update this paragraph
 //! Index construction is currently the only place where the storage sync can return an [`Err`] to the user.
-//! New sync tasks are accepted via [`schedule_layer_upload`], [`schedule_layer_download`] and [`schedule_layer_delete`] functions,
-//! disregarding of the corresponding loop startup.
-//! It's up to the caller to avoid synchronizations if the loop is disabled: otherwise, the sync tasks will be ignored.
+//! New sync tasks are accepted via [`schedule_layer_upload`], [`schedule_layer_download`] and [`schedule_layer_delete`] functions.
 //! After the initial state is loaded into memory and the loop starts, any further [`Err`] results do not stop the loop, but rather
 //! reschedule the same task, with possibly less files to sync:
 //! * download tasks currently never replace existing local file with metadata file as an exception
@@ -129,1441 +114,657 @@
 //! * downloads do not contain any actual files to download, so that "external", sync pageserver code is able to schedule the timeline download
 //! without accessing any extra information about its files.
 //!
+//! FIXME: update this paragraph
 //! Uploads and downloads sync layer files in arbitrary order, but only after all layer files are synched the local metadada (for download) and remote index part (for upload) are updated,
 //! to avoid having a corrupt state without the relevant layer files.
 //! Refer to [`upload`] and [`download`] for more details.
 //!
 //! Synchronization never removes any local files from pageserver workdir or remote files from the remote storage, yet there could be overwrites of the same files (index part and metadata file updates, future checksum mismatch fixes).
 //! NOTE: No real contents or checksum check happens right now and is a subject to improve later.
-//!
-//! After the whole timeline is downloaded, [`crate::tenant_mgr::apply_timeline_sync_status_updates`] function is used to update pageserver memory stage for the timeline processed.
 
 mod delete;
 mod download;
 pub mod index;
 mod upload;
 
-use std::{
-    collections::{hash_map, HashMap, HashSet, VecDeque},
-    fmt::Debug,
-    num::{NonZeroU32, NonZeroUsize},
-    ops::ControlFlow,
-    path::{Path, PathBuf},
-    sync::{Condvar, Mutex},
-};
+// re-export this
+pub use download::list_remote_timelines;
 
-use anyhow::{anyhow, bail, Context};
-use futures::stream::{FuturesUnordered, StreamExt};
-use once_cell::sync::OnceCell;
-use remote_storage::GenericRemoteStorage;
-use tokio::{
-    fs,
-    time::{Duration, Instant},
-};
-use tracing::*;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Debug;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use self::{
-    delete::delete_timeline_layers,
-    download::{download_timeline_layers, DownloadedTimeline},
-    index::{IndexPart, RemoteTimeline, RemoteTimelineIndex},
-    upload::{upload_index_part, upload_timeline_layers, UploadedTimeline},
-};
+use anyhow::{ensure, Result};
+use remote_storage::{DownloadError, GenericRemoteStorage};
+use tokio::runtime::Runtime;
+use tracing::{error, info, warn};
+
+use utils::lsn::Lsn;
+
+use self::index::IndexPart;
+
 use crate::{
     config::PageServerConf,
-    exponential_backoff,
-    storage_sync::index::{LayerFileMetadata, RemoteIndex},
+    storage_sync::index::{LayerFileMetadata, RelativePath},
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
     tenant::metadata::TimelineMetadata,
-    tenant_mgr::{attach_local_tenants, TenantAttachData},
-};
-use crate::{
-    metrics::{IMAGE_SYNC_TIME, REMAINING_SYNC_ITEMS, REMOTE_INDEX_UPLOAD},
-    TenantTimelineValues,
+    {exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS},
 };
 
-use crate::metrics::{IMAGE_SYNC_COUNT, IMAGE_SYNC_TIME_HISTOGRAM};
-use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::id::{TenantId, TimelineId};
 
-use self::download::download_index_parts;
-pub use self::download::gather_tenant_timelines_index_parts;
+/// A client for accessing a timeline's data in remote storage.
+///
+/// This takes care of managing the number of connections, and balancing them
+/// across tenants. This also handles retries of failed uploads.
+///
+/// Upload and delete requests are ordered so that before a deletion is
+/// performed, we wait for all preceding uploads to finish. This ensures sure
+/// that if you perform a compaction operation that reshuffles data in layer
+/// files, we don't have a transient state where the old files have already been
+/// deleted, but new files have not yet been uploaded.
+///
+/// Similarly, this enforces an order between index-file uploads, and layer
+/// uploads.  Before an index-file upload is performed, all preceding layer
+/// uploads must be finished.
+///
+/// This also maintains a list of remote files, and automatically includes that
+/// in the index part file, whenever timeline metadata is uploaded.
+///
+/// Downloads are not queued, they are performed immediately.
+pub struct RemoteTimelineClient {
+    conf: &'static PageServerConf,
 
-static SYNC_QUEUE: OnceCell<SyncQueue> = OnceCell::new();
+    runtime: &'static Runtime,
 
-/// A timeline status to share with pageserver's sync counterpart,
-/// after comparing local and remote timeline state.
-#[derive(Clone, PartialEq, Eq)]
-pub enum LocalTimelineInitStatus {
-    /// The timeline has every remote layer present locally.
-    /// There could be some layers requiring uploading,
-    /// but this does not block the timeline from any user interaction.
-    LocallyComplete(TimelineMetadata),
-    /// A timeline has some files remotely, that are not present locally and need downloading.
-    /// Downloading might update timeline's metadata locally and current pageserver logic deals with local layers only,
-    /// so the data needs to be downloaded first before the timeline can be used.
-    NeedsSync,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+
+    upload_queue: Mutex<UploadQueue>,
+
+    storage_impl: GenericRemoteStorage,
 }
 
-impl std::fmt::Debug for LocalTimelineInitStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// This keeps track of queued and in-progress tasks.
+#[derive(Default)]
+struct UploadQueue {
+    /// Counter to assign task IDs
+    task_counter: u64,
+
+    /// All layer files stored in the remote storage, taking into account all
+    /// in-progress and queued operations
+    latest_files: HashMap<RelativePath, LayerFileMetadata>,
+
+    /// Copy of latest remote metadata file. None if the upload queue hasn't been initialized yet.
+    /// Can be ahead of what's actually stored in remote storage, if new index file upload
+    /// has been scheduled but not finished yet.
+    latest_metadata: Option<TimelineMetadata>,
+
+    /// `disk_consistent_lsn` from the last metadata file that was successfully
+    /// uploaded. None if the upload queue hasn't been initialized yet.
+    last_uploaded_consistent_lsn: Option<Lsn>,
+
+    // Breakdown of different kinds of tasks currently in-progress
+    num_inprogress_layer_uploads: usize,
+    num_inprogress_metadata_uploads: usize,
+    num_inprogress_deletions: usize,
+
+    /// Tasks that are currently in-progress. In-progress means that a tokio Task
+    /// has been launched for it. An in-progress task can be busy uploading, but it can
+    /// also be waiting on the `concurrency_limiter` Semaphore in S3Bucket, or it can
+    /// be waiting for retry in `exponential_backoff`.
+    inprogress_tasks: HashMap<u64, Arc<UploadTask>>,
+
+    /// Queued operations that have not been launched yet. They might depend on previous
+    /// tasks to finish. For example, metadata upload cannot be performed before all
+    /// preceding layer file uploads have completed.
+    queued_operations: VecDeque<UploadOp>,
+}
+
+/// An in-progress upload or delete task.
+#[derive(Debug)]
+struct UploadTask {
+    /// Unique ID of this task. Used as the key in `inprogress_tasks` above.
+    task_id: u64,
+    retries: AtomicU32,
+
+    op: UploadOp,
+}
+
+#[derive(Debug)]
+enum UploadOp {
+    /// Upload a layer file
+    UploadLayer(PathBuf, LayerFileMetadata),
+
+    /// Upload the metadata file
+    UploadMetadata(IndexPart, Lsn),
+
+    /// Delete a file.
+    Delete(PathBuf),
+
+    /// Barrier. When the barrier operation is reached,
+    Barrier(tokio::sync::watch::Sender<()>),
+}
+
+impl std::fmt::Display for UploadOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::LocallyComplete(_) => write!(f, "LocallyComplete"),
-            Self::NeedsSync => write!(f, "NeedsSync"),
+            UploadOp::UploadLayer(path, metadata) => write!(
+                f,
+                "UploadLayer({}, size={:?})",
+                path.display(),
+                metadata.file_size()
+            ),
+            UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
+            UploadOp::Delete(path) => write!(f, "Delete({})", path.display()),
+            UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }
 }
 
-/// A structure to combine all synchronization data to share with pageserver after a successful sync loop initialization.
-/// Successful initialization includes a case when sync loop is not started, in which case the startup data is returned still,
-/// to simplify the received code.
-pub struct SyncStartupData {
-    pub remote_index: RemoteIndex,
-    pub local_timeline_init_statuses: TenantTimelineValues<LocalTimelineInitStatus>,
-}
-
-/// Global queue of sync tasks.
-///
-/// 'queue' is protected by a mutex, and 'condvar' is used to wait for tasks to arrive.
-struct SyncQueue {
-    max_timelines_per_batch: NonZeroUsize,
-
-    queue: Mutex<VecDeque<(TenantTimelineId, SyncTask)>>,
-    condvar: Condvar,
-}
-
-impl SyncQueue {
-    fn new(max_timelines_per_batch: NonZeroUsize) -> Self {
-        Self {
-            max_timelines_per_batch,
-            queue: Mutex::new(VecDeque::new()),
-            condvar: Condvar::new(),
-        }
-    }
-
-    /// Queue a new task
-    fn push(&self, sync_id: TenantTimelineId, new_task: SyncTask) {
-        let mut q = self.queue.lock().unwrap();
-
-        q.push_back((sync_id, new_task));
-        if q.len() <= 1 {
-            self.condvar.notify_one();
-        }
-    }
-
-    /// Fetches a task batch, getting every existing entry from the queue, grouping by timelines and merging the tasks for every timeline.
-    /// A timeline has to care to not to delete certain layers from the remote storage before the corresponding uploads happen.
-    /// Other than that, due to "immutable" nature of the layers, the order of their deletion/uploading/downloading does not matter.
-    /// Hence, we merge the layers together into single task per timeline and run those concurrently (with the deletion happening only after successful uploading).
-    fn next_task_batch(&self) -> (HashMap<TenantTimelineId, SyncTaskBatch>, usize) {
-        // Wait for the first task in blocking fashion
-        let mut q = self.queue.lock().unwrap();
-        while q.is_empty() {
-            q = self
-                .condvar
-                .wait_timeout(q, Duration::from_millis(1000))
-                .unwrap()
-                .0;
-
-            if task_mgr::is_shutdown_requested() {
-                return (HashMap::new(), q.len());
-            }
-        }
-        let (first_sync_id, first_task) = q.pop_front().unwrap();
-
-        let mut timelines_left_to_batch = self.max_timelines_per_batch.get() - 1;
-        let tasks_to_process = q.len();
-
-        let mut batches = HashMap::with_capacity(tasks_to_process);
-        batches.insert(first_sync_id, SyncTaskBatch::new(first_task));
-
-        let mut tasks_to_reenqueue = Vec::with_capacity(tasks_to_process);
-
-        // Greedily grab as many other tasks that we can.
-        // Yet do not put all timelines in the batch, but only the first ones that fit the timeline limit.
-        // Re-enqueue the tasks that don't fit in this batch.
-        while let Some((sync_id, new_task)) = q.pop_front() {
-            match batches.entry(sync_id) {
-                hash_map::Entry::Occupied(mut v) => v.get_mut().add(new_task),
-                hash_map::Entry::Vacant(v) => {
-                    timelines_left_to_batch = timelines_left_to_batch.saturating_sub(1);
-                    if timelines_left_to_batch == 0 {
-                        tasks_to_reenqueue.push((sync_id, new_task));
-                    } else {
-                        v.insert(SyncTaskBatch::new(new_task));
-                    }
-                }
-            }
-        }
-
-        debug!(
-            "Batched {} timelines, reenqueuing {}",
-            batches.len(),
-            tasks_to_reenqueue.len()
-        );
-        for (id, task) in tasks_to_reenqueue {
-            q.push_back((id, task));
-        }
-
-        (batches, q.len())
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.queue.lock().unwrap().len()
-    }
-}
-
-/// A task to run in the async download/upload loop.
-/// Limited by the number of retries, after certain threshold the failing task gets evicted and the timeline disabled.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SyncTask {
-    /// A checkpoint outcome with possible local file updates that need actualization in the remote storage.
-    /// Not necessary more fresh than the one already uploaded.
-    Download(SyncData<LayersDownload>),
-    /// A certain amount of image files to download.
-    Upload(SyncData<LayersUpload>),
-    /// Delete remote files.
-    Delete(SyncData<LayersDeletion>),
-}
-
-/// Stores the data to synd and its retries, to evict the tasks failing to frequently.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SyncData<T> {
-    retries: u32,
-    data: T,
-}
-
-impl<T> SyncData<T> {
-    fn new(retries: u32, data: T) -> Self {
-        Self { retries, data }
-    }
-}
-
-impl SyncTask {
-    fn download(download_task: LayersDownload) -> Self {
-        Self::Download(SyncData::new(0, download_task))
-    }
-
-    fn upload(upload_task: LayersUpload) -> Self {
-        Self::Upload(SyncData::new(0, upload_task))
-    }
-
-    fn delete(delete_task: LayersDeletion) -> Self {
-        Self::Delete(SyncData::new(0, delete_task))
-    }
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct SyncTaskBatch {
-    upload: Option<SyncData<LayersUpload>>,
-    download: Option<SyncData<LayersDownload>>,
-    delete: Option<SyncData<LayersDeletion>>,
-}
-
-impl SyncTaskBatch {
-    fn new(task: SyncTask) -> Self {
-        let mut new_self = Self::default();
-        new_self.add(task);
-        new_self
-    }
-
-    fn add(&mut self, task: SyncTask) {
-        match task {
-            SyncTask::Download(new_download) => match &mut self.download {
-                Some(batch_download) => {
-                    batch_download.retries = batch_download.retries.min(new_download.retries);
-                    batch_download
-                        .data
-                        .layers_to_skip
-                        .extend(new_download.data.layers_to_skip.into_iter());
-                }
-                None => self.download = Some(new_download),
-            },
-            SyncTask::Upload(new_upload) => match &mut self.upload {
-                Some(batch_upload) => {
-                    batch_upload.retries = batch_upload.retries.min(new_upload.retries);
-
-                    let batch_data = &mut batch_upload.data;
-                    let new_data = new_upload.data;
-                    batch_data
-                        .layers_to_upload
-                        .extend(new_data.layers_to_upload.into_iter());
-                    batch_data
-                        .uploaded_layers
-                        .extend(new_data.uploaded_layers.into_iter());
-                    if batch_data
-                        .metadata
-                        .as_ref()
-                        .map(|meta| meta.disk_consistent_lsn())
-                        <= new_data
-                            .metadata
-                            .as_ref()
-                            .map(|meta| meta.disk_consistent_lsn())
-                    {
-                        batch_data.metadata = new_data.metadata;
-                    }
-                }
-                None => self.upload = Some(new_upload),
-            },
-            SyncTask::Delete(new_delete) => match &mut self.delete {
-                Some(batch_delete) => {
-                    batch_delete.retries = batch_delete.retries.min(new_delete.retries);
-                    // Need to reregister deletions, but it's ok to register already deleted files once again, they will be skipped.
-                    batch_delete.data.deletion_registered = batch_delete
-                        .data
-                        .deletion_registered
-                        .min(new_delete.data.deletion_registered);
-
-                    // Do not download and upload the layers getting removed in the same batch
-                    if let Some(batch_download) = &mut self.download {
-                        batch_download
-                            .data
-                            .layers_to_skip
-                            .extend(new_delete.data.layers_to_delete.iter().cloned());
-                        batch_download
-                            .data
-                            .layers_to_skip
-                            .extend(new_delete.data.deleted_layers.iter().cloned());
-                    }
-                    if let Some(batch_upload) = &mut self.upload {
-                        let not_deleted = |layer: &PathBuf, _: &mut LayerFileMetadata| {
-                            !new_delete.data.layers_to_delete.contains(layer)
-                                && !new_delete.data.deleted_layers.contains(layer)
-                        };
-                        batch_upload.data.layers_to_upload.retain(not_deleted);
-                        batch_upload.data.uploaded_layers.retain(not_deleted);
-                    }
-
-                    batch_delete
-                        .data
-                        .layers_to_delete
-                        .extend(new_delete.data.layers_to_delete.into_iter());
-                    batch_delete
-                        .data
-                        .deleted_layers
-                        .extend(new_delete.data.deleted_layers.into_iter());
-                }
-                None => self.delete = Some(new_delete),
-            },
-        }
-    }
-}
-
-/// Local timeline files for upload, appeared after the new checkpoint.
-/// Current checkpoint design assumes new files are added only, no deletions or amendment happens.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LayersUpload {
-    /// Layer file path in the pageserver workdir, that were added for the corresponding checkpoint.
-    layers_to_upload: HashMap<PathBuf, LayerFileMetadata>,
-    /// Already uploaded layers. Used to store the data about the uploads between task retries
-    /// and to record the data into the remote index after the task got completed or evicted.
-    uploaded_layers: HashMap<PathBuf, LayerFileMetadata>,
-    metadata: Option<TimelineMetadata>,
-}
-
-/// A timeline download task.
-/// Does not contain the file list to download, to allow other
-/// parts of the pageserer code to schedule the task
-/// without using the remote index or any other ways to list the remote timeline files.
-/// Skips the files that are already downloaded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LayersDownload {
-    layers_to_skip: HashSet<PathBuf>,
-
-    /// Paths which have been downloaded, and had their metadata verified or generated.
+impl RemoteTimelineClient {
+    /// Initialize the upload queue. This must be called before any uploads can be
+    /// scheduled.
     ///
-    /// Metadata generation happens when upgrading from past version of `IndexPart`.
-    gathered_metadata: HashMap<PathBuf, LayerFileMetadata>,
-}
-
-impl LayersDownload {
-    fn from_skipped_layers(layers_to_skip: HashSet<PathBuf>) -> Self {
-        LayersDownload {
-            layers_to_skip,
-            gathered_metadata: HashMap::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LayersDeletion {
-    layers_to_delete: HashSet<PathBuf>,
-    deleted_layers: HashSet<PathBuf>,
-    /// Pageserver uses [`IndexPart`] as a source of truth for listing the files per timeline.
-    /// This object gets serialized and placed into the remote storage.
-    /// So if we manage to update pageserver's [`RemoteIndex`] and update the index part on the remote storage,
-    /// the corresponding files on S3 won't exist for pageserver albeit being physically present on that remote storage still.
-    /// Then all that's left is to remove the files from the remote storage, without concerns about consistency.
-    deletion_registered: bool,
-}
-
-/// Adds the new checkpoint files as an upload sync task to the queue.
-/// On task failure, it gets retried again from the start a number of times.
-///
-/// Ensure that the loop is started otherwise the task is never processed.
-pub fn schedule_layer_upload(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    layers_to_upload: HashMap<PathBuf, LayerFileMetadata>,
-    metadata: Option<TimelineMetadata>,
-) {
-    let sync_queue = match SYNC_QUEUE.get() {
-        Some(queue) => queue,
-        None => {
-            warn!("Could not send an upload task for tenant {tenant_id}, timeline {timeline_id}");
-            return;
-        }
-    };
-    sync_queue.push(
-        TenantTimelineId {
-            tenant_id,
-            timeline_id,
-        },
-        SyncTask::upload(LayersUpload {
-            layers_to_upload,
-            uploaded_layers: HashMap::new(),
-            metadata,
-        }),
-    );
-    debug!("Upload task for tenant {tenant_id}, timeline {timeline_id} sent")
-}
-
-/// Adds the new files to delete as a deletion task to the queue.
-/// On task failure, it gets retried again from the start a number of times.
-///
-/// Ensure that the loop is started otherwise the task is never processed.
-pub fn schedule_layer_delete(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    layers_to_delete: HashSet<PathBuf>,
-) {
-    let sync_queue = match SYNC_QUEUE.get() {
-        Some(queue) => queue,
-        None => {
-            warn!("Could not send deletion task for tenant {tenant_id}, timeline {timeline_id}");
-            return;
-        }
-    };
-    sync_queue.push(
-        TenantTimelineId {
-            tenant_id,
-            timeline_id,
-        },
-        SyncTask::delete(LayersDeletion {
-            layers_to_delete,
-            deleted_layers: HashSet::new(),
-            deletion_registered: false,
-        }),
-    );
-    debug!("Deletion task for tenant {tenant_id}, timeline {timeline_id} sent")
-}
-
-/// Requests the download of the entire timeline for a given tenant.
-/// No existing local files are currently overwritten, except the metadata file (if its disk_consistent_lsn is less than the downloaded one).
-/// The metadata file is always updated last, to avoid inconsistencies.
-///
-/// On any failure, the task gets retried, omitting already downloaded layers.
-///
-/// Ensure that the loop is started otherwise the task is never processed.
-pub fn schedule_layer_download(tenant_id: TenantId, timeline_id: TimelineId) {
-    debug!("Scheduling layer download for tenant {tenant_id}, timeline {timeline_id}");
-    let sync_queue = match SYNC_QUEUE.get() {
-        Some(queue) => queue,
-        None => {
-            warn!("Could not send download task for tenant {tenant_id}, timeline {timeline_id}");
-            return;
-        }
-    };
-    sync_queue.push(
-        TenantTimelineId {
-            tenant_id,
-            timeline_id,
-        },
-        SyncTask::download(LayersDownload::from_skipped_layers(HashSet::new())),
-    );
-    debug!("Download task for tenant {tenant_id}, timeline {timeline_id} sent")
-}
-
-/// Local existing timeline files
-///
-/// Values of this type serve different meanings in different contexts. On startup, collected
-/// timelines come with the full collected information and when signalling readyness to attach
-/// after completed download. After the download the file information is no longer carried, because
-/// it is already merged into [`RemoteTimeline`].
-#[derive(Debug)]
-pub struct TimelineLocalFiles(TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>);
-
-impl TimelineLocalFiles {
-    pub fn metadata(&self) -> &TimelineMetadata {
-        &self.0
-    }
-
-    /// Called during startup, for all of the local files with full metadata.
-    pub(crate) fn collected(
-        metadata: TimelineMetadata,
-        timeline_files: HashMap<PathBuf, LayerFileMetadata>,
-    ) -> TimelineLocalFiles {
-        TimelineLocalFiles(metadata, timeline_files)
-    }
-
-    /// Called near the end of tenant initialization, to signal readyness to attach tenants.
-    pub(crate) fn ready(metadata: TimelineMetadata) -> Self {
-        TimelineLocalFiles(metadata, HashMap::new())
-    }
-}
-
-/// Launch a thread to perform remote storage sync tasks.
-/// See module docs for loop step description.
-pub fn spawn_storage_sync_task(
-    conf: &'static PageServerConf,
-    local_timeline_files: HashMap<TenantId, HashMap<TimelineId, TimelineLocalFiles>>,
-    storage: GenericRemoteStorage,
-    max_concurrent_timelines_sync: NonZeroUsize,
-    max_sync_errors: NonZeroU32,
-) -> anyhow::Result<SyncStartupData> {
-    let sync_queue = SyncQueue::new(max_concurrent_timelines_sync);
-    SYNC_QUEUE
-        .set(sync_queue)
-        .map_err(|_queue| anyhow!("Could not initialize sync queue"))?;
-    let sync_queue = match SYNC_QUEUE.get() {
-        Some(queue) => queue,
-        None => bail!("Could not get sync queue during the sync loop step, aborting"),
-    };
-
-    // TODO we are able to "attach" empty tenants, but not doing it now since it might require big wait time:
-    // * we need to list every timeline for tenant on S3, that might be a costly operation
-    // * we need to download every timeline for the tenant, to activate it in memory
-    //
-    // When on-demand download gets merged, we're able to do this fast by storing timeline metadata only.
-    let mut empty_tenants = TenantTimelineValues::<LocalTimelineInitStatus>::new();
-    let mut keys_for_index_part_downloads = HashSet::new();
-    let mut timelines_to_sync = HashMap::new();
-
-    for (tenant_id, timeline_data) in local_timeline_files {
-        if timeline_data.is_empty() {
-            info!("got empty tenant {}", tenant_id);
-            let _ = empty_tenants.0.entry(tenant_id).or_default();
-        } else {
-            for (timeline_id, timeline_data) in timeline_data {
-                let id = TenantTimelineId::new(tenant_id, timeline_id);
-                keys_for_index_part_downloads.insert(id);
-                timelines_to_sync.insert(id, timeline_data);
-            }
-        }
-    }
-
-    let applicable_index_parts = BACKGROUND_RUNTIME.block_on(download_index_parts(
-        conf,
-        &storage,
-        keys_for_index_part_downloads,
-    ));
-
-    let remote_index = RemoteIndex::from_parts(conf, applicable_index_parts)?;
-
-    let mut local_timeline_init_statuses = schedule_first_sync_tasks(
-        &mut BACKGROUND_RUNTIME.block_on(remote_index.write()),
-        sync_queue,
-        timelines_to_sync,
-    );
-    local_timeline_init_statuses
-        .0
-        .extend(empty_tenants.0.into_iter());
-
-    let remote_index_clone = remote_index.clone();
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        TaskKind::StorageSync,
-        None,
-        None,
-        "Remote storage sync task",
-        false,
-        async move {
-            storage_sync_loop(
-                conf,
-                (storage, remote_index_clone, sync_queue),
-                max_sync_errors,
-            )
-            .instrument(info_span!("storage_sync_loop"))
-            .await;
-            Ok(())
-        },
-    );
-    Ok(SyncStartupData {
-        remote_index,
-        local_timeline_init_statuses,
-    })
-}
-
-async fn storage_sync_loop(
-    conf: &'static PageServerConf,
-    (storage, index, sync_queue): (GenericRemoteStorage, RemoteIndex, &SyncQueue),
-    max_sync_errors: NonZeroU32,
-) {
-    info!("Starting remote storage sync loop");
-    loop {
-        let loop_storage = storage.clone();
-
-        let (batched_tasks, remaining_queue_length) = sync_queue.next_task_batch();
-
-        if task_mgr::is_shutdown_requested() {
-            info!("Shutdown requested, stopping");
-            break;
+    /// 'index_part' is the current remote metadata file.
+    pub fn init_upload_queue(&self, index_part: &IndexPart) -> Result<()> {
+        let mut files = HashMap::new();
+        for path in &index_part.timeline_layers {
+            let layer_metadata = index_part
+                .layer_metadata
+                .get(path)
+                .map(LayerFileMetadata::from)
+                .unwrap_or(LayerFileMetadata::MISSING);
+            files.insert(path.clone(), layer_metadata);
         }
 
-        REMAINING_SYNC_ITEMS.set(remaining_queue_length as i64);
-        if remaining_queue_length > 0 || !batched_tasks.is_empty() {
-            debug!("Processing tasks for {} timelines in batch, more tasks left to process: {remaining_queue_length}", batched_tasks.len());
-        } else {
-            debug!("No tasks to process");
-            continue;
-        }
+        let metadata = index_part.parse_metadata()?;
 
-        // Concurrently perform all the tasks in the batch
-        let loop_step = tokio::select! {
-            step = process_batches(
-                conf,
-                max_sync_errors,
-                loop_storage,
-                &index,
-                batched_tasks,
-                sync_queue,
-            )
-                .instrument(info_span!("storage_sync_loop_step")) => ControlFlow::Continue(step)
-                ,
-            _ = task_mgr::shutdown_watcher() => ControlFlow::Break(()),
-        };
-
-        match loop_step {
-            ControlFlow::Continue(updated_tenants) => {
-                if updated_tenants.is_empty() {
-                    debug!("Sync loop step completed, no new tenant states");
-                } else {
-                    info!(
-                        "Sync loop step completed, {} new tenant state update(s)",
-                        updated_tenants.len()
-                    );
-                    let mut timelines_to_attach = HashMap::new();
-                    let index_accessor = index.read().await;
-                    for tenant_id in updated_tenants {
-                        let tenant_entry = match index_accessor.tenant_entry(&tenant_id) {
-                            Some(tenant_entry) => tenant_entry,
-                            None => {
-                                error!(
-                                    "cannot find tenant in remote index for timeline sync update"
-                                );
-                                continue;
-                            }
-                        };
-
-                        if tenant_entry.has_in_progress_downloads() {
-                            info!("Tenant {tenant_id} has pending timeline downloads, skipping tenant registration");
-                            continue;
-                        } else {
-                            info!(
-                                "Tenant {tenant_id} download completed. Picking to register in tenant"
-                            );
-                            // Here we assume that if tenant has no in-progress downloads that
-                            // means that it is the last completed timeline download that triggered
-                            // sync status update. So we look at the index for available timelines
-                            // and register them all at once in a tenant for download
-                            // to be submitted in a single operation to tenant
-                            // so it can apply them at once to internal timeline map.
-                            timelines_to_attach.insert(
-                                tenant_id,
-                                TenantAttachData::Ready(
-                                    tenant_entry
-                                        .iter()
-                                        .map(|(&id, entry)| {
-                                            (id, TimelineLocalFiles::ready(entry.metadata.clone()))
-                                        })
-                                        .collect(),
-                                ),
-                            );
-                        }
-                    }
-                    drop(index_accessor);
-                    // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
-                    attach_local_tenants(conf, &index, timelines_to_attach);
-                }
-            }
-            ControlFlow::Break(()) => {
-                info!("Shutdown requested, stopping");
-                break;
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-enum DownloadStatus {
-    Downloaded,
-    Nothing,
-}
-
-#[derive(Debug)]
-enum UploadStatus {
-    Uploaded,
-    Failed(anyhow::Error),
-    Nothing,
-}
-
-async fn process_batches(
-    conf: &'static PageServerConf,
-    max_sync_errors: NonZeroU32,
-    storage: GenericRemoteStorage,
-    index: &RemoteIndex,
-    batched_tasks: HashMap<TenantTimelineId, SyncTaskBatch>,
-    sync_queue: &SyncQueue,
-) -> HashSet<TenantId> {
-    let mut sync_results = batched_tasks
-        .into_iter()
-        .map(|(sync_id, batch)| {
-            let storage = storage.clone();
-            let index = index.clone();
-            async move {
-                let state_update = process_sync_task_batch(
-                    conf,
-                    (storage, index, sync_queue),
-                    max_sync_errors,
-                    sync_id,
-                    batch,
-                )
-                .instrument(info_span!("process_sync_task_batch", sync_id = %sync_id))
-                .await;
-                (sync_id, state_update)
-            }
-        })
-        .collect::<FuturesUnordered<_>>();
-
-    let mut downloaded_timelines = HashSet::new();
-
-    while let Some((sync_id, download_marker)) = sync_results.next().await {
-        debug!(
-            "Finished storage sync task for sync id {sync_id} download marker {:?}",
-            download_marker
+        info!(
+            "initializing upload queue with disk_consistent_lsn: {}",
+            metadata.disk_consistent_lsn()
         );
-        if matches!(download_marker, DownloadStatus::Downloaded) {
-            downloaded_timelines.insert(sync_id.tenant_id);
-        }
+        let mut upload_queue = self.upload_queue.lock().unwrap();
+        upload_queue.latest_files = files;
+        upload_queue.latest_metadata = Some(metadata.clone());
+        upload_queue.last_uploaded_consistent_lsn = Some(metadata.disk_consistent_lsn());
+
+        Ok(())
     }
 
-    downloaded_timelines
-}
-
-async fn process_sync_task_batch(
-    conf: &'static PageServerConf,
-    (storage, index, sync_queue): (GenericRemoteStorage, RemoteIndex, &SyncQueue),
-    max_sync_errors: NonZeroU32,
-    sync_id: TenantTimelineId,
-    batch: SyncTaskBatch,
-) -> DownloadStatus {
-    let sync_start = Instant::now();
-    let current_remote_timeline = { index.read().await.timeline_entry(&sync_id).cloned() };
-
-    let upload_data = batch.upload.clone();
-    let download_data = batch.download.clone();
-    // Run both upload and download tasks concurrently (not in parallel):
-    // download and upload tasks do not conflict and spoil the pageserver state even if they are executed in parallel.
-    // Under "spoiling" here means potentially inconsistent layer set that misses some of the layers, declared present
-    // in local (implicitly, via Lsn values and related memory state) or remote (explicitly via remote layer file paths) metadata.
-    // When operating in a system without tasks failing over the error threshold,
-    // current batching and task processing systems aim to update the layer set and metadata files (remote and local),
-    // without "losing" such layer files.
-    let (upload_status, download_status) = tokio::join!(
-        async {
-            if let Some(upload_data) = upload_data {
-                let upload_retries = upload_data.retries;
-                match validate_task_retries(upload_retries, max_sync_errors)
-                    .instrument(info_span!("retries_validation"))
-                    .await
-                {
-                    ControlFlow::Continue(()) => {
-                        upload_timeline_data(
-                            conf,
-                            (&storage, &index, sync_queue),
-                            current_remote_timeline.as_ref(),
-                            sync_id,
-                            upload_data,
-                            sync_start,
-                        )
-                        .await
-                    }
-                    ControlFlow::Break(()) => match update_remote_data(
-                        conf,
-                        &storage,
-                        &index,
-                        sync_id,
-                        RemoteDataUpdate::Upload {
-                            uploaded_data: upload_data.data,
-                            upload_failed: true,
-                        },
-                    )
-                    .await
-                    {
-                        Ok(()) => UploadStatus::Failed(anyhow::anyhow!(
-                            "Aborted after retries validation, current retries: {upload_retries}, max retries allowed: {max_sync_errors}"
-                        )),
-                        Err(e) => {
-                            error!("Failed to update remote timeline {sync_id}: {e:?}");
-                            UploadStatus::Failed(e)
-                        }
-                    },
-                }
-            } else {
-                UploadStatus::Nothing
-            }
-        }
-        .instrument(info_span!("upload_timeline_data")),
-        async {
-            if let Some(download_data) = download_data {
-                match validate_task_retries(download_data.retries, max_sync_errors)
-                    .instrument(info_span!("retries_validation"))
-                    .await
-                {
-                    ControlFlow::Continue(()) => {
-                        return download_timeline_data(
-                            conf,
-                            (&storage, &index, sync_queue),
-                            current_remote_timeline.as_ref(),
-                            sync_id,
-                            download_data,
-                            sync_start,
-                        )
-                        .await;
-                    }
-                    ControlFlow::Break(()) => {
-                        index
-                            .write()
-                            .await
-                            .set_awaits_download(&sync_id, false)
-                            .ok();
-                    }
-                }
-            }
-            DownloadStatus::Nothing
-        }
-        .instrument(info_span!("download_timeline_data")),
-    );
-
-    if let Some(delete_data) = batch.delete {
-        match upload_status {
-            UploadStatus::Uploaded | UploadStatus::Nothing => {
-                match validate_task_retries(delete_data.retries, max_sync_errors)
-                    .instrument(info_span!("retries_validation"))
-                    .await
-                {
-                    ControlFlow::Continue(()) => {
-                        delete_timeline_data(
-                            conf,
-                            (&storage, &index, sync_queue),
-                            sync_id,
-                            delete_data,
-                            sync_start,
-                        )
-                        .instrument(info_span!("delete_timeline_data"))
-                        .await;
-                    }
-                    ControlFlow::Break(()) => {
-                        if let Err(e) = update_remote_data(
-                            conf,
-                            &storage,
-                            &index,
-                            sync_id,
-                            RemoteDataUpdate::Delete(&delete_data.data.deleted_layers),
-                        )
-                        .await
-                        {
-                            error!("Failed to update remote timeline {sync_id}: {e:?}");
-                        }
-                    }
-                }
-            }
-            UploadStatus::Failed(e) => {
-                warn!("Skipping delete task due to failed upload tasks, reenqueuing. Upload data: {:?}, delete data: {delete_data:?}. Upload failure: {e:#}", batch.upload);
-                sync_queue.push(sync_id, SyncTask::Delete(delete_data));
-            }
-        }
+    /// Like init_upload_queue, but the list of files is initially empty, and
+    /// metadata is passed as a TimelineMetadata. This is used when creating a
+    /// new timeline.
+    pub fn init_upload_queue_empty(&self, metadata: &TimelineMetadata) {
+        info!(
+            "initializing upload queue for new timeline with disk_consistent_lsn: {}",
+            metadata.disk_consistent_lsn()
+        );
+        let mut upload_queue = self.upload_queue.lock().unwrap();
+        upload_queue.latest_files = HashMap::new();
+        upload_queue.latest_metadata = Some(metadata.clone());
+        upload_queue.last_uploaded_consistent_lsn = Some(metadata.disk_consistent_lsn());
     }
 
-    download_status
-}
-
-async fn download_timeline_data(
-    conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
-    current_remote_timeline: Option<&RemoteTimeline>,
-    sync_id: TenantTimelineId,
-    new_download_data: SyncData<LayersDownload>,
-    sync_start: Instant,
-) -> DownloadStatus {
-    static TASK_NAME: &str = "download";
-
-    match download_timeline_layers(
-        conf,
-        storage,
-        sync_queue,
-        current_remote_timeline,
-        sync_id,
-        new_download_data,
-    )
-    .await
-    {
-        DownloadedTimeline::Abort => {
-            register_sync_status(sync_id, sync_start, TASK_NAME, None);
-            if let Err(e) = index.write().await.set_awaits_download(&sync_id, false) {
-                error!("Timeline {sync_id} was expected to be in the remote index after a download attempt, but it's absent: {e:?}");
-            }
-        }
-        DownloadedTimeline::FailedAndRescheduled => {
-            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
-        }
-        DownloadedTimeline::Successful(mut download_data) => {
-            match update_local_metadata(conf, sync_id, current_remote_timeline).await {
-                Ok(()) => {
-                    let mut g = index.write().await;
-
-                    match g.set_awaits_download(&sync_id, false) {
-                        Ok(()) => {
-                            let timeline = g
-                                .timeline_entry_mut(&sync_id)
-                                .expect("set_awaits_download verified existence");
-
-                            timeline.merge_metadata_from_downloaded(
-                                &download_data.data.gathered_metadata,
-                            );
-
-                            register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
-                            return DownloadStatus::Downloaded;
-                        }
-                        Err(e) => {
-                            error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
-                        }
-                    };
-                }
-                Err(e) => {
-                    error!("Failed to update local timeline metadata: {e:?}");
-                    download_data.retries += 1;
-                    sync_queue.push(sync_id, SyncTask::Download(download_data));
-                    register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
-                }
-            }
-        }
+    pub fn last_uploaded_consistent_lsn(&self) -> Option<Lsn> {
+        let upload_queue = self.upload_queue.lock().unwrap();
+        upload_queue.last_uploaded_consistent_lsn
     }
 
-    DownloadStatus::Nothing
-}
+    //
+    // Download operations.
+    //
+    // These don't use the per-timeline queue. They do use the global semaphore in
+    // S3Bucket, to limit the total number of concurrent operations, though.
+    //
 
-async fn update_local_metadata(
-    conf: &'static PageServerConf,
-    sync_id: TenantTimelineId,
-    remote_timeline: Option<&RemoteTimeline>,
-) -> anyhow::Result<()> {
-    let remote_metadata = match remote_timeline {
-        Some(timeline) => &timeline.metadata,
-        None => {
-            debug!("No remote timeline to update local metadata from, skipping the update");
-            return Ok(());
-        }
-    };
-    let remote_lsn = remote_metadata.disk_consistent_lsn();
-
-    let local_metadata_path = conf.metadata_path(sync_id.timeline_id, sync_id.tenant_id);
-    let local_lsn = if local_metadata_path.exists() {
-        let local_metadata = read_metadata_file(&local_metadata_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to load local metadata from path '{}'",
-                    local_metadata_path.display()
-                )
-            })?;
-
-        Some(local_metadata.disk_consistent_lsn())
-    } else {
-        None
-    };
-
-    if local_lsn < Some(remote_lsn) {
-        info!("Updating local timeline metadata from remote timeline: local disk_consistent_lsn={local_lsn:?}, remote disk_consistent_lsn={remote_lsn}");
-        // clone because spawn_blocking requires static lifetime
-        let cloned_metadata = remote_metadata.to_owned();
-        let TenantTimelineId {
-            tenant_id,
-            timeline_id,
-        } = sync_id;
-        tokio::task::spawn_blocking(move || {
-            crate::tenant::save_metadata(conf, timeline_id, tenant_id, &cloned_metadata, true)
-        })
-        .await
-        .with_context(|| {
-            format!(
-                "failed to join save_metadata task for {}",
-                local_metadata_path.display()
-            )
-        })?
-        .with_context(|| {
-            format!(
-                "Failed to write remote metadata bytes locally to path '{}'",
-                local_metadata_path.display()
-            )
-        })?;
-    } else {
-        info!("Local metadata at path '{}' has later disk consistent Lsn ({local_lsn:?}) than the remote one ({remote_lsn}), skipping the update", local_metadata_path.display());
-    }
-
-    Ok(())
-}
-
-async fn delete_timeline_data(
-    conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
-    sync_id: TenantTimelineId,
-    mut new_delete_data: SyncData<LayersDeletion>,
-    sync_start: Instant,
-) {
-    static TASK_NAME: &str = "delete";
-
-    let timeline_delete = &mut new_delete_data.data;
-
-    if !timeline_delete.deletion_registered {
-        if let Err(e) = update_remote_data(
-            conf,
-            storage,
-            index,
-            sync_id,
-            RemoteDataUpdate::Delete(&timeline_delete.layers_to_delete),
+    /// Download index file
+    pub async fn download_index_file(&self) -> Result<IndexPart, DownloadError> {
+        download::download_index_part(
+            self.conf,
+            &self.storage_impl,
+            self.tenant_id,
+            self.timeline_id,
         )
         .await
-        {
-            error!("Failed to update remote timeline {sync_id}: {e:?}");
-            new_delete_data.retries += 1;
-            sync_queue.push(sync_id, SyncTask::Delete(new_delete_data));
-            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
-            return;
-        }
-    }
-    timeline_delete.deletion_registered = true;
-
-    let sync_status = delete_timeline_layers(storage, sync_queue, sync_id, new_delete_data).await;
-    register_sync_status(sync_id, sync_start, TASK_NAME, Some(sync_status));
-}
-
-async fn read_metadata_file(metadata_path: &Path) -> anyhow::Result<TimelineMetadata> {
-    TimelineMetadata::from_bytes(
-        &fs::read(metadata_path)
-            .await
-            .context("Failed to read local metadata bytes from fs")?,
-    )
-    .context("Failed to parse metadata bytes")
-}
-
-async fn upload_timeline_data(
-    conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
-    current_remote_timeline: Option<&RemoteTimeline>,
-    sync_id: TenantTimelineId,
-    new_upload_data: SyncData<LayersUpload>,
-    sync_start: Instant,
-) -> UploadStatus {
-    static TASK_NAME: &str = "upload";
-    let mut uploaded_data = match upload_timeline_layers(
-        storage,
-        sync_queue,
-        current_remote_timeline,
-        sync_id,
-        new_upload_data,
-    )
-    .await
-    {
-        UploadedTimeline::FailedAndRescheduled(e) => {
-            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
-            return UploadStatus::Failed(e);
-        }
-        UploadedTimeline::Successful(upload_data) => upload_data,
-    };
-
-    match update_remote_data(
-        conf,
-        storage,
-        index,
-        sync_id,
-        RemoteDataUpdate::Upload {
-            uploaded_data: uploaded_data.data.clone(),
-            upload_failed: false,
-        },
-    )
-    .await
-    {
-        Ok(()) => {
-            register_sync_status(sync_id, sync_start, TASK_NAME, Some(true));
-            UploadStatus::Uploaded
-        }
-        Err(e) => {
-            error!("Failed to update remote timeline {sync_id}: {e:?}");
-            uploaded_data.retries += 1;
-            sync_queue.push(sync_id, SyncTask::Upload(uploaded_data));
-            register_sync_status(sync_id, sync_start, TASK_NAME, Some(false));
-            UploadStatus::Failed(e)
-        }
-    }
-}
-
-enum RemoteDataUpdate<'a> {
-    Upload {
-        uploaded_data: LayersUpload,
-        upload_failed: bool,
-    },
-    Delete(&'a HashSet<PathBuf>),
-}
-
-async fn update_remote_data(
-    conf: &'static PageServerConf,
-    storage: &GenericRemoteStorage,
-    index: &RemoteIndex,
-    sync_id: TenantTimelineId,
-    update: RemoteDataUpdate<'_>,
-) -> anyhow::Result<()> {
-    let updated_remote_timeline = {
-        let mut index_accessor = index.write().await;
-
-        match index_accessor.timeline_entry_mut(&sync_id) {
-            Some(existing_entry) => {
-                match update {
-                    RemoteDataUpdate::Upload {
-                        uploaded_data,
-                        upload_failed,
-                    } => {
-                        if let Some(new_metadata) = uploaded_data.metadata.as_ref() {
-                            if existing_entry.metadata.disk_consistent_lsn()
-                                < new_metadata.disk_consistent_lsn()
-                            {
-                                existing_entry.metadata = new_metadata.clone();
-                            }
-                        }
-                        if upload_failed {
-                            existing_entry.add_upload_failures(
-                                uploaded_data
-                                    .layers_to_upload
-                                    .iter()
-                                    .map(|(k, v)| (k.to_owned(), v.to_owned())),
-                            );
-                        } else {
-                            existing_entry.add_timeline_layers(
-                                uploaded_data
-                                    .uploaded_layers
-                                    .iter()
-                                    .map(|(k, v)| (k.to_owned(), v.to_owned())),
-                            );
-                        }
-                    }
-                    RemoteDataUpdate::Delete(layers_to_remove) => {
-                        existing_entry.remove_layers(layers_to_remove)
-                    }
-                }
-                existing_entry.clone()
-            }
-            None => match update {
-                RemoteDataUpdate::Upload {
-                    uploaded_data,
-                    upload_failed,
-                } => {
-                    let new_metadata = match uploaded_data.metadata.as_ref() {
-                        Some(new_metadata) => new_metadata,
-                        None => bail!("For timeline {sync_id} upload, there's no upload metadata and no remote index entry, cannot create a new one"),
-                    };
-                    let mut new_remote_timeline = RemoteTimeline::new(new_metadata.clone());
-                    if upload_failed {
-                        new_remote_timeline.add_upload_failures(
-                            uploaded_data
-                                .layers_to_upload
-                                .iter()
-                                .map(|(k, v)| (k.to_owned(), v.to_owned())),
-                        );
-                    } else {
-                        new_remote_timeline.add_timeline_layers(
-                            uploaded_data
-                                .uploaded_layers
-                                .iter()
-                                .map(|(k, v)| (k.to_owned(), v.to_owned())),
-                        );
-                    }
-
-                    index_accessor.add_timeline_entry(sync_id, new_remote_timeline.clone());
-                    new_remote_timeline
-                }
-                RemoteDataUpdate::Delete(_) => {
-                    warn!("No remote index entry for timeline {sync_id}, skipping deletion");
-                    return Ok(());
-                }
-            },
-        }
-    };
-
-    let timeline_path = conf.timeline_path(&sync_id.timeline_id, &sync_id.tenant_id);
-    let new_index_part =
-        IndexPart::from_remote_timeline(&timeline_path, updated_remote_timeline)
-            .context("Failed to create an index part from the updated remote timeline")?;
-
-    debug!("Uploading remote index for the timeline");
-    REMOTE_INDEX_UPLOAD
-        .with_label_values(&[
-            &sync_id.tenant_id.to_string(),
-            &sync_id.timeline_id.to_string(),
-        ])
-        .inc();
-
-    upload_index_part(conf, storage, sync_id, new_index_part)
-        .await
-        .context("Failed to upload new index part")
-}
-
-async fn validate_task_retries(
-    current_attempt: u32,
-    max_sync_errors: NonZeroU32,
-) -> ControlFlow<(), ()> {
-    let max_sync_errors = max_sync_errors.get();
-    if current_attempt >= max_sync_errors {
-        return ControlFlow::Break(());
     }
 
-    exponential_backoff(current_attempt, 1.0, 30.0).await;
-    ControlFlow::Continue(())
-}
-
-fn schedule_first_sync_tasks(
-    index: &mut RemoteTimelineIndex,
-    sync_queue: &SyncQueue,
-    local_timeline_files: HashMap<TenantTimelineId, TimelineLocalFiles>,
-) -> TenantTimelineValues<LocalTimelineInitStatus> {
-    let mut local_timeline_init_statuses = TenantTimelineValues::new();
-
-    let mut new_sync_tasks = VecDeque::with_capacity(local_timeline_files.len());
-
-    for (sync_id, local_timeline) in local_timeline_files {
-        let TimelineLocalFiles(local_metadata, local_files) = local_timeline;
-        match index.timeline_entry_mut(&sync_id) {
-            Some(remote_timeline) => {
-                let (timeline_status, awaits_download) = compare_local_and_remote_timeline(
-                    &mut new_sync_tasks,
-                    sync_id,
-                    local_metadata,
-                    local_files,
-                    remote_timeline,
-                );
-                match local_timeline_init_statuses
-                    .0
-                    .entry(sync_id.tenant_id)
-                    .or_default()
-                    .entry(sync_id.timeline_id)
-                {
-                    hash_map::Entry::Occupied(mut o) => {
-                        {
-                            // defensive check
-                            warn!(
-                                "Overwriting timeline init sync status. Status {timeline_status:?}, timeline {}",
-                                sync_id.timeline_id
-                            );
-                        }
-                        o.insert(timeline_status);
-                    }
-                    hash_map::Entry::Vacant(v) => {
-                        v.insert(timeline_status);
-                    }
-                }
-
-                remote_timeline.awaits_download = awaits_download;
-            }
-            None => {
-                // TODO (rodionov) does this mean that we've crashed during tenant creation?
-                //  is it safe to upload this checkpoint? could it be half broken?
-                warn!(
-                    "marking {} as locally complete, while it doesnt exist in remote index",
-                    sync_id
-                );
-                new_sync_tasks.push_back((
-                    sync_id,
-                    SyncTask::upload(LayersUpload {
-                        layers_to_upload: local_files,
-                        uploaded_layers: HashMap::new(),
-                        metadata: Some(local_metadata.clone()),
-                    }),
-                ));
-                local_timeline_init_statuses
-                    .0
-                    .entry(sync_id.tenant_id)
-                    .or_default()
-                    .insert(
-                        sync_id.timeline_id,
-                        LocalTimelineInitStatus::LocallyComplete(local_metadata),
-                    );
-            }
-        }
-    }
-
-    new_sync_tasks.into_iter().for_each(|(sync_id, task)| {
-        sync_queue.push(sync_id, task);
-    });
-    local_timeline_init_statuses
-}
-
-/// bool in return value stands for awaits_download
-fn compare_local_and_remote_timeline(
-    new_sync_tasks: &mut VecDeque<(TenantTimelineId, SyncTask)>,
-    sync_id: TenantTimelineId,
-    local_metadata: TimelineMetadata,
-    local_files: HashMap<PathBuf, LayerFileMetadata>,
-    remote_entry: &RemoteTimeline,
-) -> (LocalTimelineInitStatus, bool) {
-    let _entered = info_span!("compare_local_and_remote_timeline", sync_id = %sync_id).entered();
-
-    let needed_to_download_files = remote_entry
-        .stored_files()
-        .iter()
-        .filter_map(|(layer_file, remote_metadata)| {
-            if let Some(local_metadata) = local_files.get(layer_file) {
-                match (remote_metadata.file_size(), local_metadata.file_size()) {
-                    (Some(x), Some(y)) if x == y => { None },
-                    (None, Some(_)) => {
-                        // upgrading from an earlier IndexPart without metadata
-                        None
-                    },
-                    _ => {
-                        // having to deal with other than (Some(x), Some(y)) where x != y here is a
-                        // bummer, but see #2582 and #2610 for attempts and discussion.
-                        warn!("Redownloading locally existing {layer_file:?} due to size mismatch, size on index: {:?}, on disk: {:?}", remote_metadata.file_size(), local_metadata.file_size());
-                        Some(layer_file)
-                    },
-                }
-            } else {
-                // doesn't exist locally
-                Some(layer_file)
-            }
-        })
-        .collect::<HashSet<_>>();
-
-    let (initial_timeline_status, awaits_download) = if !needed_to_download_files.is_empty() {
-        new_sync_tasks.push_back((
-            sync_id,
-            SyncTask::download(LayersDownload::from_skipped_layers(
-                local_files
-                    .keys()
-                    .filter(|path| !needed_to_download_files.contains(path))
-                    .cloned()
-                    .collect(),
-            )),
-        ));
-        info!("NeedsSync");
-        (LocalTimelineInitStatus::NeedsSync, true)
-        // we do not need to manipulate with remote consistent lsn here
-        // because it will be updated when sync will be completed
-    } else {
-        info!("LocallyComplete");
-        (
-            LocalTimelineInitStatus::LocallyComplete(local_metadata.clone()),
-            false,
-        )
-    };
-
-    let layers_to_upload = local_files
-        .iter()
-        .filter_map(|(local_file, metadata)| {
-            if !remote_entry.stored_files().contains_key(local_file) {
-                Some((local_file.to_owned(), metadata.to_owned()))
-            } else {
-                None
-            }
-        })
-        .collect::<HashMap<_, _>>();
-
-    if !layers_to_upload.is_empty() {
-        new_sync_tasks.push_back((
-            sync_id,
-            SyncTask::upload(LayersUpload {
-                layers_to_upload,
-                uploaded_layers: HashMap::new(),
-                metadata: Some(local_metadata),
-            }),
-        ));
-        // Note that status here doesn't change.
-    }
-
-    (initial_timeline_status, awaits_download)
-}
-
-fn register_sync_status(
-    sync_id: TenantTimelineId,
-    sync_start: Instant,
-    sync_name: &str,
-    sync_status: Option<bool>,
-) {
-    let secs_elapsed = sync_start.elapsed().as_secs_f64();
-    debug!("Processed a sync task in {secs_elapsed:.2} seconds");
-
-    let tenant_id = sync_id.tenant_id.to_string();
-    let timeline_id = sync_id.timeline_id.to_string();
-
-    let sync_status = match sync_status {
-        Some(true) => "success",
-        Some(false) => "failure",
-        None => "abort",
-    };
-
-    IMAGE_SYNC_TIME_HISTOGRAM
-        .with_label_values(&[sync_name, sync_status])
-        .observe(secs_elapsed);
-    IMAGE_SYNC_TIME
-        .with_label_values(&[&tenant_id, &timeline_id])
-        .add(secs_elapsed);
-    IMAGE_SYNC_COUNT
-        .with_label_values(&[&tenant_id, &timeline_id, sync_name, sync_status])
-        .inc();
-}
-
-#[cfg(test)]
-mod test_utils {
-    use utils::lsn::Lsn;
-
-    use crate::tenant::harness::TenantHarness;
-
-    use super::*;
-
-    pub(super) async fn create_local_timeline(
-        harness: &TenantHarness<'_>,
-        timeline_id: TimelineId,
-        filenames: &[&str],
-        metadata: TimelineMetadata,
-    ) -> anyhow::Result<LayersUpload> {
-        let timeline_path = harness.timeline_path(&timeline_id);
-        fs::create_dir_all(&timeline_path).await?;
-
-        let mut layers_to_upload = HashMap::with_capacity(filenames.len());
-        for &file in filenames {
-            let file_path = timeline_path.join(file);
-            fs::write(&file_path, dummy_contents(file).into_bytes()).await?;
-            let metadata = LayerFileMetadata::new(file_path.metadata()?.len());
-            layers_to_upload.insert(file_path, metadata);
-        }
-
-        fs::write(
-            harness.conf.metadata_path(timeline_id, harness.tenant_id),
-            metadata.to_bytes()?,
+    /// Download a (layer) file from `path`, into local filesystem.
+    ///
+    /// 'layer_metadata' is the metadata from the remote index file.
+    pub async fn download_layer_file(
+        &self,
+        path: &RelativePath,
+        layer_metadata: &LayerFileMetadata,
+    ) -> Result<()> {
+        let downloaded_size = download::download_layer_file(
+            self.conf,
+            &self.storage_impl,
+            self.tenant_id,
+            self.timeline_id,
+            path,
+            layer_metadata,
         )
         .await?;
 
-        Ok(LayersUpload {
-            layers_to_upload,
-            uploaded_layers: HashMap::new(),
-            metadata: Some(metadata),
-        })
+        // Update the metadata for given layer file. The remote index file
+        // might be missing some information for the file; this allows us
+        // to fill in the missing details.
+        if layer_metadata.file_size().is_none() {
+            let new_metadata = LayerFileMetadata::new(downloaded_size);
+            let mut upload_queue = self.upload_queue.lock().unwrap();
+            if let Some(upgraded) = upload_queue.latest_files.get_mut(path) {
+                upgraded.merge(&new_metadata);
+            } else {
+                // The file should exist, since we just downloaded it.
+                warn!(
+                    "downloaded file {:?} not found in local copy of the index file",
+                    path
+                );
+            }
+        }
+        Ok(())
     }
 
-    pub(super) fn dummy_contents(name: &str) -> String {
-        format!("contents for {name}")
+    //
+    // Upload operations.
+    //
+
+    ///
+    /// Launch an index-file upload operation in the background.
+    ///
+    /// The upload will be added to the queue immediately, but it
+    /// won't be performed until all previosuly scheduled layer file
+    /// upload operations have completed successfully.  This is to
+    /// ensure that when the index file claims that layers X, Y and Z
+    /// exist in remote storage, they really do.
+    pub fn schedule_index_upload(
+        self: &Arc<Self>,
+        metadata: Option<&TimelineMetadata>,
+    ) -> Result<()> {
+        let mut upload_queue = self.upload_queue.lock().unwrap();
+        ensure!(
+            upload_queue.latest_metadata.is_some(),
+            "upload queue not initialized"
+        );
+
+        if let Some(new_metadata) = metadata {
+            upload_queue.latest_metadata = Some(new_metadata.clone());
+        }
+
+        let disk_consistent_lsn = upload_queue
+            .latest_metadata
+            .as_ref()
+            .unwrap()
+            .disk_consistent_lsn();
+
+        let index_part = IndexPart::new(
+            upload_queue.latest_files.clone(),
+            disk_consistent_lsn,
+            upload_queue.latest_metadata.as_ref().unwrap().to_bytes()?,
+        );
+        upload_queue
+            .queued_operations
+            .push_back(UploadOp::UploadMetadata(index_part, disk_consistent_lsn));
+
+        info!(
+            "scheduled metadata upload with {} files",
+            upload_queue.latest_files.len()
+        );
+
+        // Launch the task immediately, if possible
+        self.launch_queued_tasks(upload_queue);
+
+        Ok(())
+    }
+
+    ///
+    /// Launch an upload operation in the background.
+    ///
+    pub fn schedule_layer_file_upload(
+        self: &Arc<Self>,
+        path: &Path,
+        layer_metadata: &LayerFileMetadata,
+    ) -> Result<()> {
+        let mut upload_queue = self.upload_queue.lock().unwrap();
+        ensure!(
+            upload_queue.last_uploaded_consistent_lsn.is_some(),
+            "upload queue not initialized"
+        );
+        // The file size can be missing for files that were created before we tracked that
+        // in the metadata, but it should be present for any new files we create.
+        ensure!(
+            layer_metadata.file_size().is_some(),
+            "file size not initialized in metadata"
+        );
+
+        let relative_path = RelativePath::from_local_path(
+            &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
+            path,
+        )?;
+
+        upload_queue
+            .latest_files
+            .insert(relative_path, layer_metadata.clone());
+
+        upload_queue
+            .queued_operations
+            .push_back(UploadOp::UploadLayer(
+                PathBuf::from(path),
+                layer_metadata.clone(),
+            ));
+
+        info!("scheduled layer file upload {}", path.display());
+
+        // Launch the task immediately, if possible
+        self.launch_queued_tasks(upload_queue);
+        Ok(())
+    }
+
+    ///
+    /// Launch a delete operation in the background.
+    ///
+    /// The deletion won't actually be performed, until all preceding
+    /// upload operations have completed succesfully.
+    pub fn schedule_layer_file_deletion(self: &Arc<Self>, paths: &[PathBuf]) -> Result<()> {
+        let mut upload_queue = self.upload_queue.lock().unwrap();
+        ensure!(
+            upload_queue.latest_metadata.is_some(),
+            "upload queue not initialized"
+        );
+
+        // Update the remote index file, removing the to-be-deleted files from the index,
+        // before deleting the actual files.
+        for path in paths {
+            let relative_path = RelativePath::from_local_path(
+                &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
+                path,
+            )?;
+            upload_queue.latest_files.remove(&relative_path);
+        }
+        let disk_consistent_lsn = upload_queue
+            .latest_metadata
+            .as_ref()
+            .unwrap()
+            .disk_consistent_lsn();
+        let index_part = IndexPart::new(
+            upload_queue.latest_files.clone(),
+            disk_consistent_lsn,
+            upload_queue.latest_metadata.as_ref().unwrap().to_bytes()?,
+        );
+        upload_queue
+            .queued_operations
+            .push_back(UploadOp::UploadMetadata(index_part, disk_consistent_lsn));
+
+        // schedule the actual deletions
+        for path in paths {
+            upload_queue
+                .queued_operations
+                .push_back(UploadOp::Delete(PathBuf::from(path)));
+            info!("scheduled layer file deletion {}", path.display());
+        }
+
+        // Launch the tasks immediately, if possible
+        self.launch_queued_tasks(upload_queue);
+        Ok(())
+    }
+
+    ///
+    /// Wait for all previously scheduled uploads/deletions to complete
+    ///
+    pub async fn wait_completion(self: &Arc<Self>) -> Result<()> {
+        let (sender, mut receiver) = tokio::sync::watch::channel(());
+        let barrier_op = UploadOp::Barrier(sender);
+
+        {
+            let mut upload_queue = self.upload_queue.lock().unwrap();
+            ensure!(
+                upload_queue.latest_metadata.is_some(),
+                "upload queue not initialized"
+            );
+
+            upload_queue.queued_operations.push_back(barrier_op);
+
+            // Launch the task immediately, if possible
+            self.launch_queued_tasks(upload_queue);
+        }
+
+        receiver.changed().await?;
+        Ok(())
+    }
+
+    ///
+    /// Pick next tasks from the queue, and start as many of them as possible without violating
+    /// the ordering constraints.
+    ///
+    /// The caller needs to already hold the `upload_queue` lock.
+    fn launch_queued_tasks(self: &Arc<Self>, mut upload_queue: MutexGuard<UploadQueue>) {
+        while let Some(next_op) = upload_queue.queued_operations.front() {
+            // Can we run this task now?
+            let can_run_now = match next_op {
+                UploadOp::UploadLayer(_, _) => {
+                    // Can always be scheduled.
+                    true
+                }
+                UploadOp::UploadMetadata(_, _) => {
+                    // These can only be performed after all the preceding operations
+                    // have finished.
+                    upload_queue.inprogress_tasks.is_empty()
+                }
+                UploadOp::Delete(_) => {
+                    // Wait for preceding uploads to finish. Concurrent deletions are OK, though.
+                    upload_queue.num_inprogress_deletions == upload_queue.inprogress_tasks.len()
+                }
+
+                UploadOp::Barrier(_) => upload_queue.inprogress_tasks.is_empty(),
+            };
+
+            // If we cannot launch this task, don't look any further.
+            //
+            // In some cases, we could let some non-frontmost tasks to "jump the queue" and launch
+            // them now, but we don't try to do that currently.  For example, if the frontmost task
+            // is an index-file upload that cannot proceed until preceding uploads have finished, we
+            // could still start layer uploads that were scheduled later.
+            if !can_run_now {
+                break;
+            }
+
+            // We can launch this task. Remove it from the queue first.
+            let next_op = upload_queue.queued_operations.pop_front().unwrap();
+
+            info!("starting op: {}", next_op);
+
+            // Update the counters
+            match next_op {
+                UploadOp::UploadLayer(_, _) => {
+                    upload_queue.num_inprogress_layer_uploads += 1;
+                }
+                UploadOp::UploadMetadata(_, _) => {
+                    upload_queue.num_inprogress_metadata_uploads += 1;
+                }
+                UploadOp::Delete(_) => {
+                    upload_queue.num_inprogress_deletions += 1;
+                }
+                UploadOp::Barrier(sender) => {
+                    sender.send_replace(());
+                    continue;
+                }
+            };
+
+            // Assign unique ID to this task
+            upload_queue.task_counter += 1;
+            let task_id = upload_queue.task_counter;
+
+            // Add it to the in-progress map
+            let task = Arc::new(UploadTask {
+                task_id,
+                op: next_op,
+                retries: AtomicU32::new(0),
+            });
+            upload_queue
+                .inprogress_tasks
+                .insert(task.task_id, Arc::clone(&task));
+
+            // Spawn task to perform the task
+            let self_rc = Arc::clone(self);
+            task_mgr::spawn(
+                self.runtime.handle(),
+                TaskKind::RemoteUploadTask,
+                Some(self.tenant_id),
+                Some(self.timeline_id),
+                "remote upload",
+                false,
+                async move {
+                    self_rc.perform_upload_task(task).await;
+                    Ok(())
+                },
+            );
+
+            // Loop back to process next task
+        }
+    }
+
+    ///
+    /// Perform an upload task.
+    ///
+    /// The task is in the `inprogress_tasks` list. This function will try to
+    /// execute it, retrying forever. On successful completion, the task is
+    /// removed it from the `inprogress_tasks` list, and any next task(s) in the
+    /// queue that were waiting by the completion are launched.
+    ///
+    async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
+        // Loop to retry until it completes.
+        loop {
+            let upload_result: anyhow::Result<()> = match task.op {
+                UploadOp::UploadLayer(ref path, ref layer_metadata) => {
+                    upload::upload_timeline_layer(
+                        &self.storage_impl,
+                        self.tenant_id,
+                        self.timeline_id,
+                        path,
+                        layer_metadata,
+                    )
+                    .await
+                }
+                UploadOp::UploadMetadata(ref index_part, _lsn) => {
+                    upload::upload_index_part(
+                        self.conf,
+                        &self.storage_impl,
+                        self.tenant_id,
+                        self.timeline_id,
+                        index_part,
+                    )
+                    .await
+                }
+                UploadOp::Delete(ref path) => {
+                    delete::delete_layer(&self.storage_impl, self.tenant_id, self.timeline_id, path)
+                        .await
+                }
+                UploadOp::Barrier(_) => {
+                    // unreachable. Barrier operations are handled synchronously in
+                    // launch_queued_tasks
+                    warn!("unexpected Barrier operation in perform_upload_task");
+                    break;
+                }
+            };
+
+            match upload_result {
+                Ok(()) => {
+                    break;
+                }
+                Err(e) => {
+                    let retries = task.retries.fetch_add(1, Ordering::SeqCst);
+
+                    error!(
+                        "failed to perform remote task {}, will retry (attempt {}): {:?}",
+                        task.op, retries, e
+                    );
+
+                    exponential_backoff(
+                        retries,
+                        DEFAULT_BASE_BACKOFF_SECONDS,
+                        DEFAULT_MAX_BACKOFF_SECONDS,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        let retries = task.retries.load(Ordering::SeqCst);
+        if retries > 0 {
+            info!(
+                "remote task {} completed successfully after {} retries",
+                task.op, retries
+            );
+        } else {
+            info!("remote task {} completed successfully", task.op);
+        }
+
+        // The task has completed succesfully. Remove it from the in-progress list.
+        {
+            let mut upload_queue = self.upload_queue.lock().unwrap();
+            upload_queue.inprogress_tasks.remove(&task.task_id);
+
+            match task.op {
+                UploadOp::UploadLayer(_, _) => {
+                    upload_queue.num_inprogress_layer_uploads -= 1;
+                }
+                UploadOp::UploadMetadata(_, lsn) => {
+                    upload_queue.num_inprogress_metadata_uploads -= 1;
+                    upload_queue.last_uploaded_consistent_lsn = Some(lsn);
+                }
+                UploadOp::Delete(_) => {
+                    upload_queue.num_inprogress_deletions -= 1;
+                }
+                UploadOp::Barrier(_) => unreachable!(),
+            };
+
+            // Launch any queued tasks that were unblocked by this one.
+            self.launch_queued_tasks(upload_queue);
+        }
+    }
+}
+
+///
+/// Create a remote storage client for given timeline
+///
+/// Note: the caller must initialize the upload queue before any uploads can be scheduled,
+/// by calling init_upload_queue.
+///
+pub fn create_remote_timeline_client(
+    remote_storage: &GenericRemoteStorage,
+    conf: &'static PageServerConf,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<RemoteTimelineClient> {
+    Ok(RemoteTimelineClient {
+        conf,
+        runtime: &BACKGROUND_RUNTIME,
+        tenant_id,
+        timeline_id,
+        storage_impl: remote_storage.clone(),
+        upload_queue: Mutex::new(UploadQueue::default()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
+    use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
+    use std::collections::HashSet;
+    use utils::lsn::Lsn;
+
+    pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
+        format!("contents for {name}").into()
     }
 
     pub(super) fn dummy_metadata(disk_consistent_lsn: Lsn) -> TimelineMetadata {
-        TimelineMetadata::new(
+        let metadata = TimelineMetadata::new(
             disk_consistent_lsn,
             None,
             None,
@@ -1573,335 +774,180 @@ mod test_utils {
             // Any version will do
             // but it should be consistent with the one in the tests
             crate::DEFAULT_PG_VERSION,
-        )
+        );
+
+        // go through serialize + deserialize to fix the header, including checksum
+        TimelineMetadata::from_bytes(&metadata.to_bytes().unwrap()).unwrap()
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::test_utils::dummy_metadata;
-    use crate::tenant::harness::TIMELINE_ID;
-    use hex_literal::hex;
-    use utils::lsn::Lsn;
+    fn assert_file_list(a: &HashSet<RelativePath>, b: &[&str]) {
+        let xx = PathBuf::from("");
+        let mut avec: Vec<String> = a
+            .iter()
+            .map(|x| x.to_local_path(&xx).to_string_lossy().into())
+            .collect();
+        avec.sort();
 
-    use super::*;
+        let mut bvec = b.to_owned();
+        bvec.sort_unstable();
 
-    const TEST_SYNC_ID: TenantTimelineId = TenantTimelineId {
-        tenant_id: TenantId::from_array(hex!("11223344556677881122334455667788")),
-        timeline_id: TIMELINE_ID,
-    };
+        assert_eq!(avec, bvec);
+    }
 
-    #[tokio::test]
-    async fn separate_task_ids_batch() {
-        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        assert_eq!(sync_queue.len(), 0);
+    fn assert_remote_files(expected: &[&str], remote_path: &Path) {
+        let mut expected: Vec<String> = expected.iter().map(|x| String::from(*x)).collect();
+        expected.sort();
 
-        let sync_id_2 = TenantTimelineId {
-            tenant_id: TenantId::from_array(hex!("22223344556677881122334455667788")),
-            timeline_id: TIMELINE_ID,
+        let mut found: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(remote_path).unwrap().flatten() {
+            let entry_name = entry.file_name();
+            let fname = entry_name.to_str().unwrap();
+            found.push(String::from(fname));
+        }
+        found.sort();
+
+        assert_eq!(found, expected);
+    }
+
+    // Test scheduling
+    #[test]
+    fn upload_scheduling() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("upload_scheduling")?;
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+        std::fs::create_dir_all(&timeline_path)?;
+
+        let remote_fs_dir = harness.conf.workdir.join("remote_fs");
+        std::fs::create_dir_all(remote_fs_dir)?;
+        let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
+
+        let storage_config = RemoteStorageConfig {
+            max_concurrent_syncs: std::num::NonZeroUsize::new(
+                remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
+            )
+            .unwrap(),
+            max_sync_errors: std::num::NonZeroU32::new(
+                remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
+            )
+            .unwrap(),
+            storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
         };
-        let sync_id_3 = TenantTimelineId {
-            tenant_id: TenantId::from_array(hex!("33223344556677881122334455667788")),
-            timeline_id: TIMELINE_ID,
-        };
-        assert!(sync_id_2 != TEST_SYNC_ID);
-        assert!(sync_id_2 != sync_id_3);
-        assert!(sync_id_3 != TEST_SYNC_ID);
 
-        let download_task =
-            SyncTask::download(LayersDownload::from_skipped_layers(HashSet::from([
-                PathBuf::from("sk"),
-            ])));
-        let upload_task = SyncTask::upload(LayersUpload {
-            layers_to_upload: HashMap::from([(PathBuf::from("up"), LayerFileMetadata::new(123))]),
-            uploaded_layers: HashMap::from([(PathBuf::from("upl"), LayerFileMetadata::new(123))]),
-            metadata: Some(dummy_metadata(Lsn(2))),
+        // Use a current-thread runtime in the test
+        let runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+        ));
+        let _entered = runtime.enter();
+
+        // Test outline:
+        //
+        // Schedule upload of a bunch of layers. Check that they are started immediately, not queued
+        // Schedule upload of index. Check that it is queued
+        // let the layer file uploads finish. Check that the index-upload is now started
+        // let the index-upload finish.
+        //
+        // Download back the index.json. Check that the list of files is correct
+        //
+        // Schedule upload. Schedule deletion. Check that the deletion is queued
+        // let upload finish. Check that deletion is now started
+        // Schedule another deletion. Check that it's launched immediately.
+        // Schedule index upload. Check that it's queued
+
+        println!("workdir: {}", harness.conf.workdir.display());
+
+        let storage_impl =
+            GenericRemoteStorage::from_config(harness.conf.workdir.clone(), &storage_config)?;
+        let client = Arc::new(RemoteTimelineClient {
+            conf: harness.conf,
+            runtime,
+            tenant_id: harness.tenant_id,
+            timeline_id: TIMELINE_ID,
+            storage_impl,
+            upload_queue: Mutex::new(UploadQueue::default()),
         });
-        let delete_task = SyncTask::delete(LayersDeletion {
-            layers_to_delete: HashSet::from([PathBuf::from("de")]),
-            deleted_layers: HashSet::from([PathBuf::from("del")]),
-            deletion_registered: false,
-        });
 
-        sync_queue.push(TEST_SYNC_ID, download_task.clone());
-        sync_queue.push(sync_id_2, upload_task.clone());
-        sync_queue.push(sync_id_3, delete_task.clone());
+        let remote_timeline_dir =
+            remote_fs_dir.join(timeline_path.strip_prefix(&harness.conf.workdir)?);
+        println!("remote_timeline_dir: {}", remote_timeline_dir.display());
 
-        let submitted_tasks_count = sync_queue.len();
-        assert_eq!(submitted_tasks_count, 3);
-        let (mut batch, _) = sync_queue.next_task_batch();
-        assert_eq!(
-            batch.len(),
-            submitted_tasks_count,
-            "Batch should consist of all tasks submitted"
-        );
+        let metadata = dummy_metadata(Lsn(0x10));
+        client.init_upload_queue_empty(&metadata);
 
-        assert_eq!(
-            Some(SyncTaskBatch::new(download_task)),
-            batch.remove(&TEST_SYNC_ID)
-        );
-        assert_eq!(
-            Some(SyncTaskBatch::new(upload_task)),
-            batch.remove(&sync_id_2)
-        );
-        assert_eq!(
-            Some(SyncTaskBatch::new(delete_task)),
-            batch.remove(&sync_id_3)
-        );
+        // Create a couple of dummy files,  schedule upload for them
+        let content_foo = dummy_contents("foo");
+        let content_bar = dummy_contents("bar");
+        std::fs::write(timeline_path.join("foo"), &content_foo)?;
+        std::fs::write(timeline_path.join("bar"), &content_bar)?;
 
-        assert!(batch.is_empty(), "Should check all batch tasks");
-        assert_eq!(sync_queue.len(), 0);
-    }
+        client.schedule_layer_file_upload(
+            &timeline_path.join("foo"),
+            &LayerFileMetadata::new(content_foo.len() as u64),
+        )?;
+        client.schedule_layer_file_upload(
+            &timeline_path.join("bar"),
+            &LayerFileMetadata::new(content_bar.len() as u64),
+        )?;
 
-    #[tokio::test]
-    async fn same_task_id_separate_tasks_batch() {
-        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
-        assert_eq!(sync_queue.len(), 0);
-
-        let download = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk")]));
-        let upload = LayersUpload {
-            layers_to_upload: HashMap::from([(PathBuf::from("up"), LayerFileMetadata::new(123))]),
-            uploaded_layers: HashMap::from([(PathBuf::from("upl"), LayerFileMetadata::new(123))]),
-            metadata: Some(dummy_metadata(Lsn(2))),
-        };
-        let delete = LayersDeletion {
-            layers_to_delete: HashSet::from([PathBuf::from("de")]),
-            deleted_layers: HashSet::from([PathBuf::from("del")]),
-            deletion_registered: false,
-        };
-
-        sync_queue.push(TEST_SYNC_ID, SyncTask::download(download.clone()));
-        sync_queue.push(TEST_SYNC_ID, SyncTask::upload(upload.clone()));
-        sync_queue.push(TEST_SYNC_ID, SyncTask::delete(delete.clone()));
-
-        let submitted_tasks_count = sync_queue.len();
-        assert_eq!(submitted_tasks_count, 3);
-        let (mut batch, _) = sync_queue.next_task_batch();
-        assert_eq!(
-            batch.len(),
-            1,
-            "Queue should have one batch merged from 3 sync tasks of the same user"
-        );
-
-        assert_eq!(
-            Some(SyncTaskBatch {
-                upload: Some(SyncData {
-                    retries: 0,
-                    data: upload
-                }),
-                download: Some(SyncData {
-                    retries: 0,
-                    data: download
-                }),
-                delete: Some(SyncData {
-                    retries: 0,
-                    data: delete
-                }),
-            }),
-            batch.remove(&TEST_SYNC_ID),
-            "Should have one batch containing all tasks unchanged"
-        );
-
-        assert!(batch.is_empty(), "Should check all batch tasks");
-        assert_eq!(sync_queue.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn same_task_id_same_tasks_batch() {
-        let sync_queue = SyncQueue::new(NonZeroUsize::new(1).unwrap());
-        let download_1 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk1")]));
-        let download_2 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk2")]));
-        let download_3 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk3")]));
-        let download_4 = LayersDownload::from_skipped_layers(HashSet::from([PathBuf::from("sk4")]));
-
-        let sync_id_2 = TenantTimelineId {
-            tenant_id: TenantId::from_array(hex!("22223344556677881122334455667788")),
-            timeline_id: TIMELINE_ID,
-        };
-        assert!(sync_id_2 != TEST_SYNC_ID);
-
-        sync_queue.push(TEST_SYNC_ID, SyncTask::download(download_1.clone()));
-        sync_queue.push(TEST_SYNC_ID, SyncTask::download(download_2.clone()));
-        sync_queue.push(sync_id_2, SyncTask::download(download_3));
-        sync_queue.push(TEST_SYNC_ID, SyncTask::download(download_4.clone()));
-        assert_eq!(sync_queue.len(), 4);
-
-        let (mut smallest_batch, _) = sync_queue.next_task_batch();
-        assert_eq!(
-            smallest_batch.len(),
-            1,
-            "Queue should have one batch merged from the all sync tasks, but not the other user's task"
-        );
-        assert_eq!(
-            Some(SyncTaskBatch {
-                download: Some(SyncData {
-                    retries: 0,
-                    data: LayersDownload::from_skipped_layers(
-                        {
-                            let mut set = HashSet::new();
-                            set.extend(download_1.layers_to_skip.into_iter());
-                            set.extend(download_2.layers_to_skip.into_iter());
-                            set.extend(download_4.layers_to_skip.into_iter());
-                            set
-                        },
-                    )
-                }),
-                upload: None,
-                delete: None,
-            }),
-            smallest_batch.remove(&TEST_SYNC_ID),
-            "Should have one batch containing all tasks merged for the tenant first appeared in the batch"
-        );
-
-        assert!(smallest_batch.is_empty(), "Should check all batch tasks");
-        assert_eq!(
-            sync_queue.len(),
-            1,
-            "Should have one task left out of the batch"
-        );
-    }
-
-    mod local_and_remote_comparisons {
-        use super::*;
-
-        #[test]
-        fn ready() {
-            let mut new_sync_tasks = VecDeque::default();
-            let sync_id = TenantTimelineId::generate();
-            let local_metadata = dummy_metadata(0x02.into());
-            let local_files =
-                HashMap::from([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
-            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
-            remote_entry
-                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
-
-            let (status, sync_needed) = compare_local_and_remote_timeline(
-                &mut new_sync_tasks,
-                sync_id,
-                local_metadata.clone(),
-                local_files,
-                &remote_entry,
-            );
-
-            assert_eq!(
-                status,
-                LocalTimelineInitStatus::LocallyComplete(local_metadata)
-            );
-            assert!(!sync_needed);
-
-            assert!(new_sync_tasks.is_empty(), "{:?}", new_sync_tasks);
+        // Check that they are started immediately, not queued
+        {
+            let upload_queue = client.upload_queue.lock().unwrap();
+            assert!(upload_queue.queued_operations.is_empty());
+            assert!(upload_queue.inprogress_tasks.len() == 2);
+            assert!(upload_queue.num_inprogress_layer_uploads == 2);
         }
 
-        #[test]
-        fn needs_download() {
-            let mut new_sync_tasks = VecDeque::default();
-            let sync_id = TenantTimelineId::generate();
-            let local_metadata = dummy_metadata(0x02.into());
-            let local_files = HashMap::default();
-            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
-            remote_entry
-                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
-
-            let (status, sync_needed) = compare_local_and_remote_timeline(
-                &mut new_sync_tasks,
-                sync_id,
-                local_metadata,
-                local_files.clone(),
-                &remote_entry,
-            );
-
-            assert_eq!(status, LocalTimelineInitStatus::NeedsSync);
-            assert!(sync_needed);
-
-            let new_sync_tasks = new_sync_tasks.into_iter().collect::<Vec<_>>();
-
-            assert_eq!(
-                &new_sync_tasks,
-                &[(
-                    sync_id,
-                    SyncTask::download(LayersDownload::from_skipped_layers(
-                        local_files.keys().cloned().collect()
-                    ))
-                )]
-            );
+        // Schedule upload of index. Check that it is queued
+        let metadata = dummy_metadata(Lsn(0x20));
+        client.schedule_index_upload(Some(&metadata))?;
+        {
+            let upload_queue = client.upload_queue.lock().unwrap();
+            assert!(upload_queue.queued_operations.len() == 1);
         }
 
-        #[test]
-        fn redownload_is_not_needed_on_upgrade() {
-            // originally the implementation missed the `(None, Some(_))` case in the match, and
-            // proceeded to always redownload if the remote metadata was not available.
-
-            let mut new_sync_tasks = VecDeque::default();
-            let sync_id = TenantTimelineId::generate();
-
-            let local_metadata = dummy_metadata(0x02.into());
-
-            // type system would in general allow that LayerFileMetadata would be created with
-            // file_size: None, however `LayerFileMetadata::default` is only allowed from tests,
-            // and so everywhere within the system valid LayerFileMetadata is being created, it is
-            // created through `::new`.
-            let local_files =
-                HashMap::from([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
-
-            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
-
-            // RemoteTimeline is constructed out of an older version IndexPart, which didn't carry
-            // any metadata.
-            remote_entry
-                .add_timeline_layers([(PathBuf::from("first_file"), LayerFileMetadata::default())]);
-
-            let (status, sync_needed) = compare_local_and_remote_timeline(
-                &mut new_sync_tasks,
-                sync_id,
-                local_metadata.clone(),
-                local_files,
-                &remote_entry,
-            );
-
-            assert_eq!(
-                status,
-                LocalTimelineInitStatus::LocallyComplete(local_metadata)
-            );
-            assert!(!sync_needed);
+        // Wait for the uploads to finish
+        runtime.block_on(client.wait_completion())?;
+        {
+            let upload_queue = client.upload_queue.lock().unwrap();
+            assert!(upload_queue.queued_operations.is_empty());
+            assert!(upload_queue.inprogress_tasks.is_empty());
         }
 
-        #[test]
-        fn needs_upload() {
-            let mut new_sync_tasks = VecDeque::default();
-            let sync_id = TenantTimelineId::generate();
-            let local_metadata = dummy_metadata(0x02.into());
-            let local_files =
-                HashMap::from([(PathBuf::from("first_file"), LayerFileMetadata::new(123))]);
-            let mut remote_entry = RemoteTimeline::new(local_metadata.clone());
-            remote_entry.add_timeline_layers([]);
+        // Download back the index.json, and check that the list of files is correct
+        let index_part = runtime.block_on(client.download_index_file())?;
+        assert_file_list(&index_part.timeline_layers, &["foo", "bar"]);
+        let downloaded_metadata = index_part.parse_metadata()?;
+        assert_eq!(downloaded_metadata, metadata);
 
-            let (status, sync_needed) = compare_local_and_remote_timeline(
-                &mut new_sync_tasks,
-                sync_id,
-                local_metadata.clone(),
-                local_files.clone(),
-                &remote_entry,
-            );
-
-            assert_eq!(
-                status,
-                LocalTimelineInitStatus::LocallyComplete(local_metadata.clone())
-            );
-            assert!(!sync_needed);
-
-            let new_sync_tasks = new_sync_tasks.into_iter().collect::<Vec<_>>();
-
-            assert_eq!(
-                &new_sync_tasks,
-                &[(
-                    sync_id,
-                    SyncTask::upload(LayersUpload {
-                        layers_to_upload: local_files,
-                        uploaded_layers: HashMap::default(),
-                        metadata: Some(local_metadata),
-                    })
-                )]
-            );
+        // Schedule upload and then a deletion. Check that the deletion is queued
+        let content_baz = dummy_contents("baz");
+        std::fs::write(timeline_path.join("baz"), &content_baz)?;
+        client.schedule_layer_file_upload(
+            &timeline_path.join("baz"),
+            &LayerFileMetadata::new(content_baz.len() as u64),
+        )?;
+        client.schedule_layer_file_deletion(&[timeline_path.join("foo")])?;
+        {
+            let upload_queue = client.upload_queue.lock().unwrap();
+            // Deletion schedules upload of the index file, and the file deletion itself
+            assert!(upload_queue.queued_operations.len() == 2);
+            assert!(upload_queue.inprogress_tasks.len() == 1);
+            assert!(upload_queue.num_inprogress_layer_uploads == 1);
+            assert!(upload_queue.num_inprogress_deletions == 0);
         }
+        assert_remote_files(&["foo", "bar", "index_part.json"], &remote_timeline_dir);
+
+        // Finish them
+        runtime.block_on(client.wait_completion())?;
+
+        assert_remote_files(&["bar", "baz", "index_part.json"], &remote_timeline_dir);
+
+        Ok(())
     }
+
+    // TODO: Currently, GC can run between upload retries, removing local layers scheduled for upload. Test this scenario.
+    // FIXME: used to have a test for this in upload.rs, `layer_upload_after_local_fs_update()`.
+    // I didn't understand how it tests that, though.
+
+    // TODO: Test upload failures and retries
 }

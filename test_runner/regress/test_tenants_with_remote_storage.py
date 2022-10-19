@@ -21,7 +21,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     Postgres,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
+    assert_tenant_status,
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -162,13 +162,16 @@ def test_tenants_attached_after_download(
     assert local_layer_deleted, f"Found no local layer files to delete in directory {timeline_dir}"
 
     ##### Start the pageserver, forcing it to download the layer file and load the timeline into memory
+    # FIXME: just starting the pageserver no longer downloads the
+    # layer files. Do we want to force download, or maybe run some
+    # queries, or is it enough that it starts up without layer files?
     env.pageserver.start()
     client = env.pageserver.http_client()
 
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=lambda: assert_tenant_status(client, tenant_id, "Active"),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
@@ -249,7 +252,7 @@ def test_tenant_upgrades_index_json_from_v0(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(pageserver_http, tenant_id),
+        func=lambda: assert_tenant_status(pageserver_http, tenant_id, "Active"),
     )
 
     pg = env.postgres.create_start("main")
@@ -351,14 +354,15 @@ def test_tenant_redownloads_truncated_file_on_startup(
     index_part = local_fs_index_part(env, tenant_id, timeline_id)
     assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
 
-    ##### Start the pageserver, forcing it to download the layer file and load the timeline into memory
+    ## Start the pageserver. It will notice that the file size doesn't match, and
+    ## rename away the local file. It will be re-downloaded when it's needed.
     env.pageserver.start()
     client = env.pageserver.http_client()
 
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=lambda: assert_tenant_status(client, tenant_id, "Active"),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
@@ -369,6 +373,10 @@ def test_tenant_redownloads_truncated_file_on_startup(
     assert retored_timeline["timeline_id"] == str(
         timeline_id
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
+
+    # Request non-incremental logical size. Calculating it needs the layer file that
+    # we corrupted, forcing it to be redownloaded.
+    res = client.timeline_detail(tenant_id, timeline_id, include_non_incremental_logical_size=True)
 
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
 

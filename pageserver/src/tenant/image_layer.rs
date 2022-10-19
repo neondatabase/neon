@@ -163,7 +163,10 @@ impl Layer for ImageLayer {
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf)? {
+        if let Some(offset) = tree_reader
+            .get(&keybuf)
+            .context("could not read value from layer file")?
+        {
             let blob = file.block_cursor().read_blob(offset).with_context(|| {
                 format!(
                     "failed to read value from data file {} at offset {}",
@@ -180,8 +183,8 @@ impl Layer for ImageLayer {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
-        todo!();
+    fn iter(&self) -> Result<Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>>> {
+        bail!("iter() not implemented for ImageLayer");
     }
 
     fn delete(&self) -> Result<()> {

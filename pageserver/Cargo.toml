@@ -40,6 +40,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_with = "2.0"
 humantime-serde = "1.1.1"
+pin-project-lite = "0.2.7"
 
 pprof = { git = "https://github.com/neondatabase/pprof-rs.git", branch = "wallclock-profiling", features = ["flamegraph"], optional = true }
 

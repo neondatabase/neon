@@ -565,8 +565,6 @@ components:
 
         current_physical_size:
           type: integer
-        has_in_progress_downloads:
-          type: boolean
     TenantCreateInfo:
       type: object
       properties:
@@ -617,7 +615,6 @@ components:
         - tenant_id
         - last_record_lsn
         - disk_consistent_lsn
-        - awaits_download
       properties:
         timeline_id:
           type: string
@@ -651,6 +648,9 @@ components:
           type: integer
         current_physical_size_non_incremental:
           type: integer
+        remote_consistent_lsn:
+          type: string
+          format: hex
         wal_source_connstr:
           type: string
         last_received_msg_lsn:
@@ -658,8 +658,6 @@ components:
           format: hex
         last_received_msg_ts:
           type: integer
-        awaits_download:
-          type: boolean
 
         # These 'local' and 'remote' fields just duplicate some of the fields
         # above. They are kept for backwards-compatibility. They can be removed,

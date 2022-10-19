@@ -9,7 +9,7 @@
 //  custom protocol.
 //
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{Stream, StreamExt};
 use std::io;
@@ -420,7 +420,7 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         // Check that the timeline exists
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timeline = get_active_timeline(tenant_id, timeline_id).await?;
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -500,11 +500,9 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let timeline = tenant_mgr::get_tenant(tenant_id, true)?.create_empty_timeline(
-            timeline_id,
-            base_lsn,
-            pg_version,
-        )?;
+        let timeline = tenant_mgr::get_active_tenant(tenant_id)
+            .await?
+            .create_empty_timeline(timeline_id, base_lsn, pg_version)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -565,7 +563,7 @@ impl PageServerHandler {
     ) -> anyhow::Result<()> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timeline = get_active_timeline(tenant_id, timeline_id).await?;
         ensure!(timeline.get_last_record_lsn() == start_lsn);
 
         // TODO leave clean state on error. For now you can use detach to clean
@@ -674,7 +672,11 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest)?;
+        let exists = crate::tenant::retry_get_with_timeout(
+            || timeline.get_rel_exists(req.rel, lsn, req.latest),
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
@@ -691,7 +693,11 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest)?;
+        let n_blocks = crate::tenant::retry_get_with_timeout(
+            || timeline.get_rel_size(req.rel, lsn, req.latest),
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
@@ -708,8 +714,11 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let total_blocks =
-            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)?;
+        let total_blocks = crate::tenant::retry_get_with_timeout(
+            || timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest),
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
 
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -734,13 +743,19 @@ impl PageServerHandler {
         if rand::thread_rng().gen::<u8>() < 5 {
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
-        */
+         */
 
-        // FIXME: this profiling now happens at different place than it used to. The
-        // current profiling is based on a thread-local variable, so it doesn't work
-        // across awaits
-        let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
-        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
+        let page = crate::tenant::retry_get_with_timeout(
+            || {
+                // FIXME: this profiling now happens at different place than it used to. The
+                // current profiling is based on a thread-local variable, so it doesn't work
+                // across awaits
+                let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
+                timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)
+            },
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
@@ -758,7 +773,10 @@ impl PageServerHandler {
         full_backup: bool,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let tenant = tenant_mgr::get_active_tenant(tenant_id).await?;
+        let timeline = tenant
+            .get_timeline(timeline_id)
+            .ok_or_else(|| anyhow!("timeline {timeline_id} not found"))?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
@@ -900,7 +918,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let timeline_id = TimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenant_id))?;
-            let timeline = get_local_timeline(tenant_id, timeline_id)?;
+            let timeline = get_active_timeline(tenant_id, timeline_id).await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
@@ -1023,7 +1041,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+            let tenant = tenant_mgr::get_active_tenant(tenant_id).await?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
@@ -1067,8 +1085,17 @@ impl postgres_backend_async::Handler for PageServerHandler {
     }
 }
 
-fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
-    tenant_mgr::get_tenant(tenant_id, true).and_then(|tenant| tenant.get_timeline(timeline_id))
+async fn get_active_timeline(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<Arc<Timeline>> {
+    let tenant = tenant_mgr::get_active_tenant(tenant_id).await?;
+    tenant.get_timeline(timeline_id).with_context(|| {
+        format!(
+            "Timeline {} was not found for tenant {}",
+            timeline_id, tenant_id
+        )
+    })
 }
 
 ///

@@ -26,12 +26,10 @@ use crate::{
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
     tenant::{Timeline, WalReceiverInfo},
-    tenant_mgr,
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::id::TenantTimelineId;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
 
 /// Status of the connection.
@@ -131,18 +129,6 @@ pub async fn handle_walreceiver_connection(
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
-    connection_status.latest_connection_update = Utc::now().naive_utc();
-    connection_status.latest_wal_update = Utc::now().naive_utc();
-    connection_status.commit_lsn = Some(end_of_wal);
-    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
-        warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
-        return Ok(());
-    }
-
-    let tenant_id = timeline.tenant_id;
-    let timeline_id = timeline.timeline_id;
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
-
     //
     // Start streaming the WAL, from where we left off previously.
     //
@@ -240,7 +226,7 @@ pub async fn handle_walreceiver_connection(
 
                         walingest
                             .ingest_record(recdata, lsn, &mut modification, &mut decoded)
-                            .context("could not ingest record at {lsn}")?;
+                            .context(format!("could not ingest record at {lsn}"))?;
 
                         fail_point!("walreceiver-after-ingest");
 
@@ -291,19 +277,8 @@ pub async fn handle_walreceiver_connection(
         })?;
 
         if let Some(last_lsn) = status_update {
-            let remote_index = tenant.get_remote_index();
-            let timeline_remote_consistent_lsn = remote_index
-                .read()
-                .await
-                // here we either do not have this timeline in remote index
-                // or there were no checkpoints for it yet
-                .timeline_entry(&TenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                })
-                .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
-                // no checkpoint was uploaded
-                .unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn =
+                timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);

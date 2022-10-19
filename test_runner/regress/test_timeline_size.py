@@ -16,7 +16,9 @@ from fixtures.neon_fixtures import (
     PortDistributor,
     Postgres,
     VanillaPostgres,
+    assert_tenant_status,
     wait_for_last_flush_lsn,
+    wait_until,
 )
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size
@@ -232,6 +234,14 @@ def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
     # restart the pageserer to force calculating timeline's initial physical size
     env.pageserver.stop()
     env.pageserver.start()
+
+    # Wait for the tenant to be loaded
+    client = env.pageserver.http_client()
+    wait_until(
+        number_of_iterations=5,
+        interval=1,
+        func=lambda: assert_tenant_status(client, env.initial_tenant, "Active"),
+    )
 
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 

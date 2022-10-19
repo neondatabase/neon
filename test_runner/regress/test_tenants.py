@@ -226,7 +226,7 @@ def test_pageserver_with_empty_tenants(
 
     tenant_without_timelines_dir = env.initial_tenant
     log.info(
-        f"Tenant {tenant_without_timelines_dir} becomes broken: it abnormally looses tenants/ directory and is expected to be completely ignored when pageserver restarts"
+        f"Tenant {tenant_without_timelines_dir} becomes broken: it abnormally loses timelines/ directory"
     )
     shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
 
@@ -273,6 +273,6 @@ def test_pageserver_with_empty_tenants(
     assert (
         loaded_tenant
     ), f"Tenant {tenant_with_empty_timelines_dir} should be loaded as the only one with tenants/ directory"
-    assert loaded_tenant["state"] == {
-        "Active": {"background_jobs_running": False}
-    }, "Empty tenant should be loaded and ready for timeline creation"
+    assert (
+        loaded_tenant["state"] == "Active"
+    ), "Empty tenant should be loaded and ready for timeline creation"

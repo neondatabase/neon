@@ -224,7 +224,6 @@ impl Layer for DeltaLayer {
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
-        ensure!(lsn_range.start >= self.lsn_range.start);
         let mut need_image = true;
 
         ensure!(self.key_range.contains(&key));
@@ -244,19 +243,21 @@ impl Layer for DeltaLayer {
 
             let mut offsets: Vec<(Lsn, u64)> = Vec::new();
 
-            tree_reader.visit(&search_key.0, VisitDirection::Backwards, |key, value| {
-                let blob_ref = BlobRef(value);
-                if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
-                    return false;
-                }
-                let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                if entry_lsn < lsn_range.start {
-                    return false;
-                }
-                offsets.push((entry_lsn, blob_ref.pos()));
+            tree_reader
+                .visit(&search_key.0, VisitDirection::Backwards, |key, value| {
+                    let blob_ref = BlobRef(value);
+                    if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
+                        return false;
+                    }
+                    let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                    if entry_lsn < lsn_range.start {
+                        return false;
+                    }
+                    offsets.push((entry_lsn, blob_ref.pos()));
 
-                !blob_ref.will_init()
-            })?;
+                    !blob_ref.will_init()
+                })
+                .context("could not read value from layer file")?;
 
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
             let mut cursor = file.block_cursor();
@@ -302,28 +303,19 @@ impl Layer for DeltaLayer {
         }
     }
 
-    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
-        let inner = match self.load() {
-            Ok(inner) => inner,
-            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
-        };
-
-        match DeltaValueIter::new(inner) {
-            Ok(iter) => Box::new(iter),
-            Err(err) => Box::new(std::iter::once(Err(err))),
-        }
+    fn iter<'a>(
+        &'a self,
+    ) -> Result<Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a>> {
+        let inner = self.load()?;
+        Ok(Box::new(DeltaValueIter::new(inner)?))
     }
 
-    fn key_iter<'a>(&'a self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'a> {
-        let inner = match self.load() {
-            Ok(inner) => inner,
-            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
-        };
+    fn key_iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'a>> {
+        let inner = self.load()?;
 
-        match DeltaKeyIter::new(inner) {
-            Ok(iter) => Box::new(iter),
-            Err(e) => panic!("Layer index is corrupted: {e:?}"),
-        }
+        Ok(Box::new(
+            DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
+        ))
     }
 
     fn delete(&self) -> Result<()> {

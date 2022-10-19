@@ -8,6 +8,9 @@ use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::tenant::remote_layer::RemoteLayer;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -137,12 +140,13 @@ pub trait Layer: Send + Sync {
     fn is_in_memory(&self) -> bool;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
+    #[allow(clippy::type_complexity)]
+    fn iter(&self) -> Result<Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>>;
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
-        panic!("Not implemented")
+    fn key_iter(&self) -> Result<Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_>> {
+        anyhow::bail!("Not implemented")
     }
 
     /// Permanently remove this layer from disk.
@@ -150,4 +154,20 @@ pub trait Layer: Send + Sync {
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
+
+    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
+        None
+    }
+
+    fn is_remote_layer(&self) -> bool {
+        false
+    }
+}
+
+pub fn downcast_remote_layer(layer: &Arc<dyn Layer>) -> Option<std::sync::Arc<RemoteLayer>> {
+    if layer.is_remote_layer() {
+        Arc::clone(layer).downcast_remote_layer()
+    } else {
+        None
+    }
 }

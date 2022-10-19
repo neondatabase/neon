@@ -9,9 +9,9 @@
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
-use crate::tenant::Timeline;
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::walrecord::NeonWalRecord;
-use anyhow::{bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, Bytes};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -88,8 +88,10 @@ impl Timeline {
         blknum: BlockNumber,
         lsn: Lsn,
         latest: bool,
-    ) -> Result<Bytes> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    ) -> Result<Bytes, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(anyhow!("invalid relnode").into());
+        }
 
         let nblocks = self.get_rel_size(tag, lsn, latest)?;
         if blknum >= nblocks {
@@ -105,7 +107,13 @@ impl Timeline {
     }
 
     // Get size of a database in blocks
-    pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn, latest: bool) -> Result<usize> {
+    pub fn get_db_size(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        lsn: Lsn,
+        latest: bool,
+    ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
 
         let rels = self.list_rels(spcnode, dbnode, lsn)?;
@@ -118,8 +126,15 @@ impl Timeline {
     }
 
     /// Get size of a relation file
-    pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn, latest: bool) -> Result<BlockNumber> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    pub fn get_rel_size(
+        &self,
+        tag: RelTag,
+        lsn: Lsn,
+        latest: bool,
+    ) -> Result<BlockNumber, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(anyhow!("invalid relnode").into());
+        }
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
             return Ok(nblocks);
@@ -153,8 +168,15 @@ impl Timeline {
     }
 
     /// Does relation exist?
-    pub fn get_rel_exists(&self, tag: RelTag, lsn: Lsn, _latest: bool) -> Result<bool> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    pub fn get_rel_exists(
+        &self,
+        tag: RelTag,
+        lsn: Lsn,
+        _latest: bool,
+    ) -> Result<bool, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(anyhow!("invalid relnode").into());
+        }
 
         // first try to lookup relation in cache
         if let Some(_nblocks) = self.get_cached_rel_size(&tag, lsn) {
@@ -163,7 +185,7 @@ impl Timeline {
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = self.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf)?;
+        let dir = RelDirectory::des(&buf).context("deserialization failure")?;
 
         let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
 
@@ -171,11 +193,16 @@ impl Timeline {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
-    pub fn list_rels(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<HashSet<RelTag>> {
+    pub fn list_rels(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        lsn: Lsn,
+    ) -> Result<HashSet<RelTag>, PageReconstructError> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = self.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf)?;
+        let dir = RelDirectory::des(&buf).context("deserialization failure")?;
 
         let rels: HashSet<RelTag> =
             HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
@@ -195,7 +222,7 @@ impl Timeline {
         segno: u32,
         blknum: BlockNumber,
         lsn: Lsn,
-    ) -> Result<Bytes> {
+    ) -> Result<Bytes, PageReconstructError> {
         let key = slru_block_to_key(kind, segno, blknum);
         self.get(key, lsn)
     }
@@ -206,18 +233,23 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         lsn: Lsn,
-    ) -> Result<BlockNumber> {
+    ) -> Result<BlockNumber, PageReconstructError> {
         let key = slru_segment_size_to_key(kind, segno);
         let mut buf = self.get(key, lsn)?;
         Ok(buf.get_u32_le())
     }
 
     /// Get size of an SLRU segment
-    pub fn get_slru_segment_exists(&self, kind: SlruKind, segno: u32, lsn: Lsn) -> Result<bool> {
+    pub fn get_slru_segment_exists(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+    ) -> Result<bool, PageReconstructError> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
         let buf = self.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf)?;
+        let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
 
         let exists = dir.segments.get(&segno).is_some();
         Ok(exists)
@@ -230,7 +262,10 @@ impl Timeline {
     /// so it's not well defined which LSN you get if there were multiple commits
     /// "in flight" at that point in time.
     ///
-    pub fn find_lsn_for_timestamp(&self, search_timestamp: TimestampTz) -> Result<LsnForTimestamp> {
+    pub fn find_lsn_for_timestamp(
+        &self,
+        search_timestamp: TimestampTz,
+    ) -> Result<LsnForTimestamp, PageReconstructError> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         let min_lsn = *gc_cutoff_lsn_guard;
         let max_lsn = self.get_last_record_lsn();
@@ -299,7 +334,7 @@ impl Timeline {
         probe_lsn: Lsn,
         found_smaller: &mut bool,
         found_larger: &mut bool,
-    ) -> Result<bool> {
+    ) -> Result<bool, PageReconstructError> {
         for segno in self.list_slru_segments(SlruKind::Clog, probe_lsn)? {
             let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, probe_lsn)?;
             for blknum in (0..nblocks).rev() {
@@ -324,50 +359,66 @@ impl Timeline {
     }
 
     /// Get a list of SLRU segments
-    pub fn list_slru_segments(&self, kind: SlruKind, lsn: Lsn) -> Result<HashSet<u32>> {
+    pub fn list_slru_segments(
+        &self,
+        kind: SlruKind,
+        lsn: Lsn,
+    ) -> Result<HashSet<u32>, PageReconstructError> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
         let buf = self.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf)?;
+        let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
 
         Ok(dir.segments)
     }
 
-    pub fn get_relmap_file(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_relmap_file(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        lsn: Lsn,
+    ) -> Result<Bytes, PageReconstructError> {
         let key = relmap_file_key(spcnode, dbnode);
 
         let buf = self.get(key, lsn)?;
         Ok(buf)
     }
 
-    pub fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>> {
+    pub fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>, PageReconstructError> {
         // fetch directory entry
         let buf = self.get(DBDIR_KEY, lsn)?;
-        let dir = DbDirectory::des(&buf)?;
+        let dir = DbDirectory::des(&buf).context("deserialization failure")?;
 
         Ok(dir.dbdirs)
     }
 
-    pub fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_twophase_file(
+        &self,
+        xid: TransactionId,
+        lsn: Lsn,
+    ) -> Result<Bytes, PageReconstructError> {
         let key = twophase_file_key(xid);
         let buf = self.get(key, lsn)?;
         Ok(buf)
     }
 
-    pub fn list_twophase_files(&self, lsn: Lsn) -> Result<HashSet<TransactionId>> {
+    pub fn list_twophase_files(
+        &self,
+        lsn: Lsn,
+    ) -> Result<HashSet<TransactionId>, PageReconstructError> {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
-        let dir = TwoPhaseDirectory::des(&buf)?;
+        let dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
 
         Ok(dir.xids)
     }
 
-    pub fn get_control_file(&self, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_control_file(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
         self.get(CONTROLFILE_KEY, lsn)
     }
 
-    pub fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
         self.get(CHECKPOINT_KEY, lsn)
     }
 
@@ -376,16 +427,19 @@ impl Timeline {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
-    pub fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<u64> {
+    pub async fn get_current_logical_size_non_incremental(
+        &self,
+        lsn: Lsn,
+    ) -> Result<u64, PageReconstructError> {
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let buf = self.get_download(DBDIR_KEY, lsn).await?;
+        let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
             for rel in self.list_rels(*spcnode, *dbnode, lsn)? {
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self.get(relsize_key, lsn)?;
+                let mut buf = self.get_download(relsize_key, lsn).await?;
                 let relsize = buf.get_u32_le();
 
                 total_size += relsize as u64;
@@ -398,7 +452,9 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    pub fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace> {
+    ///
+    /// Note: this downloads layers from remote storage as needed
+    pub async fn collect_keyspace(&self, lsn: Lsn) -> anyhow::Result<KeySpace> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -406,8 +462,8 @@ impl Timeline {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let buf = self.get_download(DBDIR_KEY, lsn).await?;
+        let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
@@ -423,7 +479,7 @@ impl Timeline {
             rels.sort_unstable();
             for rel in rels {
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self.get(relsize_key, lsn)?;
+                let mut buf = self.get_download(relsize_key, lsn).await?;
                 let relsize = buf.get_u32_le();
 
                 result.add_range(rel_block_to_key(rel, 0)..rel_block_to_key(rel, relsize));
@@ -439,13 +495,13 @@ impl Timeline {
         ] {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
-            let buf = self.get(slrudir_key, lsn)?;
-            let dir = SlruSegmentDirectory::des(&buf)?;
+            let buf = self.get_download(slrudir_key, lsn).await?;
+            let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
                 let segsize_key = slru_segment_size_to_key(kind, segno);
-                let mut buf = self.get(segsize_key, lsn)?;
+                let mut buf = self.get_download(segsize_key, lsn).await?;
                 let segsize = buf.get_u32_le();
 
                 result.add_range(
@@ -457,8 +513,8 @@ impl Timeline {
 
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
-        let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
-        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
+        let buf = self.get_download(TWOPHASEDIR_KEY, lsn).await?;
+        let twophase_dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
         for xid in xids {
@@ -984,7 +1040,7 @@ impl<'a> DatadirModification<'a> {
 
     // Internal helper functions to batch the modifications
 
-    fn get(&self, key: Key) -> Result<Bytes> {
+    fn get(&self, key: Key) -> Result<Bytes, PageReconstructError> {
         // Have we already updated the same key? Read the pending updated
         // version in that case.
         //
@@ -999,7 +1055,7 @@ impl<'a> DatadirModification<'a> {
                 // work directly with Images, and we never need to read actual
                 // data pages. We could handle this if we had to, by calling
                 // the walredo manager, but let's keep it simple for now.
-                bail!("unexpected pending WAL record");
+                return Err(anyhow!("unexpected pending WAL record").into());
             }
         } else {
             let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
@@ -1415,16 +1471,6 @@ pub fn create_test_timeline(
 mod tests {
     //use super::repo_harness::*;
     //use super::*;
-
-    /*
-        fn assert_current_logical_size<R: Repository>(timeline: &DatadirTimeline<R>, lsn: Lsn) {
-            let incremental = timeline.get_current_logical_size();
-            let non_incremental = timeline
-                .get_current_logical_size_non_incremental(lsn)
-                .unwrap();
-            assert_eq!(incremental, non_incremental);
-        }
-    */
 
     /*
     ///

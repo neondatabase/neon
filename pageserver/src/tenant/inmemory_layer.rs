@@ -12,7 +12,7 @@ use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -135,8 +135,10 @@ impl Layer for InMemoryLayer {
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos)?;
-                let value = Value::des(&buf)?;
+                let buf = reader
+                    .read_blob(*pos)
+                    .context("could not read value from ephemeral file")?;
+                let value = Value::des(&buf).context("deserialize error")?;
                 match value {
                     Value::Image(img) => {
                         reconstruct_state.img = Some((*entry_lsn, img));
@@ -166,8 +168,8 @@ impl Layer for InMemoryLayer {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
-        todo!();
+    fn iter(&self) -> Result<Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>>> {
+        bail!("iter() not implemented for InMemoryLayer");
     }
 
     /// Nothing to do here. When you drop the last reference to the layer, it will

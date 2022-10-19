@@ -271,9 +271,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         })
         .transpose()
         .context("Failed to init generic remote storage")?;
-    let remote_index = {
+    {
         let _rt_guard = BACKGROUND_RUNTIME.enter();
-        tenant_mgr::init_tenant_mgr(conf, remote_storage.clone())?
+        tenant_mgr::init_tenant_mgr(conf, remote_storage.as_ref())?
     };
 
     // Spawn all HTTP related tasks in the MGMT_REQUEST_RUNTIME.
@@ -283,7 +283,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, auth.clone(), remote_index, remote_storage)?;
+        let router = http::make_router(conf, auth.clone(), remote_storage)?;
         let service =
             utils::http::RouterService::new(router.build().map_err(|err| anyhow!(err))?).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?

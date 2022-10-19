@@ -11,7 +11,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -53,9 +52,9 @@ def test_remote_storage_backup_and_restore(
     )
 
     data_id = 1
-    data_secret = "very secret secret"
+    data = "just some data"
 
-    ##### First start, insert secret data and upload it to the remote storage
+    ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
@@ -71,8 +70,8 @@ def test_remote_storage_backup_and_restore(
         with pg.cursor() as cur:
             cur.execute(
                 f"""
-                CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
-                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
+                CREATE TABLE t{checkpoint_number}(id int primary key, data text);
+                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data}|{checkpoint_number}');
             """
             )
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -100,45 +99,60 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # Introduce failpoint in download
+    #
+    # FIXME: Now that we do on-demand download, this failpoint is only hit by compaction
+    # that runs in the background. It doesn't prevent the tenant from being attached.
     pageserver_http.configure_failpoints(("remote-storage-download-pre-rename", "return"))
 
     client.tenant_attach(tenant_id)
+
+    detail = client.tenant_status(tenant_id)
+    log.info("Tenant status with active failpoint: %s", detail)
 
     # is there a better way to assert that failpoint triggered?
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
-    with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
+
+    # FIXME: we used to keep retrying the initial download on failure.
+    # (We need to download some layers to calculate the logical size.)
+    # Now we mark the timeline as broken, instead.
+    # with pytest.raises(Exception, match="attach is already in progress"):
+    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists"):
         client.tenant_attach(tenant_id)
 
     tenant_status = client.tenant_status(tenant_id)
     log.info("Tenant status with active failpoint: %s", tenant_status)
-    assert tenant_status["has_in_progress_downloads"] is True
+    # assert tenant_status["has_in_progress_downloads"] is True
 
     # trigger temporary download files removal
     env.pageserver.stop()
+    dir_to_clear = Path(env.repo_dir) / "tenants"
+    shutil.rmtree(dir_to_clear)
+    os.mkdir(dir_to_clear)
     env.pageserver.start()
 
     client.tenant_attach(tenant_id)
 
-    log.info("waiting for timeline redownload")
-    wait_until(
-        number_of_iterations=20,
-        interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
-    )
+    def ll():
+        tenant_state = client.tenant_status(tenant_id)["state"]
+        log.info(f"STATUS: {tenant_state}")
+        if tenant_state != "Active":
+            raise Exception(f"state is {tenant_state}")
+
+    log.info("waiting for tenant attach to finish")
+    wait_until(number_of_iterations=20, interval=1, func=ll)
 
     detail = client.timeline_detail(tenant_id, timeline_id)
     log.info("Timeline detail after attach completed: %s", detail)
     assert (
         Lsn(detail["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
-    assert not detail["awaits_download"]
 
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
             assert (
-                query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
-                == f"{data_secret}|{checkpoint_number}"
+                query_scalar(cur, f"SELECT data FROM t{checkpoint_number} WHERE id = {data_id};")
+                == f"{data}|{checkpoint_number}"
             )

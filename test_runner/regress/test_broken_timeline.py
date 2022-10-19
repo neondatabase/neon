@@ -70,22 +70,18 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # But all others are broken
 
     # First timeline would not get loaded into pageserver due to corrupt metadata file
-    with pytest.raises(
-        Exception, match=f"Timeline {timeline1} was not found for tenant {tenant1}"
-    ) as err:
+    with pytest.raises(Exception, match="tenant is in broken state") as err:
         pg1.start()
     log.info(f"compute startup failed eagerly for timeline with corrupt metadata: {err}")
 
-    # Second timeline has no ancestors, only the metadata file and no layer files
-    # We don't have the remote storage enabled, which means timeline is in an incorrect state,
-    # it's not loaded at all
-    with pytest.raises(
-        Exception, match=f"Timeline {timeline2} was not found for tenant {tenant2}"
-    ) as err:
+    # Second timeline has no ancestors, only the metadata file and no layer files locally,
+    # and we don't have the remote storage enabled. It is loaded into memory, but getting
+    # the basebackup from it will fail.
+    with pytest.raises(Exception, match=".*extracting base backup failed") as err:
         pg2.start()
     log.info(f"compute startup failed eagerly for timeline with corrupt metadata: {err}")
 
-    # Yet other timelines will fail when their layers will be queried during basebackup: we don't check layer file contents on startup, when loading the timeline
+    # The other timelines will also fail when their layers are queried during basebackup
     for n in range(3, 4):
         (bad_tenant, bad_timeline, pg) = tenant_timelines[n]
         with pytest.raises(Exception, match="extracting base backup failed") as err:

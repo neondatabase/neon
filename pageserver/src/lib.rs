@@ -22,10 +22,7 @@ pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
 
-use std::collections::HashMap;
-
 use tracing::info;
-use utils::id::{TenantId, TimelineId};
 
 use crate::task_mgr::TaskKind;
 
@@ -71,7 +68,7 @@ pub async fn shutdown_pageserver(exit_code: i32) {
     //
     // FIXME: Does this wait for the sync tasks to finish syncing what's queued up?
     // Should it?
-    task_mgr::shutdown_tasks(Some(TaskKind::StorageSync), None, None).await;
+    task_mgr::shutdown_tasks(Some(TaskKind::RemoteUploadTask), None, None).await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
@@ -107,23 +104,16 @@ fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds
     }
 }
 
-/// A newtype to store arbitrary data grouped by tenant and timeline ids.
-/// One could use [`utils::id::TenantTimelineId`] for grouping, but that would
-/// not include the cases where a certain tenant has zero timelines.
-/// This is sometimes important: a tenant could be registered during initial load from FS,
-/// even if he has no timelines on disk.
-#[derive(Debug)]
-pub struct TenantTimelineValues<T>(HashMap<TenantId, HashMap<TimelineId, T>>);
-
-impl<T> TenantTimelineValues<T> {
-    fn new() -> Self {
-        Self(HashMap::new())
-    }
-}
-
 /// A suffix to be used during file sync from the remote storage,
 /// to ensure that we do not leave corrupted files that pretend to be layers.
 const TEMP_FILE_SUFFIX: &str = "___temp";
+
+pub fn is_temporary(path: &std::path::Path) -> bool {
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().ends_with(TEMP_FILE_SUFFIX),
+        None => false,
+    }
+}
 
 #[cfg(test)]
 mod backoff_defaults_tests {

@@ -197,8 +197,11 @@ pub enum TaskKind {
     // Task that flushes frozen in-memory layers to disk
     LayerFlushTask,
 
-    // Task that manages the remote upload queue
-    StorageSync,
+    // Task that uploads a file to remote storage
+    RemoteUploadTask,
+
+    // Task that downloads a file from remote storage
+    RemoteDownloadTask,
 
     // task that handles the initial downloading of all tenants
     InitialLoad,
@@ -430,6 +433,10 @@ pub async fn shutdown_tasks(
             //  * It was shut down concurrently and already exited
         }
     }
+    info!(
+        "shutdown_tasks({:?}, {:?}, {:?}) completed",
+        kind, tenant_id, timeline_id
+    );
 }
 
 pub fn current_task_kind() -> Option<TaskKind> {

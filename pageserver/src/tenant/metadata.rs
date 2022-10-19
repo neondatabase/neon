@@ -228,6 +228,26 @@ impl TimelineMetadata {
     }
 }
 
+pub fn load_metadata(
+    conf: &'static PageServerConf,
+    timeline_id: TimelineId,
+    tenant_id: TenantId,
+) -> anyhow::Result<TimelineMetadata> {
+    let metadata_path = conf.metadata_path(timeline_id, tenant_id);
+    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
+        format!(
+            "Failed to read metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })?;
+    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
+        format!(
+            "Failed to parse metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })
+}
+
 /// Save timeline metadata to file
 pub fn save_metadata(
     conf: &'static PageServerConf,
@@ -261,6 +281,25 @@ pub fn save_metadata(
         timeline_dir.sync_all()?;
     }
 
+    Ok(())
+}
+
+/// Delete the metadata file.
+pub fn delete_metadata(
+    conf: &'static PageServerConf,
+    timelineid: TimelineId,
+    tenantid: TenantId,
+) -> anyhow::Result<()> {
+    let path = conf.metadata_path(timelineid, tenantid);
+    std::fs::remove_file(&path)?;
+
+    // fsync the parent directory to ensure the removal is durable
+    let timeline_dir = File::open(
+        &path
+            .parent()
+            .expect("Metadata should always have a parent dir"),
+    )?;
+    timeline_dir.sync_all()?;
     Ok(())
 }
 
