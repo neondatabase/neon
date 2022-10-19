@@ -36,8 +36,9 @@
 //! mapping is automatically removed and the slot is marked free.
 //!
 
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 use std::{
-    collections::{hash_map::Entry, HashMap},
     convert::TryInto,
     sync::{
         atomic::{AtomicU8, AtomicUsize, Ordering},
@@ -168,18 +169,11 @@ impl Slot {
 pub struct PageCache {
     /// This contains the mapping from the cache key to buffer slot that currently
     /// contains the page, if any.
-    ///
-    /// TODO: This is protected by a single lock. If that becomes a bottleneck,
-    /// this HashMap can be replaced with a more concurrent version, there are
-    /// plenty of such crates around.
-    ///
-    /// If you add support for caching different kinds of objects, each object kind
-    /// can have a separate mapping map, next to this field.
-    materialized_page_map: RwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
+    materialized_page_map: DashMap<MaterializedPageHashKey, Vec<Version>>,
 
-    ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
+    ephemeral_page_map: DashMap<(u64, u32), usize>,
 
-    immutable_page_map: RwLock<HashMap<(u64, u32), usize>>,
+    immutable_page_map: DashMap<(u64, u32), usize>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -616,7 +610,7 @@ impl PageCache {
     fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
-                let map = self.materialized_page_map.read().unwrap();
+                let map = &self.materialized_page_map;
                 let versions = map.get(hash_key)?;
 
                 let version_idx = match versions.binary_search_by_key(lsn, |v| v.lsn) {
@@ -629,11 +623,11 @@ impl PageCache {
                 Some(version.slot_idx)
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
-                let map = self.ephemeral_page_map.read().unwrap();
+                let map = &self.ephemeral_page_map;
                 Some(*map.get(&(*file_id, *blkno))?)
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let map = self.immutable_page_map.read().unwrap();
+                let map = &self.immutable_page_map;
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -646,7 +640,7 @@ impl PageCache {
     fn search_mapping_for_write(&self, key: &CacheKey) -> Option<usize> {
         match key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
-                let map = self.materialized_page_map.read().unwrap();
+                let map = &self.materialized_page_map;
                 let versions = map.get(hash_key)?;
 
                 if let Ok(version_idx) = versions.binary_search_by_key(lsn, |v| v.lsn) {
@@ -656,11 +650,11 @@ impl PageCache {
                 }
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
-                let map = self.ephemeral_page_map.read().unwrap();
+                let map = &self.ephemeral_page_map;
                 Some(*map.get(&(*file_id, *blkno))?)
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let map = self.immutable_page_map.read().unwrap();
+                let map = &self.immutable_page_map;
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -675,7 +669,7 @@ impl PageCache {
                 hash_key: old_hash_key,
                 lsn: old_lsn,
             } => {
-                let mut map = self.materialized_page_map.write().unwrap();
+                let map = &self.materialized_page_map;
                 if let Entry::Occupied(mut old_entry) = map.entry(old_hash_key.clone()) {
                     let versions = old_entry.get_mut();
 
@@ -690,12 +684,12 @@ impl PageCache {
                 }
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
-                let mut map = self.ephemeral_page_map.write().unwrap();
+                let map = &self.ephemeral_page_map;
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
+                let map = &self.immutable_page_map;
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
@@ -713,8 +707,8 @@ impl PageCache {
                 hash_key: new_key,
                 lsn: new_lsn,
             } => {
-                let mut map = self.materialized_page_map.write().unwrap();
-                let versions = map.entry(new_key.clone()).or_default();
+                let map = &self.materialized_page_map;
+                let mut versions = map.entry(new_key.clone()).or_default();
                 match versions.binary_search_by_key(new_lsn, |v| v.lsn) {
                     Ok(version_idx) => Some(versions[version_idx].slot_idx),
                     Err(version_idx) => {
@@ -730,7 +724,7 @@ impl PageCache {
                 }
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
-                let mut map = self.ephemeral_page_map.write().unwrap();
+                let map = &self.ephemeral_page_map;
                 match map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
@@ -740,7 +734,7 @@ impl PageCache {
                 }
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
+                let map = &self.immutable_page_map;
                 match map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
