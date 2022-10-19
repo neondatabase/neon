@@ -159,7 +159,7 @@ def profiling_supported():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    return "profiling:true" in res.stdout
+    return "profiling" in res.stdout
 
 
 def shareable_scope(fixture_name, config) -> Literal["session", "function"]:
