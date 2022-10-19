@@ -1,7 +1,9 @@
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::Result;
 use log::{info, log_enabled, warn, Level};
+use postgres::config::Config;
 use postgres::{Client, NoTls};
 use serde::Deserialize;
 
@@ -115,8 +117,8 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     if existing_roles.iter().any(|r| r.name == op.name) {
                         let query: String = format!(
                             "ALTER ROLE {} RENAME TO {}",
-                            op.name.quote(),
-                            new_name.quote()
+                            op.name.pg_quote(),
+                            new_name.pg_quote()
                         );
 
                         warn!("renaming role '{}' to '{}'", op.name, new_name);
@@ -162,7 +164,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             }
 
             if update_role {
-                let mut query: String = format!("ALTER ROLE {} ", name.quote());
+                let mut query: String = format!("ALTER ROLE {} ", name.pg_quote());
                 info_print!(" -> update");
 
                 query.push_str(&role.to_pg_options());
@@ -170,7 +172,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             }
         } else {
             info!("role name: '{}'", &name);
-            let mut query: String = format!("CREATE ROLE {} ", name.quote());
+            let mut query: String = format!("CREATE ROLE {} ", name.pg_quote());
             info!("role create query: '{}'", &query);
             info_print!(" -> create");
 
@@ -179,7 +181,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
             let grant_query = format!(
                 "GRANT pg_read_all_data, pg_write_all_data TO {}",
-                name.quote()
+                name.pg_quote()
             );
             xact.execute(grant_query.as_str(), &[])?;
             info!("role grant query: '{}'", &grant_query);
@@ -215,7 +217,7 @@ pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<
             // We do not check either role exists or not,
             // Postgres will take care of it for us
             if op.action == "delete_role" {
-                let query: String = format!("DROP ROLE IF EXISTS {}", &op.name.quote());
+                let query: String = format!("DROP ROLE IF EXISTS {}", &op.name.pg_quote());
 
                 warn!("deleting role '{}'", &op.name);
                 xact.execute(query.as_str(), &[])?;
@@ -230,17 +232,16 @@ pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<
 fn reassign_owned_objects(node: &ComputeNode, role_name: &PgIdent) -> Result<()> {
     for db in &node.spec.cluster.databases {
         if db.owner != *role_name {
-            let mut connstr = node.connstr.clone();
-            // database name is always the last and the only component of the path
-            connstr.set_path(&db.name);
+            let mut conf = Config::from_str(node.connstr.as_str())?;
+            conf.dbname(&db.name);
 
-            let mut client = Client::connect(connstr.as_str(), NoTls)?;
+            let mut client = conf.connect(NoTls)?;
 
             // This will reassign all dependent objects to the db owner
             let reassign_query = format!(
                 "REASSIGN OWNED BY {} TO {}",
-                role_name.quote(),
-                db.owner.quote()
+                role_name.pg_quote(),
+                db.owner.pg_quote()
             );
             info!(
                 "reassigning objects owned by '{}' in db '{}' to '{}'",
@@ -249,7 +250,7 @@ fn reassign_owned_objects(node: &ComputeNode, role_name: &PgIdent) -> Result<()>
             client.simple_query(&reassign_query)?;
 
             // This now will only drop privileges of the role
-            let drop_query = format!("DROP OWNED BY {}", role_name.quote());
+            let drop_query = format!("DROP OWNED BY {}", role_name.pg_quote());
             client.simple_query(&drop_query)?;
         }
     }
@@ -279,7 +280,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 // We do not check either DB exists or not,
                 // Postgres will take care of it for us
                 "delete_db" => {
-                    let query: String = format!("DROP DATABASE IF EXISTS {}", &op.name.quote());
+                    let query: String = format!("DROP DATABASE IF EXISTS {}", &op.name.pg_quote());
 
                     warn!("deleting database '{}'", &op.name);
                     client.execute(query.as_str(), &[])?;
@@ -291,8 +292,8 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     if existing_dbs.iter().any(|r| r.name == op.name) {
                         let query: String = format!(
                             "ALTER DATABASE {} RENAME TO {}",
-                            op.name.quote(),
-                            new_name.quote()
+                            op.name.pg_quote(),
+                            new_name.pg_quote()
                         );
 
                         warn!("renaming database '{}' to '{}'", op.name, new_name);
@@ -320,7 +321,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             // XXX: db owner name is returned as quoted string from Postgres,
             // when quoting is needed.
             let new_owner = if r.owner.starts_with('"') {
-                db.owner.quote()
+                db.owner.pg_quote()
             } else {
                 db.owner.clone()
             };
@@ -328,15 +329,15 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             if new_owner != r.owner {
                 let query: String = format!(
                     "ALTER DATABASE {} OWNER TO {}",
-                    name.quote(),
-                    db.owner.quote()
+                    name.pg_quote(),
+                    db.owner.pg_quote()
                 );
                 info_print!(" -> update");
 
                 client.execute(query.as_str(), &[])?;
             }
         } else {
-            let mut query: String = format!("CREATE DATABASE {} ", name.quote());
+            let mut query: String = format!("CREATE DATABASE {} ", name.pg_quote());
             info_print!(" -> create");
 
             query.push_str(&db.to_pg_options());
@@ -366,7 +367,7 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
         .cluster
         .roles
         .iter()
-        .map(|r| r.name.quote())
+        .map(|r| r.name.pg_quote())
         .collect::<Vec<_>>();
 
     for db in &spec.cluster.databases {
@@ -374,7 +375,7 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
 
         let query: String = format!(
             "GRANT CREATE ON DATABASE {} TO {}",
-            dbname.quote(),
+            dbname.pg_quote(),
             roles.join(", ")
         );
         info!("grant query {}", &query);
@@ -385,12 +386,11 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
     // Do some per-database access adjustments. We'd better do this at db creation time,
     // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants
     // atomically.
-    let mut db_connstr = node.connstr.clone();
     for db in &node.spec.cluster.databases {
-        // database name is always the last and the only component of the path
-        db_connstr.set_path(&db.name);
+        let mut conf = Config::from_str(node.connstr.as_str())?;
+        conf.dbname(&db.name);
 
-        let mut db_client = Client::connect(db_connstr.as_str(), NoTls)?;
+        let mut db_client = conf.connect(NoTls)?;
 
         // This will only change ownership on the schema itself, not the objects
         // inside it. Without it owner of the `public` schema will be `cloud_admin`
@@ -419,7 +419,7 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
                     END IF;\n\
                 END\n\
             $$;",
-            db.owner.quote()
+            db.owner.pg_quote()
         );
         db_client.simple_query(&alter_query)?;
 
