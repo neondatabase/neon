@@ -44,9 +44,16 @@ pub enum NeonWalRecord {
         members: Vec<MultiXactMember>,
     },
     /// Mark transaction ID as committed with the given LSN on a CsnLog page
-    CsnLogSetCommitted { xids: Vec<TransactionId>, region: u32, lsn: u64 },
+    CsnLogSetCommitted {
+        xids: Vec<TransactionId>,
+        region: u32,
+        lsn: u64,
+    },
     /// Mark transaction ID as aborted on a CsnLog page
-    CsnLogSetAborted { xids: Vec<TransactionId>, region: u32},
+    CsnLogSetAborted {
+        xids: Vec<TransactionId>,
+        region: u32,
+    },
 }
 
 impl NeonWalRecord {
