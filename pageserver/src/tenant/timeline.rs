@@ -1961,7 +1961,7 @@ impl Timeline {
             write_guard.store_and_unlock(new_gc_cutoff).wait();
 
             // Persist metadata file
-            self.update_metadata_file(self.disk_consistent_lsn.load(), HashSet::new())?;
+            self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())?;
         }
 
         info!("GC starting");
