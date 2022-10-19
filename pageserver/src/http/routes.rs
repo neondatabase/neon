@@ -781,11 +781,6 @@ async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>
 }
 
 // Run GC immediately on given timeline.
-// FIXME: This is just for tests. See test_runner/regress/test_gc.py.
-// This probably should require special authentication or a global flag to
-// enable, I don't think we want to or need to allow regular clients to invoke
-// GC.
-//     @hllinnaka in commits ec44f4b29, 3aca717f3
 #[cfg(feature = "testing")]
 async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
@@ -811,9 +806,6 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
 }
 
 // Run compaction immediately on given timeline.
-// FIXME This is just for tests. Don't expect this to be exposed to
-// the users or the api.
-//     @dhammika in commit a0781f229
 #[cfg(feature = "testing")]
 async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
