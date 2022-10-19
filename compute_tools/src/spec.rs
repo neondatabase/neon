@@ -1,7 +1,9 @@
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::Result;
 use log::{info, log_enabled, warn, Level};
+use postgres::config::Config;
 use postgres::{Client, NoTls};
 use serde::Deserialize;
 
@@ -230,11 +232,10 @@ pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<
 fn reassign_owned_objects(node: &ComputeNode, role_name: &PgIdent) -> Result<()> {
     for db in &node.spec.cluster.databases {
         if db.owner != *role_name {
-            let mut connstr = node.connstr.clone();
-            // database name is always the last and the only component of the path
-            connstr.set_path(&db.name.url_encode());
+            let mut conf = Config::from_str(node.connstr.as_str())?;
+            conf.dbname(&db.name);
 
-            let mut client = Client::connect(connstr.as_str(), NoTls)?;
+            let mut client = conf.connect(NoTls)?;
 
             // This will reassign all dependent objects to the db owner
             let reassign_query = format!(
@@ -389,12 +390,11 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
     // Do some per-database access adjustments. We'd better do this at db creation time,
     // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants
     // atomically.
-    let mut db_connstr = node.connstr.clone();
     for db in &node.spec.cluster.databases {
-        // database name is always the last and the only component of the path
-        db_connstr.set_path(&db.name.url_encode());
+        let mut conf = Config::from_str(node.connstr.as_str())?;
+        conf.dbname(&db.name);
 
-        let mut db_client = Client::connect(db_connstr.as_str(), NoTls)?;
+        let mut db_client = conf.connect(NoTls)?;
 
         // This will only change ownership on the schema itself, not the objects
         // inside it. Without it owner of the `public` schema will be `cloud_admin`

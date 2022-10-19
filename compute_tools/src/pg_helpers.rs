@@ -11,7 +11,6 @@ use anyhow::{bail, Result};
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
 use serde::Deserialize;
-use urlencoding::encode;
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
@@ -184,7 +183,6 @@ pub type PgIdent = String;
 /// Postgres SQL queries and DATABASE_URL.
 pub trait Escaping {
     fn pg_quote(&self) -> String;
-    fn url_encode(&self) -> String;
 }
 
 impl Escaping for PgIdent {
@@ -194,18 +192,6 @@ impl Escaping for PgIdent {
     fn pg_quote(&self) -> String {
         let result = format!("\"{}\"", self.replace('"', "\"\""));
         result
-    }
-
-    /// We use `url` crate for manipulating the DATABASE_URL, but it uses a standard
-    /// that doesn't fit really well with Postgres. For example, it trims all trailing
-    /// spaces from the path:
-    ///   > Remove any leading and trailing C0 control or space from input.
-    ///   > https://url.spec.whatwg.org/#url-parsing
-    /// But we use path for database name and it's totally valid to have trailing spaces
-    /// in the database name in Postgres. Thus, use this helper to pre-escape
-    /// the database name before putting it as a path into the DATABASE_URL.
-    fn url_encode(&self) -> String {
-        encode(self).into_owned()
     }
 }
 
