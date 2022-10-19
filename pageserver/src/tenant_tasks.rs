@@ -70,8 +70,10 @@ async fn compaction_loop(tenant_id: TenantId) {
             // Run compaction
             let mut sleep_duration = tenant.get_compaction_period();
             if let Err(e) = tenant.compaction_iteration() {
-                error!("Compaction failed, retrying: {e:#}");
                 sleep_duration = wait_duration;
+                error!("Compaction failed, retrying in {:?}: {e:#}", sleep_duration);
+                #[cfg(feature = "testing")]
+                std::process::abort();
             }
 
             // Sleep
@@ -119,8 +121,10 @@ async fn gc_loop(tenant_id: TenantId) {
             if gc_horizon > 0 {
                 if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false)
                 {
-                    error!("Gc failed, retrying: {e:#}");
                     sleep_duration = wait_duration;
+                    error!("Gc failed, retrying in {:?}: {e:#}", sleep_duration);
+                    #[cfg(feature = "testing")]
+                    std::process::abort();
                 }
             }
 
