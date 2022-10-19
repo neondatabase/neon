@@ -2,7 +2,7 @@ import time
 from contextlib import closing
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserverVersion
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
@@ -13,8 +13,7 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
 
     env = neon_env_builder.init()
-
-    NeonPageserverVersion.is_testing_enabled_or_skip()
+    env.pageserver.is_testing_enabled_or_skip()
 
     neon_env_builder.start()
 

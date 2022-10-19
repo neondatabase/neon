@@ -568,6 +568,17 @@ class NeonEnvBuilder:
         self.start()
         return env
 
+    def get_pageserver_version(self) -> str:
+        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
+        res = subprocess.run(
+            [bin_pageserver, "--version"],
+            check=True,
+            universal_newlines=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return res.stdout
+
     def enable_remote_storage(
         self,
         remote_storage_kind: RemoteStorageKind,
@@ -809,6 +820,7 @@ class NeonEnv:
         self.pageserver = NeonPageserver(
             self, port=pageserver_port, config_override=config.pageserver_config_override
         )
+        self.pageserver_version = config.get_pageserver_version()
 
         # Create config and a Safekeeper object for each safekeeper
         for i in range(1, config.num_safekeepers + 1):
@@ -960,10 +972,11 @@ class NeonPageserverApiException(Exception):
 
 
 class NeonPageserverHttpClient(requests.Session):
-    def __init__(self, port: int, auth_token: Optional[str] = None):
+    def __init__(self, port: int, is_testing_enabled_or_skip, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
+        self.is_testing_enabled_or_skip = is_testing_enabled_or_skip
 
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
@@ -982,7 +995,7 @@ class NeonPageserverHttpClient(requests.Session):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
     def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]) -> None:
-        NeonPageserverVersion.is_testing_enabled_or_skip()
+        self.is_testing_enabled_or_skip()
 
         if isinstance(config_strings, tuple):
             pairs = [config_strings]
@@ -1101,7 +1114,7 @@ class NeonPageserverHttpClient(requests.Session):
     def timeline_gc(
         self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
     ) -> dict[str, Any]:
-        NeonPageserverVersion.is_testing_enabled_or_skip()
+        self.is_testing_enabled_or_skip()
 
         log.info(
             f"Requesting GC: tenant {tenant_id}, timeline {timeline_id}, gc_horizon {repr(gc_horizon)}"
@@ -1118,7 +1131,7 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_compact(self, tenant_id: TenantId, timeline_id: TimelineId):
-        NeonPageserverVersion.is_testing_enabled_or_skip()
+        self.is_testing_enabled_or_skip()
 
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
@@ -1144,7 +1157,7 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
-        NeonPageserverVersion.is_testing_enabled_or_skip()
+        self.is_testing_enabled_or_skip()
 
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
@@ -1677,10 +1690,19 @@ class NeonPageserver(PgProtocol):
     def __exit__(self, exc_type, exc, tb):
         self.stop(immediate=True)
 
+    def is_testing_enabled_or_skip(self):
+        if "testing:true" not in self.env.pageserver_version:
+            pytest.skip("pageserver was built without 'testing' feature")
+
+    def is_profiling_enabled_or_skip(self):
+        if "profiling:true" not in self.env.pageserver_version:
+            pytest.skip("pageserver was built without 'profiling' feature")
+
     def http_client(self, auth_token: Optional[str] = None) -> NeonPageserverHttpClient:
         return NeonPageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
+            is_testing_enabled_or_skip=self.is_testing_enabled_or_skip,
         )
 
 
