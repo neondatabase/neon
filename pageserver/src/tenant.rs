@@ -191,9 +191,7 @@ impl UninitializedTimeline<'_> {
                     )
                 })?;
                 v.insert(Arc::clone(&new_timeline));
-                new_timeline.launch_wal_receiver().with_context(|| {
-                    format!("Failed to launch walreceiver for timeline {tenant_id}/{timeline_id}")
-                })?;
+                new_timeline.launch_wal_receiver();
             }
         }
 

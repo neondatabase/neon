@@ -602,11 +602,11 @@ impl Timeline {
         result
     }
 
-    pub fn launch_wal_receiver(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub fn launch_wal_receiver(self: &Arc<Self>) {
         if !is_etcd_client_initialized() {
             if cfg!(test) {
                 info!("not launching WAL receiver because etcd client hasn't been initialized");
-                return Ok(());
+                return;
             } else {
                 panic!("etcd client not initialized");
             }
@@ -634,9 +634,7 @@ impl Timeline {
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
-        )?;
-
-        Ok(())
+        );
     }
 
     ///
