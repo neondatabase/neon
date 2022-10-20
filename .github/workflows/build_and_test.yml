@@ -847,6 +847,13 @@ jobs:
       - name: Add curl
         run: apt update && apt install curl -y
 
+      - name: Add awscli
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip" \
+          && unzip -q awscliv2.zip \
+          && ./aws/install \
+          && rm awscliv2.zip
+
       - name: Setup helm v3
         run: |
           curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
