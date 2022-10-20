@@ -32,8 +32,12 @@ use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use utils::auth::JwtAuth;
 use utils::{
-    http::endpoint, id::NodeId, logging, project_git_version, shutdown::exit_now, signals,
-    tcp_listener,
+    http::endpoint,
+    id::NodeId,
+    logging::{self, LogFormat},
+    project_git_version,
+    shutdown::exit_now,
+    signals, tcp_listener,
 };
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
@@ -131,11 +135,15 @@ fn main() -> anyhow::Result<()> {
         .get_one::<String>("auth-validation-public-key-path")
         .map(PathBuf::from);
 
+    if let Some(log_format) = arg_matches.get_one::<String>("log-format") {
+        conf.log_format = LogFormat::from_config(log_format)?;
+    }
+
     start_safekeeper(conf, given_id, arg_matches.get_flag("init"))
 }
 
 fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bool) -> Result<()> {
-    let log_file = logging::init("safekeeper.log", conf.daemonize)?;
+    let log_file = logging::init("safekeeper.log", conf.daemonize, conf.log_format)?;
 
     info!("version: {GIT_VERSION}");
 
@@ -435,6 +443,11 @@ fn cli() -> Command {
             Arg::new("auth-validation-public-key-path")
                 .long("auth-validation-public-key-path")
                 .help("Path to an RSA .pem public key which is used to check JWT tokens")
+        )
+        .arg(
+            Arg::new("log-format")
+                .long("log-format")
+                .help("Format for logging, either 'plain' or 'json'")
         )
 }
 
