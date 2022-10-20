@@ -2124,7 +2124,6 @@ impl Timeline {
                 info!("Abnormaly terinate pageserver at gc-before-save-metadata fail point");
                 std::process::abort();
             });
-            return Ok(result);
         }
 
         if self.upload_layers.load(atomic::Ordering::Relaxed) {
