@@ -1,9 +1,10 @@
 use svg_fmt::*;
-use clap::{App, Arg};
+// use clap::{App, Arg};
 use anyhow::Result;
 use std::{collections::{BTreeMap, BTreeSet}, ops::Range, path::PathBuf};
 use utils::{lsn::Lsn, project_git_version};
-use pageserver::{layered_repository::get_range, repository::{Key, key_range_size}};
+use pageserver::tenant::get_range;
+use pageserver::repository::{Key, key_range_size};
 
 project_git_version!(GIT_VERSION);
 
@@ -19,28 +20,49 @@ fn analyze<T: Ord + Copy>(coords: Vec<T>) -> (usize, BTreeMap<T, usize>) {
     (set.len(), map)
 }
 
+
+fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
+    let split: Vec<&str> = name.split("__").collect();
+    let keys: Vec<&str> = split[0].split("-").collect();
+    let mut lsns: Vec<&str> = split[1].split("-").collect();
+    if lsns.len() == 1 {
+        lsns.push(lsns[0]);
+    }
+
+    let keys = Key::from_hex(keys[0]).unwrap()..Key::from_hex(keys[1]).unwrap();
+    let lsns = Lsn::from_hex(lsns[0]).unwrap()..Lsn::from_hex(lsns[1]).unwrap();
+    (keys, lsns)
+}
+
+
 fn main() -> Result<()> {
-    let arg_matches = App::new("Neon draw_timeline_dir utility")
-        .about("Draws the domains of the image and delta layers in a directory")
-        .version(GIT_VERSION)
-        .arg(
-            Arg::new("path")
-                .help("Path to timeline directory")
-                .required(true)
-                .index(1),
-        )
-        .get_matches();
+    // let arg_matches = App::new("Neon draw_timeline_dir utility")
+    //     .about("Draws the domains of the image and delta layers in a directory")
+    //     .version(GIT_VERSION)
+    //     .arg(
+    //         Arg::new("path")
+    //             .help("Path to timeline directory")
+    //             .required(true)
+    //             .index(1),
+    //     )
+    //     .get_matches();
 
     // Get ranges
     let mut ranges: Vec<(Range<Key>, Range<Lsn>)> = vec![];
-    let timeline_path = PathBuf::from(arg_matches.value_of("path").unwrap());
-    for entry in std::fs::read_dir(timeline_path).unwrap() {
-        let entry = entry?;
-        let path: PathBuf = entry.path();
+    // let timeline_path = PathBuf::from(arg_matches.value_of("path").unwrap());
+    // for entry in std::fs::read_dir(timeline_path).unwrap() {
+    //     let entry = entry?;
+    //     let path: PathBuf = entry.path();
 
-        if let Ok(range) = get_range(&path) {
-            ranges.push(range);
+    //     if let Ok(range) = get_range(&path) {
+    //         ranges.push(range);
+    //     }
+    // }
+    for line in names.lines() {
+        if line.len() == 0 {
+            continue;
         }
+
     }
 
     let mut sum: u64 = 0;
@@ -66,6 +88,8 @@ fn main() -> Result<()> {
     let (key_max, key_map) = analyze(keys);
     let (lsn_max, lsn_map) = analyze(lsns);
 
+    dbg!(&lsn_map);
+
     // Initialize stats
     let mut num_deltas = 0;
     let mut num_images = 0;
@@ -86,13 +110,14 @@ fn main() -> Result<()> {
         let lsn_end = *lsn_map.get(&lsnr.end).unwrap();
 
         let mut lsn_diff = (lsn_end - lsn_start) as f32;
+        eprintln!("{} {} {}", lsn_start, lsn_end, lsn_diff);
         let mut fill = Fill::None;
         let mut margin = 0.05 * lsn_diff;
         let mut lsn_offset = 0.0;
         if lsn_start == lsn_end {
             num_images += 1;
             lsn_diff = 0.3;
-            lsn_offset = lsn_diff * 2.0;
+            lsn_offset = lsn_diff * 2.5 - 1.0;
             margin = 0.05;
             fill = Fill::Color(rgb(200, 200, 200));
         } else if lsn_start < lsn_end {
@@ -104,7 +129,7 @@ fn main() -> Result<()> {
 
         println!("    {}",
             rectangle(key_start as f32 + stretch * margin,
-                      stretch * (lsn_max as f32 - 1.0 - (lsn_start as f32 + margin - lsn_offset)),
+                      stretch * (lsn_max as f32 - 1.0 - (lsn_end as f32 + margin - lsn_offset)),
                       key_diff as f32 - stretch * 2.0 * margin,
                       stretch * (lsn_diff - 2.0 * margin))
                 // .fill(rgb(200, 200, 200))
