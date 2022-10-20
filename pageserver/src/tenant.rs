@@ -25,7 +25,6 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
-use std::num::NonZeroU64;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
@@ -784,27 +783,6 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
-    pub fn get_wal_receiver_connect_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
-        tenant_conf
-            .walreceiver_connect_timeout
-            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout)
-    }
-
-    pub fn get_lagging_wal_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
-        tenant_conf
-            .lagging_wal_timeout
-            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout)
-    }
-
-    pub fn get_max_lsn_wal_lag(&self) -> NonZeroU64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
-        tenant_conf
-            .max_lsn_wal_lag
-            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag)
-    }
-
     pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().update(&new_tenant_conf);
     }
@@ -836,7 +814,7 @@ impl Tenant {
         ))
     }
 
-    pub fn new(
+    pub(super) fn new(
         conf: &'static PageServerConf,
         tenant_conf: TenantConfOpt,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -859,7 +837,7 @@ impl Tenant {
     }
 
     /// Locate and load config
-    pub fn load_tenant_config(
+    pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
@@ -901,7 +879,7 @@ impl Tenant {
         Ok(tenant_conf)
     }
 
-    pub fn persist_tenant_config(
+    pub(super) fn persist_tenant_config(
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
         first_save: bool,
