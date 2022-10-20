@@ -346,7 +346,11 @@ def test_tenant_relocation(
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
     pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
 
-    new_pageserver_http = NeonPageserverHttpClient(port=new_pageserver_http_port, auth_token=None)
+    new_pageserver_http = NeonPageserverHttpClient(
+        port=new_pageserver_http_port,
+        auth_token=None,
+        is_testing_enabled_or_skip=env.pageserver.is_testing_enabled_or_skip,
+    )
 
     with new_pageserver_helper(
         new_pageserver_dir,
