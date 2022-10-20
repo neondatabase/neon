@@ -65,7 +65,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     # check 404
     with pytest.raises(
         NeonPageserverApiException,
-        match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} is not found neither locally nor remotely",
+        match=f"Timeline {leaf_timeline_id} was not found for tenant {env.initial_tenant}",
     ):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 

@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 chrono = "0.4"
-clap = "3.0"
+clap = "4.0"
 env_logger = "0.9"
 futures = "0.3.13"
 hyper = { version = "0.14", features = ["full"] }

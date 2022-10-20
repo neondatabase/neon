@@ -1,3 +1,14 @@
+# 'named-profiles' feature was stabilized in cargo 1.57. This line makes the
+# build work with older cargo versions.
+#
+# We have this because as of this writing, the latest cargo Debian package
+# that's available is 1.56. (Confusingly, the Debian package version number
+# is 0.57, whereas 'cargo --version' says 1.56.)
+#
+# See https://tracker.debian.org/pkg/cargo for the current status of the
+# package. When that gets updated, we can remove this.
+cargo-features = ["named-profiles"]
+
 [workspace]
 members = [
     "compute_tools",

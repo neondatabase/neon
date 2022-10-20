@@ -66,6 +66,11 @@ impl Lsn {
         (self.0 % seg_sz as u64) as usize
     }
 
+    /// Compute LSN of the segment start.
+    pub fn segment_lsn(self, seg_sz: usize) -> Lsn {
+        Lsn(self.0 - (self.0 % seg_sz as u64))
+    }
+
     /// Compute the segment number
     pub fn segment_number(self, seg_sz: usize) -> u64 {
         self.0 / seg_sz as u64

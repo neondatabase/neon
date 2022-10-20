@@ -107,18 +107,20 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
-static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "pageserver_created_persistent_files_total",
         "Number of files created that are meant to be uploaded to cloud storage",
+        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
 
-static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
+        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -275,11 +277,15 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 /// smallest redo processing times. These buckets allow us to measure down
 /// to 5us, which equates to 200'000 pages/sec, which equates to 1.6GB/sec.
 /// This is much better than the previous 5ms aka 200 pages/sec aka 1.6MB/sec.
+///
+/// Values up to 1s are recorded because metrics show that we have redo
+/// durations and lock times larger than 0.250s.
 macro_rules! redo_histogram_time_buckets {
     () => {
         vec![
             0.000_005, 0.000_010, 0.000_025, 0.000_050, 0.000_100, 0.000_250, 0.000_500, 0.001_000,
-            0.002_500, 0.005_000, 0.010_000, 0.025_000, 0.050_000, 0.100_000, 0.250_000,
+            0.002_500, 0.005_000, 0.010_000, 0.025_000, 0.050_000, 0.100_000, 0.250_000, 0.500_000,
+            1.000_000,
         ]
     };
 }
@@ -291,6 +297,17 @@ macro_rules! redo_histogram_time_buckets {
 macro_rules! redo_histogram_count_buckets {
     () => {
         vec![0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0]
+    };
+}
+
+macro_rules! redo_bytes_histogram_count_buckets {
+    () => {
+        // powers of (2^.5), from 2^4.5 to 2^15 (22 buckets)
+        // rounded up to the next multiple of 8 to capture any MAXALIGNed record of that size, too.
+        vec![
+            24.0, 32.0, 48.0, 64.0, 96.0, 128.0, 184.0, 256.0, 368.0, 512.0, 728.0, 1024.0, 1456.0,
+            2048.0, 2904.0, 4096.0, 5800.0, 8192.0, 11592.0, 16384.0, 23176.0, 32768.0,
+        ]
     };
 }
 
@@ -317,6 +334,15 @@ pub static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
         "pageserver_wal_redo_records_histogram",
         "Histogram of number of records replayed per redo",
         redo_histogram_count_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WAL_REDO_BYTES_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_bytes_histogram",
+        "Histogram of number of records replayed per redo",
+        redo_bytes_histogram_count_buckets!(),
     )
     .expect("failed to define a metric")
 });
@@ -386,8 +412,12 @@ impl TimelineMetrics {
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED.clone();
-        let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN.clone();
+        let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
+        let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
 
         TimelineMetrics {
             tenant_id,
@@ -419,6 +449,8 @@ impl Drop for TimelineMetrics {
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = CURRENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
 
         for op in STORAGE_TIME_OPERATIONS {
             let _ = STORAGE_TIME.remove_label_values(&[op, tenant_id, timeline_id]);

@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
-use clap::{App, Arg};
+use clap::{value_parser, Arg, Command};
 
 use pageserver::{
     page_cache,
@@ -24,40 +24,14 @@ project_git_version!(GIT_VERSION);
 const METADATA_SUBCOMMAND: &str = "metadata";
 
 fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("Neon Pageserver binutils")
-        .about("Reads pageserver (and related) binary files management utility")
-        .version(GIT_VERSION)
-        .arg(Arg::new("path").help("Input file path").required(false))
-        .subcommand(
-            App::new(METADATA_SUBCOMMAND)
-                .about("Read and update pageserver metadata file")
-                .arg(
-                    Arg::new("metadata_path")
-                        .help("Input metadata file path")
-                        .required(false),
-                )
-                .arg(
-                    Arg::new("disk_consistent_lsn")
-                        .long("disk_consistent_lsn")
-                        .takes_value(true)
-                        .help("Replace disk consistent Lsn"),
-                )
-                .arg(
-                    Arg::new("prev_record_lsn")
-                        .long("prev_record_lsn")
-                        .takes_value(true)
-                        .help("Replace previous record Lsn"),
-                ),
-        )
-        .get_matches();
+    let arg_matches = cli().get_matches();
 
     match arg_matches.subcommand() {
         Some((subcommand_name, subcommand_matches)) => {
-            let path = PathBuf::from(
-                subcommand_matches
-                    .value_of("metadata_path")
-                    .context("'metadata_path' argument is missing")?,
-            );
+            let path = subcommand_matches
+                .get_one::<PathBuf>("metadata_path")
+                .context("'metadata_path' argument is missing")?
+                .to_path_buf();
             anyhow::ensure!(
                 subcommand_name == METADATA_SUBCOMMAND,
                 "Unknown subcommand {subcommand_name}"
@@ -65,11 +39,10 @@ fn main() -> anyhow::Result<()> {
             handle_metadata(&path, subcommand_matches)?;
         }
         None => {
-            let path = PathBuf::from(
-                arg_matches
-                    .value_of("path")
-                    .context("'path' argument is missing")?,
-            );
+            let path = arg_matches
+                .get_one::<PathBuf>("path")
+                .context("'path' argument is missing")?
+                .to_path_buf();
             println!(
                 "No subcommand specified, attempting to guess the format for file {}",
                 path.display()
@@ -110,7 +83,7 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
     let mut meta = TimelineMetadata::from_bytes(&metadata_bytes)?;
     println!("Current metadata:\n{meta:?}");
     let mut update_meta = false;
-    if let Some(disk_consistent_lsn) = arg_matches.value_of("disk_consistent_lsn") {
+    if let Some(disk_consistent_lsn) = arg_matches.get_one::<String>("disk_consistent_lsn") {
         meta = TimelineMetadata::new(
             Lsn::from_str(disk_consistent_lsn)?,
             meta.prev_record_lsn(),
@@ -122,7 +95,7 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
         );
         update_meta = true;
     }
-    if let Some(prev_record_lsn) = arg_matches.value_of("prev_record_lsn") {
+    if let Some(prev_record_lsn) = arg_matches.get_one::<String>("prev_record_lsn") {
         meta = TimelineMetadata::new(
             meta.disk_consistent_lsn(),
             Some(Lsn::from_str(prev_record_lsn)?),
@@ -141,4 +114,41 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
     }
 
     Ok(())
+}
+
+fn cli() -> Command {
+    Command::new("Neon Pageserver binutils")
+        .about("Reads pageserver (and related) binary files management utility")
+        .version(GIT_VERSION)
+        .arg(
+            Arg::new("path")
+                .help("Input file path")
+                .value_parser(value_parser!(PathBuf))
+                .required(false),
+        )
+        .subcommand(
+            Command::new(METADATA_SUBCOMMAND)
+                .about("Read and update pageserver metadata file")
+                .arg(
+                    Arg::new("metadata_path")
+                        .help("Input metadata file path")
+                        .value_parser(value_parser!(PathBuf))
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("disk_consistent_lsn")
+                        .long("disk_consistent_lsn")
+                        .help("Replace disk consistent Lsn"),
+                )
+                .arg(
+                    Arg::new("prev_record_lsn")
+                        .long("prev_record_lsn")
+                        .help("Replace previous record Lsn"),
+                ),
+        )
+}
+
+#[test]
+fn verify_cli() {
+    cli().debug_assert();
 }

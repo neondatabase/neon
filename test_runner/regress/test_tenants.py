@@ -258,11 +258,20 @@ def test_pageserver_with_empty_tenants(
     tenants = client.tenant_list()
 
     assert (
-        len(tenants) == 1
-    ), "Pageserver should attach only tenants with empty timelines/ dir on restart"
-    loaded_tenant = tenants[0]
-    assert loaded_tenant["id"] == str(
-        tenant_with_empty_timelines_dir
+        len(tenants) == 2
+    ), "Pageserver should attach only tenants with empty or not existing timelines/ dir on restart"
+
+    [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
+    assert (
+        broken_tenant
+    ), f"A broken tenant {tenant_without_timelines_dir} should exists in the tenant list"
+    assert (
+        broken_tenant["state"] == "Broken"
+    ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
+
+    [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
+    assert (
+        loaded_tenant
     ), f"Tenant {tenant_with_empty_timelines_dir} should be loaded as the only one with tenants/ directory"
     assert loaded_tenant["state"] == {
         "Active": {"background_jobs_running": False}

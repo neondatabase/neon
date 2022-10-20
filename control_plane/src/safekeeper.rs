@@ -12,13 +12,8 @@ use nix::unistd::Pid;
 use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
-use safekeeper_api::models::TimelineCreateRequest;
 use thiserror::Error;
-use utils::{
-    connstring::connection_address,
-    http::error::HttpErrorBody,
-    id::{NodeId, TenantId, TimelineId},
-};
+use utils::{connstring::connection_address, http::error::HttpErrorBody, id::NodeId};
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
@@ -280,25 +275,5 @@ impl SafekeeperNode {
             .send()?
             .error_from_body()?;
         Ok(())
-    }
-
-    pub fn timeline_create(
-        &self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        peer_ids: Vec<NodeId>,
-    ) -> Result<()> {
-        Ok(self
-            .http_request(
-                Method::POST,
-                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
-            )
-            .json(&TimelineCreateRequest {
-                timeline_id,
-                peer_ids,
-            })
-            .send()?
-            .error_from_body()?
-            .json()?)
     }
 }

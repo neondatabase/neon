@@ -2,3 +2,6 @@ zenith_install.tar.gz
 .zenith_current_version
 neon_install.tar.gz
 .neon_current_version
+
+collections/*
+!collections/.keep

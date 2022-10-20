@@ -52,7 +52,10 @@ use crate::task_mgr::TaskKind;
 use crate::walreceiver::{is_etcd_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::{page_cache, storage_sync};
+use crate::{
+    page_cache,
+    storage_sync::{self, index::LayerFileMetadata},
+};
 
 pub struct Timeline {
     conf: &'static PageServerConf,
@@ -1190,8 +1193,8 @@ impl Timeline {
                 self.create_image_layers(&partitioning, self.initdb_lsn, true)?
             } else {
                 // normal case, write out a L0 delta layer file.
-                let delta_path = self.create_delta_layer(&frozen_layer)?;
-                HashSet::from([delta_path])
+                let (delta_path, metadata) = self.create_delta_layer(&frozen_layer)?;
+                HashMap::from([(delta_path, metadata)])
             };
 
         fail_point!("flush-frozen-before-sync");
@@ -1217,85 +1220,86 @@ impl Timeline {
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
         let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
-        self.update_disk_consistent_lsn(disk_consistent_lsn, layer_paths_to_upload)?;
+        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
 
+        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
+        // After crash, we will restart WAL streaming and processing from that point.
+        if disk_consistent_lsn != old_disk_consistent_lsn {
+            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+            self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)?;
+            // Also update the in-memory copy
+            self.disk_consistent_lsn.store(disk_consistent_lsn);
+        }
         Ok(())
     }
 
     /// Update metadata file
-    fn update_disk_consistent_lsn(
+    fn update_metadata_file(
         &self,
         disk_consistent_lsn: Lsn,
-        layer_paths_to_upload: HashSet<PathBuf>,
+        layer_paths_to_upload: HashMap<PathBuf, LayerFileMetadata>,
     ) -> Result<()> {
-        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
-        // After crash, we will restart WAL streaming and processing from that point.
-        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
-        if disk_consistent_lsn != old_disk_consistent_lsn {
-            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+        // We can only save a valid 'prev_record_lsn' value on disk if we
+        // flushed *all* in-memory changes to disk. We only track
+        // 'prev_record_lsn' in memory for the latest processed record, so we
+        // don't remember what the correct value that corresponds to some old
+        // LSN is. But if we flush everything, then the value corresponding
+        // current 'last_record_lsn' is correct and we can store it on disk.
+        let RecordLsn {
+            last: last_record_lsn,
+            prev: prev_record_lsn,
+        } = self.last_record_lsn.load();
+        let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
+            Some(prev_record_lsn)
+        } else {
+            None
+        };
 
-            // We can only save a valid 'prev_record_lsn' value on disk if we
-            // flushed *all* in-memory changes to disk. We only track
-            // 'prev_record_lsn' in memory for the latest processed record, so we
-            // don't remember what the correct value that corresponds to some old
-            // LSN is. But if we flush everything, then the value corresponding
-            // current 'last_record_lsn' is correct and we can store it on disk.
-            let RecordLsn {
-                last: last_record_lsn,
-                prev: prev_record_lsn,
-            } = self.last_record_lsn.load();
-            let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
-                Some(prev_record_lsn)
-            } else {
-                None
-            };
+        let ancestor_timeline_id = self
+            .ancestor_timeline
+            .as_ref()
+            .map(|ancestor| ancestor.timeline_id);
 
-            let ancestor_timeline_id = self
-                .ancestor_timeline
-                .as_ref()
-                .map(|ancestor| ancestor.timeline_id);
+        let metadata = TimelineMetadata::new(
+            disk_consistent_lsn,
+            ondisk_prev_record_lsn,
+            ancestor_timeline_id,
+            self.ancestor_lsn,
+            *self.latest_gc_cutoff_lsn.read(),
+            self.initdb_lsn,
+            self.pg_version,
+        );
 
-            let metadata = TimelineMetadata::new(
-                disk_consistent_lsn,
-                ondisk_prev_record_lsn,
-                ancestor_timeline_id,
-                self.ancestor_lsn,
-                *self.latest_gc_cutoff_lsn.read(),
-                self.initdb_lsn,
-                self.pg_version,
-            );
+        fail_point!("checkpoint-before-saving-metadata", |x| bail!(
+            "{}",
+            x.unwrap()
+        ));
 
-            fail_point!("checkpoint-before-saving-metadata", |x| bail!(
-                "{}",
-                x.unwrap()
-            ));
+        save_metadata(
+            self.conf,
+            self.timeline_id,
+            self.tenant_id,
+            &metadata,
+            false,
+        )?;
 
-            save_metadata(
-                self.conf,
-                self.timeline_id,
+        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            storage_sync::schedule_layer_upload(
                 self.tenant_id,
-                &metadata,
-                false,
-            )?;
-
-            if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                storage_sync::schedule_layer_upload(
-                    self.tenant_id,
-                    self.timeline_id,
-                    layer_paths_to_upload,
-                    Some(metadata),
-                );
-            }
-
-            // Also update the in-memory copy
-            self.disk_consistent_lsn.store(disk_consistent_lsn);
+                self.timeline_id,
+                layer_paths_to_upload,
+                Some(metadata),
+            );
         }
 
         Ok(())
     }
 
     // Write out the given frozen in-memory layer as a new L0 delta file
-    fn create_delta_layer(&self, frozen_layer: &InMemoryLayer) -> Result<PathBuf> {
+    fn create_delta_layer(
+        &self,
+        frozen_layer: &InMemoryLayer,
+    ) -> Result<(PathBuf, LayerFileMetadata)> {
         // Write it out
         let new_delta = frozen_layer.write_to_disk()?;
         let new_delta_path = new_delta.path();
@@ -1321,12 +1325,13 @@ impl Timeline {
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
+
         self.metrics.current_physical_size_gauge.add(sz);
         // update metrics
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
-        Ok(new_delta_path)
+        Ok((new_delta_path, LayerFileMetadata::new(sz)))
     }
 
     pub fn compact(&self) -> anyhow::Result<()> {
@@ -1392,7 +1397,7 @@ impl Timeline {
                     storage_sync::schedule_layer_upload(
                         self.tenant_id,
                         self.timeline_id,
-                        HashSet::from_iter(layer_paths_to_upload),
+                        layer_paths_to_upload,
                         None,
                     );
                 }
@@ -1473,10 +1478,9 @@ impl Timeline {
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         force: bool,
-    ) -> Result<HashSet<PathBuf>> {
+    ) -> Result<HashMap<PathBuf, LayerFileMetadata>> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
-        let mut layer_paths_to_upload = HashSet::new();
         for partition in partitioning.parts.iter() {
             if force || self.time_for_new_image_layer(partition, lsn)? {
                 let img_range =
@@ -1498,7 +1502,6 @@ impl Timeline {
                     }
                 }
                 let image_layer = image_layer_writer.finish()?;
-                layer_paths_to_upload.insert(image_layer.path());
                 image_layers.push(image_layer);
             }
         }
@@ -1512,15 +1515,25 @@ impl Timeline {
         //
         // Compaction creates multiple image layers. It would be better to create them all
         // and fsync them all in parallel.
-        let mut all_paths = Vec::from_iter(layer_paths_to_upload.clone());
-        all_paths.push(self.conf.timeline_path(&self.timeline_id, &self.tenant_id));
+        let all_paths = image_layers
+            .iter()
+            .map(|layer| layer.path())
+            .chain(std::iter::once(
+                self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
+            ))
+            .collect::<Vec<_>>();
         par_fsync::par_fsync(&all_paths)?;
+
+        let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
         let mut layers = self.layers.write().unwrap();
         for l in image_layers {
-            self.metrics
-                .current_physical_size_gauge
-                .add(l.path().metadata()?.len());
+            let path = l.path();
+            let metadata = path.metadata()?;
+
+            layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
+
+            self.metrics.current_physical_size_gauge.add(metadata.len());
             layers.insert_historic(Arc::new(l));
         }
         drop(layers);
@@ -1771,16 +1784,16 @@ impl Timeline {
         }
 
         let mut layers = self.layers.write().unwrap();
-        let mut new_layer_paths = HashSet::with_capacity(new_layers.len());
+        let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
             let new_delta_path = l.path();
 
-            // update the timeline's physical size
-            self.metrics
-                .current_physical_size_gauge
-                .add(new_delta_path.metadata()?.len());
+            let metadata = new_delta_path.metadata()?;
 
-            new_layer_paths.insert(new_delta_path);
+            // update the timeline's physical size
+            self.metrics.current_physical_size_gauge.add(metadata.len());
+
+            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             layers.insert_historic(Arc::new(l));
         }
 
@@ -1946,6 +1959,9 @@ impl Timeline {
                 new_gc_cutoff
             );
             write_guard.store_and_unlock(new_gc_cutoff).wait();
+
+            // Persist metadata file
+            self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())?;
         }
 
         info!("GC starting");
@@ -2070,6 +2086,18 @@ impl Timeline {
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
+        }
+
+        info!(
+            "GC completed removing {} layers, cuttof {}",
+            result.layers_removed, new_gc_cutoff
+        );
+        if result.layers_removed != 0 {
+            fail_point!("gc-before-save-metadata", |_| {
+                info!("Abnormaly terinate pageserver at gc-before-save-metadata fail point");
+                std::process::abort();
+            });
+            return Ok(result);
         }
 
         if self.upload_layers.load(atomic::Ordering::Relaxed) {

@@ -6,6 +6,7 @@ use anyhow::{anyhow, bail, Result};
 
 use bytes::BytesMut;
 use tracing::*;
+use utils::lsn::Lsn;
 
 use crate::safekeeper::ServerInfo;
 use crate::timeline::Timeline;
@@ -79,7 +80,7 @@ impl<'pg> ReceiveWalConn<'pg> {
                     system_id: greeting.system_id,
                     wal_seg_size: greeting.wal_seg_size,
                 };
-                GlobalTimelines::create(spg.ttid, server_info)?
+                GlobalTimelines::create(spg.ttid, server_info, Lsn::INVALID, Lsn::INVALID)?
             }
             _ => bail!("unexpected message {:?} instead of greeting", next_msg),
         };

@@ -33,9 +33,9 @@ mod pg_helpers_tests {
     }
 
     #[test]
-    fn quote_ident() {
+    fn ident_pg_quote() {
         let ident: PgIdent = PgIdent::from("\"name\";\\n select 1;");
 
-        assert_eq!(ident.quote(), "\"\"\"name\"\";\\n select 1;\"");
+        assert_eq!(ident.pg_quote(), "\"\"\"name\"\";\\n select 1;\"");
     }
 }
