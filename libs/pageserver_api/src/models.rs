@@ -201,3 +201,13 @@ pub struct FailpointConfig {
 pub struct TimelineGcRequest {
     pub gc_horizon: Option<u64>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TenantSetBackgroundActivityRequest {
+    pub run_backround_jobs: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TenantSetBackgroundActivityResponse {
+    pub msg: String,
+}

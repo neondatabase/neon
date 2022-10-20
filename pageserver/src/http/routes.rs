@@ -3,6 +3,9 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
+use pageserver_api::models::{
+    TenantSetBackgroundActivityRequest, TenantSetBackgroundActivityResponse,
+};
 use remote_storage::GenericRemoteStorage;
 use tokio::task::JoinError;
 use tracing::*;
@@ -13,11 +16,12 @@ use super::models::{
     TimelineCreateRequest,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
-use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
+use crate::task_mgr::TaskKind;
 use crate::tenant::{TenantState, Timeline};
 use crate::tenant_config::TenantConfOpt;
 use crate::{config::PageServerConf, tenant_mgr};
+use crate::{storage_sync, task_mgr};
 use utils::{
     auth::JwtAuth,
     http::{
@@ -570,6 +574,63 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     )
 }
 
+async fn tenant_set_background_activity(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let request: TenantSetBackgroundActivityRequest = json_request(&mut request).await?;
+
+    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::NotFound)?;
+
+    let modified = tenant.set_state_with(|old_state| {
+        let background_jobs_running = match old_state {
+            TenantState::Active {
+                background_jobs_running,
+            } => background_jobs_running,
+            _ => return None,
+        };
+
+        match (request.run_backround_jobs, background_jobs_running) {
+            (true, true) => None,
+            (false, false) => None,
+            (true, false) => Some(TenantState::Active {
+                background_jobs_running: true,
+            }),
+            (false, true) => {
+                // tasks will eventually shut down after that, but we need a guarantee
+                // that they've stopped so explicitly waiting for it
+                Some(TenantState::Active {
+                    background_jobs_running: false,
+                })
+            }
+        }
+    });
+
+    if !modified {
+        return Ok(json_response(
+            StatusCode::NOT_MODIFIED,
+            TenantSetBackgroundActivityResponse { msg: "".to_owned() },
+        )?);
+    }
+
+    // state was modified and request values was set to false which means we changed state
+    // and now need to wait for tasks shutdown
+    // XXX can it be changed second time here? and modified flag be outdated now?
+    if modified && !request.run_backround_jobs {
+        task_mgr::shutdown_tasks(Some(TaskKind::Compaction), Some(tenant_id), None).await;
+        task_mgr::shutdown_tasks(Some(TaskKind::GarbageCollector), Some(tenant_id), None).await;
+    }
+
+    Ok(json_response(
+        StatusCode::OK,
+        TenantSetBackgroundActivityResponse {
+            msg: format!("run background jobs set to {}", request.run_backround_jobs),
+        },
+    )?)
+}
+
 // Helper function to standardize the error messages we produce on bad durations
 //
 // Intended to be used with anyhow's `with_context`, e.g.:
@@ -904,6 +965,10 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)
         .post("/v1/tenant/:tenant_id/detach", tenant_detach_handler)
+        .post(
+            "/v1/tenant/:tenant_id/set_background_activity",
+            tenant_set_background_activity,
+        )
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,

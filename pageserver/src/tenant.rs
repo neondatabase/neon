@@ -655,22 +655,42 @@ impl Tenant {
     }
 
     pub fn set_state(&self, new_state: TenantState) {
-        match (self.current_state(), new_state) {
-            (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
-                debug!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
-            }
-            (TenantState::Broken, _) => {
-                error!("Ignoring state update {new_state:?} for broken tenant");
-            }
-            (_, new_state) => {
-                self.state.send_replace(new_state);
-                if self.should_run_tasks() {
-                    // Spawn gc and compaction loops. The loops will shut themselves
-                    // down when they notice that the tenant is inactive.
-                    crate::tenant_tasks::start_background_loops(self.tenant_id);
+        self.set_state_with(|_| Some(new_state));
+    }
+
+    pub fn set_state_with<F>(&self, f: F) -> bool
+    where
+        F: FnOnce(&mut TenantState) -> Option<TenantState>,
+    {
+        let modify = |old_state: &mut TenantState| {
+            let new_state = match f(old_state) {
+                None => return false,
+                Some(new_state) => new_state,
+            };
+
+            match (old_state, new_state) {
+                (equal_state_1, equal_state_2) if equal_state_1 == &equal_state_2 => {
+                    debug!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
+                    false
+                }
+                (TenantState::Broken, _) => {
+                    error!("Ignoring state update {new_state:?} for broken tenant");
+                    false
+                }
+                (old_state, new_state) => {
+                    *old_state = new_state;
+                    true
                 }
             }
+        };
+
+        let modified = self.state.send_if_modified(modify);
+        if modified && self.should_run_tasks() {
+            // Spawn gc and compaction loops. The loops will shut themselves
+            // down when they notice that the tenant is inactive.
+            crate::tenant_tasks::start_background_loops(self.tenant_id);
         }
+        modified
     }
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TenantState> {
