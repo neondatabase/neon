@@ -80,4 +80,6 @@
 - [015-storage-messaging](rfcs/015-storage-messaging.md)
 - [016-connection-routing](rfcs/016-connection-routing.md)
 - [017-timeline-data-management](rfcs/017-timeline-data-management.md)
+- [018-storage-messaging-2](rfcs/018-storage-messaging-2.md)
+- [019-tenant-timeline-lifecycles](rfcs/019-tenant-timeline-lifecycles.md)
 - [cluster-size-limits](rfcs/cluster-size-limits.md)
