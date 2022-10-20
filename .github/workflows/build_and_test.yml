@@ -847,23 +847,12 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Add curl
-        run: apt update && apt install curl unzip wget jq  -y
-
-      - name: Add awscli
+      - name: Configure environment 
         run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip" \
-          && unzip -q awscliv2.zip \
-          && ./aws/install \
-          && rm awscliv2.zip
-
-      - name: Setup helm v3
-        run: |
-          curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           helm repo add neondatabase https://neondatabase.github.io/helm-charts
+          aws --region us-east-2 eks update-kubeconfig --name dev-us-east-2-beta --role-arn arn:aws:iam::369495373322:role/github-runner
 
       - name: Re-deploy proxy
         run: |
           DOCKER_TAG=2213 #${{needs.tag.outputs.build-tag}}
-          aws --region us-east-2 eks update-kubeconfig --name dev-us-east-2-beta
           helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/dev-us-east-2-beta.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
