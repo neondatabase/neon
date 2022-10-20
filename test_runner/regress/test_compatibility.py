@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from time import time
 from typing import Any
 
 import pytest
@@ -18,24 +19,46 @@ from fixtures.types import Lsn
 from pytest import FixtureRequest
 
 
-def test_backward_compatibility(test_output_dir: Path, pg_bin: PgBin, request: FixtureRequest):
-    compatibility_snapshot = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
+def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: FixtureRequest):
+    compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
     assert (
-        compatibility_snapshot is not None
-    ), "COMPATIBILITY_SNAPSHOT_DIR is not set. It should be set to `compatibility_snapshot` path generateted by test_prepare_snapshot"
+        compatibility_snapshot_dir_env is not None
+    ), "COMPATIBILITY_SNAPSHOT_DIR is not set. It should be set to `compatibility_snapshot_pg14` path generateted by test_prepare_snapshot"
+    compatibility_snapshot_dir: Path = Path(compatibility_snapshot_dir_env).resolve()
 
-    breaking_changes_allowed = os.environ.get("ALLOW_BREAKING_CHANGES", "false").lower() == "true"
+    # Make compatibility snapshot artifacts pickupable by Allure
+    # by copying the snapshot directory to the curent test output directory.
+    if compatibility_snapshot_dir.is_relative_to(test_output_dir):
+        # To ease local test running (and to save disk space), do not copy the snapshot
+        # if COMPATIBILITY_SNAPSHOT_DIR already is in the current test directory
+        repo_dir = compatibility_snapshot_dir / "repo"
+    else:
+        repo_dir = test_output_dir / f"compatibility_snapshot_{int(time())}"
 
-    compatibility_snapshot_dir = Path(compatibility_snapshot)
-    repo_dir = compatibility_snapshot_dir / "repo"
+        shutil.copytree(compatibility_snapshot_dir / "repo", repo_dir)
+
+        # Remove old logs to avoid confusion in test artifacts
+        for logfile in repo_dir.glob("**/*.log"):
+            logfile.unlink()
+
+        # Update paths in configs
+        pageserver_config = (repo_dir / "pageserver.toml").read_text()
+        pageserver_config = pageserver_config.replace(
+            "/test_prepare_snapshot/", "/test_backward_compatibility/compatibility_snapshot/"
+        )
+        (repo_dir / "pageserver.toml").write_text(pageserver_config)
+
+        for postmaster_opts in repo_dir.glob("**/postmaster.opts"):
+            postmaster_opts_content = postmaster_opts.read_text()
+            postmaster_opts_content = postmaster_opts_content.replace(
+                "/test_prepare_snapshot/", "/test_backward_compatibility/compatibility_snapshot/"
+            )
+            postmaster_opts.write_text(postmaster_opts_content)
+
     snapshot_config = toml.load(repo_dir / "config")
 
-    connstr_re = re.compile(r"Starting postgres node at '([^']+)'")
-
-    class NeonEnvStub(object):
-        pass
-
-    config: Any = NeonEnvStub()
+    # NeonEnv stub to make NeonCli happy
+    config: Any = type("NeonEnvStub", (object,), {})
     config.rust_log_override = None
     config.repo_dir = repo_dir
     config.pg_version = "14"  # Note: `pg_dumpall` (from pg_bin) version is set by DEFAULT_PG_VERSION_DEFAULT and can be overriden by DEFAULT_PG_VERSION env var
@@ -49,11 +72,15 @@ def test_backward_compatibility(test_output_dir: Path, pg_bin: PgBin, request: F
         result = cli.pg_start("main")
         request.addfinalizer(lambda: cli.pg_stop("main"))
     except Exception:
+        breaking_changes_allowed = (
+            os.environ.get("ALLOW_BREAKING_CHANGES", "false").lower() == "true"
+        )
         if breaking_changes_allowed:
-            pytest.xfail("Breaking changes are allowed")
+            pytest.xfail("Breaking changes are allowed by ALLOW_BREAKING_CHANGES env var")
         else:
             raise
 
+    connstr_re = re.compile(r"Starting postgres node at '([^']+)'")
     connstr_all = connstr_re.findall(result.stdout)
     assert len(connstr_all) == 1, f"can't parse connstr from {result.stdout}"
     connstr = connstr_all[0]
@@ -78,7 +105,7 @@ def test_backward_compatibility(test_output_dir: Path, pg_bin: PgBin, request: F
 @pytest.mark.order(after="test_backward_compatibility")
 # Note: if renaming this test, don't forget to update a reference to it in a workflow file:
 #   "Upload compatibility snapshot" step in .github/actions/run-python-test-set/action.yml
-def test_prepare_snapshot(neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_bin: PgBin):
+def test_prepare_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path):
     # The test doesn't really test anything
     # it creates a new snapshot for releases after we tested the current version against the previous snapshot in `test_backward_compatibility`
     neon_env_builder.pg_version = "14"
