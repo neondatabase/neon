@@ -1,14 +1,13 @@
-import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
-from performance.test_perf_pgbench import get_scales_matrix
 
 
-# Test gc_cuttoff
+# Test gc_cutoff
 #
-# This test set fail point after at the end of GC and checks
-# that pageserver normally restarts after it
-@pytest.mark.parametrize("scale", get_scales_matrix(10))
-def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, scale: int):
+# This test sets fail point at the end of GC, and checks that pageserver
+# normally restarts after it. Also, there should be GC ERRORs in the log,
+# but the fixture checks the log for any unexpected ERRORs after every
+# test anyway, so it doesn't need any special attention here.
+def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
@@ -18,21 +17,23 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, scale: int):
             "gc_period": "10 s",
             "gc_horizon": f"{1024 ** 2}",
             "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "compaction_period": "5 s",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "1 s",
+            "compaction_threshold": "3",
+            "image_creation_threshold": "2",
         }
     )
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    connstr = pg.connstr()
-    pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
+    connstr = pg.connstr(options="-csynchronous_commit=off")
+    pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
 
-    pageserver_http.configure_failpoints(("gc-before-save-metadata", "return"))
+    pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
 
     for i in range(5):
         try:
-            pg_bin.run_capture(["pgbench", "-T100", connstr])
+            pg_bin.run_capture(["pgbench", "-N", "-c5", "-T100", "-Mprepared", connstr])
         except Exception:
             env.pageserver.stop()
             env.pageserver.start()
-            pageserver_http.configure_failpoints(("gc-before-save-metadata", "return"))
+            pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
