@@ -1,9 +1,10 @@
 use svg_fmt::*;
-use clap::{App, Arg};
+use clap::{Command, Arg};
 use anyhow::Result;
 use std::{collections::{BTreeMap, BTreeSet}, ops::Range, path::PathBuf};
 use utils::{lsn::Lsn, project_git_version};
-use pageserver::{layered_repository::get_range, repository::{Key, key_range_size}};
+use pageserver::tenant::get_range;
+use pageserver::repository::{Key, key_range_size};
 
 project_git_version!(GIT_VERSION);
 
@@ -20,7 +21,7 @@ fn analyze<T: Ord + Copy>(coords: Vec<T>) -> (usize, BTreeMap<T, usize>) {
 }
 
 fn main() -> Result<()> {
-    let arg_matches = App::new("Neon draw_timeline_dir utility")
+    let arg_matches = Command::new("Neon draw_timeline_dir utility")
         .about("Draws the domains of the image and delta layers in a directory")
         .version(GIT_VERSION)
         .arg(
@@ -33,7 +34,7 @@ fn main() -> Result<()> {
 
     // Get ranges
     let mut ranges: Vec<(Range<Key>, Range<Lsn>)> = vec![];
-    let timeline_path = PathBuf::from(arg_matches.value_of("path").unwrap());
+    let timeline_path = PathBuf::from(arg_matches.get_one::<String>("path").unwrap());
     for entry in std::fs::read_dir(timeline_path).unwrap() {
         let entry = entry?;
         let path: PathBuf = entry.path();
