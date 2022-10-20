@@ -1,6 +1,6 @@
 //!
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
@@ -445,7 +445,7 @@ impl Timeline {
         &self,
         lsn: Lsn,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
             "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
@@ -595,7 +595,7 @@ impl Timeline {
     ///
     /// Also flush after a period of time without new data -- it helps
     /// safekeepers to regard pageserver as caught up and suspend activity.
-    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> Result<()> {
+    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
         let last_lsn = self.get_last_record_lsn();
         let layers = self.layers.read().unwrap();
         if let Some(open_layer) = &layers.open_layer {
@@ -1112,7 +1112,7 @@ impl Timeline {
         Some((lsn, img))
     }
 
-    fn get_ancestor_timeline(&self) -> Result<Arc<Timeline>> {
+    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
         let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
@@ -1171,14 +1171,14 @@ impl Timeline {
         Ok(layer)
     }
 
-    fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
+    fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> anyhow::Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn)?;
         layer.put_value(key, lsn, val)?;
         Ok(())
     }
 
-    fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
+    fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
         let layer = self.get_layer_for_write(lsn)?;
         layer.put_tombstone(key_range, lsn)?;
 
@@ -1224,7 +1224,7 @@ impl Timeline {
     /// currently doing the flushing, this function will wait for it
     /// to finish. If 'wait' is false, this function will return
     /// immediately instead.
-    fn flush_frozen_layers(&self, wait: bool) -> Result<()> {
+    fn flush_frozen_layers(&self, wait: bool) -> anyhow::Result<()> {
         let flush_lock_guard = if wait {
             self.layer_flush_lock.lock().unwrap()
         } else {
@@ -1263,7 +1263,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
+    fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> anyhow::Result<()> {
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
@@ -1321,7 +1321,7 @@ impl Timeline {
         &self,
         disk_consistent_lsn: Lsn,
         layer_paths_to_upload: HashMap<PathBuf, LayerFileMetadata>,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // We can only save a valid 'prev_record_lsn' value on disk if we
         // flushed *all* in-memory changes to disk. We only track
         // 'prev_record_lsn' in memory for the latest processed record, so we
@@ -1382,7 +1382,7 @@ impl Timeline {
     fn create_delta_layer(
         &self,
         frozen_layer: &InMemoryLayer,
-    ) -> Result<(PathBuf, LayerFileMetadata)> {
+    ) -> anyhow::Result<(PathBuf, LayerFileMetadata)> {
         // Write it out
         let new_delta = frozen_layer.write_to_disk()?;
         let new_delta_path = new_delta.path();
@@ -1417,7 +1417,7 @@ impl Timeline {
         Ok((new_delta_path, LayerFileMetadata::new(sz)))
     }
 
-    fn repartition(&self, lsn: Lsn, partition_size: u64) -> Result<(KeyPartitioning, Lsn)> {
+    fn repartition(&self, lsn: Lsn, partition_size: u64) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         let mut partitioning_guard = self.partitioning.lock().unwrap();
         if partitioning_guard.1 == Lsn(0)
             || lsn.0 - partitioning_guard.1 .0 > self.repartition_threshold
@@ -1431,7 +1431,7 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> Result<bool> {
+    fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<bool> {
         let layers = self.layers.read().unwrap();
 
         for part_range in &partition.ranges {
@@ -1476,7 +1476,7 @@ impl Timeline {
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         force: bool,
-    ) -> Result<HashMap<PathBuf, LayerFileMetadata>> {
+    ) -> anyhow::Result<HashMap<PathBuf, LayerFileMetadata>> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
         for partition in partitioning.parts.iter() {
@@ -1569,7 +1569,7 @@ impl Timeline {
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
     /// as Level 1 files.
     ///
-    fn compact_level0(&self, target_file_size: u64) -> Result<()> {
+    fn compact_level0(&self, target_file_size: u64) -> anyhow::Result<()> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
@@ -1884,7 +1884,7 @@ impl Timeline {
         retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         let mut gc_info = self.gc_info.write().unwrap();
 
         gc_info.horizon_cutoff = cutoff_horizon;
@@ -1939,7 +1939,7 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub(super) fn gc(&self) -> Result<GcResult> {
+    pub(super) fn gc(&self) -> anyhow::Result<GcResult> {
         let mut result: GcResult = Default::default();
         let now = SystemTime::now();
 
@@ -2259,11 +2259,11 @@ impl<'a> TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    pub fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
+    pub fn put(&self, key: Key, lsn: Lsn, value: &Value) -> anyhow::Result<()> {
         self.tl.put_value(key, lsn, value)
     }
 
-    pub fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
+    pub fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
         self.tl.put_tombstone(key_range, lsn)
     }
 
