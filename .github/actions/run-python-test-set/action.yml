@@ -167,7 +167,7 @@ runs:
       if: github.ref_name == 'release'
       uses: ./.github/actions/upload
       with:
-        name: compatibility-snapshot-${{ inputs.build_type }}-pg14
+        name: compatibility-snapshot-${{ inputs.build_type }}-pg14-${{ github.run_id }}
         # The path includes a test name (test_prepare_snapshot) and directory that the test creates (compatibility_snapshot_pg14), keep the path in sync with the test
         path: /tmp/test_output/test_prepare_snapshot/compatibility_snapshot_pg14/
         prefix: latest
