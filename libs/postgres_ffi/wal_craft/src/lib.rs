@@ -37,22 +37,22 @@ pub static REQUIRED_POSTGRES_CONFIG: Lazy<Vec<&'static str>> = Lazy::new(|| {
 });
 
 impl Conf {
-    pub fn pg_distrib_dir(&self) -> PathBuf {
+    pub fn pg_distrib_dir(&self) -> Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
         match self.pg_version {
-            14 => path.join(format!("v{}", self.pg_version)),
-            15 => path.join(format!("v{}", self.pg_version)),
-            _ => panic!("Unsupported postgres version: {}", self.pg_version),
+            14 => Ok(path.join(format!("v{}", self.pg_version))),
+            15 => Ok(path.join(format!("v{}", self.pg_version))),
+            _ => bail!("Unsupported postgres version: {}", self.pg_version),
         }
     }
 
-    fn pg_bin_dir(&self) -> PathBuf {
-        self.pg_distrib_dir().join("bin")
+    fn pg_bin_dir(&self) -> Result<PathBuf> {
+        Ok(self.pg_distrib_dir()?.join("bin"))
     }
 
-    fn pg_lib_dir(&self) -> PathBuf {
-        self.pg_distrib_dir().join("lib")
+    fn pg_lib_dir(&self) -> Result<PathBuf> {
+        Ok(self.pg_distrib_dir()?.join("lib"))
     }
 
     pub fn wal_dir(&self) -> PathBuf {
@@ -60,12 +60,12 @@ impl Conf {
     }
 
     fn new_pg_command(&self, command: impl AsRef<Path>) -> Result<Command> {
-        let path = self.pg_bin_dir().join(command);
+        let path = self.pg_bin_dir()?.join(command);
         ensure!(path.exists(), "Command {:?} does not exist", path);
         let mut cmd = Command::new(path);
         cmd.env_clear()
-            .env("LD_LIBRARY_PATH", self.pg_lib_dir())
-            .env("DYLD_LIBRARY_PATH", self.pg_lib_dir());
+            .env("LD_LIBRARY_PATH", self.pg_lib_dir()?)
+            .env("DYLD_LIBRARY_PATH", self.pg_lib_dir()?);
         Ok(cmd)
     }
 
