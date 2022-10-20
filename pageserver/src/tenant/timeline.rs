@@ -1986,10 +1986,10 @@ impl Timeline {
                 new_gc_cutoff
             );
             write_guard.store_and_unlock(new_gc_cutoff).wait();
-
-            // Persist metadata file
-            self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())?;
         }
+        // Persist the new GC cutoff value in the metadata file, before
+        // we actually remove anything.
+        self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())?;
 
         info!("GC starting");
 
@@ -2116,14 +2116,12 @@ impl Timeline {
         }
 
         info!(
-            "GC completed removing {} layers, cuttof {}",
+            "GC completed removing {} layers, cutoff {}",
             result.layers_removed, new_gc_cutoff
         );
+
         if result.layers_removed != 0 {
-            fail_point!("gc-before-save-metadata", |_| {
-                info!("Abnormaly terinate pageserver at gc-before-save-metadata fail point");
-                std::process::abort();
-            });
+            fail_point!("after-timeline-gc-removed-layers");
         }
 
         if self.upload_layers.load(atomic::Ordering::Relaxed) {
