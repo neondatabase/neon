@@ -46,6 +46,8 @@ pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 pub const LOG_FILE_NAME: &str = "pageserver.log";
 
+static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
+
 /// Config for the Repository checkpointer
 #[derive(Debug, Clone, Copy)]
 pub enum CheckpointConfig {

@@ -1373,6 +1373,17 @@ fn is_rel_block_key(key: Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0
 }
 
+pub fn is_rel_fsm_block_key(key: Key) -> bool {
+    key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
+}
+
+pub fn is_rel_vm_block_key(key: Key) -> bool {
+    key.field1 == 0x00
+        && key.field4 != 0
+        && key.field5 == VISIBILITYMAP_FORKNUM
+        && key.field6 != 0xffffffff
+}
+
 pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
     Ok(match key.field1 {
         0x01 => {
