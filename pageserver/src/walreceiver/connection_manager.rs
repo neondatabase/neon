@@ -268,7 +268,7 @@ async fn wait_for_active_timeline(
                 let new_state = *timeline_state_updates.borrow();
                 match new_state {
                     TimelineState::Active => {
-                        debug!("Timeline state changed to active, continuing the walreceover connection manager");
+                        debug!("Timeline state changed to active, continuing the walreceiver connection manager");
                         return ControlFlow::Continue(());
                     }
                     state => {

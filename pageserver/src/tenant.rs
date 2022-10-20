@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, Context};
 use pageserver_api::models::TimelineState;
 use tokio::sync::watch;
 use tracing::*;

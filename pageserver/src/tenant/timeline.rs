@@ -937,19 +937,18 @@ impl Timeline {
                 false,
                 async move {
                     let mut timeline_state_updates = self_clone.subscribe_for_state_updates();
+                    let self_calculation = Arc::clone(&self_clone);
                     tokio::select! {
-                        calculation_result = async {
-                            let calculated_size = self_clone.calculate_logical_size(init_lsn)?;
-                            let result = spawn_blocking(move || {
-                                self_clone.current_logical_size.initial_logical_size.set(calculated_size)
-                            }).await?;
-                            match result {
+                        calculation_result = spawn_blocking(move || self_calculation.calculate_logical_size(init_lsn)) => {
+                            let calculated_size = calculation_result
+                                .context("Failed to spawn calculation result task")?
+                                .context("Failed to calculate logical size")?;
+                            match self_clone.current_logical_size.initial_logical_size.set(calculated_size) {
                                 Ok(()) => info!("Successfully calculated initial logical size"),
                                 Err(existing_size) => error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing"),
                             }
                             Ok(())
-                        } => calculation_result,
-
+                        },
                         new_event = async {
                             loop {
                                 match timeline_state_updates.changed().await {
