@@ -848,7 +848,7 @@ jobs:
           fetch-depth: 0
 
       - name: Add curl
-        run: apt update && apt install curl -y
+        run: apt update && apt install curl unzip wget jq  -y
 
       - name: Add awscli
         run: |
