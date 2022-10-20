@@ -1412,8 +1412,8 @@ fn run_initdb(
     initdb_target_dir: &Path,
     pg_version: u32,
 ) -> Result<()> {
-    let initdb_bin_path = conf.pg_bin_dir(pg_version).join("initdb");
-    let initdb_lib_dir = conf.pg_lib_dir(pg_version);
+    let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
+    let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
     info!(
         "running {} in {}, libdir: {}",
         initdb_bin_path.display(),

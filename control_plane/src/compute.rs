@@ -183,18 +183,18 @@ impl PostgresNode {
     }
 
     fn sync_safekeepers(&self, auth_token: &Option<String>, pg_version: u32) -> Result<Lsn> {
-        let pg_path = self.env.pg_bin_dir(pg_version).join("postgres");
+        let pg_path = self.env.pg_bin_dir(pg_version)?.join("postgres");
         let mut cmd = Command::new(&pg_path);
 
         cmd.arg("--sync-safekeepers")
             .env_clear()
             .env(
                 "LD_LIBRARY_PATH",
-                self.env.pg_lib_dir(pg_version).to_str().unwrap(),
+                self.env.pg_lib_dir(pg_version)?.to_str().unwrap(),
             )
             .env(
                 "DYLD_LIBRARY_PATH",
-                self.env.pg_lib_dir(pg_version).to_str().unwrap(),
+                self.env.pg_lib_dir(pg_version)?.to_str().unwrap(),
             )
             .env("PGDATA", self.pgdata().to_str().unwrap())
             .stdout(Stdio::piped())
@@ -422,7 +422,7 @@ impl PostgresNode {
     }
 
     fn pg_ctl(&self, args: &[&str], auth_token: &Option<String>) -> Result<()> {
-        let pg_ctl_path = self.env.pg_bin_dir(self.pg_version).join("pg_ctl");
+        let pg_ctl_path = self.env.pg_bin_dir(self.pg_version)?.join("pg_ctl");
         let mut cmd = Command::new(pg_ctl_path);
         cmd.args(
             [
@@ -440,11 +440,11 @@ impl PostgresNode {
         .env_clear()
         .env(
             "LD_LIBRARY_PATH",
-            self.env.pg_lib_dir(self.pg_version).to_str().unwrap(),
+            self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
         )
         .env(
             "DYLD_LIBRARY_PATH",
-            self.env.pg_lib_dir(self.pg_version).to_str().unwrap(),
+            self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
         );
         if let Some(token) = auth_token {
             cmd.env("ZENITH_AUTH_TOKEN", token);

@@ -610,13 +610,26 @@ impl PostgresRedoProcess {
             );
             fs::remove_dir_all(&datadir)?;
         }
+        let pg_bin_dir_path = conf.pg_bin_dir(pg_version).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("incorrect pg_bin_dir path: {}", e),
+            )
+        })?;
+        let pg_lib_dir_path = conf.pg_lib_dir(pg_version).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("incorrect pg_lib_dir path: {}", e),
+            )
+        })?;
+
         info!("running initdb in {}", datadir.display());
-        let initdb = Command::new(conf.pg_bin_dir(pg_version).join("initdb"))
+        let initdb = Command::new(pg_bin_dir_path.join("initdb"))
             .args(&["-D", &datadir.to_string_lossy()])
             .arg("-N")
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
+            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path) // macOS
             .close_fds()
             .output()
             .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
@@ -642,14 +655,14 @@ impl PostgresRedoProcess {
         }
 
         // Start postgres itself
-        let mut child = Command::new(conf.pg_bin_dir(pg_version).join("postgres"))
+        let mut child = Command::new(pg_bin_dir_path.join("postgres"))
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
+            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("PGDATA", &datadir)
             // The redo process is not trusted, so it runs in seccomp mode
             // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't

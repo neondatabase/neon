@@ -3,7 +3,7 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, ensure, Context, Result};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -201,28 +201,28 @@ impl LocalEnv {
         self.pg_distrib_dir.clone()
     }
 
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> PathBuf {
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
         match pg_version {
-            14 => path.join(format!("v{pg_version}")),
-            15 => path.join(format!("v{pg_version}")),
-            _ => panic!("Unsupported postgres version: {}", pg_version),
+            14 => Ok(path.join(format!("v{pg_version}"))),
+            15 => Ok(path.join(format!("v{pg_version}"))),
+            _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> PathBuf {
+    pub fn pg_bin_dir(&self, pg_version: u32) -> Result<PathBuf> {
         match pg_version {
-            14 => self.pg_distrib_dir(pg_version).join("bin"),
-            15 => self.pg_distrib_dir(pg_version).join("bin"),
-            _ => panic!("Unsupported postgres version: {}", pg_version),
+            14 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
+            15 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
+            _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
-    pub fn pg_lib_dir(&self, pg_version: u32) -> PathBuf {
+    pub fn pg_lib_dir(&self, pg_version: u32) -> Result<PathBuf> {
         match pg_version {
-            14 => self.pg_distrib_dir(pg_version).join("lib"),
-            15 => self.pg_distrib_dir(pg_version).join("lib"),
-            _ => panic!("Unsupported postgres version: {}", pg_version),
+            14 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
+            15 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
+            _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
 
@@ -422,10 +422,10 @@ impl LocalEnv {
             "directory '{}' already exists. Perhaps already initialized?",
             base_path.display()
         );
-        if !self.pg_bin_dir(pg_version).join("postgres").exists() {
+        if !self.pg_bin_dir(pg_version)?.join("postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
-                self.pg_bin_dir(pg_version).display()
+                self.pg_bin_dir(pg_version)?.display()
             );
         }
         for binary in ["pageserver", "safekeeper"] {
