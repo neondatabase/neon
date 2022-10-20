@@ -1114,10 +1114,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
                 cur.execute("INSERT INTO t (key) VALUES (1)")
 
     # Remove initial tenant's br1 (active)
-    assert sk_http.timeline_delete_force(tenant_id, timeline_id_1) == {
-        "dir_existed": True,
-        "was_active": True,
-    }
+    assert sk_http.timeline_delete_force(tenant_id, timeline_id_1)["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_2)).is_dir()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).is_dir()
@@ -1125,10 +1122,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
     # Ensure repeated deletion succeeds
-    assert sk_http.timeline_delete_force(tenant_id, timeline_id_1) == {
-        "dir_existed": False,
-        "was_active": False,
-    }
+    assert not sk_http.timeline_delete_force(tenant_id, timeline_id_1)["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_2)).is_dir()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).is_dir()
@@ -1145,10 +1139,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
     # Remove initial tenant's br2 (inactive)
-    assert sk_http.timeline_delete_force(tenant_id, timeline_id_2) == {
-        "dir_existed": True,
-        "was_active": False,
-    }
+    assert sk_http.timeline_delete_force(tenant_id, timeline_id_2)["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_2)).exists()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).is_dir()
@@ -1156,10 +1147,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
     # Remove non-existing branch, should succeed
-    assert sk_http.timeline_delete_force(tenant_id, TimelineId("00" * 16)) == {
-        "dir_existed": False,
-        "was_active": False,
-    }
+    assert not sk_http.timeline_delete_force(tenant_id, TimelineId("00" * 16))["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_2)).exists()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).exists()
@@ -1168,10 +1156,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # Remove initial tenant fully (two branches are active)
     response = sk_http.tenant_delete_force(tenant_id)
-    assert response[str(timeline_id_3)] == {
-        "dir_existed": True,
-        "was_active": True,
-    }
+    assert response[str(timeline_id_3)]["dir_existed"]
     assert not (sk_data_dir / str(tenant_id)).exists()
     assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
