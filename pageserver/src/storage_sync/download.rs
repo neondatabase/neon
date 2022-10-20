@@ -22,7 +22,7 @@ use crate::{
     TEMP_FILE_SUFFIX,
 };
 use utils::{
-    crashsafe_dir::path_with_suffix_extension,
+    crashsafe::path_with_suffix_extension,
     id::{TenantId, TenantTimelineId, TimelineId},
 };
 

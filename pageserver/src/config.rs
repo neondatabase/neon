@@ -7,6 +7,7 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use remote_storage::RemoteStorageConfig;
 use std::env;
+use utils::crashsafe::path_with_suffix_extension;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -24,6 +25,7 @@ use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
+pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 const TENANT_CONFIG_NAME: &str = "config";
 
 pub mod defaults {
@@ -362,6 +364,17 @@ impl PageServerConf {
 
     pub fn timeline_path(&self, timeline_id: &TimelineId, tenant_id: &TenantId) -> PathBuf {
         self.timelines_path(tenant_id).join(timeline_id.to_string())
+    }
+
+    pub fn timeline_uninit_mark_file_path(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> PathBuf {
+        path_with_suffix_extension(
+            self.timeline_path(&timeline_id, &tenant_id),
+            TIMELINE_UNINIT_MARK_SUFFIX,
+        )
     }
 
     /// Points to a place in pageserver's local directory,

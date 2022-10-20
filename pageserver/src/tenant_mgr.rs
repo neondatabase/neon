@@ -12,7 +12,7 @@ use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
 
-use crate::config::{PageServerConf, METADATA_FILE_NAME};
+use crate::config::{PageServerConf, METADATA_FILE_NAME, TIMELINE_UNINIT_MARK_SUFFIX};
 use crate::http::models::TenantInfo;
 use crate::storage_sync::index::{LayerFileMetadata, RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData, TimelineLocalFiles};
@@ -24,7 +24,7 @@ use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
 
-use utils::crashsafe_dir::{self, path_with_suffix_extension};
+use utils::crashsafe::{self, path_with_suffix_extension};
 use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
@@ -265,58 +265,98 @@ fn create_tenant_files(
         temporary_tenant_dir.display()
     );
 
-    let temporary_tenant_timelines_dir = rebase_directory(
-        &conf.timelines_path(&tenant_id),
-        &target_tenant_directory,
-        &temporary_tenant_dir,
-    )?;
-    let temporary_tenant_config_path = rebase_directory(
-        &conf.tenant_config_path(tenant_id),
-        &target_tenant_directory,
-        &temporary_tenant_dir,
-    )?;
-
     // top-level dir may exist if we are creating it through CLI
-    crashsafe_dir::create_dir_all(&temporary_tenant_dir).with_context(|| {
+    crashsafe::create_dir_all(&temporary_tenant_dir).with_context(|| {
         format!(
             "could not create temporary tenant directory {}",
             temporary_tenant_dir.display()
         )
     })?;
-    // first, create a config in the top-level temp directory, fsync the file
-    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true)?;
-    // then, create a subdirectory in the top-level temp directory, fsynced
-    crashsafe_dir::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
+
+    let creation_result = try_create_target_tenant_dir(
+        conf,
+        tenant_conf,
+        tenant_id,
+        &temporary_tenant_dir,
+        &target_tenant_directory,
+    );
+
+    if creation_result.is_err() {
+        error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
+        if let Err(e) = fs::remove_dir_all(&temporary_tenant_dir) {
+            error!("Failed to remove temporary tenant directory {temporary_tenant_dir:?}: {e}")
+        } else if let Err(e) = crashsafe::fsync(&temporary_tenant_dir) {
+            error!(
+                "Failed to fsync removed temporary tenant directory {temporary_tenant_dir:?}: {e}"
+            )
+        }
+    }
+
+    creation_result
+}
+
+fn try_create_target_tenant_dir(
+    conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
+    tenant_id: TenantId,
+    temporary_tenant_dir: &Path,
+    target_tenant_directory: &Path,
+) -> Result<(), anyhow::Error> {
+    let temporary_tenant_timelines_dir = rebase_directory(
+        &conf.timelines_path(&tenant_id),
+        target_tenant_directory,
+        temporary_tenant_dir,
+    )
+    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary timelines dir"))?;
+    let temporary_tenant_config_path = rebase_directory(
+        &conf.tenant_config_path(tenant_id),
+        target_tenant_directory,
+        temporary_tenant_dir,
+    )
+    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary config path"))?;
+
+    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true).with_context(
+        || {
+            format!(
+                "Failed to write tenant {} config to {}",
+                tenant_id,
+                temporary_tenant_config_path.display()
+            )
+        },
+    )?;
+    crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
-            "could not create temporary tenant timelines directory {}",
+            "could not create tenant {} temporary timelines directory {}",
+            tenant_id,
             temporary_tenant_timelines_dir.display()
         )
     })?;
-
     fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
         anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
     });
 
-    // move-rename tmp directory with all files synced into a permanent directory, fsync its parent
-    fs::rename(&temporary_tenant_dir, &target_tenant_directory).with_context(|| {
+    fs::rename(&temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
-            "failed to move temporary tenant directory {} into the permanent one {}",
+            "failed to move tenant {} temporary directory {} into the permanent one {}",
+            tenant_id,
             temporary_tenant_dir.display(),
             target_tenant_directory.display()
         )
     })?;
     let target_dir_parent = target_tenant_directory.parent().with_context(|| {
         format!(
-            "Failed to get tenant dir parent for {}",
+            "Failed to get tenant {} dir parent for {}",
+            tenant_id,
             target_tenant_directory.display()
         )
     })?;
-    fs::File::open(target_dir_parent)?.sync_all()?;
-
-    info!(
-        "created tenant directory structure in {}",
-        target_tenant_directory.display()
-    );
+    crashsafe::fsync(target_dir_parent).with_context(|| {
+        format!(
+            "Failed to fsync renamed directory's parent {} for tenant {}",
+            target_dir_parent.display(),
+            tenant_id,
+        )
+    })?;
 
     Ok(())
 }
@@ -602,6 +642,15 @@ fn is_temporary(path: &Path) -> bool {
     }
 }
 
+fn is_uninit_mark(path: &Path) -> bool {
+    match path.file_name() {
+        Some(name) => name
+            .to_string_lossy()
+            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
+        None => false,
+    }
+}
+
 fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
@@ -644,28 +693,74 @@ fn collect_timelines_for_tenant(
                             e
                         );
                     }
+                } else if is_uninit_mark(&timeline_dir) {
+                    let timeline_uninit_mark_file = &timeline_dir;
+                    info!(
+                        "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                        timeline_uninit_mark_file.display()
+                    );
+                    let timeline_id = timeline_uninit_mark_file
+                        .file_stem()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                                "Could not parse timeline id out of the timeline uninit mark name {}",
+                                timeline_uninit_mark_file.display()
+                            )
+                        })?;
+                    let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
+                    if let Err(e) =
+                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
+                    {
+                        error!("Failed to clean up uninit marked timeline: {e:?}");
+                    }
                 } else {
-                    match collect_timeline_files(&timeline_dir) {
-                        Ok((timeline_id, metadata, timeline_files)) => {
-                            tenant_timelines.insert(
-                                timeline_id,
-                                TimelineLocalFiles::collected(metadata, timeline_files),
-                            );
+                    let timeline_id = timeline_dir
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                                "Could not parse timeline id out of the timeline dir name {}",
+                                timeline_dir.display()
+                            )
+                        })?;
+                    let timeline_uninit_mark_file =
+                        config.timeline_uninit_mark_file_path(tenant_id, timeline_id);
+                    if timeline_uninit_mark_file.exists() {
+                        info!("Found an uninit mark file for timeline {tenant_id}/{timeline_id}, removing the timeline and its uninit mark");
+                        if let Err(e) = remove_timeline_and_uninit_mark(
+                            &timeline_dir,
+                            &timeline_uninit_mark_file,
+                        ) {
+                            error!("Failed to clean up uninit marked timeline: {e:?}");
                         }
-                        Err(e) => {
-                            error!(
-                                "Failed to process timeline dir contents at '{}', reason: {:?}",
-                                timeline_dir.display(),
-                                e
-                            );
-                            match remove_if_empty(&timeline_dir) {
-                                Ok(true) => info!(
-                                    "Removed empty timeline directory {}",
-                                    timeline_dir.display()
-                                ),
-                                Ok(false) => (),
-                                Err(e) => {
-                                    error!("Failed to remove empty timeline directory: {e:?}")
+                    } else {
+                        match collect_timeline_files(&timeline_dir) {
+                            Ok((metadata, timeline_files)) => {
+                                tenant_timelines.insert(
+                                    timeline_id,
+                                    TimelineLocalFiles::collected(metadata, timeline_files),
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to process timeline dir contents at '{}', reason: {:?}",
+                                    timeline_dir.display(),
+                                    e
+                                );
+                                match remove_if_empty(&timeline_dir) {
+                                    Ok(true) => info!(
+                                        "Removed empty timeline directory {}",
+                                        timeline_dir.display()
+                                    ),
+                                    Ok(false) => (),
+                                    Err(e) => {
+                                        error!("Failed to remove empty timeline directory: {e:?}")
+                                    }
                                 }
                             }
                         }
@@ -688,24 +783,41 @@ fn collect_timelines_for_tenant(
     Ok((tenant_id, TenantAttachData::Ready(tenant_timelines)))
 }
 
+fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
+    fs::remove_dir_all(&timeline_dir)
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                // we can leave the uninit mark without a timeline dir,
+                // just remove the mark then
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .with_context(|| {
+            format!(
+                "Failed to remove unit marked timeline directory {}",
+                timeline_dir.display()
+            )
+        })?;
+    fs::remove_file(&uninit_mark).with_context(|| {
+        format!(
+            "Failed to remove timeline uninit mark file {}",
+            uninit_mark.display()
+        )
+    })?;
+
+    Ok(())
+}
+
 // discover timeline files and extract timeline metadata
 //  NOTE: ephemeral files are excluded from the list
 fn collect_timeline_files(
     timeline_dir: &Path,
-) -> anyhow::Result<(
-    TimelineId,
-    TimelineMetadata,
-    HashMap<PathBuf, LayerFileMetadata>,
-)> {
+) -> anyhow::Result<(TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>)> {
     let mut timeline_files = HashMap::new();
     let mut timeline_metadata_path = None;
 
-    let timeline_id = timeline_dir
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or_default()
-        .parse::<TimelineId>()
-        .context("Could not parse timeline id out of the timeline dir name")?;
     let timeline_dir_entries =
         fs::read_dir(&timeline_dir).context("Failed to list timeline dir contents")?;
     for entry in timeline_dir_entries {
@@ -754,5 +866,5 @@ fn collect_timeline_files(
         "Timeline has no ancestor and no layer files"
     );
 
-    Ok((timeline_id, metadata, timeline_files))
+    Ok((metadata, timeline_files))
 }

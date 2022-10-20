@@ -12,16 +12,8 @@ pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
 
     fs::create_dir(path)?;
-    File::open(path)?.sync_all()?;
-
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "can't find parent",
-        ))
-    }
+    fsync_file_and_parent(path)?;
+    Ok(())
 }
 
 /// Similar to [`std::fs::create_dir_all`], except we fsync all
@@ -65,12 +57,12 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 
     // Fsync the created directories from child to parent.
     for &path in dirs_to_create.iter() {
-        File::open(path)?.sync_all()?;
+        fsync(path)?;
     }
 
     // If we created any new directories, fsync the parent.
     if !dirs_to_create.is_empty() {
-        File::open(path)?.sync_all()?;
+        fsync(path)?;
     }
 
     Ok(())
@@ -90,6 +82,33 @@ pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str)
     original_path
         .as_ref()
         .with_extension(new_extension.as_ref())
+}
+
+pub fn fsync_file_and_parent(file_path: &Path) -> io::Result<()> {
+    let parent = file_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("File {file_path:?} has no parent"),
+        )
+    })?;
+
+    fsync(file_path)?;
+    fsync(parent)?;
+    Ok(())
+}
+
+pub fn fsync(path: &Path) -> io::Result<()> {
+    File::open(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("Failed to open the file {path:?}: {e}")))
+        .and_then(|file| {
+            file.sync_all().map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("Failed to sync file {path:?} data and metadata: {e}"),
+                )
+            })
+        })
+        .map_err(|e| io::Error::new(e.kind(), format!("Failed to fsync file {path:?}: {e}")))
 }
 
 #[cfg(test)]
