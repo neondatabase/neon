@@ -307,10 +307,6 @@ pub struct GcInfo {
 
 /// Public interface functions
 impl Timeline {
-    //------------------------------------------------------------------------------
-    // Public GET functions
-    //------------------------------------------------------------------------------
-
     /// Get the LSN where this branch was created
     pub fn get_ancestor_lsn(&self) -> Lsn {
         self.ancestor_lsn
@@ -454,12 +450,6 @@ impl Timeline {
         );
         Ok(())
     }
-
-    //------------------------------------------------------------------------------
-    // Public PUT functions, to update the repository with new page versions.
-    //
-    // These are called by the WAL receiver to digest WAL records.
-    //------------------------------------------------------------------------------
 
     /// Flush to disk all data that was written with the put_* functions
     ///
