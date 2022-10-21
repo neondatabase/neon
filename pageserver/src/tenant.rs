@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context};
 use tokio::sync::watch;
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
@@ -25,7 +25,6 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
-use std::num::NonZeroU64;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
@@ -292,7 +291,7 @@ impl TimelineUninitMark {
         Ok(())
     }
 
-    fn delete_mark_file_if_present(&mut self) -> Result<(), anyhow::Error> {
+    fn delete_mark_file_if_present(&mut self) -> anyhow::Result<()> {
         let uninit_mark_file = &self.uninit_mark_path;
         let uninit_mark_parent = uninit_mark_file
             .parent()
@@ -470,7 +469,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
-    ) -> Result<GcResult> {
+    ) -> anyhow::Result<GcResult> {
         let timeline_str = target_timeline_id
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
@@ -486,7 +485,7 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub fn compaction_iteration(&self) -> Result<()> {
+    pub fn compaction_iteration(&self) -> anyhow::Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
@@ -510,7 +509,7 @@ impl Tenant {
     ///
     /// Used at graceful shutdown.
     ///
-    pub fn checkpoint(&self) -> Result<()> {
+    pub fn checkpoint(&self) -> anyhow::Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // checkpoints. We don't want to block everything else while the
@@ -681,7 +680,7 @@ impl Tenant {
 /// before the children.
 fn tree_sort_timelines(
     timelines: HashMap<TimelineId, TimelineMetadata>,
-) -> Result<Vec<(TimelineId, TimelineMetadata)>> {
+) -> anyhow::Result<Vec<(TimelineId, TimelineMetadata)>> {
     let mut result = Vec::with_capacity(timelines.len());
 
     let mut now = Vec::with_capacity(timelines.len());
@@ -784,27 +783,6 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
-    pub fn get_wal_receiver_connect_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
-        tenant_conf
-            .walreceiver_connect_timeout
-            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout)
-    }
-
-    pub fn get_lagging_wal_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
-        tenant_conf
-            .lagging_wal_timeout
-            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout)
-    }
-
-    pub fn get_max_lsn_wal_lag(&self) -> NonZeroU64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
-        tenant_conf
-            .max_lsn_wal_lag
-            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag)
-    }
-
     pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().update(&new_tenant_conf);
     }
@@ -836,7 +814,7 @@ impl Tenant {
         ))
     }
 
-    pub fn new(
+    pub(super) fn new(
         conf: &'static PageServerConf,
         tenant_conf: TenantConfOpt,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -859,7 +837,7 @@ impl Tenant {
     }
 
     /// Locate and load config
-    pub fn load_tenant_config(
+    pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
@@ -901,7 +879,7 @@ impl Tenant {
         Ok(tenant_conf)
     }
 
-    pub fn persist_tenant_config(
+    pub(super) fn persist_tenant_config(
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
         first_save: bool,
@@ -994,7 +972,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
-    ) -> Result<GcResult> {
+    ) -> anyhow::Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
@@ -1411,7 +1389,7 @@ fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Path,
     pg_version: u32,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
     let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
     info!(
@@ -1457,7 +1435,7 @@ impl Drop for Tenant {
     }
 }
 /// Dump contents of a layer file to stdout.
-pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
+pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> anyhow::Result<()> {
     use std::os::unix::fs::FileExt;
 
     // All layer files start with a two-byte "magic" value, to identify the kind of
@@ -1562,13 +1540,13 @@ pub mod harness {
     }
 
     impl<'a> TenantHarness<'a> {
-        pub fn create(test_name: &'static str) -> Result<Self> {
+        pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
             Self::create_internal(test_name, false)
         }
-        pub fn create_exclusive(test_name: &'static str) -> Result<Self> {
+        pub fn create_exclusive(test_name: &'static str) -> anyhow::Result<Self> {
             Self::create_internal(test_name, true)
         }
-        fn create_internal(test_name: &'static str, exclusive: bool) -> Result<Self> {
+        fn create_internal(test_name: &'static str, exclusive: bool) -> anyhow::Result<Self> {
             let lock_guard = if exclusive {
                 (None, Some(LOCK.write().unwrap()))
             } else {
@@ -1602,7 +1580,7 @@ pub mod harness {
             self.try_load().expect("failed to load test tenant")
         }
 
-        pub fn try_load(&self) -> Result<Tenant> {
+        pub fn try_load(&self) -> anyhow::Result<Tenant> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
             let tenant = Tenant::new(
@@ -1682,7 +1660,7 @@ pub mod harness {
                 },
                 records.len()
             );
-            println!("{}", s);
+            println!("{s}");
 
             Ok(TEST_IMG(&s))
         }
@@ -1706,7 +1684,7 @@ mod tests {
         Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
 
     #[test]
-    fn test_basic() -> Result<()> {
+    fn test_basic() -> anyhow::Result<()> {
         let tenant = TenantHarness::create("test_basic")?.load();
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
@@ -1730,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn no_duplicate_timelines() -> Result<()> {
+    fn no_duplicate_timelines() -> anyhow::Result<()> {
         let tenant = TenantHarness::create("no_duplicate_timelines")?.load();
         let _ = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
@@ -1761,7 +1739,7 @@ mod tests {
     /// Test branch creation
     ///
     #[test]
-    fn test_branch() -> Result<()> {
+    fn test_branch() -> anyhow::Result<()> {
         let tenant = TenantHarness::create("test_branch")?.load();
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
@@ -1814,7 +1792,7 @@ mod tests {
         Ok(())
     }
 
-    fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> Result<()> {
+    fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
@@ -1856,7 +1834,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
+    fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let tenant =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
                 .load();
@@ -1888,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> Result<()> {
+    fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> anyhow::Result<()> {
         let tenant =
             TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load();
 
@@ -1915,7 +1893,7 @@ mod tests {
     // FIXME: This currently fails to error out. Calling GC doesn't currently
     // remove the old value, we'd need to work a little harder
     #[test]
-    fn test_prohibit_get_for_garbage_collected_data() -> Result<()> {
+    fn test_prohibit_get_for_garbage_collected_data() -> anyhow::Result<()> {
         let repo =
             RepoHarness::create("test_prohibit_get_for_garbage_collected_data")?
             .load();
@@ -1935,7 +1913,7 @@ mod tests {
      */
 
     #[test]
-    fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
+    fn test_retain_data_in_parent_which_is_needed_for_child() -> anyhow::Result<()> {
         let tenant =
             TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
         let tline = tenant
@@ -1954,7 +1932,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
+    fn test_parent_keeps_data_forever_after_branching() -> anyhow::Result<()> {
         let tenant =
             TenantHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
         let tline = tenant
@@ -1982,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_load() -> Result<()> {
+    fn timeline_load() -> anyhow::Result<()> {
         const TEST_NAME: &str = "timeline_load";
         let harness = TenantHarness::create(TEST_NAME)?;
         {
@@ -2003,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_load_with_ancestor() -> Result<()> {
+    fn timeline_load_with_ancestor() -> anyhow::Result<()> {
         const TEST_NAME: &str = "timeline_load_with_ancestor";
         let harness = TenantHarness::create(TEST_NAME)?;
         // create two timelines
@@ -2042,7 +2020,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_metadata() -> Result<()> {
+    fn corrupt_metadata() -> anyhow::Result<()> {
         const TEST_NAME: &str = "corrupt_metadata";
         let harness = TenantHarness::create(TEST_NAME)?;
         let tenant = harness.load();
@@ -2084,7 +2062,7 @@ mod tests {
     }
 
     #[test]
-    fn test_images() -> Result<()> {
+    fn test_images() -> anyhow::Result<()> {
         let tenant = TenantHarness::create("test_images")?.load();
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
@@ -2136,7 +2114,7 @@ mod tests {
     // repeat 50 times.
     //
     #[test]
-    fn test_bulk_insert() -> Result<()> {
+    fn test_bulk_insert() -> anyhow::Result<()> {
         let tenant = TenantHarness::create("test_bulk_insert")?.load();
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
@@ -2178,7 +2156,7 @@ mod tests {
     }
 
     #[test]
-    fn test_random_updates() -> Result<()> {
+    fn test_random_updates() -> anyhow::Result<()> {
         let tenant = TenantHarness::create("test_random_updates")?.load();
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
@@ -2250,7 +2228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_traverse_branches() -> Result<()> {
+    fn test_traverse_branches() -> anyhow::Result<()> {
         let tenant = TenantHarness::create("test_traverse_branches")?.load();
         let mut tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
@@ -2331,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn test_traverse_ancestors() -> Result<()> {
+    fn test_traverse_ancestors() -> anyhow::Result<()> {
         let tenant = TenantHarness::create("test_traverse_ancestors")?.load();
         let mut tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
