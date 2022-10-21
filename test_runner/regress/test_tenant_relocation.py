@@ -16,7 +16,6 @@ from fixtures.neon_fixtures import (
     PortDistributor,
     Postgres,
     assert_no_in_progress_downloads_for_tenant,
-    assert_timeline_local,
     base_dir,
     neon_binpath,
     pg_distrib_dir,
@@ -167,18 +166,18 @@ def check_timeline_attached(
     old_current_lsn: Lsn,
 ):
     # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
-    new_timeline_detail = assert_timeline_local(new_pageserver_http_client, tenant_id, timeline_id)
+    new_timeline_detail = new_pageserver_http_client.timeline_detail(tenant_id, timeline_id)
 
     # when load is active these checks can break because lsns are not static
     # so let's check with some margin
     assert_abs_margin_ratio(
-        int(Lsn(new_timeline_detail["local"]["disk_consistent_lsn"])),
-        int(Lsn(old_timeline_detail["local"]["disk_consistent_lsn"])),
+        int(Lsn(new_timeline_detail["disk_consistent_lsn"])),
+        int(Lsn(old_timeline_detail["disk_consistent_lsn"])),
         0.03,
     )
 
     assert_abs_margin_ratio(
-        int(Lsn(new_timeline_detail["local"]["disk_consistent_lsn"])), int(old_current_lsn), 0.03
+        int(Lsn(new_timeline_detail["disk_consistent_lsn"])), int(old_current_lsn), 0.03
     )
 
 
@@ -301,10 +300,10 @@ def test_tenant_relocation(
 
     # wait until pageserver receives that data
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id_main, current_lsn_main)
-    timeline_detail_main = assert_timeline_local(pageserver_http, tenant_id, timeline_id_main)
+    timeline_detail_main = pageserver_http.timeline_detail(tenant_id, timeline_id_main)
 
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id_second, current_lsn_second)
-    timeline_detail_second = assert_timeline_local(pageserver_http, tenant_id, timeline_id_second)
+    timeline_detail_second = pageserver_http.timeline_detail(tenant_id, timeline_id_second)
 
     if with_load == "with_load":
         # create load table
@@ -347,7 +346,11 @@ def test_tenant_relocation(
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
     pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
 
-    new_pageserver_http = NeonPageserverHttpClient(port=new_pageserver_http_port, auth_token=None)
+    new_pageserver_http = NeonPageserverHttpClient(
+        port=new_pageserver_http_port,
+        auth_token=None,
+        is_testing_enabled_or_skip=env.pageserver.is_testing_enabled_or_skip,
+    )
 
     with new_pageserver_helper(
         new_pageserver_dir,

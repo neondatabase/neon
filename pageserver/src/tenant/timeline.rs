@@ -1,6 +1,6 @@
 //!
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
@@ -34,6 +34,7 @@ use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::BlockNumber;
 use crate::pgdatadir_mapping::LsnForTimestamp;
+use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
 
@@ -52,7 +53,11 @@ use crate::task_mgr::TaskKind;
 use crate::walreceiver::{is_etcd_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::{page_cache, storage_sync};
+use crate::ZERO_PAGE;
+use crate::{
+    page_cache,
+    storage_sync::{self, index::LayerFileMetadata},
+};
 
 pub struct Timeline {
     conf: &'static PageServerConf,
@@ -302,10 +307,6 @@ pub struct GcInfo {
 
 /// Public interface functions
 impl Timeline {
-    //------------------------------------------------------------------------------
-    // Public GET functions
-    //------------------------------------------------------------------------------
-
     /// Get the LSN where this branch was created
     pub fn get_ancestor_lsn(&self) -> Lsn {
         self.ancestor_lsn
@@ -440,7 +441,7 @@ impl Timeline {
         &self,
         lsn: Lsn,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
             "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
@@ -449,12 +450,6 @@ impl Timeline {
         );
         Ok(())
     }
-
-    //------------------------------------------------------------------------------
-    // Public PUT functions, to update the repository with new page versions.
-    //
-    // These are called by the WAL receiver to digest WAL records.
-    //------------------------------------------------------------------------------
 
     /// Flush to disk all data that was written with the put_* functions
     ///
@@ -474,16 +469,171 @@ impl Timeline {
         }
     }
 
+    pub fn compact(&self) -> anyhow::Result<()> {
+        let last_record_lsn = self.get_last_record_lsn();
+
+        // Last record Lsn could be zero in case the timelie was just created
+        if !last_record_lsn.is_valid() {
+            warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
+            return Ok(());
+        }
+
+        //
+        // High level strategy for compaction / image creation:
+        //
+        // 1. First, calculate the desired "partitioning" of the
+        // currently in-use key space. The goal is to partition the
+        // key space into roughly fixed-size chunks, but also take into
+        // account any existing image layers, and try to align the
+        // chunk boundaries with the existing image layers to avoid
+        // too much churn. Also try to align chunk boundaries with
+        // relation boundaries.  In principle, we don't know about
+        // relation boundaries here, we just deal with key-value
+        // pairs, and the code in pgdatadir_mapping.rs knows how to
+        // map relations into key-value pairs. But in practice we know
+        // that 'field6' is the block number, and the fields 1-5
+        // identify a relation. This is just an optimization,
+        // though.
+        //
+        // 2. Once we know the partitioning, for each partition,
+        // decide if it's time to create a new image layer. The
+        // criteria is: there has been too much "churn" since the last
+        // image layer? The "churn" is fuzzy concept, it's a
+        // combination of too many delta files, or too much WAL in
+        // total in the delta file. Or perhaps: if creating an image
+        // file would allow to delete some older files.
+        //
+        // 3. After that, we compact all level0 delta files if there
+        // are too many of them.  While compacting, we also garbage
+        // collect any page versions that are no longer needed because
+        // of the new image layers we created in step 2.
+        //
+        // TODO: This high level strategy hasn't been implemented yet.
+        // Below are functions compact_level0() and create_image_layers()
+        // but they are a bit ad hoc and don't quite work like it's explained
+        // above. Rewrite it.
+        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
+
+        let target_file_size = self.get_checkpoint_distance();
+
+        // Define partitioning schema if needed
+
+        match self.repartition(
+            self.get_last_record_lsn(),
+            self.get_compaction_target_size(),
+        ) {
+            Ok((partitioning, lsn)) => {
+                // 2. Create new image layers for partitions that have been modified
+                // "enough".
+                let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
+                if !layer_paths_to_upload.is_empty()
+                    && self.upload_layers.load(atomic::Ordering::Relaxed)
+                {
+                    storage_sync::schedule_layer_upload(
+                        self.tenant_id,
+                        self.timeline_id,
+                        layer_paths_to_upload,
+                        None,
+                    );
+                }
+
+                // 3. Compact
+                let timer = self.metrics.compact_time_histo.start_timer();
+                self.compact_level0(target_file_size)?;
+                timer.stop_and_record();
+            }
+            Err(err) => {
+                // no partitioning? This is normal, if the timeline was just created
+                // as an empty timeline. Also in unit tests, when we use the timeline
+                // as a simple key-value store, ignoring the datadir layout. Log the
+                // error but continue.
+                error!("could not compact, repartitioning keyspace failed: {err:?}");
+            }
+        };
+
+        Ok(())
+    }
+
     /// Mutate the timeline with a [`TimelineWriter`].
-    ///
-    /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
-    /// is a generic type in this trait. But that doesn't currently work in
-    /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
     pub fn writer(&self) -> TimelineWriter<'_> {
         TimelineWriter {
             tl: self,
             _write_guard: self.write_lock.lock().unwrap(),
         }
+    }
+
+    /// Retrieve current logical size of the timeline.
+    ///
+    /// The size could be lagging behind the actual number, in case
+    /// the initial size calculation has not been run (gets triggered on the first size access).
+    pub fn get_current_logical_size(self: &Arc<Self>) -> anyhow::Result<u64> {
+        let current_size = self.current_logical_size.current_size()?;
+        debug!("Current size: {current_size:?}");
+
+        let size = current_size.size();
+        if let (CurrentLogicalSize::Approximate(_), Some(init_lsn)) =
+            (current_size, self.current_logical_size.initial_part_end)
+        {
+            self.try_spawn_size_init_task(init_lsn);
+        }
+
+        Ok(size)
+    }
+
+    /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
+    /// the in-memory layer, and initiate flushing it if so.
+    ///
+    /// Also flush after a period of time without new data -- it helps
+    /// safekeepers to regard pageserver as caught up and suspend activity.
+    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
+        let last_lsn = self.get_last_record_lsn();
+        let layers = self.layers.read().unwrap();
+        if let Some(open_layer) = &layers.open_layer {
+            let open_layer_size = open_layer.size()?;
+            drop(layers);
+            let last_freeze_at = self.last_freeze_at.load();
+            let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
+            let distance = last_lsn.widening_sub(last_freeze_at);
+            // Checkpointing the open layer can be triggered by layer size or LSN range.
+            // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
+            // we want to stay below that with a big margin.  The LSN distance determines how
+            // much WAL the safekeepers need to store.
+            if distance >= self.get_checkpoint_distance().into()
+                || open_layer_size > self.get_checkpoint_distance()
+                || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
+            {
+                info!(
+                    "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
+                    distance,
+                    open_layer_size,
+                    last_freeze_ts.elapsed()
+                );
+
+                self.freeze_inmem_layer(true);
+                self.last_freeze_at.store(last_lsn);
+                *(self.last_freeze_ts.write().unwrap()) = Instant::now();
+
+                // Launch a task to flush the frozen layer to disk, unless
+                // a task was already running. (If the task was running
+                // at the time that we froze the layer, it must've seen the
+                // the layer we just froze before it exited; see comments
+                // in flush_frozen_layers())
+                if let Ok(guard) = self.layer_flush_lock.try_lock() {
+                    drop(guard);
+                    let self_clone = Arc::clone(self);
+                    task_mgr::spawn(
+                        task_mgr::BACKGROUND_RUNTIME.handle(),
+                        task_mgr::TaskKind::LayerFlushTask,
+                        Some(self.tenant_id),
+                        Some(self.timeline_id),
+                        "layer flush task",
+                        false,
+                        async move { self_clone.flush_frozen_layers(false) },
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -528,7 +678,7 @@ impl Timeline {
     ///
     /// Loads the metadata for the timeline into memory, but not the layer map.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(super) fn new(
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
@@ -601,11 +751,11 @@ impl Timeline {
         result
     }
 
-    pub fn launch_wal_receiver(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub(super) fn launch_wal_receiver(self: &Arc<Self>) {
         if !is_etcd_client_initialized() {
             if cfg!(test) {
                 info!("not launching WAL receiver because etcd client hasn't been initialized");
-                return Ok(());
+                return;
             } else {
                 panic!("etcd client not initialized");
             }
@@ -633,16 +783,14 @@ impl Timeline {
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
-        )?;
-
-        Ok(())
+        );
     }
 
     ///
     /// Scan the timeline directory to populate the layer map.
     /// Returns all timeline-related files that were found and loaded.
     ///
-    pub fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+    pub(super) fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         let mut layers = self.layers.write().unwrap();
         let mut num_layers = 0;
 
@@ -728,28 +876,10 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn layer_removal_guard(&self) -> anyhow::Result<MutexGuard<()>> {
+    pub(super) fn layer_removal_guard(&self) -> anyhow::Result<MutexGuard<()>> {
         self.layer_removal_cs
             .try_lock()
             .map_err(|e| anyhow!("cannot lock compaction critical section {e}"))
-    }
-
-    /// Retrieve current logical size of the timeline.
-    ///
-    /// The size could be lagging behind the actual number, in case
-    /// the initial size calculation has not been run (gets triggered on the first size access).
-    pub fn get_current_logical_size(self: &Arc<Self>) -> anyhow::Result<u64> {
-        let current_size = self.current_logical_size.current_size()?;
-        debug!("Current size: {current_size:?}");
-
-        let size = current_size.size();
-        if let (CurrentLogicalSize::Approximate(_), Some(init_lsn)) =
-            (current_size, self.current_logical_size.initial_part_end)
-        {
-            self.try_spawn_size_init_task(init_lsn);
-        }
-
-        Ok(size)
     }
 
     fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn) {
@@ -972,7 +1102,7 @@ impl Timeline {
         Some((lsn, img))
     }
 
-    fn get_ancestor_timeline(&self) -> Result<Arc<Timeline>> {
+    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
         let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
@@ -1031,14 +1161,14 @@ impl Timeline {
         Ok(layer)
     }
 
-    fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
+    fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> anyhow::Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn)?;
         layer.put_value(key, lsn, val)?;
         Ok(())
     }
 
-    fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
+    fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
         let layer = self.get_layer_for_write(lsn)?;
         layer.put_tombstone(key_range, lsn)?;
 
@@ -1077,64 +1207,6 @@ impl Timeline {
         drop(layers);
     }
 
-    ///
-    /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
-    /// the in-memory layer, and initiate flushing it if so.
-    ///
-    /// Also flush after a period of time without new data -- it helps
-    /// safekeepers to regard pageserver as caught up and suspend activity.
-    ///
-    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> Result<()> {
-        let last_lsn = self.get_last_record_lsn();
-        let layers = self.layers.read().unwrap();
-        if let Some(open_layer) = &layers.open_layer {
-            let open_layer_size = open_layer.size()?;
-            drop(layers);
-            let last_freeze_at = self.last_freeze_at.load();
-            let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
-            let distance = last_lsn.widening_sub(last_freeze_at);
-            // Checkpointing the open layer can be triggered by layer size or LSN range.
-            // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
-            // we want to stay below that with a big margin.  The LSN distance determines how
-            // much WAL the safekeepers need to store.
-            if distance >= self.get_checkpoint_distance().into()
-                || open_layer_size > self.get_checkpoint_distance()
-                || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
-            {
-                info!(
-                    "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
-                    distance,
-                    open_layer_size,
-                    last_freeze_ts.elapsed()
-                );
-
-                self.freeze_inmem_layer(true);
-                self.last_freeze_at.store(last_lsn);
-                *(self.last_freeze_ts.write().unwrap()) = Instant::now();
-
-                // Launch a task to flush the frozen layer to disk, unless
-                // a task was already running. (If the task was running
-                // at the time that we froze the layer, it must've seen the
-                // the layer we just froze before it exited; see comments
-                // in flush_frozen_layers())
-                if let Ok(guard) = self.layer_flush_lock.try_lock() {
-                    drop(guard);
-                    let self_clone = Arc::clone(self);
-                    task_mgr::spawn(
-                        task_mgr::BACKGROUND_RUNTIME.handle(),
-                        task_mgr::TaskKind::LayerFlushTask,
-                        Some(self.tenant_id),
-                        Some(self.timeline_id),
-                        "layer flush task",
-                        false,
-                        async move { self_clone.flush_frozen_layers(false) },
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Flush all frozen layers to disk.
     ///
     /// Only one task at a time can be doing layer-flushing for a
@@ -1142,7 +1214,7 @@ impl Timeline {
     /// currently doing the flushing, this function will wait for it
     /// to finish. If 'wait' is false, this function will return
     /// immediately instead.
-    fn flush_frozen_layers(&self, wait: bool) -> Result<()> {
+    fn flush_frozen_layers(&self, wait: bool) -> anyhow::Result<()> {
         let flush_lock_guard = if wait {
             self.layer_flush_lock.lock().unwrap()
         } else {
@@ -1181,7 +1253,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
+    fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> anyhow::Result<()> {
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
@@ -1194,8 +1266,8 @@ impl Timeline {
                 self.create_image_layers(&partitioning, self.initdb_lsn, true)?
             } else {
                 // normal case, write out a L0 delta layer file.
-                let delta_path = self.create_delta_layer(&frozen_layer)?;
-                HashSet::from([delta_path])
+                let (delta_path, metadata) = self.create_delta_layer(&frozen_layer)?;
+                HashMap::from([(delta_path, metadata)])
             };
 
         fail_point!("flush-frozen-before-sync");
@@ -1221,85 +1293,86 @@ impl Timeline {
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
         let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
-        self.update_disk_consistent_lsn(disk_consistent_lsn, layer_paths_to_upload)?;
+        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
 
+        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
+        // After crash, we will restart WAL streaming and processing from that point.
+        if disk_consistent_lsn != old_disk_consistent_lsn {
+            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+            self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)?;
+            // Also update the in-memory copy
+            self.disk_consistent_lsn.store(disk_consistent_lsn);
+        }
         Ok(())
     }
 
     /// Update metadata file
-    fn update_disk_consistent_lsn(
+    fn update_metadata_file(
         &self,
         disk_consistent_lsn: Lsn,
-        layer_paths_to_upload: HashSet<PathBuf>,
-    ) -> Result<()> {
-        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
-        // After crash, we will restart WAL streaming and processing from that point.
-        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
-        if disk_consistent_lsn != old_disk_consistent_lsn {
-            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+        layer_paths_to_upload: HashMap<PathBuf, LayerFileMetadata>,
+    ) -> anyhow::Result<()> {
+        // We can only save a valid 'prev_record_lsn' value on disk if we
+        // flushed *all* in-memory changes to disk. We only track
+        // 'prev_record_lsn' in memory for the latest processed record, so we
+        // don't remember what the correct value that corresponds to some old
+        // LSN is. But if we flush everything, then the value corresponding
+        // current 'last_record_lsn' is correct and we can store it on disk.
+        let RecordLsn {
+            last: last_record_lsn,
+            prev: prev_record_lsn,
+        } = self.last_record_lsn.load();
+        let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
+            Some(prev_record_lsn)
+        } else {
+            None
+        };
 
-            // We can only save a valid 'prev_record_lsn' value on disk if we
-            // flushed *all* in-memory changes to disk. We only track
-            // 'prev_record_lsn' in memory for the latest processed record, so we
-            // don't remember what the correct value that corresponds to some old
-            // LSN is. But if we flush everything, then the value corresponding
-            // current 'last_record_lsn' is correct and we can store it on disk.
-            let RecordLsn {
-                last: last_record_lsn,
-                prev: prev_record_lsn,
-            } = self.last_record_lsn.load();
-            let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
-                Some(prev_record_lsn)
-            } else {
-                None
-            };
+        let ancestor_timeline_id = self
+            .ancestor_timeline
+            .as_ref()
+            .map(|ancestor| ancestor.timeline_id);
 
-            let ancestor_timeline_id = self
-                .ancestor_timeline
-                .as_ref()
-                .map(|ancestor| ancestor.timeline_id);
+        let metadata = TimelineMetadata::new(
+            disk_consistent_lsn,
+            ondisk_prev_record_lsn,
+            ancestor_timeline_id,
+            self.ancestor_lsn,
+            *self.latest_gc_cutoff_lsn.read(),
+            self.initdb_lsn,
+            self.pg_version,
+        );
 
-            let metadata = TimelineMetadata::new(
-                disk_consistent_lsn,
-                ondisk_prev_record_lsn,
-                ancestor_timeline_id,
-                self.ancestor_lsn,
-                *self.latest_gc_cutoff_lsn.read(),
-                self.initdb_lsn,
-                self.pg_version,
-            );
+        fail_point!("checkpoint-before-saving-metadata", |x| bail!(
+            "{}",
+            x.unwrap()
+        ));
 
-            fail_point!("checkpoint-before-saving-metadata", |x| bail!(
-                "{}",
-                x.unwrap()
-            ));
+        save_metadata(
+            self.conf,
+            self.timeline_id,
+            self.tenant_id,
+            &metadata,
+            false,
+        )?;
 
-            save_metadata(
-                self.conf,
-                self.timeline_id,
+        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            storage_sync::schedule_layer_upload(
                 self.tenant_id,
-                &metadata,
-                false,
-            )?;
-
-            if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                storage_sync::schedule_layer_upload(
-                    self.tenant_id,
-                    self.timeline_id,
-                    layer_paths_to_upload,
-                    Some(metadata),
-                );
-            }
-
-            // Also update the in-memory copy
-            self.disk_consistent_lsn.store(disk_consistent_lsn);
+                self.timeline_id,
+                layer_paths_to_upload,
+                Some(metadata),
+            );
         }
 
         Ok(())
     }
 
     // Write out the given frozen in-memory layer as a new L0 delta file
-    fn create_delta_layer(&self, frozen_layer: &InMemoryLayer) -> Result<PathBuf> {
+    fn create_delta_layer(
+        &self,
+        frozen_layer: &InMemoryLayer,
+    ) -> anyhow::Result<(PathBuf, LayerFileMetadata)> {
         // Write it out
         let new_delta = frozen_layer.write_to_disk()?;
         let new_delta_path = new_delta.path();
@@ -1325,100 +1398,16 @@ impl Timeline {
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
+
         self.metrics.current_physical_size_gauge.add(sz);
         // update metrics
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
-        Ok(new_delta_path)
+        Ok((new_delta_path, LayerFileMetadata::new(sz)))
     }
 
-    pub fn compact(&self) -> anyhow::Result<()> {
-        let last_record_lsn = self.get_last_record_lsn();
-
-        // Last record Lsn could be zero in case the timelie was just created
-        if !last_record_lsn.is_valid() {
-            warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(());
-        }
-
-        //
-        // High level strategy for compaction / image creation:
-        //
-        // 1. First, calculate the desired "partitioning" of the
-        // currently in-use key space. The goal is to partition the
-        // key space into roughly fixed-size chunks, but also take into
-        // account any existing image layers, and try to align the
-        // chunk boundaries with the existing image layers to avoid
-        // too much churn. Also try to align chunk boundaries with
-        // relation boundaries.  In principle, we don't know about
-        // relation boundaries here, we just deal with key-value
-        // pairs, and the code in pgdatadir_mapping.rs knows how to
-        // map relations into key-value pairs. But in practice we know
-        // that 'field6' is the block number, and the fields 1-5
-        // identify a relation. This is just an optimization,
-        // though.
-        //
-        // 2. Once we know the partitioning, for each partition,
-        // decide if it's time to create a new image layer. The
-        // criteria is: there has been too much "churn" since the last
-        // image layer? The "churn" is fuzzy concept, it's a
-        // combination of too many delta files, or too much WAL in
-        // total in the delta file. Or perhaps: if creating an image
-        // file would allow to delete some older files.
-        //
-        // 3. After that, we compact all level0 delta files if there
-        // are too many of them.  While compacting, we also garbage
-        // collect any page versions that are no longer needed because
-        // of the new image layers we created in step 2.
-        //
-        // TODO: This high level strategy hasn't been implemented yet.
-        // Below are functions compact_level0() and create_image_layers()
-        // but they are a bit ad hoc and don't quite work like it's explained
-        // above. Rewrite it.
-        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
-
-        let target_file_size = self.get_checkpoint_distance();
-
-        // Define partitioning schema if needed
-
-        match self.repartition(
-            self.get_last_record_lsn(),
-            self.get_compaction_target_size(),
-        ) {
-            Ok((partitioning, lsn)) => {
-                // 2. Create new image layers for partitions that have been modified
-                // "enough".
-                let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
-                if !layer_paths_to_upload.is_empty()
-                    && self.upload_layers.load(atomic::Ordering::Relaxed)
-                {
-                    storage_sync::schedule_layer_upload(
-                        self.tenant_id,
-                        self.timeline_id,
-                        HashSet::from_iter(layer_paths_to_upload),
-                        None,
-                    );
-                }
-
-                // 3. Compact
-                let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size)?;
-                timer.stop_and_record();
-            }
-            Err(err) => {
-                // no partitioning? This is normal, if the timeline was just created
-                // as an empty timeline. Also in unit tests, when we use the timeline
-                // as a simple key-value store, ignoring the datadir layout. Log the
-                // error but continue.
-                error!("could not compact, repartitioning keyspace failed: {err:?}");
-            }
-        };
-
-        Ok(())
-    }
-
-    fn repartition(&self, lsn: Lsn, partition_size: u64) -> Result<(KeyPartitioning, Lsn)> {
+    fn repartition(&self, lsn: Lsn, partition_size: u64) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         let mut partitioning_guard = self.partitioning.lock().unwrap();
         if partitioning_guard.1 == Lsn(0)
             || lsn.0 - partitioning_guard.1 .0 > self.repartition_threshold
@@ -1432,7 +1421,7 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> Result<bool> {
+    fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<bool> {
         let layers = self.layers.read().unwrap();
 
         for part_range in &partition.ranges {
@@ -1477,10 +1466,9 @@ impl Timeline {
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         force: bool,
-    ) -> Result<HashSet<PathBuf>> {
+    ) -> anyhow::Result<HashMap<PathBuf, LayerFileMetadata>> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
-        let mut layer_paths_to_upload = HashSet::new();
         for partition in partitioning.parts.iter() {
             if force || self.time_for_new_image_layer(partition, lsn)? {
                 let img_range =
@@ -1496,13 +1484,37 @@ impl Timeline {
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
-                        let img = self.get(key, lsn)?;
+                        let img = match self.get(key, lsn) {
+                            Ok(img) => img,
+                            Err(err) => {
+                                // If we fail to reconstruct a VM or FSM page, we can zero the
+                                // page without losing any actual user data. That seems better
+                                // than failing repeatedly and getting stuck.
+                                //
+                                // We had a bug at one point, where we truncated the FSM and VM
+                                // in the pageserver, but the Postgres didn't know about that
+                                // and continued to generate incremental WAL records for pages
+                                // that didn't exist in the pageserver. Trying to replay those
+                                // WAL records failed to find the previous image of the page.
+                                // This special case allows us to recover from that situation.
+                                // See https://github.com/neondatabase/neon/issues/2601.
+                                //
+                                // Unfortunately we cannot do this for the main fork, or for
+                                // any metadata keys, keys, as that would lead to actual data
+                                // loss.
+                                if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
+                                    warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
+                                    ZERO_PAGE.clone()
+                                } else {
+                                    return Err(err);
+                                }
+                            }
+                        };
                         image_layer_writer.put_image(key, &img)?;
                         key = key.next();
                     }
                 }
                 let image_layer = image_layer_writer.finish()?;
-                layer_paths_to_upload.insert(image_layer.path());
                 image_layers.push(image_layer);
             }
         }
@@ -1516,15 +1528,25 @@ impl Timeline {
         //
         // Compaction creates multiple image layers. It would be better to create them all
         // and fsync them all in parallel.
-        let mut all_paths = Vec::from_iter(layer_paths_to_upload.clone());
-        all_paths.push(self.conf.timeline_path(&self.timeline_id, &self.tenant_id));
+        let all_paths = image_layers
+            .iter()
+            .map(|layer| layer.path())
+            .chain(std::iter::once(
+                self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
+            ))
+            .collect::<Vec<_>>();
         par_fsync::par_fsync(&all_paths)?;
+
+        let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
         let mut layers = self.layers.write().unwrap();
         for l in image_layers {
-            self.metrics
-                .current_physical_size_gauge
-                .add(l.path().metadata()?.len());
+            let path = l.path();
+            let metadata = path.metadata()?;
+
+            layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
+
+            self.metrics.current_physical_size_gauge.add(metadata.len());
             layers.insert_historic(Arc::new(l));
         }
         drop(layers);
@@ -1537,7 +1559,7 @@ impl Timeline {
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
     /// as Level 1 files.
     ///
-    fn compact_level0(&self, target_file_size: u64) -> Result<()> {
+    fn compact_level0(&self, target_file_size: u64) -> anyhow::Result<()> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
@@ -1775,16 +1797,16 @@ impl Timeline {
         }
 
         let mut layers = self.layers.write().unwrap();
-        let mut new_layer_paths = HashSet::with_capacity(new_layers.len());
+        let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
             let new_delta_path = l.path();
 
-            // update the timeline's physical size
-            self.metrics
-                .current_physical_size_gauge
-                .add(new_delta_path.metadata()?.len());
+            let metadata = new_delta_path.metadata()?;
 
-            new_layer_paths.insert(new_delta_path);
+            // update the timeline's physical size
+            self.metrics.current_physical_size_gauge.add(metadata.len());
+
+            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             layers.insert_historic(Arc::new(l));
         }
 
@@ -1847,12 +1869,12 @@ impl Timeline {
     ///
     /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
     /// whether a record is needed for PITR.
-    pub fn update_gc_info(
+    pub(super) fn update_gc_info(
         &self,
         retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         let mut gc_info = self.gc_info.write().unwrap();
 
         gc_info.horizon_cutoff = cutoff_horizon;
@@ -1907,7 +1929,7 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub fn gc(&self) -> Result<GcResult> {
+    pub(super) fn gc(&self) -> anyhow::Result<GcResult> {
         let mut result: GcResult = Default::default();
         let now = SystemTime::now();
 
@@ -1951,6 +1973,9 @@ impl Timeline {
             );
             write_guard.store_and_unlock(new_gc_cutoff).wait();
         }
+        // Persist the new GC cutoff value in the metadata file, before
+        // we actually remove anything.
+        self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())?;
 
         info!("GC starting");
 
@@ -2074,6 +2099,15 @@ impl Timeline {
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
+        }
+
+        info!(
+            "GC completed removing {} layers, cutoff {}",
+            result.layers_removed, new_gc_cutoff
+        );
+
+        if result.layers_removed != 0 {
+            fail_point!("after-timeline-gc-removed-layers");
         }
 
         if self.upload_layers.load(atomic::Ordering::Relaxed) {
@@ -2215,11 +2249,11 @@ impl<'a> TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    pub fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
+    pub fn put(&self, key: Key, lsn: Lsn, value: &Value) -> anyhow::Result<()> {
         self.tl.put_value(key, lsn, value)
     }
 
-    pub fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
+    pub fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
         self.tl.put_tombstone(key_range, lsn)
     }
 

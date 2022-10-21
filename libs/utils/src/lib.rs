@@ -22,8 +22,8 @@ pub mod pq_proto;
 // dealing with connstring parsing and handy access to it's parts
 pub mod connstring;
 
-// helper functions for creating and fsyncing directories/trees
-pub mod crashsafe_dir;
+// helper functions for creating and fsyncing
+pub mod crashsafe;
 
 // common authentication routines
 pub mod auth;

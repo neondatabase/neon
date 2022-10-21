@@ -7,6 +7,7 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use remote_storage::RemoteStorageConfig;
 use std::env;
+use utils::crashsafe::path_with_suffix_extension;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -24,6 +25,7 @@ use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
+pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 const TENANT_CONFIG_NAME: &str = "config";
 
 pub mod defaults {
@@ -364,6 +366,17 @@ impl PageServerConf {
         self.timelines_path(tenant_id).join(timeline_id.to_string())
     }
 
+    pub fn timeline_uninit_mark_file_path(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> PathBuf {
+        path_with_suffix_extension(
+            self.timeline_path(&timeline_id, &tenant_id),
+            TIMELINE_UNINIT_MARK_SUFFIX,
+        )
+    }
+
     /// Points to a place in pageserver's local directory,
     /// where certain timeline's metadata file should be located.
     pub fn metadata_path(&self, timeline_id: TimelineId, tenant_id: TenantId) -> PathBuf {
@@ -374,28 +387,28 @@ impl PageServerConf {
     //
     // Postgres distribution paths
     //
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> PathBuf {
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
         match pg_version {
-            14 => path.join(format!("v{pg_version}")),
-            15 => path.join(format!("v{pg_version}")),
-            _ => panic!("Unsupported postgres version: {}", pg_version),
+            14 => Ok(path.join(format!("v{pg_version}"))),
+            15 => Ok(path.join(format!("v{pg_version}"))),
+            _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> PathBuf {
+    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         match pg_version {
-            14 => self.pg_distrib_dir(pg_version).join("bin"),
-            15 => self.pg_distrib_dir(pg_version).join("bin"),
-            _ => panic!("Unsupported postgres version: {}", pg_version),
+            14 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
+            15 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
+            _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
-    pub fn pg_lib_dir(&self, pg_version: u32) -> PathBuf {
+    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         match pg_version {
-            14 => self.pg_distrib_dir(pg_version).join("lib"),
-            15 => self.pg_distrib_dir(pg_version).join("lib"),
-            _ => panic!("Unsupported postgres version: {}", pg_version),
+            14 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
+            15 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
+            _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
 

@@ -32,7 +32,7 @@ use utils::{
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
-use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
+use crate::import_datadir::import_wal_from_tar;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
@@ -500,11 +500,8 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let timeline = tenant_mgr::get_tenant(tenant_id, true)?.create_empty_timeline(
-            timeline_id,
-            base_lsn,
-            pg_version,
-        )?;
+        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -527,7 +524,8 @@ impl PageServerHandler {
         // - use block_in_place()
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
         let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-        tokio::task::block_in_place(|| import_basebackup_from_tar(&timeline, reader, base_lsn))?;
+        tokio::task::block_in_place(|| timeline.import_basebackup_from_tar(reader, base_lsn))?;
+        timeline.initialize()?;
 
         // Drain the rest of the Copy data
         let mut bytes_after_tar = 0;
@@ -543,12 +541,6 @@ impl PageServerHandler {
         // and checking that it matches in size with what was imported.
         // It wouldn't work if base came from vanilla postgres though,
         // since we discard some log files.
-
-        // Flush data to disk, then upload to s3
-        info!("flushing layers");
-        timeline.checkpoint(CheckpointConfig::Flush)?;
-
-        timeline.launch_wal_receiver()?;
 
         info!("done");
         Ok(())

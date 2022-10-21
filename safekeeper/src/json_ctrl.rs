@@ -104,6 +104,8 @@ fn prepare_safekeeper(ttid: TenantTimelineId, pg_version: u32) -> Result<Arc<Tim
             wal_seg_size: WAL_SEGMENT_SIZE as u32,
             system_id: 0,
         },
+        Lsn::INVALID,
+        Lsn::INVALID,
     )
 }
 

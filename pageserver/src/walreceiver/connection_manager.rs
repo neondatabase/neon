@@ -47,7 +47,7 @@ pub fn spawn_connection_manager_task(
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
-) -> anyhow::Result<()> {
+) {
     let mut etcd_client = get_etcd_client().clone();
 
     let tenant_id = timeline.tenant_id;
@@ -95,7 +95,6 @@ pub fn spawn_connection_manager_task(
             info_span!("wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id),
         ),
     );
-    Ok(())
 }
 
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
@@ -1374,7 +1373,9 @@ mod tests {
             timeline: harness
                 .load()
                 .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
-                .expect("Failed to create an empty timeline for dummy wal connection manager"),
+                .expect("Failed to create an empty timeline for dummy wal connection manager")
+                .initialize()
+                .unwrap(),
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),
             max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),

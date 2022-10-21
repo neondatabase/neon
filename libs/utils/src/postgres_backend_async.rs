@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::task::Poll;
 use tracing::{debug, error, trace};
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_rustls::TlsAcceptor;
 
 #[async_trait::async_trait]
@@ -66,8 +66,8 @@ pub enum ProcessMsgResult {
 /// Always-writeable sock_split stream.
 /// May not be readable. See [`PostgresBackend::take_stream_in`]
 pub enum Stream {
-    Unencrypted(tokio::net::TcpStream),
-    Tls(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
+    Unencrypted(BufReader<tokio::net::TcpStream>),
+    Tls(Box<tokio_rustls::server::TlsStream<BufReader<tokio::net::TcpStream>>>),
     Broken,
 }
 
@@ -157,7 +157,7 @@ impl PostgresBackend {
         let peer_addr = socket.peer_addr()?;
 
         Ok(Self {
-            stream: Stream::Unencrypted(socket),
+            stream: Stream::Unencrypted(BufReader::new(socket)),
             buf_out: BytesMut::with_capacity(10 * 1024),
             state: ProtoState::Initialization,
             md5_salt: [0u8; 4],

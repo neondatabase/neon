@@ -34,6 +34,7 @@ use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::tenant::Timeline;
 use crate::walrecord::*;
+use crate::ZERO_PAGE;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
@@ -42,8 +43,6 @@ use postgres_ffi::v14::CheckPoint;
 use postgres_ffi::TransactionId;
 use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
-
-static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 pub struct WalIngest<'a> {
     timeline: &'a Timeline,

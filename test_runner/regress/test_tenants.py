@@ -23,7 +23,7 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     initial_tenants = sorted(
         map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
     )
-    initial_tenant_dirs = set([d for d in tenants_dir.iterdir()])
+    initial_tenant_dirs = [d for d in tenants_dir.iterdir()]
 
     pageserver_http = neon_simple_env.pageserver.http_client()
     pageserver_http.configure_failpoints(("tenant-creation-before-tmp-rename", "return"))
@@ -35,26 +35,10 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     )
     assert initial_tenants == new_tenants, "should not create new tenants"
 
-    new_tenant_dirs = list(set([d for d in tenants_dir.iterdir()]) - initial_tenant_dirs)
-    assert len(new_tenant_dirs) == 1, "should have new tenant directory created"
-    tmp_tenant_dir = new_tenant_dirs[0]
-    assert str(tmp_tenant_dir).endswith(
-        ".___temp"
-    ), "new tenant directory created should be a temporary one"
-
-    neon_simple_env.pageserver.stop()
-    neon_simple_env.pageserver.start()
-
-    tenants_after_restart = sorted(
-        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
-    )
-    dirs_after_restart = set([d for d in tenants_dir.iterdir()])
+    new_tenant_dirs = [d for d in tenants_dir.iterdir()]
     assert (
-        tenants_after_restart == initial_tenants
-    ), "should load all non-corrupt tenants after restart"
-    assert (
-        dirs_after_restart == initial_tenant_dirs
-    ), "pageserver should clean its temp tenant dirs on restart"
+        new_tenant_dirs == initial_tenant_dirs
+    ), "pageserver should clean its temp tenant dirs on tenant creation failure"
 
 
 def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
@@ -258,11 +242,20 @@ def test_pageserver_with_empty_tenants(
     tenants = client.tenant_list()
 
     assert (
-        len(tenants) == 1
-    ), "Pageserver should attach only tenants with empty timelines/ dir on restart"
-    loaded_tenant = tenants[0]
-    assert loaded_tenant["id"] == str(
-        tenant_with_empty_timelines_dir
+        len(tenants) == 2
+    ), "Pageserver should attach only tenants with empty or not existing timelines/ dir on restart"
+
+    [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
+    assert (
+        broken_tenant
+    ), f"A broken tenant {tenant_without_timelines_dir} should exists in the tenant list"
+    assert (
+        broken_tenant["state"] == "Broken"
+    ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
+
+    [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
+    assert (
+        loaded_tenant
     ), f"Tenant {tenant_with_empty_timelines_dir} should be loaded as the only one with tenants/ directory"
     assert loaded_tenant["state"] == {
         "Active": {"background_jobs_running": False}

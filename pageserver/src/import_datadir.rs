@@ -43,19 +43,19 @@ pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
 /// The code that deals with the checkpoint would not work right if the
 /// cluster was not shut down cleanly.
 pub fn import_timeline_from_postgres_datadir(
-    path: &Path,
     tline: &Timeline,
-    lsn: Lsn,
+    pgdata_path: &Path,
+    pgdata_lsn: Lsn,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
 
     // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
     // Then fishing out pg_control would be unnecessary
-    let mut modification = tline.begin_modification(lsn);
+    let mut modification = tline.begin_modification(pgdata_lsn);
     modification.init_empty()?;
 
     // Import all but pg_wal
-    let all_but_wal = WalkDir::new(path)
+    let all_but_wal = WalkDir::new(pgdata_path)
         .into_iter()
         .filter_entry(|entry| !entry.path().ends_with("pg_wal"));
     for entry in all_but_wal {
@@ -63,7 +63,7 @@ pub fn import_timeline_from_postgres_datadir(
         let metadata = entry.metadata().expect("error getting dir entry metadata");
         if metadata.is_file() {
             let absolute_path = entry.path();
-            let relative_path = absolute_path.strip_prefix(path)?;
+            let relative_path = absolute_path.strip_prefix(pgdata_path)?;
 
             let file = File::open(absolute_path)?;
             let len = metadata.len() as usize;
@@ -84,7 +84,7 @@ pub fn import_timeline_from_postgres_datadir(
         "Postgres cluster was not shut down cleanly"
     );
     ensure!(
-        pg_control.checkPointCopy.redo == lsn.0,
+        pg_control.checkPointCopy.redo == pgdata_lsn.0,
         "unexpected checkpoint REDO pointer"
     );
 
@@ -92,10 +92,10 @@ pub fn import_timeline_from_postgres_datadir(
     // this reads the checkpoint record itself, advancing the tip of the timeline to
     // *after* the checkpoint record. And crucially, it initializes the 'prev_lsn'.
     import_wal(
-        &path.join("pg_wal"),
+        &pgdata_path.join("pg_wal"),
         tline,
         Lsn(pg_control.checkPointCopy.redo),
-        lsn,
+        pgdata_lsn,
     )?;
 
     Ok(())

@@ -177,7 +177,7 @@ impl fmt::Display for ImageFileName {
 ///
 /// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
 /// global config, and paths to layer files are constructed using the tenant/timeline
-/// path from the config. But in the 'dump_layerfile' binary, we need to construct a Layer
+/// path from the config. But in the 'pageserver_binutils' binary, we need to construct a Layer
 /// struct for a file on disk, without having a page server running, so that we have no
 /// config. In that case, we use the Path variant to hold the full path to the file on
 /// disk.

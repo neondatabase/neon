@@ -32,7 +32,7 @@ runs:
             ;;
         esac
 
-        echo "::set-output name=api_host::${API_HOST}"
+        echo "api_host=${API_HOST}" >> $GITHUB_OUTPUT
       env:
         ENVIRONMENT: ${{ inputs.environment }}
 

@@ -35,11 +35,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
-use utils::crashsafe_dir::path_with_suffix_extension;
+use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
 use crate::metrics::{
-    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME, WAL_REDO_WAIT_TIME,
+    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
+    WAL_REDO_WAIT_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
@@ -244,12 +245,23 @@ impl PostgresRedoManager {
         let end_time = Instant::now();
         let duration = end_time.duration_since(lock_time);
 
+        let len = records.len();
+        let nbytes = records.iter().fold(0, |acumulator, record| {
+            acumulator
+                + match &record.1 {
+                    NeonWalRecord::Postgres { rec, .. } => rec.len(),
+                    _ => unreachable!("Only PostgreSQL records are accepted in this batch"),
+                }
+        });
+
         WAL_REDO_TIME.observe(duration.as_secs_f64());
-        WAL_REDO_RECORDS_HISTOGRAM.observe(records.len() as f64);
+        WAL_REDO_RECORDS_HISTOGRAM.observe(len as f64);
+        WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
 
         debug!(
-            "postgres applied {} WAL records in {} us to reconstruct page image at LSN {}",
-            records.len(),
+            "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
+            len,
+            nbytes,
             duration.as_micros(),
             lsn
         );
@@ -258,8 +270,9 @@ impl PostgresRedoManager {
         // next request will launch a new one.
         if result.is_err() {
             error!(
-                "error applying {} WAL records to reconstruct page image at LSN {}",
+                "error applying {} WAL records ({} bytes) to reconstruct page image at LSN {}",
                 records.len(),
+                nbytes,
                 lsn
             );
             let process = process_guard.take().unwrap();
@@ -597,13 +610,26 @@ impl PostgresRedoProcess {
             );
             fs::remove_dir_all(&datadir)?;
         }
+        let pg_bin_dir_path = conf.pg_bin_dir(pg_version).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("incorrect pg_bin_dir path: {}", e),
+            )
+        })?;
+        let pg_lib_dir_path = conf.pg_lib_dir(pg_version).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("incorrect pg_lib_dir path: {}", e),
+            )
+        })?;
+
         info!("running initdb in {}", datadir.display());
-        let initdb = Command::new(conf.pg_bin_dir(pg_version).join("initdb"))
+        let initdb = Command::new(pg_bin_dir_path.join("initdb"))
             .args(&["-D", &datadir.to_string_lossy()])
             .arg("-N")
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
+            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path) // macOS
             .close_fds()
             .output()
             .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
@@ -629,14 +655,14 @@ impl PostgresRedoProcess {
         }
 
         // Start postgres itself
-        let mut child = Command::new(conf.pg_bin_dir(pg_version).join("postgres"))
+        let mut child = Command::new(pg_bin_dir_path.join("postgres"))
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir(pg_version))
+            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
+            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("PGDATA", &datadir)
             // The redo process is not trusted, so it runs in seccomp mode
             // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't

@@ -6,10 +6,12 @@ use tracing::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use clap::{App, Arg};
+use clap::{Arg, ArgAction, Command};
 use daemonize::Daemonize;
 
 use fail::FailScenario;
+use metrics::set_build_info_metric;
+
 use pageserver::{
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service, profiling, task_mgr,
@@ -31,72 +33,35 @@ use utils::{
 
 project_git_version!(GIT_VERSION);
 
+const FEATURES: &[&str] = &[
+    #[cfg(feature = "testing")]
+    "testing",
+    #[cfg(feature = "fail/failpoints")]
+    "fail/failpoints",
+    #[cfg(feature = "profiling")]
+    "profiling",
+];
+
 fn version() -> String {
     format!(
-        "{GIT_VERSION} profiling:{} failpoints:{}",
-        cfg!(feature = "profiling"),
-        fail::has_failpoints()
+        "{GIT_VERSION} failpoints: {}, features: {:?}",
+        fail::has_failpoints(),
+        FEATURES,
     )
 }
 
 fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("Neon page server")
-        .about("Materializes WAL stream to pages and serves them to the postgres")
-        .version(&*version())
-        .arg(
+    let arg_matches = cli().get_matches();
 
-            Arg::new("daemonize")
-                .short('d')
-                .long("daemonize")
-                .takes_value(false)
-                .help("Run in the background"),
-        )
-        .arg(
-            Arg::new("init")
-                .long("init")
-                .takes_value(false)
-                .help("Initialize pageserver with all given config overrides"),
-        )
-        .arg(
-            Arg::new("workdir")
-                .short('D')
-                .long("workdir")
-                .takes_value(true)
-                .help("Working directory for the pageserver"),
-        )
-        // See `settings.md` for more details on the extra configuration patameters pageserver can process
-        .arg(
-            Arg::new("config-override")
-                .short('c')
-                .takes_value(true)
-                .number_of_values(1)
-                .multiple_occurrences(true)
-                .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
-                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
-        )
-        .arg(Arg::new("update-config").long("update-config").takes_value(false).help(
-            "Update the config file when started",
-        ))
-        .arg(
-            Arg::new("enabled-features")
-                .long("enabled-features")
-                .takes_value(false)
-                .help("Show enabled compile time features"),
-        )
-        .get_matches();
-
-    if arg_matches.is_present("enabled-features") {
-        let features: &[&str] = &[
-            #[cfg(feature = "testing")]
-            "testing",
-            #[cfg(feature = "profiling")]
-            "profiling",
-        ];
-        println!("{{\"features\": {features:?} }}");
+    if arg_matches.get_flag("enabled-features") {
+        println!("{{\"features\": {FEATURES:?} }}");
         return Ok(());
     }
 
-    let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".neon"));
+    let workdir = arg_matches
+        .get_one::<String>("workdir")
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new(".neon"));
     let workdir = workdir
         .canonicalize()
         .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
@@ -110,7 +75,7 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
 
-    let daemonize = arg_matches.is_present("daemonize");
+    let daemonize = arg_matches.get_flag("daemonize");
 
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,
@@ -122,7 +87,7 @@ fn main() -> anyhow::Result<()> {
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
-        utils::crashsafe_dir::create_dir_all(conf.tenants_path()).with_context(|| {
+        utils::crashsafe::create_dir_all(conf.tenants_path()).with_context(|| {
             format!(
                 "Failed to create tenants root dir at '{}'",
                 tenants_path.display()
@@ -148,8 +113,8 @@ fn initialize_config(
     arg_matches: clap::ArgMatches,
     workdir: &Path,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
-    let init = arg_matches.is_present("init");
-    let update_config = init || arg_matches.is_present("update-config");
+    let init = arg_matches.get_flag("init");
+    let update_config = init || arg_matches.get_flag("update-config");
 
     let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
         if init {
@@ -191,13 +156,10 @@ fn initialize_config(
         )
     };
 
-    if let Some(values) = arg_matches.values_of("config-override") {
+    if let Some(values) = arg_matches.get_many::<String>("config-override") {
         for option_line in values {
             let doc = toml_edit::Document::from_str(option_line).with_context(|| {
-                format!(
-                    "Option '{}' could not be parsed as a toml document",
-                    option_line
-                )
+                format!("Option '{option_line}' could not be parsed as a toml document")
             })?;
 
             for (key, item) in doc.iter() {
@@ -239,7 +201,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, daemonize)?;
 
-    info!("version: {GIT_VERSION}");
+    info!("version: {}", version());
 
     // TODO: Check that it looks like a valid repository before going further
 
@@ -356,6 +318,8 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         },
     );
 
+    set_build_info_metric(GIT_VERSION);
+
     // All started up! Now just sit and wait for shutdown signal.
     signals.handle(|signal| match signal {
         Signal::Quit => {
@@ -377,4 +341,56 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
             unreachable!()
         }
     })
+}
+
+fn cli() -> Command {
+    Command::new("Neon page server")
+        .about("Materializes WAL stream to pages and serves them to the postgres")
+        .version(version())
+        .arg(
+
+            Arg::new("daemonize")
+                .short('d')
+                .long("daemonize")
+                .action(ArgAction::SetTrue)
+                .help("Run in the background"),
+        )
+        .arg(
+            Arg::new("init")
+                .long("init")
+                .action(ArgAction::SetTrue)
+                .help("Initialize pageserver with all given config overrides"),
+        )
+        .arg(
+            Arg::new("workdir")
+                .short('D')
+                .long("workdir")
+                .help("Working directory for the pageserver"),
+        )
+        // See `settings.md` for more details on the extra configuration patameters pageserver can process
+        .arg(
+            Arg::new("config-override")
+                .short('c')
+                .num_args(1)
+                .action(ArgAction::Append)
+                .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
+                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
+        )
+        .arg(
+            Arg::new("update-config")
+                .long("update-config")
+                .action(ArgAction::SetTrue)
+                .help("Update the config file when started"),
+        )
+        .arg(
+            Arg::new("enabled-features")
+                .long("enabled-features")
+                .action(ArgAction::SetTrue)
+                .help("Show enabled compile time features"),
+        )
+}
+
+#[test]
+fn verify_cli() {
+    cli().debug_assert();
 }

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc::Sender;
 use tracing::*;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 
 struct GlobalTimelinesState {
     timelines: HashMap<TenantTimelineId, Arc<Timeline>>,
@@ -153,7 +154,12 @@ impl GlobalTimelines {
 
     /// Create a new timeline with the given id. If the timeline already exists, returns
     /// an existing timeline.
-    pub fn create(ttid: TenantTimelineId, server_info: ServerInfo) -> Result<Arc<Timeline>> {
+    pub fn create(
+        ttid: TenantTimelineId,
+        server_info: ServerInfo,
+        commit_lsn: Lsn,
+        local_start_lsn: Lsn,
+    ) -> Result<Arc<Timeline>> {
         let (conf, wal_backup_launcher_tx) = {
             let state = TIMELINES_STATE.lock().unwrap();
             if let Ok(timeline) = state.get(&ttid) {
@@ -170,6 +176,8 @@ impl GlobalTimelines {
             ttid,
             wal_backup_launcher_tx,
             server_info,
+            commit_lsn,
+            local_start_lsn,
         )?);
 
         // Take a lock and finish the initialization holding this mutex. No other threads
@@ -190,6 +198,9 @@ impl GlobalTimelines {
             Ok(_) => {
                 // We are done with bootstrap, release the lock, return the timeline.
                 drop(shared_state);
+                timeline
+                    .wal_backup_launcher_tx
+                    .blocking_send(timeline.ttid)?;
                 Ok(timeline)
             }
             Err(e) => {

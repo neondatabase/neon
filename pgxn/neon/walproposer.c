@@ -79,9 +79,6 @@ bool		am_wal_proposer;
 char	   *neon_timeline_walproposer = NULL;
 char	   *neon_tenant_walproposer = NULL;
 
-/* Declared in walproposer.h, defined here, initialized in libpqwalproposer.c */
-WalProposerFunctionsType *WalProposerFunctions = NULL;
-
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
 static int	n_safekeepers = 0;
@@ -437,10 +434,6 @@ WalProposerInitImpl(XLogRecPtr flushRecPtr, uint64 systemId)
 	char	   *host;
 	char	   *sep;
 	char	   *port;
-
-	/* Load the libpq-specific functions */
-	if (WalProposerFunctions == NULL)
-		elog(ERROR, "libpqwalproposer didn't initialize correctly");
 
 	load_file("libpqwalreceiver", false);
 	if (WalReceiverFunctions == NULL)
@@ -1471,12 +1464,6 @@ SendProposerElected(Safekeeper *sk)
 	 */
 	th = &sk->voteResponse.termHistory;
 
-	/*
-	 * If any WAL is present on the sk, it must be authorized by some term.
-	 * OTOH, without any WAL there are no term swiches in the log.
-	 */
-	Assert((th->n_entries == 0) ==
-		   (sk->voteResponse.flushLsn == InvalidXLogRecPtr));
 	/* We must start somewhere. */
 	Assert(propTermHistory.n_entries >= 1);
 

@@ -149,19 +149,6 @@ def pytest_configure(config):
         raise Exception('neon binaries not found at "{}"'.format(neon_binpath))
 
 
-def profiling_supported():
-    """Return True if the pageserver was compiled with the 'profiling' feature"""
-    bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
-    res = subprocess.run(
-        [bin_pageserver, "--version"],
-        check=True,
-        universal_newlines=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return "profiling:true" in res.stdout
-
-
 def shareable_scope(fixture_name, config) -> Literal["session", "function"]:
     """Return either session of function scope, depending on TEST_SHARED_FIXTURES envvar.
 
@@ -874,6 +861,17 @@ class NeonEnv:
         """Get a timeline directory's path based on the repo directory of the test environment"""
         return self.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
 
+    def get_pageserver_version(self) -> str:
+        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
+        res = subprocess.run(
+            [bin_pageserver, "--version"],
+            check=True,
+            universal_newlines=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return res.stdout
+
     @cached_property
     def auth_keys(self) -> AuthKeys:
         pub = (Path(self.repo_dir) / "auth_public_key.pem").read_bytes()
@@ -972,10 +970,11 @@ class NeonPageserverApiException(Exception):
 
 
 class NeonPageserverHttpClient(requests.Session):
-    def __init__(self, port: int, auth_token: Optional[str] = None):
+    def __init__(self, port: int, is_testing_enabled_or_skip, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
+        self.is_testing_enabled_or_skip = is_testing_enabled_or_skip
 
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
@@ -994,6 +993,8 @@ class NeonPageserverHttpClient(requests.Session):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
     def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]) -> None:
+        self.is_testing_enabled_or_skip()
+
         if isinstance(config_strings, tuple):
             pairs = [config_strings]
         else:
@@ -1111,6 +1112,8 @@ class NeonPageserverHttpClient(requests.Session):
     def timeline_gc(
         self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
     ) -> dict[str, Any]:
+        self.is_testing_enabled_or_skip()
+
         log.info(
             f"Requesting GC: tenant {tenant_id}, timeline {timeline_id}, gc_horizon {repr(gc_horizon)}"
         )
@@ -1126,6 +1129,8 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_compact(self, tenant_id: TenantId, timeline_id: TimelineId):
+        self.is_testing_enabled_or_skip()
+
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact"
@@ -1150,6 +1155,8 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
+        self.is_testing_enabled_or_skip()
+
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint"
@@ -1179,7 +1186,7 @@ CREATE_TIMELINE_ID_EXTRACTOR = re.compile(
     r"^Created timeline '(?P<timeline_id>[^']+)'", re.MULTILINE
 )
 TIMELINE_DATA_EXTRACTOR = re.compile(
-    r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
+    r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
 )
 
 
@@ -1430,8 +1437,8 @@ class NeonCli(AbstractNeonCli):
         Returns a list of (branch_name, timeline_id) tuples out of parsed `neon timeline list` CLI output.
         """
 
-        # (L) main [b49f7954224a0ad25cc0013ea107b54b]
-        # (L) ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
+        # main [b49f7954224a0ad25cc0013ea107b54b]
+        # ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
         res = self.raw_cli(
             ["timeline", "list", "--tenant-id", str(tenant_id or self.env.initial_tenant)]
         )
@@ -1468,21 +1475,6 @@ class NeonCli(AbstractNeonCli):
             res = self.raw_cli(cmd)
             res.check_returncode()
             return res
-
-    def pageserver_enabled_features(self) -> Any:
-        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
-        args = [bin_pageserver, "--enabled-features"]
-        log.info('Running command "{}"'.format(" ".join(args)))
-
-        res = subprocess.run(
-            args,
-            check=True,
-            universal_newlines=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        log.info(f"pageserver_enabled_features success: {res.stdout}")
-        return json.loads(res.stdout)
 
     def pageserver_start(
         self,
@@ -1642,6 +1634,7 @@ class NeonPageserver(PgProtocol):
         self.running = False
         self.service_port = port
         self.config_override = config_override
+        self.version = env.get_pageserver_version()
 
     def start(self, overrides=()) -> "NeonPageserver":
         """
@@ -1671,10 +1664,19 @@ class NeonPageserver(PgProtocol):
     def __exit__(self, exc_type, exc, tb):
         self.stop(immediate=True)
 
+    def is_testing_enabled_or_skip(self):
+        if '"testing"' not in self.version:
+            pytest.skip("pageserver was built without 'testing' feature")
+
+    def is_profiling_enabled_or_skip(self):
+        if '"profiling"' not in self.version:
+            pytest.skip("pageserver was built without 'profiling' feature")
+
     def http_client(self, auth_token: Optional[str] = None) -> NeonPageserverHttpClient:
         return NeonPageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
+            is_testing_enabled_or_skip=self.is_testing_enabled_or_skip,
         )
 
 
@@ -1960,6 +1962,11 @@ class NeonProxy(PgProtocol):
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
+
+    def get_metrics(self) -> str:
+        request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
+        request_result.raise_for_status()
+        return request_result.text
 
     def __enter__(self):
         return self
@@ -2334,6 +2341,7 @@ class Safekeeper:
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
+    pg_version: int
     flush_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
@@ -2362,6 +2370,18 @@ class SafekeeperHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def timeline_create(
+        self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
+    ):
+        body = {
+            "tenant_id": str(tenant_id),
+            "timeline_id": str(timeline_id),
+            "pg_version": pg_version,
+            "commit_lsn": str(commit_lsn),
+        }
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/timeline", json=body)
+        res.raise_for_status()
+
     def timeline_status(
         self, tenant_id: TenantId, timeline_id: TimelineId
     ) -> SafekeeperTimelineStatus:
@@ -2370,6 +2390,7 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         return SafekeeperTimelineStatus(
             acceptor_epoch=resj["acceptor_state"]["epoch"],
+            pg_version=resj["pg_info"]["pg_version"],
             flush_lsn=Lsn(resj["flush_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
@@ -2683,19 +2704,6 @@ def wait_until(number_of_iterations: int, interval: float, func):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def assert_timeline_local(
-    pageserver_http_client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
-):
-    timeline_detail = pageserver_http_client.timeline_detail(
-        tenant,
-        timeline,
-        include_non_incremental_logical_size=True,
-        include_non_incremental_physical_size=True,
-    )
-    assert timeline_detail.get("local", {}).get("disk_consistent_lsn"), timeline_detail
-    return timeline_detail
-
-
 def assert_no_in_progress_downloads_for_tenant(
     pageserver_http_client: NeonPageserverHttpClient,
     tenant: TenantId,
@@ -2709,15 +2717,14 @@ def remote_consistent_lsn(
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    if detail["remote"] is None:
+    lsn_str = detail["remote_consistent_lsn"]
+    if lsn_str is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return Lsn(0)
-    else:
-        lsn_str = detail["remote"]["remote_consistent_lsn"]
-        assert isinstance(lsn_str, str)
-        return Lsn(lsn_str)
+    assert isinstance(lsn_str, str)
+    return Lsn(lsn_str)
 
 
 def wait_for_upload(
@@ -2749,7 +2756,7 @@ def last_record_lsn(
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail["local"]["last_record_lsn"]
+    lsn_str = detail["last_record_lsn"]
     assert isinstance(lsn_str, str)
     return Lsn(lsn_str)
 

@@ -23,6 +23,7 @@ docker cp ${ID}:/data/postgres_install.tar.gz .
 tar -xzf postgres_install.tar.gz -C neon_install
 mkdir neon_install/bin/
 docker cp ${ID}:/usr/local/bin/pageserver neon_install/bin/
+docker cp ${ID}:/usr/local/bin/pageserver_binutils neon_install/bin/
 docker cp ${ID}:/usr/local/bin/safekeeper neon_install/bin/
 docker cp ${ID}:/usr/local/bin/proxy neon_install/bin/
 docker cp ${ID}:/usr/local/v14/bin/ neon_install/v14/bin/

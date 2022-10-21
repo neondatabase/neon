@@ -1,5 +1,5 @@
 [Unit]
-Description=Zenith pageserver
+Description=Neon pageserver
 After=network.target auditd.service
 
 [Service]
