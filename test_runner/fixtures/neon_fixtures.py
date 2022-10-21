@@ -17,6 +17,7 @@ import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union, cast
 
@@ -27,7 +28,6 @@ import jwt
 import psycopg2
 import pytest
 import requests
-from cached_property import cached_property
 from fixtures.log_helper import log
 from fixtures.types import Lsn, TenantId, TimelineId
 
