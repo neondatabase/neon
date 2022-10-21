@@ -825,3 +825,30 @@ jobs:
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+  pentest:
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
+    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+            - name: Add curl
+        run: apt update && apt install curl -y
+        run: apt update && apt install curl unzip wget jq  -y
+
+      - name: Add awscli
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip" \
+          && unzip -q awscliv2.zip \
+          && ./aws/install \
+          && rm awscliv2.zip
+
+      - name: Add awscli
+        run: |
+          aws s3 ls
