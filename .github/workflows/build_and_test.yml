@@ -825,3 +825,31 @@ jobs:
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+
+  deploy-proxy-new:
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    if: |
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure environment 
+        run: |
+          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+          aws --region us-east-2 eks update-kubeconfig --name dev-us-east-2-beta --role-arn arn:aws:iam::369495373322:role/github-runner
+
+      - name: Re-deploy proxy
+        run: |
+          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/dev-us-east-2-beta.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
