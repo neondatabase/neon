@@ -37,7 +37,7 @@ pub static REQUIRED_POSTGRES_CONFIG: Lazy<Vec<&'static str>> = Lazy::new(|| {
 });
 
 impl Conf {
-    pub fn pg_distrib_dir(&self) -> Result<PathBuf> {
+    pub fn pg_distrib_dir(&self) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
         match self.pg_version {
@@ -47,11 +47,11 @@ impl Conf {
         }
     }
 
-    fn pg_bin_dir(&self) -> Result<PathBuf> {
+    fn pg_bin_dir(&self) -> anyhow::Result<PathBuf> {
         Ok(self.pg_distrib_dir()?.join("bin"))
     }
 
-    fn pg_lib_dir(&self) -> Result<PathBuf> {
+    fn pg_lib_dir(&self) -> anyhow::Result<PathBuf> {
         Ok(self.pg_distrib_dir()?.join("lib"))
     }
 

@@ -387,7 +387,7 @@ impl PageServerConf {
     //
     // Postgres distribution paths
     //
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> Result<PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
         match pg_version {
@@ -397,14 +397,14 @@ impl PageServerConf {
         }
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> Result<PathBuf> {
+    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         match pg_version {
             14 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
             15 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
-    pub fn pg_lib_dir(&self, pg_version: u32) -> Result<PathBuf> {
+    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         match pg_version {
             14 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
             15 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
