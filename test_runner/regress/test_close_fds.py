@@ -1,10 +1,10 @@
 import os.path
 import shutil
 import subprocess
+import threading
 import time
 from contextlib import closing
 
-from cached_property import threading
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 
