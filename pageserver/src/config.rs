@@ -17,6 +17,7 @@ use toml_edit::{Document, Item};
 use url::Url;
 use utils::{
     id::{NodeId, TenantId, TimelineId},
+    logging::LogFormat,
     postgres_backend::AuthType,
 };
 
@@ -45,6 +46,8 @@ pub mod defaults {
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
 
+    pub const DEFAULT_LOG_FORMAT: &str = "plain";
+
     ///
     /// Default built-in configuration file.
     ///
@@ -63,6 +66,7 @@ pub mod defaults {
 # initial superuser role name to use when creating a new tenant
 #initial_superuser_name = '{DEFAULT_SUPERUSER}'
 
+#log_format = '{DEFAULT_LOG_FORMAT}'
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
@@ -126,6 +130,8 @@ pub struct PageServerConf {
 
     /// Etcd broker endpoints to connect to.
     pub broker_endpoints: Vec<Url>,
+
+    pub log_format: LogFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +198,8 @@ struct PageServerConfigBuilder {
     profiling: BuilderValue<ProfilingConfig>,
     broker_etcd_prefix: BuilderValue<String>,
     broker_endpoints: BuilderValue<Vec<Url>>,
+
+    log_format: BuilderValue<LogFormat>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -219,6 +227,7 @@ impl Default for PageServerConfigBuilder {
             profiling: Set(ProfilingConfig::Disabled),
             broker_etcd_prefix: Set(etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string()),
             broker_endpoints: Set(Vec::new()),
+            log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
         }
     }
 }
@@ -291,6 +300,10 @@ impl PageServerConfigBuilder {
         self.profiling = BuilderValue::Set(profiling)
     }
 
+    pub fn log_format(&mut self, log_format: LogFormat) {
+        self.log_format = BuilderValue::Set(log_format)
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let broker_endpoints = self
             .broker_endpoints
@@ -335,6 +348,7 @@ impl PageServerConfigBuilder {
             broker_etcd_prefix: self
                 .broker_etcd_prefix
                 .ok_or(anyhow!("missing broker_etcd_prefix"))?,
+            log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
         })
     }
 }
@@ -459,6 +473,9 @@ impl PageServerConf {
                         })
                         .collect::<anyhow::Result<_>>()?,
                 ),
+                "log_format" => builder.log_format(
+                    LogFormat::from_config(&parse_toml_string(key, item)?)?
+                ),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -571,6 +588,7 @@ impl PageServerConf {
             default_tenant_conf: TenantConf::dummy_conf(),
             broker_endpoints: Vec::new(),
             broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
+            log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
         }
     }
 }
@@ -665,6 +683,8 @@ max_file_descriptors = 333
 initial_superuser_name = 'zzzz'
 id = 10
 
+log_format = 'json'
+
 "#;
 
     #[test]
@@ -704,6 +724,7 @@ id = 10
                     .parse()
                     .expect("Failed to parse a valid broker endpoint URL")],
                 broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
+                log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -748,6 +769,7 @@ id = 10
                     .parse()
                     .expect("Failed to parse a valid broker endpoint URL")],
                 broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
+                log_format: LogFormat::Json,
             },
             "Should be able to parse all basic config values correctly"
         );

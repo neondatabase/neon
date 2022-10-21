@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
-use utils::id::{NodeId, TenantId, TenantTimelineId};
+use utils::{
+    id::{NodeId, TenantId, TenantTimelineId},
+    logging::LogFormat,
+};
 
 pub mod broker;
 pub mod control_file;
@@ -64,6 +67,7 @@ pub struct SafeKeeperConf {
     pub auth_validation_public_key_path: Option<PathBuf>,
     pub heartbeat_timeout: Duration,
     pub max_offloader_lag_bytes: u64,
+    pub log_format: LogFormat,
 }
 
 impl SafeKeeperConf {
@@ -97,6 +101,7 @@ impl Default for SafeKeeperConf {
             auth_validation_public_key_path: None,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
             max_offloader_lag_bytes: DEFAULT_MAX_OFFLOADER_LAG_BYTES,
+            log_format: LogFormat::Plain,
         }
     }
 }
