@@ -1,0 +1,209 @@
+version: '3'
+
+services:
+  etcd1:
+    image: docker.io/bitnami/etcd:3
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_NAME=etcd1
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd1:2380
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd1:2379
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+
+  etcd2:
+    image: docker.io/bitnami/etcd:3
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_NAME=etcd2
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd2:2380
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd2:2379
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+
+  etcd3:
+    image: docker.io/bitnami/etcd:3
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_NAME=etcd3
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd3:2380
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd3:2379
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=password
+    command: server /data --address :9000 --console-address ":9001"
+
+  miniocreatebuckets:
+    image: minio/mc
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=password
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command: 
+      - "until (/usr/bin/mc alias set minio http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD) do
+          echo 'Waiting to start minio...' && sleep 1;
+         done;
+         /usr/bin/mc mb minio/neon --region=eu-north-1;
+         exit 0;"
+    depends_on:
+      - minio
+
+  pageserver:
+    image: neondatabase/neon:2221
+    environment:
+      - BROKER_ENDPOINT='http://etcd1:2379','http://etcd2:2379','http://etcd3:2379'
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=password
+      #- RUST_BACKTRACE=1
+    ports:
+       #- 6400:6400  # pg protocol handler
+       - 9898:9898 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - "/usr/local/bin/pageserver -D /data/.neon/
+                                   -c \"broker_endpoints=[$$BROKER_ENDPOINT]\"
+                                   -c \"listen_pg_addr='0.0.0.0:6400'\"
+                                   -c \"listen_http_addr='0.0.0.0:9898'\"
+                                   -c \"remote_storage={endpoint='http://minio:9000',
+                                                        bucket_name='neon',
+                                                        bucket_region='eu-north-1',
+                                                        prefix_in_bucket='/pageserver/'}\""
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+      - miniocreatebuckets
+
+  safekeeper1:
+    image: neondatabase/neon:2221
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper1:5454
+      - SAFEKEEPER_ID=1
+      - BROKER_ENDPOINT=http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=password
+      #- RUST_BACKTRACE=1
+    ports:
+      #- 5454:5454 # pg protocol handler
+      - 7676:7676 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoints=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+      - miniocreatebuckets
+
+  safekeeper2:
+    image: neondatabase/neon:2221
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper2:5454
+      - SAFEKEEPER_ID=2
+      - BROKER_ENDPOINT=http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=password
+      #- RUST_BACKTRACE=1
+    ports:
+      #- 5454:5454 # pg protocol handler
+      - 7677:7676 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoints=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+      - miniocreatebuckets
+
+  safekeeper3:
+    image: neondatabase/neon:2221
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper3:5454
+      - SAFEKEEPER_ID=3
+      - BROKER_ENDPOINT=http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=password
+      #- RUST_BACKTRACE=1
+    ports:
+      #- 5454:5454 # pg protocol handler
+      - 7678:7676 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoints=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+      - miniocreatebuckets
+
+  compute:
+    build:
+      context: ./image/compute
+    environment:
+      - TENANT_NAME=test-tenant
+      #- RUST_BACKTRACE=1
+    volumes:
+      - ./compute/var/db/postgres/specs/:/var/db/postgres/specs/
+      - ./compute/shell/:/shell/
+    ports:
+      - 55433:55433 # pg protocol handler
+      - 3080:3080 # http endpoints
+    entrypoint:
+      - "/shell/compute.sh"
+    depends_on:
+      - safekeeper1
+      - safekeeper2
+      - safekeeper3
+      - pageserver
