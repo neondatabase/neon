@@ -3,7 +3,6 @@ storage:
     bucket_name: neon-storage-ireland
     bucket_region: eu-west-1
     console_mgmt_base_url: http://neon-stress-console.local
-    env_name: neon-stress
     etcd_endpoints: neon-stress-etcd.local:2379
     safekeeper_enable_s3_offload: 'false'
     pageserver_config_stub:
@@ -12,6 +11,7 @@ storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
         prefix_in_bucket: "{{ inventory_hostname }}"
+    safekeeper_s3_prefix: neon-stress/wal
     hostname_suffix: ".local"
     remote_user: admin
   children:

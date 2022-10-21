@@ -3,7 +3,6 @@ storage:
     bucket_name: zenith-staging-storage-us-east-1
     bucket_region: us-east-1
     console_mgmt_base_url: http://console-staging.local
-    env_name: us-stage
     etcd_endpoints: zenith-us-stage-etcd.local:2379
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
@@ -11,6 +10,7 @@ storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
         prefix_in_bucket: "{{ inventory_hostname }}"
+    safekeeper_s3_prefix: us-stage/wal
     hostname_suffix: ".local"
     remote_user: admin
 
