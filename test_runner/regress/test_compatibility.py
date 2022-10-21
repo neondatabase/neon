@@ -10,12 +10,35 @@ import toml
 from fixtures.neon_fixtures import (
     NeonCli,
     NeonEnvBuilder,
+    NeonPageserverHttpClient,
     PgBin,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
 from fixtures.types import Lsn
 from pytest import FixtureRequest
+
+
+def dump_differs(first: Path, second: Path, output: Path) -> bool:
+    """
+    Runs diff(1) command on two SQL dumps and write the output to the given output file.
+    Returns True if the dumps differ, False otherwise.
+    """
+
+    with output.open("w") as stdout:
+        rv = subprocess.run(
+            [
+                "diff",
+                "--unified",  # Make diff output more readable
+                "--ignore-matching-lines=^--",  # Ignore changes in comments
+                "--ignore-blank-lines",
+                str(first),
+                str(second),
+            ],
+            stdout=stdout,
+        )
+
+    return rv.returncode != 0
 
 
 def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: FixtureRequest):
@@ -75,38 +98,56 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
         else:
             raise
 
-    connstr_re = re.compile(r"Starting postgres node at '([^']+)'")
-    connstr_all = connstr_re.findall(result.stdout)
+    connstr_all = re.findall(r"Starting postgres node at '([^']+)'", result.stdout)
     assert len(connstr_all) == 1, f"can't parse connstr from {result.stdout}"
     connstr = connstr_all[0]
 
-    # Check that the project produces the same dump
+    # Check that the project produces the same dump as the previous version.
+    # The assert itself deferred to the end of the test
+    # to allow us to perform checks that change data before failing
     pg_bin.run(["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"])
-    with (test_output_dir / "dump.filediff").open("w") as stdout:
-        rv = subprocess.run(
-            [
-                "diff",
-                "--unified",  # Make diff output more readable
-                "--ignore-matching-lines=^--",  # Ignore changes in comments
-                "--ignore-blank-lines",
-                str(compatibility_snapshot_dir / "dump.sql"),
-                str(test_output_dir / "dump.sql"),
-            ],
-            stdout=stdout,
-        )
-        # A real assert deferred to the end of the test,
-        # to allow us to perform checks that change data
-        dump_differs = rv.returncode != 0
+    initial_dump_differs = dump_differs(
+        compatibility_snapshot_dir / "dump.sql",
+        test_output_dir / "dump.sql",
+        test_output_dir / "dump.filediff",
+    )
 
-    # Check that we can interract with the project
+    # Check that project can be recovered from WAL
+    # loosely based on https://github.com/neondatabase/cloud/wiki/Recovery-from-WAL
+    tenant_id = snapshot_config["default_tenant_id"]
+    timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
+    pageserver_port = snapshot_config["pageserver"]["listen_http_addr"].split(":")[-1]
+    auth_token = snapshot_config["pageserver"]["auth_token"]
+    pageserver_http = NeonPageserverHttpClient(
+        port=pageserver_port,
+        is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
+        auth_token=auth_token,
+    )
+
+    shutil.rmtree(repo_dir / "local_fs_remote_storage")
+    pageserver_http.timeline_delete(tenant_id, timeline_id)
+    pageserver_http.timeline_create(tenant_id, timeline_id)
+    pg_bin.run(
+        ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
+    )
+    # The assert itself deferred to the end of the test
+    # to allow us to perform checks that change data before failing
+    dump_from_wal_differs = dump_differs(
+        compatibility_snapshot_dir / "dump.sql",
+        test_output_dir / "dump-from-wal.sql",
+        test_output_dir / "dump-from-wal.filediff",
+    )
+
+    # Check that we can interract with the data
     pg_bin.run(["pgbench", "--time=10", "--progress=2", connstr])
 
-    assert not dump_differs, "dump differs"
+    assert not initial_dump_differs, "initial dump differs"
+    assert not dump_from_wal_differs, "dump from WAL differs"
 
 
 @pytest.mark.order(after="test_backward_compatibility")
 # Note: if renaming this test, don't forget to update a reference to it in a workflow file:
-#   "Upload compatibility snapshot" step in .github/actions/run-python-test-set/action.yml
+# "Upload compatibility snapshot" step in .github/actions/run-python-test-set/action.yml
 def test_prepare_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path):
     # The test doesn't really test anything
     # it creates a new snapshot for releases after we tested the current version against the previous snapshot in `test_backward_compatibility`

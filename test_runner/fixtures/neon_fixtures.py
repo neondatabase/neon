@@ -970,7 +970,7 @@ class NeonPageserverApiException(Exception):
 
 
 class NeonPageserverHttpClient(requests.Session):
-    def __init__(self, port: int, is_testing_enabled_or_skip, auth_token: Optional[str] = None):
+    def __init__(self, port: int, is_testing_enabled_or_skip: Fn, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
