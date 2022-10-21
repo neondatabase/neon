@@ -57,12 +57,6 @@ fn main() -> Result<()> {
             ranges.push(range);
         }
     }
-    for line in names.lines() {
-        if line.len() == 0 {
-            continue;
-        }
-
-    }
 
     let mut sum: u64 = 0;
     let mut count = 0;
@@ -118,7 +112,7 @@ fn main() -> Result<()> {
             lsn_diff = 0.3;
             lsn_offset = lsn_diff * 2.5 - 1.0;
             margin = 0.05;
-            fill = Fill::Color(rgb(200, 200, 200));
+            fill = Fill::Color(rgb(0, 0, 0));
         } else if lsn_start < lsn_end {
             num_deltas += 1;
             // fill = Fill::Color(rgb(200, 200, 200));
@@ -133,7 +127,7 @@ fn main() -> Result<()> {
                       stretch * (lsn_diff - 2.0 * margin))
                 // .fill(rgb(200, 200, 200))
                 .fill(fill)
-                .stroke(Stroke::Color(rgb(200, 200, 200), 0.1))
+                .stroke(Stroke::Color(rgb(0, 0, 0), 0.1))
                 .border_radius(0.4)
         );
     }
