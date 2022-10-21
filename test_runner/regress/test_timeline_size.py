@@ -11,7 +11,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverHttpClient,
+    PageserverHttpClient,
     PgBin,
     PortDistributor,
     Postgres,
@@ -462,7 +462,7 @@ def assert_physical_size(env: NeonEnv, tenant_id: TenantId, timeline_id: Timelin
 # Timeline logical size initialization is an asynchronous background task that runs once,
 # try a few times to ensure it's activated properly
 def wait_for_timeline_size_init(
-    client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
+    client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
 ):
     for i in range(10):
         timeline_details = client.timeline_detail(

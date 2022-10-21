@@ -54,7 +54,6 @@ pub struct SafeKeeperConf {
     // data directories to avoid clashing with each other.
     pub workdir: PathBuf,
 
-    pub daemonize: bool,
     pub no_sync: bool,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
@@ -88,7 +87,6 @@ impl Default for SafeKeeperConf {
             // command line, so that when the server is running, all paths are relative
             // to that.
             workdir: PathBuf::from("./"),
-            daemonize: false,
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),

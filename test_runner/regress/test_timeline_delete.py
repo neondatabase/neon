@@ -1,6 +1,7 @@
 import pytest
-from fixtures.neon_fixtures import NeonEnv, NeonPageserverApiException, wait_until
+from fixtures.neon_fixtures import NeonEnv, PageserverApiException
 from fixtures.types import TenantId, TimelineId
+from fixtures.utils import wait_until
 
 
 def test_timeline_delete(neon_simple_env: NeonEnv):
@@ -11,13 +12,13 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     # first try to delete non existing timeline
     # for existing tenant:
     invalid_timeline_id = TimelineId.generate()
-    with pytest.raises(NeonPageserverApiException, match="timeline not found"):
+    with pytest.raises(PageserverApiException, match="timeline not found"):
         ps_http.timeline_delete(tenant_id=env.initial_tenant, timeline_id=invalid_timeline_id)
 
     # for non existing tenant:
     invalid_tenant_id = TenantId.generate()
     with pytest.raises(
-        NeonPageserverApiException,
+        PageserverApiException,
         match=f"Tenant {invalid_tenant_id} not found in the local state",
     ):
         ps_http.timeline_delete(tenant_id=invalid_tenant_id, timeline_id=invalid_timeline_id)
@@ -32,7 +33,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     ps_http = env.pageserver.http_client()
     with pytest.raises(
-        NeonPageserverApiException, match="Cannot delete timeline which has child timelines"
+        PageserverApiException, match="Cannot delete timeline which has child timelines"
     ):
 
         timeline_path = (
@@ -64,7 +65,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     # check 404
     with pytest.raises(
-        NeonPageserverApiException,
+        PageserverApiException,
         match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
     ):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)

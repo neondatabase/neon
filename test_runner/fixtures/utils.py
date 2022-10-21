@@ -4,12 +4,15 @@ import re
 import shutil
 import subprocess
 import tarfile
+import time
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, Callable, List, Tuple, TypeVar
 
 import allure  # type: ignore
 from fixtures.log_helper import log
 from psycopg2.extensions import cursor
+
+Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 
 def get_self_dir() -> str:
@@ -188,3 +191,57 @@ def allure_attach_from_dir(dir: Path):
                 extension = attachment.suffix.removeprefix(".")
 
             allure.attach.file(source, name, attachment_type, extension)
+
+
+def start_in_background(
+    command: list[str], cwd: Path, log_file_name: str, is_started: Fn
+) -> subprocess.Popen[bytes]:
+    """Starts a process, creates the logfile and redirects stderr and stdout there. Runs the start checks before the process is started, or errors."""
+
+    log.info(f'Running command "{" ".join(command)}"')
+
+    with open(cwd / log_file_name, "wb") as log_file:
+        spawned_process = subprocess.Popen(command, stdout=log_file, stderr=log_file, cwd=cwd)
+        error = None
+        try:
+            return_code = spawned_process.poll()
+            if return_code is not None:
+                error = f"expected subprocess to run but it exited with code {return_code}"
+            else:
+                attempts = 10
+                try:
+                    wait_until(
+                        number_of_iterations=attempts,
+                        interval=1,
+                        func=is_started,
+                    )
+                except Exception:
+                    error = f"Failed to get correct status from subprocess in {attempts} attempts"
+        except Exception as e:
+            error = f"expected subprocess to start but it failed with exception: {e}"
+
+        if error is not None:
+            log.error(error)
+            spawned_process.kill()
+            raise Exception(f"Failed to run subprocess as {command}, reason: {error}")
+
+        log.info("subprocess spawned")
+        return spawned_process
+
+
+def wait_until(number_of_iterations: int, interval: float, func: Fn):
+    """
+    Wait until 'func' returns successfully, without exception. Returns the
+    last return value from the function.
+    """
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            res = func()
+        except Exception as e:
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            last_exception = e
+            time.sleep(interval)
+            continue
+        return res
+    raise Exception("timed out while waiting for %s" % func) from last_exception

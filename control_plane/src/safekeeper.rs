@@ -1,23 +1,21 @@
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::Child;
 use std::sync::Arc;
-use std::time::Duration;
-use std::{io, result, thread};
+use std::{io, result};
 
-use anyhow::bail;
-use nix::errno::Errno;
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
+use anyhow::Context;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use utils::{http::error::HttpErrorBody, id::NodeId};
 
 use crate::connection::PgConnectionConfig;
-use crate::local_env::{LocalEnv, SafekeeperConf};
-use crate::storage::PageServerNode;
-use crate::{fill_aws_secrets_vars, fill_rust_env_vars, read_pidfile};
+use crate::pageserver::PageServerNode;
+use crate::{
+    background_process,
+    local_env::{LocalEnv, SafekeeperConf},
+};
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {
@@ -95,7 +93,7 @@ impl SafekeeperNode {
     }
 
     pub fn datadir_path_by_id(env: &LocalEnv, sk_id: NodeId) -> PathBuf {
-        env.safekeeper_data_dir(format!("sk{}", sk_id).as_ref())
+        env.safekeeper_data_dir(&format!("sk{sk_id}"))
     }
 
     pub fn datadir_path(&self) -> PathBuf {
@@ -106,7 +104,7 @@ impl SafekeeperNode {
         self.datadir_path().join("safekeeper.pid")
     }
 
-    pub fn start(&self) -> anyhow::Result<()> {
+    pub fn start(&self) -> anyhow::Result<Child> {
         print!(
             "Starting safekeeper at '{}' in '{}'",
             self.pg_connection_config.raw_address(),
@@ -116,81 +114,68 @@ impl SafekeeperNode {
 
         let listen_pg = format!("127.0.0.1:{}", self.conf.pg_port);
         let listen_http = format!("127.0.0.1:{}", self.conf.http_port);
+        let id = self.id;
+        let datadir = self.datadir_path();
 
-        let mut cmd = Command::new(self.env.safekeeper_bin()?);
-        fill_rust_env_vars(
-            cmd.args(&["-D", self.datadir_path().to_str().unwrap()])
-                .args(&["--id", self.id.to_string().as_ref()])
-                .args(&["--listen-pg", &listen_pg])
-                .args(&["--listen-http", &listen_http])
-                .arg("--daemonize"),
-        );
+        let id_string = id.to_string();
+        let mut args = vec![
+            "-D",
+            datadir.to_str().with_context(|| {
+                format!("Datadir path {datadir:?} cannot be represented as a unicode string")
+            })?,
+            "--id",
+            &id_string,
+            "--listen-pg",
+            &listen_pg,
+            "--listen-http",
+            &listen_http,
+        ];
         if !self.conf.sync {
-            cmd.arg("--no-sync");
+            args.push("--no-sync");
         }
 
         let comma_separated_endpoints = self.env.etcd_broker.comma_separated_endpoints();
         if !comma_separated_endpoints.is_empty() {
-            cmd.args(&["--broker-endpoints", &comma_separated_endpoints]);
+            args.extend(["--broker-endpoints", &comma_separated_endpoints]);
         }
         if let Some(prefix) = self.env.etcd_broker.broker_etcd_prefix.as_deref() {
-            cmd.args(&["--broker-etcd-prefix", prefix]);
+            args.extend(["--broker-etcd-prefix", prefix]);
         }
+
+        let mut backup_threads = String::new();
         if let Some(threads) = self.conf.backup_threads {
-            cmd.args(&["--backup-threads", threads.to_string().as_ref()]);
+            backup_threads = threads.to_string();
+            args.extend(["--backup-threads", &backup_threads]);
+        } else {
+            drop(backup_threads);
         }
+
         if let Some(ref remote_storage) = self.conf.remote_storage {
-            cmd.args(&["--remote-storage", remote_storage]);
+            args.extend(["--remote-storage", remote_storage]);
         }
+
+        let key_path = self.env.base_data_dir.join("auth_public_key.pem");
         if self.conf.auth_enabled {
-            cmd.arg("--auth-validation-public-key-path");
-            // PathBuf is better be passed as is, not via `String`.
-            cmd.arg(self.env.base_data_dir.join("auth_public_key.pem"));
+            args.extend([
+                "--auth-validation-public-key-path",
+                key_path.to_str().with_context(|| {
+                    format!("Key path {key_path:?} cannot be represented as a unicode string")
+                })?,
+            ]);
         }
 
-        fill_aws_secrets_vars(&mut cmd);
-
-        if !cmd.status()?.success() {
-            bail!(
-                "Safekeeper failed to start. See '{}' for details.",
-                self.datadir_path().join("safekeeper.log").display()
-            );
-        }
-
-        // It takes a while for the safekeeper to start up. Wait until it is
-        // open for business.
-        const RETRIES: i8 = 15;
-        for retries in 1..RETRIES {
-            match self.check_status() {
-                Ok(_) => {
-                    println!("\nSafekeeper started");
-                    return Ok(());
-                }
-                Err(err) => {
-                    match err {
-                        SafekeeperHttpError::Transport(err) => {
-                            if err.is_connect() && retries < 5 {
-                                print!(".");
-                                io::stdout().flush().unwrap();
-                            } else {
-                                if retries == 5 {
-                                    println!() // put a line break after dots for second message
-                                }
-                                println!(
-                                    "Safekeeper not responding yet, err {} retrying ({})...",
-                                    err, retries
-                                );
-                            }
-                        }
-                        SafekeeperHttpError::Response(msg) => {
-                            bail!("safekeeper failed to start: {} ", msg)
-                        }
-                    }
-                    thread::sleep(Duration::from_secs(1));
-                }
-            }
-        }
-        bail!("safekeeper failed to start in {} seconds", RETRIES);
+        background_process::start_process(
+            &format!("safekeeper {id}"),
+            &datadir,
+            &self.env.safekeeper_bin(),
+            &args,
+            background_process::InitialPidFile::Expect(&self.pid_file()),
+            || match self.check_status() {
+                Ok(()) => Ok(true),
+                Err(SafekeeperHttpError::Transport(_)) => Ok(false),
+                Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
+            },
+        )
     }
 
     ///
@@ -202,63 +187,11 @@ impl SafekeeperNode {
     /// If the server is not running, returns success
     ///
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
-        let pid_file = self.pid_file();
-        if !pid_file.exists() {
-            println!("Safekeeper {} is already stopped", self.id);
-            return Ok(());
-        }
-        let pid = read_pidfile(&pid_file)?;
-        let pid = Pid::from_raw(pid);
-
-        let sig = if immediate {
-            print!("Stopping safekeeper {} immediately..", self.id);
-            Signal::SIGQUIT
-        } else {
-            print!("Stopping safekeeper {} gracefully..", self.id);
-            Signal::SIGTERM
-        };
-        io::stdout().flush().unwrap();
-        match kill(pid, sig) {
-            Ok(_) => (),
-            Err(Errno::ESRCH) => {
-                println!(
-                    "Safekeeper with pid {} does not exist, but a PID file was found",
-                    pid
-                );
-                return Ok(());
-            }
-            Err(err) => bail!(
-                "Failed to send signal to safekeeper with pid {}: {}",
-                pid,
-                err.desc()
-            ),
-        }
-
-        // Wait until process is gone
-        for i in 0..600 {
-            let signal = None; // Send no signal, just get the error code
-            match kill(pid, signal) {
-                Ok(_) => (), // Process exists, keep waiting
-                Err(Errno::ESRCH) => {
-                    // Process not found, we're done
-                    println!("done!");
-                    return Ok(());
-                }
-                Err(err) => bail!(
-                    "Failed to send signal to pageserver with pid {}: {}",
-                    pid,
-                    err.desc()
-                ),
-            };
-
-            if i % 10 == 0 {
-                print!(".");
-                io::stdout().flush().unwrap();
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-
-        bail!("Failed to stop safekeeper with pid {}", pid);
+        background_process::stop_process(
+            immediate,
+            &format!("safekeeper {}", self.id),
+            &self.pid_file(),
+        )
     }
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {

@@ -36,6 +36,8 @@ pub mod sock_split;
 // common log initialisation routine
 pub mod logging;
 
+pub mod lock_file;
+
 // Misc
 pub mod accum;
 pub mod shutdown;

@@ -1,7 +1,7 @@
 from contextlib import closing
 
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserverApiException
+from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException
 from fixtures.types import TenantId
 
 
@@ -39,7 +39,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
 
     # fail to create branch using token with different tenant_id
     with pytest.raises(
-        NeonPageserverApiException, match="Forbidden: Tenant id mismatch. Permission denied"
+        PageserverApiException, match="Forbidden: Tenant id mismatch. Permission denied"
     ):
         invalid_tenant_http_client.timeline_create(
             tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
@@ -50,7 +50,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
 
     # fail to create tenant using tenant token
     with pytest.raises(
-        NeonPageserverApiException,
+        PageserverApiException,
         match="Forbidden: Attempt to access management api with tenant scope. Permission denied",
     ):
         tenant_http_client.tenant_create()

@@ -1,7 +1,5 @@
 import os
 import pathlib
-import signal
-import subprocess
 import threading
 from contextlib import closing, contextmanager
 from typing import Any, Dict, Optional, Tuple
@@ -12,7 +10,7 @@ from fixtures.neon_fixtures import (
     Etcd,
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverHttpClient,
+    PageserverHttpClient,
     PortDistributor,
     Postgres,
     assert_no_in_progress_downloads_for_tenant,
@@ -21,10 +19,9 @@ from fixtures.neon_fixtures import (
     pg_distrib_dir,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_until,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar, subprocess_capture
+from fixtures.utils import query_scalar, start_in_background, subprocess_capture, wait_until
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -32,7 +29,7 @@ def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
 
 
 @contextmanager
-def new_pageserver_helper(
+def new_pageserver_service(
     new_pageserver_dir: pathlib.Path,
     pageserver_bin: pathlib.Path,
     remote_storage_mock_path: pathlib.Path,
@@ -49,7 +46,6 @@ def new_pageserver_helper(
         str(pageserver_bin),
         "--workdir",
         str(new_pageserver_dir),
-        "--daemonize",
         "--update-config",
         f"-c listen_pg_addr='localhost:{pg_port}'",
         f"-c listen_http_addr='localhost:{http_port}'",
@@ -61,16 +57,26 @@ def new_pageserver_helper(
         cmd.append(
             f"-c broker_endpoints=['{broker.client_url()}']",
         )
-
-    log.info("starting new pageserver %s", cmd)
-    out = subprocess.check_output(cmd, text=True)
-    log.info("started new pageserver %s", out)
+    pageserver_client = PageserverHttpClient(
+        port=http_port,
+        auth_token=None,
+        is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
+    )
     try:
-        yield
+        pageserver_process = start_in_background(
+            cmd, new_pageserver_dir, "pageserver.log", pageserver_client.check_status
+        )
+    except Exception as e:
+        log.error(e)
+        pageserver_process.kill()
+        raise Exception(f"Failed to start pageserver as {cmd}, reason: {e}")
+
+    log.info("new pageserver started")
+    try:
+        yield pageserver_process
     finally:
         log.info("stopping new pageserver")
-        pid = int((new_pageserver_dir / "pageserver.pid").read_text())
-        os.kill(pid, signal.SIGQUIT)
+        pageserver_process.kill()
 
 
 @contextmanager
@@ -113,7 +119,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
 def populate_branch(
     pg: Postgres,
     tenant_id: TenantId,
-    ps_http: NeonPageserverHttpClient,
+    ps_http: PageserverHttpClient,
     create_table: bool,
     expected_sum: Optional[int],
 ) -> Tuple[TimelineId, Lsn]:
@@ -146,7 +152,7 @@ def populate_branch(
 
 
 def ensure_checkpoint(
-    pageserver_http: NeonPageserverHttpClient,
+    pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     current_lsn: Lsn,
@@ -159,7 +165,7 @@ def ensure_checkpoint(
 
 
 def check_timeline_attached(
-    new_pageserver_http_client: NeonPageserverHttpClient,
+    new_pageserver_http_client: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     old_timeline_detail: Dict[str, Any],
@@ -346,13 +352,13 @@ def test_tenant_relocation(
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
     pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
 
-    new_pageserver_http = NeonPageserverHttpClient(
+    new_pageserver_http = PageserverHttpClient(
         port=new_pageserver_http_port,
         auth_token=None,
         is_testing_enabled_or_skip=env.pageserver.is_testing_enabled_or_skip,
     )
 
-    with new_pageserver_helper(
+    with new_pageserver_service(
         new_pageserver_dir,
         pageserver_bin,
         remote_storage_mock_path,

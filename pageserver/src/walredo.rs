@@ -671,10 +671,6 @@ impl PostgresRedoProcess {
             // The Rust standard library makes sure to mark any file descriptors with
             // as close-on-exec by default, but that's not enough, since we use
             // libraries that directly call libc open without setting that flag.
-            //
-            // One example is the pidfile of the daemonize library, which doesn't
-            // currently mark file descriptors as close-on-exec. Either way, we
-            // want to be on the safe side and prevent accidental regression.
             .close_fds()
             .spawn()
             .map_err(|e| {

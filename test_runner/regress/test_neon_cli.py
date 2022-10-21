@@ -5,13 +5,13 @@ from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverHttpClient,
+    PageserverHttpClient,
 )
 from fixtures.types import TenantId, TimelineId
 
 
 def helper_compare_timeline_list(
-    pageserver_http_client: NeonPageserverHttpClient, env: NeonEnv, initial_tenant: TenantId
+    pageserver_http_client: PageserverHttpClient, env: NeonEnv, initial_tenant: TenantId
 ):
     """
     Compare timelines list returned by CLI and directly via API.
@@ -56,7 +56,7 @@ def test_cli_timeline_list(neon_simple_env: NeonEnv):
     assert nested_timeline_id in timelines_cli
 
 
-def helper_compare_tenant_list(pageserver_http_client: NeonPageserverHttpClient, env: NeonEnv):
+def helper_compare_tenant_list(pageserver_http_client: PageserverHttpClient, env: NeonEnv):
     tenants = pageserver_http_client.tenant_list()
     tenants_api = sorted(map(lambda t: cast(str, t["id"]), tenants))
 
