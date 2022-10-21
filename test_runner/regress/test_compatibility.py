@@ -3,7 +3,6 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from time import time
 from typing import Any
 
 import pytest
@@ -28,32 +27,27 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
 
     # Make compatibility snapshot artifacts pickupable by Allure
     # by copying the snapshot directory to the curent test output directory.
-    if compatibility_snapshot_dir.is_relative_to(test_output_dir):
-        # To ease local test running (and to save disk space), do not copy the snapshot
-        # if COMPATIBILITY_SNAPSHOT_DIR already is in the current test directory
-        repo_dir = compatibility_snapshot_dir / "repo"
-    else:
-        repo_dir = test_output_dir / f"compatibility_snapshot_{int(time())}"
+    repo_dir = test_output_dir / "compatibility_snapshot" / "repo"
 
-        shutil.copytree(compatibility_snapshot_dir / "repo", repo_dir)
+    shutil.copytree(compatibility_snapshot_dir / "repo", repo_dir)
 
-        # Remove old logs to avoid confusion in test artifacts
-        for logfile in repo_dir.glob("**/*.log"):
-            logfile.unlink()
+    # Remove old logs to avoid confusion in test artifacts
+    for logfile in repo_dir.glob("**/*.log"):
+        logfile.unlink()
 
-        # Update paths in configs
-        pageserver_config = (repo_dir / "pageserver.toml").read_text()
-        pageserver_config = pageserver_config.replace(
+    # Update paths in configs
+    pageserver_config = (repo_dir / "pageserver.toml").read_text()
+    pageserver_config = pageserver_config.replace(
+        "/test_prepare_snapshot/", "/test_backward_compatibility/compatibility_snapshot/"
+    )
+    (repo_dir / "pageserver.toml").write_text(pageserver_config)
+
+    for postmaster_opts in repo_dir.glob("**/postmaster.opts"):
+        postmaster_opts_content = postmaster_opts.read_text()
+        postmaster_opts_content = postmaster_opts_content.replace(
             "/test_prepare_snapshot/", "/test_backward_compatibility/compatibility_snapshot/"
         )
-        (repo_dir / "pageserver.toml").write_text(pageserver_config)
-
-        for postmaster_opts in repo_dir.glob("**/postmaster.opts"):
-            postmaster_opts_content = postmaster_opts.read_text()
-            postmaster_opts_content = postmaster_opts_content.replace(
-                "/test_prepare_snapshot/", "/test_backward_compatibility/compatibility_snapshot/"
-            )
-            postmaster_opts.write_text(postmaster_opts_content)
+        postmaster_opts.write_text(postmaster_opts_content)
 
     snapshot_config = toml.load(repo_dir / "config")
 
