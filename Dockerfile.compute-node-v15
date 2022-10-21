@@ -115,7 +115,8 @@ RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.0.1.tar.gz -O h3
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/h3.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/h3.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/h3_postgis.control
 
 #
 # Layer "neon-pg-ext-build"
