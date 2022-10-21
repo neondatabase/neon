@@ -58,6 +58,7 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
     config.pg_version = "14"  # Note: `pg_dumpall` (from pg_bin) version is set by DEFAULT_PG_VERSION_DEFAULT and can be overriden by DEFAULT_PG_VERSION env var
     config.initial_tenant = snapshot_config["default_tenant_id"]
 
+    # Check that we can start the project
     cli = NeonCli(config)
     try:
         cli.raw_cli(["start"])
@@ -79,12 +80,13 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
     assert len(connstr_all) == 1, f"can't parse connstr from {result.stdout}"
     connstr = connstr_all[0]
 
+    # Check that the project produces the same dump
     pg_bin.run(["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"])
-
     with (test_output_dir / "dump.filediff").open("w") as stdout:
         rv = subprocess.run(
             [
                 "diff",
+                "--unified",  # Make diff output more readable
                 "--ignore-matching-lines=^--",  # Ignore changes in comments
                 "--ignore-blank-lines",
                 str(compatibility_snapshot_dir / "dump.sql"),
@@ -92,8 +94,14 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
             ],
             stdout=stdout,
         )
+        # A real assert deferred to the end of the test,
+        # to allow us to perform checks that change data
+        dump_differs = rv.returncode != 0
 
-    assert rv.returncode == 0, "dump differs"
+    # Check that we can interract with the project
+    pg_bin.run(["pgbench", "--time=10", "--progress=2", connstr])
+
+    assert not dump_differs, "dump differs"
 
 
 @pytest.mark.order(after="test_backward_compatibility")
