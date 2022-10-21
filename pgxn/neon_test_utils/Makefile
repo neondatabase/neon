@@ -10,6 +10,9 @@ EXTENSION = neon_test_utils
 DATA = neon_test_utils--1.0.sql
 PGFILEDESC = "neon_test_utils - helpers for neon testing and debugging"
 
+PG_CPPFLAGS = -I$(libpq_srcdir)
+SHLIB_LINK_INTERNAL = $(libpq)
+
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

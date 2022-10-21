@@ -23,6 +23,11 @@ RETURNS bytea
 AS 'MODULE_PATHNAME', 'get_raw_page_at_lsn_ex'
 LANGUAGE C PARALLEL UNSAFE;
 
+CREATE FUNCTION neon_seqscan_rel(rel regclass, nprefetch int DEFAULT 0)
+RETURNS void
+AS 'MODULE_PATHNAME', 'neon_seqscan_rel'
+LANGUAGE C PARALLEL UNSAFE;
+
 CREATE FUNCTION neon_xlogflush(lsn pg_lsn)
 RETURNS VOID
 AS 'MODULE_PATHNAME', 'neon_xlogflush'
