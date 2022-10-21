@@ -862,7 +862,7 @@ jobs:
     needs: [ deploy, deploy-proxy ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
     steps:
-      - name: Promote comaptibility snapshot for the release
+      - name: Promote compatibility snapshot for the release
         shell: bash -euxo pipefail {0}
         env:
           BUCKET: neon-github-public-dev
