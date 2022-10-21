@@ -3,7 +3,6 @@ storage:
     bucket_name: neon-staging-storage-us-east-2
     bucket_region: us-east-2
     console_mgmt_base_url: http://console-staging.local
-    env_name: us-stage
     etcd_endpoints: etcd-0.us-east-2.aws.neon.build:2379
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
@@ -11,6 +10,7 @@ storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
         prefix_in_bucket: "pageserver/v1"
+    safekeeper_s3_prefix: safekeeper/v1/wal
     hostname_suffix: ""
     remote_user: ssm-user
     ansible_aws_ssm_region: us-east-2

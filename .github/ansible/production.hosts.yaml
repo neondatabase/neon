@@ -1,7 +1,6 @@
 ---
 storage:
   vars:
-    env_name: prod-1
     console_mgmt_base_url: http://console-release.local
     bucket_name: zenith-storage-oregon
     bucket_region: us-west-2
@@ -12,6 +11,7 @@ storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
         prefix_in_bucket: "{{ inventory_hostname }}"
+    safekeeper_s3_prefix: prod-1/wal
     hostname_suffix: ".local"
     remote_user: admin
 
