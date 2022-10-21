@@ -618,6 +618,7 @@ components:
         - last_record_lsn
         - disk_consistent_lsn
         - awaits_download
+        - state
       properties:
         timeline_id:
           type: string
@@ -660,6 +661,8 @@ components:
           type: integer
         awaits_download:
           type: boolean
+        state:
+          type: string
 
         # These 'local' and 'remote' fields just duplicate some of the fields
         # above. They are kept for backwards-compatibility. They can be removed,

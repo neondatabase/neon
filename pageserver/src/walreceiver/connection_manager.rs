@@ -12,6 +12,7 @@
 use std::{
     collections::{hash_map, HashMap},
     num::NonZeroU64,
+    ops::ControlFlow,
     sync::Arc,
     time::Duration,
 };
@@ -26,7 +27,8 @@ use etcd_broker::{
     subscription_key::SubscriptionKey, subscription_value::SkTimelineInfo, BrokerSubscription,
     BrokerUpdate, Client,
 };
-use tokio::select;
+use pageserver_api::models::TimelineState;
+use tokio::{select, sync::watch};
 use tracing::*;
 
 use crate::{
@@ -58,10 +60,7 @@ pub fn spawn_connection_manager_task(
         TaskKind::WalReceiverManager,
         Some(tenant_id),
         Some(timeline_id),
-        &format!(
-            "walreceiver for tenant {} timeline {}",
-            timeline.tenant_id, timeline.timeline_id
-        ),
+        &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
         false,
         async move {
             info!("WAL receiver broker started, connecting to etcd");
@@ -75,19 +74,21 @@ pub fn spawn_connection_manager_task(
                 select! {
                     _ = task_mgr::shutdown_watcher() => {
                         info!("WAL receiver shutdown requested, shutting down");
-                        // Kill current connection, if any
-                        if let Some(wal_connection) = walreceiver_state.wal_connection.take()
-                        {
-                            wal_connection.connection_task.shutdown().await;
-                        }
+                        walreceiver_state.shutdown().await;
                         return Ok(());
                     },
-
-                    _ = connection_manager_loop_step(
+                    loop_step_result = connection_manager_loop_step(
                         &broker_loop_prefix,
                         &mut etcd_client,
                         &mut walreceiver_state,
-                    ) => {},
+                    ) => match loop_step_result {
+                        ControlFlow::Continue(()) => continue,
+                        ControlFlow::Break(()) => {
+                            info!("Connection manager loop ended, shutting down");
+                            walreceiver_state.shutdown().await;
+                            return Ok(());
+                        }
+                    },
                 }
             }
         }
@@ -104,7 +105,17 @@ async fn connection_manager_loop_step(
     broker_prefix: &str,
     etcd_client: &mut Client,
     walreceiver_state: &mut WalreceiverState,
-) {
+) -> ControlFlow<(), ()> {
+    let mut timeline_state_updates = walreceiver_state.timeline.subscribe_for_state_updates();
+
+    match wait_for_active_timeline(&mut timeline_state_updates).await {
+        ControlFlow::Continue(()) => {}
+        ControlFlow::Break(()) => {
+            info!("Timeline dropped state updates sender before becoming active, stopping wal connection manager loop");
+            return ControlFlow::Break(());
+        }
+    }
+
     let id = TenantTimelineId {
         tenant_id: walreceiver_state.timeline.tenant_id,
         timeline_id: walreceiver_state.timeline.timeline_id,
@@ -129,10 +140,12 @@ async fn connection_manager_loop_step(
         //  - change connection if the rules decide so, or if the current connection dies
         //  - receive updates from broker
         //      - this might change the current desired connection
+        //  - timeline state changes to something that does not allow walreceiver to run concurrently
         select! {
             broker_connection_result = &mut broker_subscription.watcher_handle => {
+                info!("Broker connection was closed from the other side, ending current broker loop step");
                 cleanup_broker_connection(broker_connection_result, walreceiver_state);
-                return;
+                return ControlFlow::Continue(());
             },
 
             Some(wal_connection_update) = async {
@@ -185,8 +198,33 @@ async fn connection_manager_loop_step(
                             (&mut broker_subscription.watcher_handle).await,
                             walreceiver_state,
                         );
-                        return;
+                        return ControlFlow::Continue(());
                     }
+                }
+            },
+
+            new_event = async {
+                loop {
+                    match timeline_state_updates.changed().await {
+                        Ok(()) => {
+                            let new_state = walreceiver_state.timeline.current_state();
+                            match new_state {
+                                // we're already active as walreceiver, no need to reactivate
+                                TimelineState::Active => continue,
+                                TimelineState::Broken | TimelineState::Paused | TimelineState::Suspended => return ControlFlow::Continue(new_state),
+                            }
+                        }
+                        Err(_sender_dropped_error) => return ControlFlow::Break(()),
+                    }
+                }
+            } => match new_event {
+                ControlFlow::Continue(new_state) => {
+                    info!("Timeline became inactive (new state: {new_state:?}), dropping current connections until it reactivates");
+                    return ControlFlow::Continue(());
+                }
+                ControlFlow::Break(()) => {
+                    info!("Timeline dropped state updates sender, stopping wal connection manager loop");
+                    return ControlFlow::Break(());
                 }
             },
 
@@ -212,6 +250,34 @@ async fn connection_manager_loop_step(
                     new_candidate.wal_source_connstr,
                 )
                 .await
+        }
+    }
+}
+
+async fn wait_for_active_timeline(
+    timeline_state_updates: &mut watch::Receiver<TimelineState>,
+) -> ControlFlow<(), ()> {
+    let current_state = *timeline_state_updates.borrow();
+    if current_state == TimelineState::Active {
+        return ControlFlow::Continue(());
+    }
+
+    loop {
+        match timeline_state_updates.changed().await {
+            Ok(()) => {
+                let new_state = *timeline_state_updates.borrow();
+                match new_state {
+                    TimelineState::Active => {
+                        debug!("Timeline state changed to active, continuing the walreceiver connection manager");
+                        return ControlFlow::Continue(());
+                    }
+                    state => {
+                        debug!("Not running the walreceiver connection manager, timeline is not active: {state:?}");
+                        continue;
+                    }
+                }
+            }
+            Err(_sender_dropped_error) => return ControlFlow::Break(()),
         }
     }
 }
@@ -721,6 +787,12 @@ impl WalreceiverState {
 
         for node_id in node_ids_to_remove {
             self.wal_connection_retries.remove(&node_id);
+        }
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(wal_connection) = self.wal_connection.take() {
+            wal_connection.connection_task.shutdown().await;
         }
     }
 }

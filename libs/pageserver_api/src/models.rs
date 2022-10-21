@@ -19,6 +19,22 @@ pub enum TenantState {
     Broken,
 }
 
+/// A state of a timeline in pageserver's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TimelineState {
+    /// Timeline is fully operational, its background jobs are running.
+    Active,
+    /// A timeline is recognized by pageserver, but not yet ready to operate.
+    /// The status indicates, that the timeline could eventually go back to Active automatically:
+    /// for example, if the owning tenant goes back to Active again.
+    Suspended,
+    /// A timeline is recognized by pageserver, but not yet ready to operate and not allowed to
+    /// automatically become Active after certain events: only a management call can change this status.
+    Paused,
+    /// A timeline is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    Broken,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
@@ -159,6 +175,8 @@ pub struct TimelineInfo {
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub remote_consistent_lsn: Option<Lsn>,
     pub awaits_download: bool,
+
+    pub state: TimelineState,
 
     // Some of the above fields are duplicated in 'local' and 'remote', for backwards-
     // compatility with older clients.
