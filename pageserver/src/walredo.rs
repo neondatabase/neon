@@ -39,7 +39,8 @@ use utils::crashsafe_dir::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
 use crate::metrics::{
-    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME, WAL_REDO_WAIT_TIME,
+    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
+    WAL_REDO_WAIT_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
@@ -244,12 +245,23 @@ impl PostgresRedoManager {
         let end_time = Instant::now();
         let duration = end_time.duration_since(lock_time);
 
+        let len = records.len();
+        let nbytes = records.iter().fold(0, |acumulator, record| {
+            acumulator
+                + match &record.1 {
+                    NeonWalRecord::Postgres { rec, .. } => rec.len(),
+                    _ => unreachable!("Only PostgreSQL records are accepted in this batch"),
+                }
+        });
+
         WAL_REDO_TIME.observe(duration.as_secs_f64());
-        WAL_REDO_RECORDS_HISTOGRAM.observe(records.len() as f64);
+        WAL_REDO_RECORDS_HISTOGRAM.observe(len as f64);
+        WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
 
         debug!(
-            "postgres applied {} WAL records in {} us to reconstruct page image at LSN {}",
-            records.len(),
+            "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
+            len,
+            nbytes,
             duration.as_micros(),
             lsn
         );
@@ -258,8 +270,9 @@ impl PostgresRedoManager {
         // next request will launch a new one.
         if result.is_err() {
             error!(
-                "error applying {} WAL records to reconstruct page image at LSN {}",
+                "error applying {} WAL records ({} bytes) to reconstruct page image at LSN {}",
                 records.len(),
+                nbytes,
                 lsn
             );
             let process = process_guard.take().unwrap();

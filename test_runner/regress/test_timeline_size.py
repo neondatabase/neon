@@ -270,9 +270,15 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_compaction")
     pg = env.postgres.create_start("test_timeline_physical_size_post_compaction")
 
+    # We don't want autovacuum to run on the table, while we are calculating the
+    # physical size, because that could cause a new layer to be created and a
+    # mismatch between the incremental and non-incremental size. (If that still
+    # happens, because of some other background activity or autovacuum on other
+    # tables, we could simply retry the size calculations. It's unlikely that
+    # that would happen more than once.)
     pg.safe_psql_many(
         [
-            "CREATE TABLE foo (t text)",
+            "CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)",
             """INSERT INTO foo
            SELECT 'long string to consume some space' || g
            FROM generate_series(1, 100000) g""",
@@ -297,9 +303,10 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_gc")
     pg = env.postgres.create_start("test_timeline_physical_size_post_gc")
 
+    # Like in test_timeline_physical_size_post_compaction, disable autovacuum
     pg.safe_psql_many(
         [
-            "CREATE TABLE foo (t text)",
+            "CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)",
             """INSERT INTO foo
            SELECT 'long string to consume some space' || g
            FROM generate_series(1, 100000) g""",

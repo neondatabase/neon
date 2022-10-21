@@ -1,5 +1,5 @@
 use svg_fmt::*;
-// use clap::{App, Arg};
+use clap::{Command, Arg};
 use anyhow::Result;
 use std::{collections::{BTreeMap, BTreeSet}, ops::Range, path::PathBuf};
 use utils::{lsn::Lsn, project_git_version};
@@ -36,28 +36,27 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
 
 
 fn main() -> Result<()> {
-    // let arg_matches = App::new("Neon draw_timeline_dir utility")
-    //     .about("Draws the domains of the image and delta layers in a directory")
-    //     .version(GIT_VERSION)
-    //     .arg(
-    //         Arg::new("path")
-    //             .help("Path to timeline directory")
-    //             .required(true)
-    //             .index(1),
-    //     )
-    //     .get_matches();
+    let arg_matches = Command::new("Neon draw_timeline_dir utility")
+        .about("Draws the domains of the image and delta layers in a directory")
+        .version(GIT_VERSION)
+        .arg(
+            Arg::new("path")
+                .help("Path to timeline directory")
+                .required(true)
+                .index(1),
+        )
+        .get_matches();
 
     // Get ranges
     let mut ranges: Vec<(Range<Key>, Range<Lsn>)> = vec![];
-    // let timeline_path = PathBuf::from(arg_matches.value_of("path").unwrap());
-    // for entry in std::fs::read_dir(timeline_path).unwrap() {
-    //     let entry = entry?;
-    //     let path: PathBuf = entry.path();
-
-    //     if let Ok(range) = get_range(&path) {
-    //         ranges.push(range);
-    //     }
-    // }
+    let timeline_path = PathBuf::from(arg_matches.get_one::<String>("path").unwrap());
+    for entry in std::fs::read_dir(timeline_path).unwrap() {
+        let entry = entry?;
+        let path: PathBuf = entry.path();
+        if let Ok(range) = get_range(&path) {
+            ranges.push(range);
+        }
+    }
     for line in names.lines() {
         if line.len() == 0 {
             continue;
