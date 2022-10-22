@@ -95,7 +95,7 @@ fn determine_offloader(
     let capable_peers = alive_peers
         .iter()
         .filter(|p| p.local_start_lsn <= wal_backup_lsn);
-    match alive_peers.iter().map(|p| p.commit_lsn).max() {
+    match capable_peers.clone().map(|p| p.commit_lsn).max() {
         None => (None, "no connected peers to elect from".to_string()),
         Some(max_commit_lsn) => {
             let threshold = max_commit_lsn
