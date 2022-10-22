@@ -107,15 +107,26 @@ fn determine_offloader(
                 .collect::<Vec<_>>();
             caughtup_peers.sort_by(|p1, p2| p1.sk_id.cmp(&p2.sk_id));
 
+            let mut capable_peers_dbg = capable_peers
+                .map(|p| (p.sk_id, p.commit_lsn))
+                .collect::<Vec<_>>();
+            capable_peers_dbg.sort_by(|p1, p2| p1.0.cmp(&p2.0));
+
+            if caughtup_peers.is_empty() {
+                return (
+                    None,
+                    format!(
+                        "no caughtup capable peers, wal_backup_lsn={}, capable peers {:?}",
+                        wal_backup_lsn, capable_peers_dbg
+                    ),
+                );
+            }
+
             // To distribute the load, shift by timeline_id.
             let offloader = caughtup_peers
                 [(u128::from(ttid.timeline_id) % caughtup_peers.len() as u128) as usize]
                 .sk_id;
 
-            let mut capable_peers_dbg = capable_peers
-                .map(|p| (p.sk_id, p.commit_lsn))
-                .collect::<Vec<_>>();
-            capable_peers_dbg.sort_by(|p1, p2| p1.0.cmp(&p2.0));
             (
                 Some(offloader),
                 format!(
