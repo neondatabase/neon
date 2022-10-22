@@ -300,7 +300,7 @@ impl PageServerHandler {
             trace!("query: {copy_data_bytes:?}");
 
             let neon_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
-
+            let mut do_flush = true;
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
@@ -312,6 +312,7 @@ impl PageServerHandler {
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
+                    do_flush = !req.prefetch;
                     self.handle_get_page_at_lsn_request(&timeline, &req).await
                 }
                 PagestreamFeMessage::DbSize(req) => {
@@ -330,7 +331,9 @@ impl PageServerHandler {
             });
 
             pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
-            pgb.flush().await?;
+            if do_flush {
+                pgb.flush().await?;
+            }
         }
         Ok(())
     }

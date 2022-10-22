@@ -60,6 +60,7 @@ typedef struct
 {
 	NeonMessageTag tag;
 	bool		latest;			/* if true, request latest page version */
+	bool		prefetch;		/* if true, then request is followed by more prefetch requests */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
 }			NeonRequest;
 

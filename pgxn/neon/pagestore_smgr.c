@@ -211,6 +211,7 @@ nm_pack_request(NeonRequest * msg)
 				NeonGetPageRequest *msg_req = (NeonGetPageRequest *) msg;
 
 				pq_sendbyte(&s, msg_req->req.latest);
+				pq_sendbyte(&s, msg_req->req.prefetch);
 				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, msg_req->rnode.spcNode);
 				pq_sendint32(&s, msg_req->rnode.dbNode);
@@ -383,6 +384,7 @@ nm_to_string(NeonMessage * msg)
 				appendStringInfo(&s, ", \"blkno\": %u", msg_req->blkno);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
 				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfo(&s, ", \"prefetch\": %d", msg_req->req.prefetch);
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1141,6 +1143,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		NeonGetPageRequest request = {
 			.req.tag = T_NeonGetPageRequest,
 			.req.latest = request_latest,
+			.req.prefetch = false,
 			.req.lsn = request_lsn,
 			.rnode = rnode,
 			.forknum = forkNum,
@@ -1150,6 +1153,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (n_prefetch_requests > 0)
 		{
 			/* Combine all prefetch requests with primary request */
+			request.req.prefetch = true;
 			page_server->send((NeonRequest *) & request);
 			for (i = 0; i < n_prefetch_requests; i++)
 			{
@@ -1157,6 +1161,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 				request.forknum = prefetch_requests[i].forkNum;
 				request.blkno = prefetch_requests[i].blockNum;
 				prefetch_responses[i] = prefetch_requests[i];
+				request.req.prefetch = i+1 < n_prefetch_requests;
 				page_server->send((NeonRequest *) & request);
 			}
 			page_server->flush();
