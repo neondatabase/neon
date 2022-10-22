@@ -1153,20 +1153,23 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		{
 			/* Combine all prefetch requests with primary request */
 			page_server->send((NeonRequest *) & request);
+			prefetch_lsn = request_lsn;
 			for (i = 0; i < n_prefetch_requests; i++)
 			{
 				request.rnode = prefetch_requests[i].rnode;
 				request.forknum = prefetch_requests[i].forkNum;
 				request.blkno = prefetch_requests[i].blockNum;
 				if (request_latest)
+				{
 					request.req.lsn = GetLastWrittenLSN(request.rnode, request.forknum, request.blkno);
+					prefetch_lsn = Max(prefetch_lsn, request.req.lsn);
+				}
 				prefetch_responses[i] = prefetch_requests[i];
 				page_server->send((NeonRequest *) & request);
 			}
 			page_server->flush();
 			n_prefetch_responses = n_prefetch_requests;
 			n_prefetch_requests = 0;
-			prefetch_lsn = request_lsn;
 			resp = page_server->receive();
 		}
 		else
