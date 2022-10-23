@@ -616,7 +616,8 @@ impl<'a> WalIngest<'a> {
             let mut fsm_physical_page_no = fsm_logical_to_physical(fsm_logical_page_no);
             if rec.blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
                 // Tail of last remaining FSM page has to be zeroed.
-                // We are not doing it here: there should be FPI wal-record for this page stored sometimes laters
+                // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
+                modification.put_rel_page_image(rel, fsm_physical_page_no, ZERO_PAGE.clone())?;
                 fsm_physical_page_no += 1;
             }
             let nblocks = self.get_relsize(rel, modification.lsn)?;
@@ -636,7 +637,8 @@ impl<'a> WalIngest<'a> {
             let mut vm_page_no = rec.blkno / pg_constants::VM_HEAPBLOCKS_PER_PAGE;
             if rec.blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
                 // Tail of last remaining vm page has to be zeroed.
-                // We are not doing it here: there should be FPI wal-record for this page stored sometimes laters
+                // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
+                modification.put_rel_page_image(rel, vm_page_no, ZERO_PAGE.clone())?;
                 vm_page_no += 1;
             }
             let nblocks = self.get_relsize(rel, modification.lsn)?;
