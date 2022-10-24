@@ -423,11 +423,32 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
         );
         db_client.simple_query(&alter_query)?;
 
-        // // Explicitly grant CREATE ON SCHEMA PUBLIC to the web_access user.
-        // // This is needed since postgres 15, where this privilege is removed by default.
-        // let grant_query: String = "GRANT CREATE ON SCHEMA public TO web_access".to_string();
-        // info!("grant query for db {} : {}", &db.name, &grant_query);
-        // db_client.simple_query(&grant_query)?;
+        // Explicitly grant CREATE ON SCHEMA PUBLIC to the web_access user.
+        // This is needed because since postgres 15 this privilege is removed by default.
+        let grant_query = "DO $$\n\
+                BEGIN\n\
+                    IF EXISTS(\n\
+                        SELECT nspname\n\
+                        FROM pg_catalog.pg_namespace\n\
+                        WHERE nspname = 'public'\n\
+                    ) AND\n\
+                    current_setting('server_version_num')::int/10000 >= 15\n\
+                    THEN\n\
+                        IF EXISTS(\n\
+                            SELECT rolname\n\
+                            FROM pg_catalog.pg_roles\n\
+                            WHERE rolname = 'web_access'\n\
+                        )\n\
+                        THEN\n\
+                            GRANT CREATE ON SCHEMA public TO web_access;\n\
+                        END IF;\n\
+                    END IF;\n\
+                END\n\
+            $$;"
+        .to_string();
+
+        info!("grant query for db {} : {}", &db.name, &grant_query);
+        db_client.simple_query(&grant_query)?;
     }
 
     Ok(())
