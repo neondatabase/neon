@@ -1,3 +1,19 @@
+//! A tool for visualizing the arrangement of layerfiles within a timeline.
+//!
+//! It reads filenames from stding and prints a svg on stdout.
+//!
+//! Example use:
+//! ```
+//! $ cd test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE
+//! $ ls | grep "__" | cargo run --release --bin draw_timeline_dir > out.svg
+//! $ firefox out.svg
+//! ```
+//!
+//! This API was chosen so that we can easily work with filenames extracted from ssh,
+//! or from pageserver log files.
+//!
+//! TODO Consider shipping this as a grafana panel plugin:
+//!      https://grafana.com/tutorials/build-a-panel-plugin/
 use svg_fmt::*;
 use anyhow::Result;
 use std::{collections::{BTreeMap, BTreeSet}, ops::Range};
@@ -33,21 +49,14 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     (keys, lsns)
 }
 
-// Example use:
-// cd test_output/test_pgbench\[neon-45-684\]/repo/tenants/8a52120a564ba2a840b6d41cac6a3639/timelines/dace33e326a9c0ef1800fa1590576526
-// ls | grep "__" | cargo run --release --bin draw_timeline_dir > out.svg
-// firefox out.svg
 fn main() -> Result<()> {
-    // Get ranges
+    // Parse layer filenames from stdin
     let mut ranges: Vec<(Range<Key>, Range<Lsn>)> = vec![];
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let range = parse_filename(&line.unwrap());
         ranges.push(range);
     }
-
-    let mut sum: u64 = 0;
-    let mut count = 0;
 
     // Collect all coordinates
     let mut keys: Vec<Key> = vec![];
@@ -57,13 +66,7 @@ fn main() -> Result<()> {
         keys.push(keyr.end);
         lsns.push(lsnr.start);
         lsns.push(lsnr.end);
-
-        sum += key_range_size(keyr) as u64;
-        count += 1;
     }
-
-    let ave = sum / count;
-    eprintln!("average size: {}", ave);
 
     // Analyze
     let (key_max, key_map) = analyze(keys);
@@ -74,7 +77,7 @@ fn main() -> Result<()> {
     let mut num_images = 0;
 
     // Draw
-    let stretch = 3.0;
+    let stretch = 3.0;  // Stretch out vertically for better visibility
     println!("{}", BeginSvg { w: key_max as f32, h: stretch * lsn_max as f32 });
     for (keyr, lsnr) in &ranges {
         let key_start = *key_map.get(&keyr.start).unwrap();
@@ -101,7 +104,6 @@ fn main() -> Result<()> {
             fill = Fill::Color(rgb(0, 0, 0));
         } else if lsn_start < lsn_end {  // Delta
             num_deltas += 1;
-            // fill = Fill::Color(rgb(200, 200, 200));
         } else {
             panic!("AAA");
         }
@@ -111,7 +113,6 @@ fn main() -> Result<()> {
                       stretch * (lsn_max as f32 - 1.0 - (lsn_end as f32 + margin - lsn_offset)),
                       key_diff as f32 - stretch * 2.0 * margin,
                       stretch * (lsn_diff - 2.0 * margin))
-                // .fill(rgb(200, 200, 200))
                 .fill(fill)
                 .stroke(Stroke::Color(rgb(0, 0, 0), 0.1))
                 .border_radius(0.4)
