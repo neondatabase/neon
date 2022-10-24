@@ -95,7 +95,7 @@ fn main() -> Result<()> {
         let lsn_max = lsn_map.len();
 
         if key_start >= key_end {
-            panic!("AAA");
+            panic!("Invalid key range {}-{}", key_start, key_end);
         }
 
         let lsn_start = *lsn_map.get(&lsnr.start).unwrap();
@@ -103,21 +103,21 @@ fn main() -> Result<()> {
 
         let mut lsn_diff = (lsn_end - lsn_start) as f32;
         let mut fill = Fill::None;
-        let mut margin = 0.05 * lsn_diff; // Height-dependent margin to avoid overlapping
+        let mut margin = 0.05 * lsn_diff; // Height-dependent margin to disambiguate overlapping deltas
         let mut lsn_offset = 0.0;
 
+        // Fill in and thicken rectangle if it's an
+        // image layer so that we can see it.
         if lsn_start == lsn_end {
-            // Image
             num_images += 1;
             lsn_diff = 0.3;
             lsn_offset = -lsn_diff / 2.0;
             margin = 0.05;
             fill = Fill::Color(rgb(0, 0, 0));
         } else if lsn_start < lsn_end {
-            // Delta
             num_deltas += 1;
         } else {
-            panic!("AAA");
+            panic!("Invalid lsn range {}-{}", lsn_start, lsn_end);
         }
 
         println!(
