@@ -1,6 +1,13 @@
 //! A tool for visualizing the arrangement of layerfiles within a timeline.
 //!
-//! It reads filenames from stding and prints a svg on stdout.
+//! It reads filenames from stding and prints a svg on stdout. The image is a plot in
+//! page-lsn space, where every delta layer is a rectangle and every image layer is a
+//! thick line. Legend:
+//! - The x axis (left to right) represents page index.
+//! - The y axis represents LSN, growing upwards.
+//!
+//! Coordinates in both axis are compressed for better readability.
+//! (see https://medium.com/algorithms-digest/coordinate-compression-2fff95326fb)
 //!
 //! Example use:
 //! ```
