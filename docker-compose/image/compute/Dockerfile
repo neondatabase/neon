@@ -1,4 +1,5 @@
-FROM neondatabase/compute-node:2221
+ARG COMPUTE_IMAGE=compute-node-v14:latest
+FROM neondatabase/${COMPUTE_IMAGE}
 
 USER root
 RUN apt-get update &&       \

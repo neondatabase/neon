@@ -51,7 +51,7 @@ services:
       - minio
 
   pageserver:
-    image: neondatabase/neon:2221
+    image: neondatabase/neon:${TAG:-latest}
     environment:
       - BROKER_ENDPOINT='http://etcd:2379'
       - AWS_ACCESS_KEY_ID=minio
@@ -77,7 +77,7 @@ services:
       - miniocreatebuckets
 
   safekeeper1:
-    image: neondatabase/neon:2221
+    image: neondatabase/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper1:5454
       - SAFEKEEPER_ID=1
@@ -106,7 +106,7 @@ services:
       - miniocreatebuckets
 
   safekeeper2:
-    image: neondatabase/neon:2221
+    image: neondatabase/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper2:5454
       - SAFEKEEPER_ID=2
@@ -135,7 +135,7 @@ services:
       - miniocreatebuckets
 
   safekeeper3:
-    image: neondatabase/neon:2221
+    image: neondatabase/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper3:5454
       - SAFEKEEPER_ID=3
@@ -166,6 +166,8 @@ services:
   compute:
     build:
       context: ./image/compute
+      args:
+        - COMPUTE_IMAGE=compute-node-${COMPUTE_VERSION:-v14}:${TAG:-latest}
     environment:
       - TENANT_NAME=test-tenant
       #- RUST_BACKTRACE=1

@@ -35,7 +35,7 @@ You can see a [docker compose](https://docs.docker.com/compose/) example to crea
 ```
 $ cd docker-compose/docker-compose.yml
 $ docker-compose down   # remove the conainers if exists
-$ docker-compose up -d
+$ COMPUTE_VERSION=v14 TAG=2221 docker-compose up --build -d   # you can specify the tag version, otherwise it use the latest tag and v14 compute images.
 Creating network "dockercompose_default" with the default driver
 Creating dockercompose_etcd3_1 ...
 (...omit...)
