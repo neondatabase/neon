@@ -178,7 +178,7 @@ pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
         leafno /= pg_constants::SLOTS_PER_FSM_PAGE;
     }
     /* Turn the page count into 0-based block number */
-    return pages - 1;
+    pages - 1;
 }
 
 pub mod waldecoder {
