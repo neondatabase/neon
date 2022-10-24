@@ -1140,7 +1140,6 @@ impl Drop for Tenant {
         remove_tenant_metrics(&self.tenant_id);
     }
 }
-
 /// Dump contents of a layer file to stdout.
 pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
     use std::os::unix::fs::FileExt;
