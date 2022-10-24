@@ -26,7 +26,9 @@ use utils::{lsn::Lsn, project_git_version};
 
 project_git_version!(GIT_VERSION);
 
-fn analyze<T: Ord + Copy>(coords: Vec<T>) -> (usize, BTreeMap<T, usize>) {
+// Map values to their compressed coordinate - the index the value
+// would have in a sorted and deduplicated list of all values.
+fn build_coordingate_compression_map<T: Ord + Copy>(coords: Vec<T>) -> BTreeMap<T, usize> {
     let set: BTreeSet<T> = coords.into_iter().collect();
 
     let mut map: BTreeMap<T, usize> = BTreeMap::new();
@@ -34,7 +36,7 @@ fn analyze<T: Ord + Copy>(coords: Vec<T>) -> (usize, BTreeMap<T, usize>) {
         map.insert(*e, i);
     }
 
-    (set.len(), map)
+    map
 }
 
 fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
@@ -70,8 +72,8 @@ fn main() -> Result<()> {
     }
 
     // Analyze
-    let (key_max, key_map) = analyze(keys);
-    let (lsn_max, lsn_map) = analyze(lsns);
+    let key_map = build_coordingate_compression_map(keys);
+    let lsn_map = build_coordingate_compression_map(lsns);
 
     // Initialize stats
     let mut num_deltas = 0;
@@ -82,14 +84,15 @@ fn main() -> Result<()> {
     println!(
         "{}",
         BeginSvg {
-            w: key_max as f32,
-            h: stretch * lsn_max as f32
+            w: key_map.len() as f32,
+            h: stretch * lsn_map.len() as f32
         }
     );
     for (keyr, lsnr) in &ranges {
         let key_start = *key_map.get(&keyr.start).unwrap();
         let key_end = *key_map.get(&keyr.end).unwrap();
         let key_diff = key_end - key_start;
+        let lsn_max = lsn_map.len();
 
         if key_start >= key_end {
             panic!("AAA");
