@@ -43,4 +43,5 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
 
     cur.execute("select count(*) from t1")
     res = cur.fetchone()
+    assert res is not None
     assert res[0] == n_records
