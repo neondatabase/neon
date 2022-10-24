@@ -26,7 +26,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::ops::Bound::Included;
-use std::ops::Range;
 use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
@@ -37,7 +36,6 @@ use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
-use crate::repository::Key;
 use crate::import_datadir;
 use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
@@ -1095,34 +1093,6 @@ impl Tenant {
 
         Ok(new_timeline)
     }
-}
-
-pub fn get_range(path: &Path) -> Result<(Range<Key>, Range<Lsn>)> {
-    use std::os::unix::fs::FileExt;
-
-    // All layer files start with a two-byte "magic" value, to identify the kind of
-    // file.
-    let file = File::open(path)?;
-    let mut header_buf = [0u8; 2];
-    file.read_exact_at(&mut header_buf, 0)?;
-
-    let (x, y) = match u16::from_be_bytes(header_buf) {
-        crate::IMAGE_FILE_MAGIC => {
-            let layer = image_layer::ImageLayer::new_for_path(path, file)?;
-            let x = layer.get_key_range();
-            let y = layer.lsn..layer.lsn;
-            (x, y)
-        },
-        crate::DELTA_FILE_MAGIC => {
-            let layer = delta_layer::DeltaLayer::new_for_path(path, file)?;
-            let x = layer.get_key_range();
-            let y = layer.get_lsn_range();
-            (x, y)
-        },
-        magic => bail!("unrecognized magic identifier: {:?}", magic),
-    };
-
-    Ok((x, y))
 }
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository

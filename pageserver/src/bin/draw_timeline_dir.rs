@@ -1,10 +1,9 @@
 use svg_fmt::*;
-use clap::{Command, Arg};
 use anyhow::Result;
-use std::{collections::{BTreeMap, BTreeSet}, ops::Range, path::PathBuf};
+use std::{collections::{BTreeMap, BTreeSet}, ops::Range};
 use utils::{lsn::Lsn, project_git_version};
-use pageserver::tenant::get_range;
 use pageserver::repository::{Key, key_range_size};
+use std::io::{self, BufRead};
 
 project_git_version!(GIT_VERSION);
 
@@ -34,28 +33,17 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     (keys, lsns)
 }
 
-
+// Example use:
+// cd test_output/test_pgbench\[neon-45-684\]/repo/tenants/8a52120a564ba2a840b6d41cac6a3639/timelines/dace33e326a9c0ef1800fa1590576526
+// ls | grep "__" | cargo run --release --bin draw_timeline_dir > out.svg
+// firefox out.svg
 fn main() -> Result<()> {
-    let arg_matches = Command::new("Neon draw_timeline_dir utility")
-        .about("Draws the domains of the image and delta layers in a directory")
-        .version(GIT_VERSION)
-        .arg(
-            Arg::new("path")
-                .help("Path to timeline directory")
-                .required(true)
-                .index(1),
-        )
-        .get_matches();
-
     // Get ranges
     let mut ranges: Vec<(Range<Key>, Range<Lsn>)> = vec![];
-    let timeline_path = PathBuf::from(arg_matches.get_one::<String>("path").unwrap());
-    for entry in std::fs::read_dir(timeline_path).unwrap() {
-        let entry = entry?;
-        let path: PathBuf = entry.path();
-        if let Ok(range) = get_range(&path) {
-            ranges.push(range);
-        }
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let range = parse_filename(&line.unwrap());
+        ranges.push(range);
     }
 
     let mut sum: u64 = 0;
@@ -81,8 +69,6 @@ fn main() -> Result<()> {
     let (key_max, key_map) = analyze(keys);
     let (lsn_max, lsn_map) = analyze(lsns);
 
-    dbg!(&lsn_map);
-
     // Initialize stats
     let mut num_deltas = 0;
     let mut num_images = 0;
@@ -103,17 +89,17 @@ fn main() -> Result<()> {
         let lsn_end = *lsn_map.get(&lsnr.end).unwrap();
 
         let mut lsn_diff = (lsn_end - lsn_start) as f32;
-        eprintln!("{} {} {}", lsn_start, lsn_end, lsn_diff);
         let mut fill = Fill::None;
         let mut margin = 0.05 * lsn_diff;
         let mut lsn_offset = 0.0;
-        if lsn_start == lsn_end {
+
+        if lsn_start == lsn_end {  // Image
             num_images += 1;
             lsn_diff = 0.3;
-            lsn_offset = lsn_diff * 2.5 - 1.0;
+            lsn_offset = -lsn_diff;
             margin = 0.05;
             fill = Fill::Color(rgb(0, 0, 0));
-        } else if lsn_start < lsn_end {
+        } else if lsn_start < lsn_end {  // Delta
             num_deltas += 1;
             // fill = Fill::Color(rgb(200, 200, 200));
         } else {
