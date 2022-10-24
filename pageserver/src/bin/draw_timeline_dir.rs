@@ -18,7 +18,7 @@ use svg_fmt::*;
 use anyhow::Result;
 use std::{collections::{BTreeMap, BTreeSet}, ops::Range};
 use utils::{lsn::Lsn, project_git_version};
-use pageserver::repository::{Key, key_range_size};
+use pageserver::repository::Key;
 use std::io::{self, BufRead};
 
 project_git_version!(GIT_VERSION);
@@ -93,13 +93,13 @@ fn main() -> Result<()> {
 
         let mut lsn_diff = (lsn_end - lsn_start) as f32;
         let mut fill = Fill::None;
-        let mut margin = 0.05 * lsn_diff;
+        let mut margin = 0.05 * lsn_diff;  // Height-dependent margin to avoid overlapping
         let mut lsn_offset = 0.0;
 
         if lsn_start == lsn_end {  // Image
             num_images += 1;
             lsn_diff = 0.3;
-            lsn_offset = -lsn_diff;
+            lsn_offset = -lsn_diff / 2.0;
             margin = 0.05;
             fill = Fill::Color(rgb(0, 0, 0));
         } else if lsn_start < lsn_end {  // Delta
@@ -110,7 +110,7 @@ fn main() -> Result<()> {
 
         println!("    {}",
             rectangle(key_start as f32 + stretch * margin,
-                      stretch * (lsn_max as f32 - 1.0 - (lsn_end as f32 + margin - lsn_offset)),
+                      stretch * (lsn_max as f32 - (lsn_end as f32 - margin - lsn_offset)),
                       key_diff as f32 - stretch * 2.0 * margin,
                       stretch * (lsn_diff - 2.0 * margin))
                 .fill(fill)
