@@ -115,6 +115,8 @@ typedef struct
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 }			NeonGetPageResponse;
 
+#define PS_GETPAGERESPONSE_SIZE (offsetof(NeonGetPageResponse, page) + BLCKSZ)
+
 typedef struct
 {
 	NeonMessageTag tag;
@@ -147,6 +149,8 @@ typedef struct
 extern page_server_api * page_server;
 
 extern char *page_server_connstring;
+extern bool seqscan_prefetch_enabled;
+extern int seqscan_prefetch_distance;
 extern char *neon_timeline;
 extern char *neon_tenant;
 extern bool wal_redo;
