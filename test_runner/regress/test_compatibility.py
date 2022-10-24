@@ -46,7 +46,7 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
     assert (
         compatibility_snapshot_dir_env is not None
     ), "COMPATIBILITY_SNAPSHOT_DIR is not set. It should be set to `compatibility_snapshot_pg14` path generateted by test_prepare_snapshot"
-    compatibility_snapshot_dir: Path = Path(compatibility_snapshot_dir_env).resolve()
+    compatibility_snapshot_dir = Path(compatibility_snapshot_dir_env).resolve()
 
     # Make compatibility snapshot artifacts pickupable by Allure
     # by copying the snapshot directory to the curent test output directory.
@@ -58,19 +58,41 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
     for logfile in repo_dir.glob("**/*.log"):
         logfile.unlink()
 
-    # Update paths in configs
-    pageserver_config = (repo_dir / "pageserver.toml").read_text()
-    pageserver_config = pageserver_config.replace(
-        "/test_prepare_snapshot/", "/test_backward_compatibility/compatibility_snapshot/"
-    )
-    (repo_dir / "pageserver.toml").write_text(pageserver_config)
+    # Remove tenants data for computes
+    for tenant in (repo_dir / "pgdatadirs" / "tenants").glob("*"):
+        shutil.rmtree(tenant)
 
-    for postmaster_opts in repo_dir.glob("**/postmaster.opts"):
-        postmaster_opts_content = postmaster_opts.read_text()
-        postmaster_opts_content = postmaster_opts_content.replace(
-            "/test_prepare_snapshot/", "/test_backward_compatibility/compatibility_snapshot/"
-        )
-        postmaster_opts.write_text(postmaster_opts_content)
+    # Remove wal-redo temp directory
+    for tenant in (repo_dir / "tenants").glob("*"):
+        shutil.rmtree(tenant / "wal-redo-datadir.___temp")
+
+    # Update paths in configs
+    pageserver_toml = repo_dir / "pageserver.toml"
+    pageserver_config = toml.load(pageserver_toml)
+    new_local_path = pageserver_config["remote_storage"]["local_path"].replace(
+        "/test_prepare_snapshot/",
+        "/test_backward_compatibility/compatibility_snapshot/",
+    )
+    pageserver_config["remote_storage"]["local_path"] = new_local_path
+    with pageserver_toml.open("w") as f:
+        toml.dump(pageserver_config, f)
+
+    # Ensure that snapshot doesn't contain references to the original path
+    rv = subprocess.run(
+        [
+            "grep",
+            "--recursive",
+            "--binary-file=without-match",
+            "--files-with-matches",
+            "test_prepare_snapshot/repo",
+            str(repo_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert (
+        rv.returncode != 0
+    ), f"there're files referencing `test_prepare_snapshot/repo`, this path should be replaced with {repo_dir}:\n{rv.stdout}"
 
     snapshot_config = toml.load(repo_dir / "config")
 
@@ -133,7 +155,7 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
     # The assert itself deferred to the end of the test
     # to allow us to perform checks that change data before failing
     dump_from_wal_differs = dump_differs(
-        compatibility_snapshot_dir / "dump.sql",
+        test_output_dir / "dump.sql",
         test_output_dir / "dump-from-wal.sql",
         test_output_dir / "dump-from-wal.filediff",
     )
@@ -141,8 +163,8 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
     # Check that we can interract with the data
     pg_bin.run(["pgbench", "--time=10", "--progress=2", connstr])
 
-    assert not initial_dump_differs, "initial dump differs"
     assert not dump_from_wal_differs, "dump from WAL differs"
+    assert not initial_dump_differs, "initial dump differs"
 
 
 @pytest.mark.order(after="test_backward_compatibility")
@@ -150,7 +172,9 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
 # "Upload compatibility snapshot" step in .github/actions/run-python-test-set/action.yml
 def test_prepare_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path):
     # The test doesn't really test anything
-    # it creates a new snapshot for releases after we tested the current version against the previous snapshot in `test_backward_compatibility`
+    # it creates a new snapshot for releases after we tested the current version against the previous snapshot in `test_backward_compatibility`.
+    #
+    # There's no cleanup here, it allows to adjust the data in `test_backward_compatibility` itself without re-collecting it.
     neon_env_builder.pg_version = "14"
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_local_fs_remote_storage()
