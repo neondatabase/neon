@@ -23,6 +23,7 @@
 //!      https://grafana.com/tutorials/build-a-panel-plugin/
 use anyhow::Result;
 use pageserver::repository::Key;
+use std::cmp::Ordering;
 use std::io::{self, BufRead};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -48,8 +49,8 @@ fn build_coordingate_compression_map<T: Ord + Copy>(coords: Vec<T>) -> BTreeMap<
 
 fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     let split: Vec<&str> = name.split("__").collect();
-    let keys: Vec<&str> = split[0].split("-").collect();
-    let mut lsns: Vec<&str> = split[1].split("-").collect();
+    let keys: Vec<&str> = split[0].split('-').collect();
+    let mut lsns: Vec<&str> = split[1].split('-').collect();
     if lsns.len() == 1 {
         lsns.push(lsns[0]);
     }
@@ -115,16 +116,16 @@ fn main() -> Result<()> {
 
         // Fill in and thicken rectangle if it's an
         // image layer so that we can see it.
-        if lsn_start == lsn_end {
-            num_images += 1;
-            lsn_diff = 0.3;
-            lsn_offset = -lsn_diff / 2.0;
-            margin = 0.05;
-            fill = Fill::Color(rgb(0, 0, 0));
-        } else if lsn_start < lsn_end {
-            num_deltas += 1;
-        } else {
-            panic!("Invalid lsn range {}-{}", lsn_start, lsn_end);
+        match lsn_start.cmp(&lsn_end) {
+            Ordering::Less => num_deltas += 1,
+            Ordering::Equal => {
+                num_images += 1;
+                lsn_diff = 0.3;
+                lsn_offset = -lsn_diff / 2.0;
+                margin = 0.05;
+                fill = Fill::Color(rgb(0, 0, 0));
+            }
+            Ordering::Greater => panic!("Invalid lsn range {}-{}", lsn_start, lsn_end),
         }
 
         println!(
