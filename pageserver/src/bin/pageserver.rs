@@ -199,7 +199,7 @@ fn initialize_config(
 
 fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()> {
     // Initialize logger
-    let log_file = logging::init(LOG_FILE_NAME, daemonize)?;
+    let log_file = logging::init(LOG_FILE_NAME, daemonize, conf.log_format)?;
 
     info!("version: {}", version());
 

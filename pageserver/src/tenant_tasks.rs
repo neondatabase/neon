@@ -175,7 +175,7 @@ async fn wait_for_active_tenant(
                         }
                         state => {
                             debug!("Not running the task loop, tenant is not active with background jobs enabled: {state:?}");
-                            tokio::time::sleep(wait).await;
+                            continue;
                         }
                     }
                 }

@@ -9,7 +9,7 @@ ARG TAG=pinned
 #
 FROM debian:bullseye-slim AS build-deps
 RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
-    echo "APT::Default-Release \"stable\";" > /etc/apt/apt.conf.d/default-release && \
+    echo "Package: *\nPin: release n=bullseye\nPin-Priority: 50" > /etc/apt/preferences && \
     apt update
 RUN apt update &&  \
     apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
@@ -191,7 +191,7 @@ RUN apt update &&  \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     echo "Installing GLIBC 2.34" && \
     echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
-    echo "APT::Default-Release \"stable\";" > /etc/apt/apt.conf.d/default-release && \
+    echo "Package: *\nPin: release n=bullseye\nPin-Priority: 50" > /etc/apt/preferences && \
     apt update && \
     apt install -y --no-install-recommends -t testing libc6 && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \

@@ -1060,7 +1060,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
 }
 
 fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
-    tenant_mgr::get_tenant(tenant_id, true).and_then(|tenant| tenant.get_timeline(timeline_id))
+    tenant_mgr::get_tenant(tenant_id, true)
+        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
 }
 
 ///

@@ -5,6 +5,8 @@ use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use pageserver_api::models::TimelineState;
+use tokio::sync::watch;
 use tokio::task::spawn_blocking;
 use tracing::*;
 
@@ -160,6 +162,8 @@ pub struct Timeline {
 
     /// Relation size cache
     pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+
+    state: watch::Sender<TimelineState>,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -416,9 +420,11 @@ impl Timeline {
     /// those functions with an LSN that has been processed yet is an error.
     ///
     pub async fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
+        anyhow::ensure!(self.is_active(), "Cannot wait for Lsn on inactive timeline");
+
         // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
-        ensure!(
+        anyhow::ensure!(
             task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnection),
             "wait_lsn cannot be called in WAL receiver"
         );
@@ -635,6 +641,35 @@ impl Timeline {
         }
         Ok(())
     }
+
+    pub fn set_state(&self, new_state: TimelineState) {
+        match (self.current_state(), new_state) {
+            (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
+                debug!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
+            }
+            (TimelineState::Broken, _) => {
+                error!("Ignoring state update {new_state:?} for broken tenant");
+            }
+            (TimelineState::Paused, TimelineState::Active) => {
+                debug!("Not activating a paused timeline");
+            }
+            (_, new_state) => {
+                self.state.send_replace(new_state);
+            }
+        }
+    }
+
+    pub fn current_state(&self) -> TimelineState {
+        *self.state.borrow()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.current_state() == TimelineState::Active
+    }
+
+    pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
+        self.state.subscribe()
+    }
 }
 
 // Private functions
@@ -688,8 +723,9 @@ impl Timeline {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_layers: bool,
         pg_version: u32,
-    ) -> Timeline {
+    ) -> Self {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
+        let (state, _) = watch::channel(TimelineState::Suspended);
 
         let mut result = Timeline {
             conf,
@@ -746,6 +782,7 @@ impl Timeline {
 
             last_received_wal: Mutex::new(None),
             rel_size_cache: RwLock::new(HashMap::new()),
+            state,
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
         result
@@ -883,8 +920,6 @@ impl Timeline {
     }
 
     fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn) {
-        let timeline_id = self.timeline_id;
-
         // Atomically check if the timeline size calculation had already started.
         // If the flag was not already set, this sets it.
         if !self
@@ -901,17 +936,42 @@ impl Timeline {
                 "initial size calculation",
                 false,
                 async move {
-                    let calculated_size = self_clone.calculate_logical_size(init_lsn)?;
-                    let result = spawn_blocking(move || {
-                        self_clone.current_logical_size.initial_logical_size.set(calculated_size)
-                    }).await?;
-                    match result {
-                        Ok(()) => info!("Successfully calculated initial logical size"),
-                        Err(existing_size) => error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing"),
+                    let mut timeline_state_updates = self_clone.subscribe_for_state_updates();
+                    let self_calculation = Arc::clone(&self_clone);
+                    tokio::select! {
+                        calculation_result = spawn_blocking(move || self_calculation.calculate_logical_size(init_lsn)) => {
+                            let calculated_size = calculation_result
+                                .context("Failed to spawn calculation result task")?
+                                .context("Failed to calculate logical size")?;
+                            match self_clone.current_logical_size.initial_logical_size.set(calculated_size) {
+                                Ok(()) => info!("Successfully calculated initial logical size"),
+                                Err(existing_size) => error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing"),
+                            }
+                            Ok(())
+                        },
+                        new_event = async {
+                            loop {
+                                match timeline_state_updates.changed().await {
+                                    Ok(()) => {
+                                        let new_state = *timeline_state_updates.borrow();
+                                        match new_state {
+                                            // we're running this job for active timelines only
+                                            TimelineState::Active => continue,
+                                            TimelineState::Broken | TimelineState::Paused | TimelineState::Suspended => return Some(new_state),
+                                        }
+                                    }
+                                    Err(_sender_dropped_error) => return None,
+                                }
+                            }
+                        } => {
+                            match new_event {
+                                Some(new_state) => info!("Timeline became inactive (new state: {new_state:?}), dropping current connections until it reactivates"),
+                                None => info!("Timeline dropped state updates sender, stopping init size calculation"),
+                            }
+                            Ok(())
+                        },
                     }
-                    Ok(())
-                }
-                .instrument(info_span!("initial_logical_size_calculation", timeline = %timeline_id))
+                }.instrument(info_span!("initial_logical_size_calculation", tenant = %self.tenant_id, timeline = %self.timeline_id)),
             );
         }
     }
@@ -1356,7 +1416,7 @@ impl Timeline {
             false,
         )?;
 
-        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+        if self.can_upload_layers() {
             storage_sync::schedule_layer_upload(
                 self.tenant_id,
                 self.timeline_id,
@@ -1826,7 +1886,7 @@ impl Timeline {
         }
         drop(layers);
 
-        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+        if self.can_upload_layers() {
             storage_sync::schedule_layer_upload(
                 self.tenant_id,
                 self.timeline_id,
@@ -1930,7 +1990,7 @@ impl Timeline {
     /// obsolete.
     ///
     pub(super) fn gc(&self) -> anyhow::Result<GcResult> {
-        let mut result: GcResult = Default::default();
+        let mut result: GcResult = GcResult::default();
         let now = SystemTime::now();
 
         fail_point!("before-timeline-gc");
@@ -2110,7 +2170,7 @@ impl Timeline {
             fail_point!("after-timeline-gc-removed-layers");
         }
 
-        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+        if self.can_upload_layers() {
             storage_sync::schedule_layer_delete(
                 self.tenant_id,
                 self.timeline_id,
@@ -2198,6 +2258,11 @@ impl Timeline {
                 Ok(img)
             }
         }
+    }
+
+    fn can_upload_layers(&self) -> bool {
+        self.upload_layers.load(atomic::Ordering::Relaxed)
+            && self.current_state() != TimelineState::Broken
     }
 }
 

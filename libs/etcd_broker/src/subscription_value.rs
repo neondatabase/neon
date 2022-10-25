@@ -29,6 +29,9 @@ pub struct SkTimelineInfo {
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default)]
     pub peer_horizon_lsn: Option<Lsn>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
+    pub local_start_lsn: Option<Lsn>,
     /// A connection string to use for WAL receiving.
     #[serde(default)]
     pub safekeeper_connstr: Option<String>,
