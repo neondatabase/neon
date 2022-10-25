@@ -168,6 +168,8 @@ services:
       context: ./image/compute
       args:
         - COMPUTE_IMAGE=compute-node-${COMPUTE_VERSION:-v14}:${TAG:-latest}
+        - http_proxy=$http_proxy
+        - https_proxy=$https_proxy
     environment:
       - TENANT_NAME=test-tenant
       #- RUST_BACKTRACE=1
