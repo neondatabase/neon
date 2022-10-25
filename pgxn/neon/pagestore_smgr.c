@@ -130,7 +130,7 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
 BufferTag	prefetch_requests[READ_BUFFER_SIZE];
 
-PrefetchState MyPState;
+PrefetchState *MyPState;
 
 int			n_prefetch_hits;
 int			n_prefetch_misses;
@@ -140,7 +140,7 @@ XLogRecPtr	prefetch_lsn;
 
 static void consume_prefetch_responses(void);
 static void prefetch_ensure_unused_space(void);
-static void prefetch_register_buffer(BufferTag tag);
+static uint64 prefetch_register_buffer(BufferTag tag);
 static inline void prefetch_read(PrefetchRequest *entry);
 static inline void prefetch_request(PrefetchRequest *slot);
 static inline void prefetch_wait_for(uint64 ring_index);
@@ -156,8 +156,8 @@ static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
 static void
 consume_prefetch_responses(void)
 {
-	MemoryContext old = MemoryContextSwitchTo(MyPState.context);
-	prefetch_wait_for(MyPState.ring_unused - 1);
+	MemoryContext old = MemoryContextSwitchTo(MyPState->context);
+	prefetch_wait_for(MyPState->ring_unused - 1);
 	MemoryContextSwitchTo(old);
 }
 
@@ -166,12 +166,12 @@ prefetch_cleanup(void)
 {
 	int		index;
 	uint64	ring_index;
-	while (MyPState.ring_last < MyPState.ring_receive) {
-		ring_index = MyPState.ring_last;
+	while (MyPState->ring_last < MyPState->ring_receive) {
+		ring_index = MyPState->ring_last;
 		index = (ring_index % READ_BUFFER_SIZE);
 		
-		if (MyPState.prf_buffer[index].status == PRFS_EMPTY)
-			MyPState.ring_last++;
+		if (MyPState->prf_buffer[index].status == PRFS_EMPTY)
+			MyPState->ring_last++;
 	} 
 }
 
@@ -181,16 +181,16 @@ prefetch_wait_for(uint64 ring_index)
 	int index;
 	PrefetchRequest *entry;
 
-	Assert(MyPState.ring_unused > ring_index);
+	Assert(MyPState->ring_unused > ring_index);
 
-	while (MyPState.ring_receive >= ring_index)
+	while (MyPState->ring_receive >= ring_index)
 	{
-		index = (MyPState.ring_receive % READ_BUFFER_SIZE);
-		entry = &MyPState.prf_buffer[index];
+		index = (MyPState->ring_receive % READ_BUFFER_SIZE);
+		entry = &MyPState->prf_buffer[index];
 
 		prefetch_read(entry);
 
-		MyPState.ring_receive++;
+		MyPState->ring_receive++;
 	}
 }
 
@@ -205,8 +205,8 @@ prefetch_read(PrefetchRequest *entry)
 	Assert(entry->status == PRFS_REQUESTED);
 
 	response = (NeonGetPageResponse *) page_server->receive();
-	MyPState.n_responses_buffered += 1;
-	MyPState.n_requestes_inflight -= 1;
+	MyPState->n_responses_buffered += 1;
+	MyPState->n_requestes_inflight -= 1;
 
 	Assert(response->tag == T_NeonGetPageResponse);
 
@@ -218,19 +218,19 @@ prefetch_read(PrefetchRequest *entry)
 static inline void
 prefetch_clear(uint64 ring_index)
 {
-	PrefetchRequest *slot = &MyPState.prf_buffer[ring_index % READ_BUFFER_SIZE];
+	PrefetchRequest *slot = &MyPState->prf_buffer[ring_index % READ_BUFFER_SIZE];
 	
 	Assert(slot->status == PRFS_RECEIVED);
 
 	pfree(slot->response);
 	slot->status = PRFS_EMPTY;
 
-	MyPState.n_responses_buffered -= 1;
-	MyPState.n_unused += 1;
+	MyPState->n_responses_buffered -= 1;
+	MyPState->n_unused += 1;
 
 	if (slot->nextOfRel > 0)
 	{ 
-		PrefetchRequest* next_slot = &MyPState.prf_buffer[
+		PrefetchRequest* next_slot = &MyPState->prf_buffer[
 			(ring_index + slot->nextOfRel) % READ_BUFFER_SIZE];
 		
 		if (slot->prevOfRel != 0 && ((int) slot->prevOfRel + (int) slot->nextOfRel) <= UINT8_MAX)
@@ -242,9 +242,9 @@ prefetch_clear(uint64 ring_index)
 	}
 	
 	if (slot->prevOfRel > 0 &&
-		(ring_index - slot->prevOfRel) >= MyPState.ring_last)
+		(ring_index - slot->prevOfRel) >= MyPState->ring_last)
 	{
-		PrefetchRequest* prev_slot = &MyPState.prf_buffer[
+		PrefetchRequest* prev_slot = &MyPState->prf_buffer[
 			(ring_index - slot->prevOfRel) % READ_BUFFER_SIZE];
 
 		if (slot->nextOfRel != 0 && ((int) slot->prevOfRel + (int) slot->nextOfRel) <= UINT8_MAX)
@@ -255,10 +255,10 @@ prefetch_clear(uint64 ring_index)
 			prev_slot->nextOfRel = 0;
 	}
 	
-	if (MyPState.ring_last == ring_index)
+	if (MyPState->ring_last == ring_index)
 	{
-		MyPState.ring_last += 1;
-		MyPState.n_unused -= 1;
+		MyPState->ring_last += 1;
+		MyPState->n_unused -= 1;
 	}
 }
 
@@ -282,6 +282,8 @@ prefetch_request(PrefetchRequest *slot)
 		slot->buftag.blockNum
 	);
 
+	MyPState->n_requestes_inflight++;
+
 	page_server->send((NeonRequest *) &request);
 	slot->status = PRFS_REQUESTED;
 }
@@ -292,8 +294,8 @@ prefetch_move_buffers(uint64 to, uint64 from, int count)
 	Assert(to != from && count > 0);
 	Assert(abs((int) (to - from)) + count < READ_BUFFER_SIZE);
 
-	Assert(MyPState.ring_last <= from && from + count < MyPState.ring_unused);
-	Assert(MyPState.ring_last <= to && to + count < MyPState.ring_unused);
+	Assert(MyPState->ring_last <= from && from + count < MyPState->ring_unused);
+	Assert(MyPState->ring_last <= to && to + count < MyPState->ring_unused);
 
 	if (from > to)
 	{
@@ -302,7 +304,7 @@ prefetch_move_buffers(uint64 to, uint64 from, int count)
 			int from_adj = (from + i) % READ_BUFFER_SIZE;
 			int to_adj = (from + i) % READ_BUFFER_SIZE;
 
-			MyPState.prf_buffer[to_adj] = MyPState.prf_buffer[from_adj];
+			MyPState->prf_buffer[to_adj] = MyPState->prf_buffer[from_adj];
 		}
 	}
 	else
@@ -312,12 +314,12 @@ prefetch_move_buffers(uint64 to, uint64 from, int count)
 			int from_adj = (from + i) % READ_BUFFER_SIZE;
 			int to_adj = (from + i) % READ_BUFFER_SIZE;
 
-			MyPState.prf_buffer[to_adj] = MyPState.prf_buffer[from_adj];
+			MyPState->prf_buffer[to_adj] = MyPState->prf_buffer[from_adj];
 		}
 	}
 }
 
-static void
+static uint64
 prefetch_register_buffer(BufferTag tag)
 {
 	int		index,
@@ -325,12 +327,13 @@ prefetch_register_buffer(BufferTag tag)
 	uint64	ring_index,
 			lastofrelfork = 0;
 	PrefetchRequest *slot;
+	MemoryContext old;
 
-	/* Check that there is no prefetch in the buffers */
-	for (uint64 i = MyPState.ring_last; i < MyPState.ring_unused; i += step)
+	/* Check that there is no prefetch for the requested buffer already */
+	for (uint64 i = MyPState->ring_last; i < MyPState->ring_unused; i += step)
 	{
 		index = (i % READ_BUFFER_SIZE);
-		slot = &MyPState.prf_buffer[index];
+		slot = &MyPState->prf_buffer[index];
 
 		step = 1;
 
@@ -347,7 +350,7 @@ prefetch_register_buffer(BufferTag tag)
 		if (slot->buftag.blockNum == tag.blockNum)
 		{
 			n_prefetch_dupes++;
-			return;
+			return i;
 		}
 
 		lastofrelfork = i;
@@ -358,11 +361,13 @@ prefetch_register_buffer(BufferTag tag)
 		step = (int) slot->nextOfRel;
 	}
 
-	ring_index = MyPState.ring_unused;
-	index = (ring_index % READ_BUFFER_SIZE);
-	slot = &MyPState.prf_buffer[index];
+	old = MemoryContextSwitchTo(MyPState->context);
 
-	if (MyPState.ring_last == (MyPState.ring_unused - READ_BUFFER_SIZE))
+	ring_index = MyPState->ring_unused;
+	index = (ring_index % READ_BUFFER_SIZE);
+	slot = &MyPState->prf_buffer[index];
+
+	if (MyPState->ring_last == (MyPState->ring_unused - READ_BUFFER_SIZE))
 	{
 		Assert(slot->status != PRFS_EMPTY);
 
@@ -370,15 +375,15 @@ prefetch_register_buffer(BufferTag tag)
 		switch (slot->status)
 		{
 			case PRFS_REQUESTED:
-				Assert(MyPState.ring_receive == MyPState.ring_last);
+				Assert(MyPState->ring_receive == MyPState->ring_last);
 				prefetch_read(slot);
-				MyPState.ring_receive++;
+				MyPState->ring_receive++;
 				prefetch_clear(ring_index);
-				MyPState.ring_last++;
+				MyPState->ring_last++;
 				break;
 			case PRFS_RECEIVED:
 				prefetch_clear(ring_index);
-				MyPState.ring_last++;
+				MyPState->ring_last++;
 				break;
 			default:
 				pg_unreachable();
@@ -395,15 +400,18 @@ prefetch_register_buffer(BufferTag tag)
 
 	if (lastofrelfork > 0 &&
 		(ring_index - lastofrelfork) <= UINT8_MAX &&
-		(lastofrelfork >= MyPState.ring_last))
+		(lastofrelfork >= MyPState->ring_last))
 	{
 		int	prev_index = (lastofrelfork % READ_BUFFER_SIZE);
 		uint8 distance = (ring_index - lastofrelfork);
 		slot->prevOfRel = distance;
-		MyPState.prf_buffer[prev_index].nextOfRel = distance;
+		MyPState->prf_buffer[prev_index].nextOfRel = distance;
 	}
 
-	MyPState.ring_unused++;
+	MyPState->ring_unused++; /* Actually allocate the slot */
+	MemoryContextSwitchTo(old);
+
+	return ring_index;
 }
 
 static NeonResponse *
@@ -875,19 +883,12 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 void
 neon_init(void)
 {
-	MyPState.context = SlabContextCreate(TopMemoryContext,
+	MyPState = palloc0(sizeof(PrefetchState));
+	
+	MyPState->context = SlabContextCreate(TopMemoryContext,
 										 "NeonSMGR/prefetch",
 										 PS_GETPAGERESPONSE_SIZE * 16,
 										 PS_GETPAGERESPONSE_SIZE);
-	MyPState.ring_unused = 0;
-	MyPState.ring_receive = 0;
-	MyPState.ring_last = 0;
-
-	MyPState.n_responses_buffered = 0;
-	MyPState.n_requestes_inflight = 0;
-	MyPState.n_unused = 0;
-
-	memset((void *) &MyPState.prf_buffer[0], 0, sizeof(MyPState.prf_buffer));
 
 #ifdef DEBUG_COMPARE_LOCAL
 	mdinit();
@@ -1364,6 +1365,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	NeonResponse *resp;
 	int			i;
 	BufferTag	buftag;
+	uint64		bufindex;
 
 	buftag = (BufferTag) {
 		.rnode = rnode,
@@ -1374,12 +1376,12 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	/*
 	 * Try to find prefetched page in the list of received pages.
 	 */
-	for (uint64 ring_index = MyPState.ring_last; ring_index < MyPState.ring_unused; ring_index++)
+	for (uint64 ring_index = MyPState->ring_last; ring_index < MyPState->ring_unused; ring_index++)
 	{
 		PrefetchRequest *slot;
 		i = (ring_index % READ_BUFFER_SIZE);
 
-		slot = &MyPState.prf_buffer[i];
+		slot = &MyPState->prf_buffer[i];
 		
 		if (slot->status == PRFS_EMPTY) /* used entries are removed */
 			continue;
@@ -1428,18 +1430,12 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	 * or the prefetch request we had was expired.
 	 */
 	n_prefetch_misses += 1;
-	{
-		NeonGetPageRequest request = {
-			.req.tag = T_NeonGetPageRequest,
-			.req.latest = request_latest,
-			.req.lsn = request_lsn,
-			.rnode = rnode,
-			.forknum = forkNum,
-			.blkno = blkno
-		};
 
-		resp = page_server_request(&request);
-	}
+	bufindex = prefetch_register_buffer(buftag);
+
+	prefetch_wait_for(bufindex);
+
+	prefetch_read(&MyPState->prf_buffer[bufindex % READ_BUFFER_SIZE])
 
 	switch (resp->tag)
 	{

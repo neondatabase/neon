@@ -40,12 +40,30 @@ typedef struct PrefetchRequest {
 	uint8		prevOfRel; /* relative offset to previous prefetch on this relfork */
 } PrefetchRequest;
 
+/*
+ * PrefetchState maintains the state of (prefetch) getPage@LSN requests.
+ * It maintains a (ring) buffer of in-flight requests and responses.
+ * 
+ * We maintain several indexes into the ring buffer:
+ * ring_unused >= ring_receive >= ring_last >= 0
+ * 
+ * ring_unused is the head of the buffer
+ * ring_receive is the next request that is to be received
+ * ring_last is the last received entry in the buffer
+ * 
+ * Apart from being an entry in the ring buffer, each PrefetchRequest is
+ * linked to the next and previous PrefetchRequest of its RelNodeFork through
+ * the nextOfRel and prevOfRel relative pointers into the ring buffer. This
+ * provides a linked list for each relations' fork, which will allow us to
+ * detect sequential scans; eventually removing (or reducing) the need for
+ * core modifications in the heap AM for prefetching buffers.
+ */
 typedef struct PrefetchState {
 	int clock_low; /* not yet requested */
 	int clock_high; /* prefetches sent to PS */
 	int response_handle; /* prefetches handled (from PS), out of .requested */
 
-	MemoryContext context; /* context for prf_buffer[].response allocations*/
+	MemoryContext context; /* context for prf_buffer[].response allocations */
 
 	uint64	ring_unused;		/* first unused slot */
 	uint64	ring_receive;		/* lowest slot that's set to receive its response */
