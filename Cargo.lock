@@ -2170,6 +2170,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "signal-hook",
+ "svg_fmt",
  "tar",
  "tempfile",
  "thiserror",
@@ -3460,6 +3461,12 @@ name = "subtle"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bdef32e8150c2a081110b42772ffe7d7c9032b606bc226c8260fd97e0976601"
+
+[[package]]
+name = "svg_fmt"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fb1df15f412ee2e9dfc1c504260fa695c1c3f10fe9f4a6ee2d2184d7d6450e2"
 
 [[package]]
 name = "symbolic-common"
