@@ -2,8 +2,9 @@ import os
 import re
 import shutil
 import subprocess
+from argparse import ArgumentError
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Union
 
 import pytest
 import toml
@@ -12,6 +13,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     NeonPageserverHttpClient,
     PgBin,
+    PortDistributor,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -41,7 +43,43 @@ def dump_differs(first: Path, second: Path, output: Path) -> bool:
     return rv.returncode != 0
 
 
-def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: FixtureRequest):
+class PortReplacer(object):
+    """
+    Class-helper for replacing ports in config files.
+    """
+
+    def __init__(self, port_distributor: PortDistributor):
+        self.port_distributor = port_distributor
+        self.port_map: Dict[int, int] = {}
+
+    def replace_port(self, value: Union[int, str]) -> Union[int, str]:
+        if isinstance(value, int):
+            if (known_port := self.port_map.get(value)) is not None:
+                return known_port
+
+            self.port_map[value] = self.port_distributor.get_port()
+            return self.port_map[value]
+
+        if isinstance(value, str):
+            # Use regex to find port in a string
+            # urllib.parse.urlparse produces inconvenient results for cases without scheme like "localhost:5432"
+            # See https://bugs.python.org/issue27657
+            ports = re.findall(r":(\d+)(?:/|$)", value)
+            assert len(ports) == 1, f"can't find port in {value}"
+            port_int = int(ports[0])
+
+            if (known_port := self.port_map.get(port_int)) is not None:
+                return value.replace(f":{port_int}", f":{known_port}")
+
+            self.port_map[port_int] = self.port_distributor.get_port()
+            return value.replace(f":{port_int}", f":{self.port_map[port_int]}")
+
+        raise ArgumentError(f"unsupported type {type(value)} of {value=}")
+
+
+def test_backward_compatibility(
+    pg_bin: PgBin, port_distributor: PortDistributor, test_output_dir: Path, request: FixtureRequest
+):
     compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
     assert (
         compatibility_snapshot_dir_env is not None
@@ -66,16 +104,43 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
     for tenant in (repo_dir / "tenants").glob("*"):
         shutil.rmtree(tenant / "wal-redo-datadir.___temp")
 
-    # Update paths in configs
+    # Update paths and ports in config files
+    pr = PortReplacer(port_distributor)
+
     pageserver_toml = repo_dir / "pageserver.toml"
     pageserver_config = toml.load(pageserver_toml)
     new_local_path = pageserver_config["remote_storage"]["local_path"].replace(
         "/test_prepare_snapshot/",
         "/test_backward_compatibility/compatibility_snapshot/",
     )
+
     pageserver_config["remote_storage"]["local_path"] = new_local_path
+    pageserver_config["listen_http_addr"] = pr.replace_port(pageserver_config["listen_http_addr"])
+    pageserver_config["listen_pg_addr"] = pr.replace_port(pageserver_config["listen_pg_addr"])
+    pageserver_config["broker_endpoints"] = [
+        pr.replace_port(ep) for ep in pageserver_config["broker_endpoints"]
+    ]
+
     with pageserver_toml.open("w") as f:
         toml.dump(pageserver_config, f)
+
+    snapshot_config_toml = repo_dir / "config"
+    snapshot_config = toml.load(snapshot_config_toml)
+    snapshot_config["etcd_broker"]["broker_endpoints"] = [
+        pr.replace_port(ep) for ep in snapshot_config["etcd_broker"]["broker_endpoints"]
+    ]
+    snapshot_config["pageserver"]["listen_http_addr"] = pr.replace_port(
+        snapshot_config["pageserver"]["listen_http_addr"]
+    )
+    snapshot_config["pageserver"]["listen_pg_addr"] = pr.replace_port(
+        snapshot_config["pageserver"]["listen_pg_addr"]
+    )
+    for sk in snapshot_config["safekeepers"]:
+        sk["http_port"] = pr.replace_port(sk["http_port"])
+        sk["pg_port"] = pr.replace_port(sk["pg_port"])
+
+    with (snapshot_config_toml).open("w") as f:
+        toml.dump(snapshot_config, f)
 
     # Ensure that snapshot doesn't contain references to the original path
     rv = subprocess.run(
@@ -93,8 +158,6 @@ def test_backward_compatibility(pg_bin: PgBin, test_output_dir: Path, request: F
     assert (
         rv.returncode != 0
     ), f"there're files referencing `test_prepare_snapshot/repo`, this path should be replaced with {repo_dir}:\n{rv.stdout}"
-
-    snapshot_config = toml.load(repo_dir / "config")
 
     # NeonEnv stub to make NeonCli happy
     config: Any = type("NeonEnvStub", (object,), {})
