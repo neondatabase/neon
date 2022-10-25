@@ -18,13 +18,13 @@ cleanup
 
 for pg_version in 14 15; do
 	echo "start containers (pg_version=$pg_version)."
-	PG_VERSION=$pg_version TAG=latest docker-compose -f $COMPOSE_FILE up --build -d 
+	PG_VERSION=$pg_version TAG=latest docker-compose -f $COMPOSE_FILE up --build -d
 
 	echo "wait until the compute is ready. timeout after 60s. "
 	cnt=0
 	while sleep 1; do
 		# check timeout
-    	cnt=`expr $cnt + 1`
+		cnt=`expr $cnt + 1`
 		if [ $cnt -gt 60 ]; then
 			echo "timeout before the compute is ready."
 			cleanup

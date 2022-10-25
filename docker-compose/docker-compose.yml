@@ -186,14 +186,14 @@ services:
       - safekeeper2
       - safekeeper3
       - pageserver
-  
+
   compute_is_ready:
     image: postgres:latest
     entrypoint:
       - "/bin/bash"
       - "-c"
     command:
-      - "until pg_isready -h compute -p 55433 ; do 
+      - "until pg_isready -h compute -p 55433 ; do
             echo 'Waiting to start compute...' && sleep 1;
          done"
     depends_on:
