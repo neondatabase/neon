@@ -6,7 +6,12 @@ set -eux -o pipefail
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 COMPOSE_FILE=$SCRIPT_DIR/../docker-compose/docker-compose.yml
 
+COMPUTE_CONTAINER_NAME=dockercompose_compute_1
+SQL="CREATE TABLE t(key int primary key, value text); insert into t values(1,1); select * from t;"
+PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -c '$SQL' postgres"
+
 cleanup() {
+	echo "show container information"
 	docker ps
 	docker-compose -f $COMPOSE_FILE logs
 	echo "stop containers..."
@@ -37,6 +42,8 @@ for pg_version in 14 15; do
 		set -o pipefail
 		if [ $result -eq 1 ]; then
 			echo "OK. The compute is ready to connect."
+			echo "execute simple queries."
+			docker exec -it $COMPUTE_CONTAINER_NAME /bin/bash -c "psql $PSQL_OPTION"
 			cleanup
 			break
 		fi
