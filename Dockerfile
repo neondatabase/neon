@@ -44,7 +44,7 @@ COPY . .
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
-&& mold -run cargo build --bin pageserver --bin pageserver_binutils --bin safekeeper --bin proxy --locked --release \
+&& mold -run cargo build --bin pageserver --bin pageserver_binutils --bin draw_timeline_dir --bin safekeeper --bin proxy --locked --release \
     && cachepot -s
 
 # Build final image
@@ -65,6 +65,7 @@ RUN set -e \
 
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver_binutils /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/draw_timeline_dir   /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
 

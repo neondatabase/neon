@@ -67,6 +67,7 @@ remote_storage = { path = "../libs/remote_storage" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 close_fds = "0.3.2"
 walkdir = "2.3.2"
+svg_fmt = "0.4.1"
 
 [dev-dependencies]
 criterion = "0.4"
