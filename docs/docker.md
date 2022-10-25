@@ -23,7 +23,7 @@ We build all images after a successful `release` tests run and push automaticall
 
 You can see a [docker compose](https://docs.docker.com/compose/) example to create a neon cluster in [/docker-compose/docker-compose.yml](/docker-compose/docker-compose.yml). It creates the following conatainers.
 
-- etcd x 3
+- etcd x 1
 - pageserver x 1
 - safekeeper x 3
 - compute x 1
