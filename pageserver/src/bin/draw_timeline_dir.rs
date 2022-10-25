@@ -1,6 +1,6 @@
 //! A tool for visualizing the arrangement of layerfiles within a timeline.
 //!
-//! It reads filenames from stding and prints a svg on stdout. The image is a plot in
+//! It reads filenames from stdin and prints a svg on stdout. The image is a plot in
 //! page-lsn space, where every delta layer is a rectangle and every image layer is a
 //! thick line. Legend:
 //! - The x axis (left to right) represents page index.
@@ -36,7 +36,7 @@ project_git_version!(GIT_VERSION);
 
 // Map values to their compressed coordinate - the index the value
 // would have in a sorted and deduplicated list of all values.
-fn build_coordingate_compression_map<T: Ord + Copy>(coords: Vec<T>) -> BTreeMap<T, usize> {
+fn build_coordinate_compression_map<T: Ord + Copy>(coords: Vec<T>) -> BTreeMap<T, usize> {
     let set: BTreeSet<T> = coords.into_iter().collect();
 
     let mut map: BTreeMap<T, usize> = BTreeMap::new();
@@ -80,8 +80,8 @@ fn main() -> Result<()> {
     }
 
     // Analyze
-    let key_map = build_coordingate_compression_map(keys);
-    let lsn_map = build_coordingate_compression_map(lsns);
+    let key_map = build_coordinate_compression_map(keys);
+    let lsn_map = build_coordinate_compression_map(lsns);
 
     // Initialize stats
     let mut num_deltas = 0;
