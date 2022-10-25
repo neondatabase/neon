@@ -438,9 +438,7 @@ WalProposerPoll(void)
 			{
 				Safekeeper *sk = &safekeeper[i];
 
-				if ((sk->state == SS_CONNECTING_WRITE ||
-					 sk->state == SS_CONNECTING_READ) &&
-					TimestampDifferenceExceeds(sk->startedConnAt, now,
+				if (TimestampDifferenceExceeds(sk->latestMsgReceivedAt, now,
 											   wal_acceptor_connect_timeout))
 				{
 					elog(WARNING, "failed to connect to node '%s:%s': exceeded connection timeout %dms",
@@ -760,7 +758,7 @@ ResetConnection(Safekeeper *sk)
 	elog(LOG, "connecting with node %s:%s", sk->host, sk->port);
 
 	sk->state = SS_CONNECTING_WRITE;
-	sk->startedConnAt = GetCurrentTimestamp();
+	sk->latestMsgReceivedAt = GetCurrentTimestamp();
 
 	sock = walprop_socket(sk->conn);
 	sk->eventPos = AddWaitEventToSet(waitEvents, WL_SOCKET_WRITEABLE, sock, NULL, sk);
@@ -918,7 +916,7 @@ HandleConnectionEvent(Safekeeper *sk)
 		case WP_CONN_POLLING_OK:
 			elog(LOG, "connected with node %s:%s", sk->host,
 				 sk->port);
-
+			sk->latestMsgReceivedAt = GetCurrentTimestamp();
 			/*
 			 * We have to pick some event to update event set. We'll
 			 * eventually need the socket to be readable, so we go with that.
@@ -2304,7 +2302,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg)
 		ResetConnection(sk);
 		return false;
 	}
-
+	sk->latestMsgReceivedAt = GetCurrentTimestamp();
 	switch (tag)
 	{
 		case 'g':

@@ -371,7 +371,7 @@ typedef struct Safekeeper
 	int			eventPos;		/* position in wait event set. Equal to -1 if*
 								 * no event */
 	SafekeeperState state;		/* safekeeper state machine state */
-	TimestampTz startedConnAt;	/* when connection attempt started */
+	TimestampTz latestMsgReceivedAt;        /* when latest msg is received */
 	AcceptorGreeting greetResponse; /* acceptor greeting */
 	VoteResponse voteResponse;	/* the vote */
 	AppendResponse appendResponse;	/* feedback for master */
