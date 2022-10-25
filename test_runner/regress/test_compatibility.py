@@ -2,7 +2,6 @@ import os
 import re
 import shutil
 import subprocess
-from argparse import ArgumentError
 from pathlib import Path
 from typing import Any, Dict, Union
 
@@ -74,7 +73,7 @@ class PortReplacer(object):
             self.port_map[port_int] = self.port_distributor.get_port()
             return value.replace(f":{port_int}", f":{self.port_map[port_int]}")
 
-        raise ArgumentError(f"unsupported type {type(value)} of {value=}")
+        raise TypeError(f"unsupported type {type(value)} of {value=}")
 
 
 def test_backward_compatibility(
