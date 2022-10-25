@@ -22,9 +22,10 @@
 #define READ_BUFFER_SIZE 128
 
 typedef enum PrefetchStatus {
-	PRFS_EMPTY = 0,
-	PRFS_REQUESTED,
-	PRFS_RECEIVED,
+	PRFS_EMPTY = 0, /* no valid data */
+	PRFS_REQUESTED, /* request is sent to PS, all fields except response valid */
+	PRFS_RECEIVED, /* all fields valid, response contains data */
+	PRFS_TAG_REMAINS, /* only buftag, *OfRel are still valid */
 } PrefetchStatus;
 
 typedef struct PrefetchRequest {
@@ -47,30 +48,31 @@ typedef struct PrefetchRequest {
  * We maintain several indexes into the ring buffer:
  * ring_unused >= ring_receive >= ring_last >= 0
  * 
- * ring_unused is the head of the buffer
+ * ring_unused points to the first unused slot of the buffer
  * ring_receive is the next request that is to be received
- * ring_last is the last received entry in the buffer
+ * ring_last is the oldest received entry in the buffer
  * 
- * Apart from being an entry in the ring buffer, each PrefetchRequest is
- * linked to the next and previous PrefetchRequest of its RelNodeFork through
- * the nextOfRel and prevOfRel relative pointers into the ring buffer. This
- * provides a linked list for each relations' fork, which will allow us to
- * detect sequential scans; eventually removing (or reducing) the need for
- * core modifications in the heap AM for prefetching buffers.
+ * Apart from being an entry in the ring buffer of prefetch requests, each
+ * PrefetchRequest is linked to the next and previous PrefetchRequest of its
+ * RelNodeFork through the nextOfRel and prevOfRel relative pointers into the
+ * ring buffer. This provides a linked list for each relations' fork, which
+ * will allow us to detect sequential scans; eventually removing (or reducing)
+ * the need for core modifications in the heap AM for prefetching buffers.
  */
 typedef struct PrefetchState {
-	int clock_low; /* not yet requested */
-	int clock_high; /* prefetches sent to PS */
-	int response_handle; /* prefetches handled (from PS), out of .requested */
-
 	MemoryContext context; /* context for prf_buffer[].response allocations */
 
+	/* buffer indexes */
 	uint64	ring_unused;		/* first unused slot */
-	uint64	ring_receive;		/* lowest slot that's set to receive its response */
-	uint64	ring_last;			/* last slot with a response value */
+	uint64	ring_receive;		/* next slot that is to receive a response */
+	uint64	ring_last;			/* min slot with a response value */
+
+	/* metrics / statistics  */
 	int n_responses_buffered;	/* count of PS responses not yet in buffers */
 	int n_requestes_inflight;	/* count of PS requests considered in flight */
-	int n_unused;				/* count of buffers < unused, > last, that are also unused */ 
+	int n_unused;				/* count of buffers < unused, > last, that are also unused */
+
+	/* the buffer slots */
 	PrefetchRequest prf_buffer[READ_BUFFER_SIZE]; /* prefetch buffers */
 } PrefetchState;
 

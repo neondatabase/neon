@@ -171,7 +171,6 @@ extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
 						BlockNumber blocknum, char *buffer, bool skipFsync);
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum);
-extern void neon_reset_prefetch(SMgrRelation reln);
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
 
