@@ -73,6 +73,13 @@ runs:
       shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
+    - name: Download compatibility snapshot for Postgres 14
+      uses: ./.github/actions/download
+      with:
+        name: compatibility-snapshot-${{ inputs.build_type }}-pg14
+        path: /tmp/compatibility_snapshot_pg14
+        prefix: latest
+
     - name: Run pytest
       env:
         NEON_BIN: /tmp/neon/bin
@@ -80,6 +87,8 @@ runs:
         BUILD_TYPE: ${{ inputs.build_type }}
         AWS_ACCESS_KEY_ID: ${{ inputs.real_s3_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.real_s3_secret_access_key }}
+        COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg14
+        ALLOW_BREAKING_CHANGES: contains(github.event.pull_request.labels.*.name, 'breaking changes')
       shell: bash -euxo pipefail {0}
       run: |
         # PLATFORM will be embedded in the perf test report
@@ -153,6 +162,15 @@ runs:
           export REPORT_TO="$PLATFORM"
           scripts/generate_and_push_perf_report.sh
         fi
+
+    - name: Upload compatibility snapshot for Postgres 14
+      if: github.ref_name == 'release'
+      uses: ./.github/actions/upload
+      with:
+        name: compatibility-snapshot-${{ inputs.build_type }}-pg14-${{ github.run_id }}
+        # The path includes a test name (test_prepare_snapshot) and directory that the test creates (compatibility_snapshot_pg14), keep the path in sync with the test
+        path: /tmp/test_output/test_prepare_snapshot/compatibility_snapshot_pg14/
+        prefix: latest
 
     - name: Create Allure report
       if: always()
