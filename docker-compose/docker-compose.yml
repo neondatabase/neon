@@ -167,11 +167,11 @@ services:
     build:
       context: ./image/compute
       args:
-        - COMPUTE_IMAGE=compute-node-${COMPUTE_VERSION:-v14}:${TAG:-latest}
+        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-14}:${TAG:-latest}
         - http_proxy=$http_proxy
         - https_proxy=$https_proxy
     environment:
-      - TENANT_NAME=test-tenant
+      - PG_VERSION=${PG_VERSION:-14}
       #- RUST_BACKTRACE=1
     volumes:
       - ./compute/var/db/postgres/specs/:/var/db/postgres/specs/

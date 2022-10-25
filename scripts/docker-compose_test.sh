@@ -16,9 +16,9 @@ cleanup() {
 echo "clean up containers if exists"
 cleanup
 
-for compute_version in v14 v15; do
-	echo "start containers (compute_version=$compute_version)."
-	COMPUTE_VERSION=$compute_version TAG=latest docker-compose -f $COMPOSE_FILE up --build -d 
+for pg_version in 14 15; do
+	echo "start containers (pg_version=$pg_version)."
+	PG_VERSION=$pg_version TAG=latest docker-compose -f $COMPOSE_FILE up --build -d 
 
 	echo "wait until the compute is ready. timeout after 60s. "
 	cnt=0

@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eux
 
+PG_VERSION=${PG_VERSION:-14}
+
 SPEC_FILE_ORG=/var/db/postgres/specs/spec.json
 SPEC_FILE=/tmp/spec.json
 
@@ -15,7 +17,7 @@ PARAMS=(
      -sb 
      -X POST
      -H "Content-Type: application/json"
-     -d "{\"id\":\"${TENANT_NAME}\"}"
+     -d "{}"
      http://pageserver:9898/v1/tenant/
 )
 tenant_id=$(curl "${PARAMS[@]}" | sed 's/"//g')
@@ -24,7 +26,7 @@ PARAMS=(
      -sb 
      -X POST
      -H "Content-Type: application/json"
-     -d "{\"tenant_id\":\"${tenant_id}\"}"
+     -d "{\"tenant_id\":\"${tenant_id}\", \"pg_version\": ${PG_VERSION}}"
      "http://pageserver:9898/v1/tenant/${tenant_id}/timeline/"
 )
 result=$(curl "${PARAMS[@]}")
