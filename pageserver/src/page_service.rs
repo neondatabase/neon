@@ -10,8 +10,14 @@
 //
 
 use anyhow::{bail, ensure, Context, Result};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use pageserver_api::models::{
+    PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
+    PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
+    PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
+    PagestreamNblocksRequest, PagestreamNblocksResponse,
+};
 use std::io;
 use std::net::TcpListener;
 use std::str;
@@ -35,7 +41,6 @@ use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::profiling::profpoint_start;
-use crate::reltag::RelTag;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
@@ -44,163 +49,6 @@ use crate::CheckpointConfig;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
-
-// Wrapped in libpq CopyData
-enum PagestreamFeMessage {
-    Exists(PagestreamExistsRequest),
-    Nblocks(PagestreamNblocksRequest),
-    GetPage(PagestreamGetPageRequest),
-    DbSize(PagestreamDbSizeRequest),
-}
-
-// Wrapped in libpq CopyData
-enum PagestreamBeMessage {
-    Exists(PagestreamExistsResponse),
-    Nblocks(PagestreamNblocksResponse),
-    GetPage(PagestreamGetPageResponse),
-    Error(PagestreamErrorResponse),
-    DbSize(PagestreamDbSizeResponse),
-}
-
-#[derive(Debug)]
-struct PagestreamExistsRequest {
-    latest: bool,
-    lsn: Lsn,
-    rel: RelTag,
-}
-
-#[derive(Debug)]
-struct PagestreamNblocksRequest {
-    latest: bool,
-    lsn: Lsn,
-    rel: RelTag,
-}
-
-#[derive(Debug)]
-struct PagestreamGetPageRequest {
-    latest: bool,
-    lsn: Lsn,
-    rel: RelTag,
-    blkno: u32,
-}
-
-#[derive(Debug)]
-struct PagestreamDbSizeRequest {
-    latest: bool,
-    lsn: Lsn,
-    dbnode: u32,
-}
-
-#[derive(Debug)]
-struct PagestreamExistsResponse {
-    exists: bool,
-}
-
-#[derive(Debug)]
-struct PagestreamNblocksResponse {
-    n_blocks: u32,
-}
-
-#[derive(Debug)]
-struct PagestreamGetPageResponse {
-    page: Bytes,
-}
-
-#[derive(Debug)]
-struct PagestreamErrorResponse {
-    message: String,
-}
-
-#[derive(Debug)]
-struct PagestreamDbSizeResponse {
-    db_size: i64,
-}
-
-impl PagestreamFeMessage {
-    fn parse(mut body: Bytes) -> anyhow::Result<PagestreamFeMessage> {
-        // TODO these gets can fail
-
-        // these correspond to the NeonMessageTag enum in pagestore_client.h
-        //
-        // TODO: consider using protobuf or serde bincode for less error prone
-        // serialization.
-        let msg_tag = body.get_u8();
-        match msg_tag {
-            0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
-                },
-            })),
-            1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
-                },
-            })),
-            2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
-                },
-                blkno: body.get_u32(),
-            })),
-            3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                dbnode: body.get_u32(),
-            })),
-            _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
-        }
-    }
-}
-
-impl PagestreamBeMessage {
-    fn serialize(&self) -> Bytes {
-        let mut bytes = BytesMut::new();
-
-        match self {
-            Self::Exists(resp) => {
-                bytes.put_u8(100); /* tag from pagestore_client.h */
-                bytes.put_u8(resp.exists as u8);
-            }
-
-            Self::Nblocks(resp) => {
-                bytes.put_u8(101); /* tag from pagestore_client.h */
-                bytes.put_u32(resp.n_blocks);
-            }
-
-            Self::GetPage(resp) => {
-                bytes.put_u8(102); /* tag from pagestore_client.h */
-                bytes.put(&resp.page[..]);
-            }
-
-            Self::Error(resp) => {
-                bytes.put_u8(103); /* tag from pagestore_client.h */
-                bytes.put(resp.message.as_bytes());
-                bytes.put_u8(0); // null terminator
-            }
-            Self::DbSize(resp) => {
-                bytes.put_u8(104); /* tag from pagestore_client.h */
-                bytes.put_i64(resp.db_size);
-            }
-        }
-
-        bytes.into()
-    }
-}
 
 fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + '_ {
     async_stream::try_stream! {
