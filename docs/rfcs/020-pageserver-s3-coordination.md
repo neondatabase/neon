@@ -56,7 +56,7 @@ Note that flag that disables background jobs needs to be persistent, because oth
 
 ### Avoid index_part.json
 
-Index part consists of two parts, list of layers and metadata. List of layers can be easily obtained by \`ListObjects\` S3 API method. But what to do with metadata? Create metadata instance for each checkpoint and add some counter to the file name?
+Index part consists of two parts, list of layers and metadata. List of layers can be easily obtained by `ListObjects` S3 API method. But what to do with metadata? Create metadata instance for each checkpoint and add some counter to the file name?
 
 Back to potentially long s3 ls.
 
@@ -73,3 +73,104 @@ One way to eliminate metadata file is to store it in layer files under some spec
 As a downside each checkpoint gets 512 bytes larger.
 
 If we entirely avoid metadata file this opens up many approaches
+
+* * *
+
+During discussion it seems that we converged on the approach consisting of:
+* index files stored per pageserver in the same timeline directory. With that index file name starts to look like: `<pageserver_node_id>_index_part.json`. In such set up there are no concurrent overwrites of index file by different pageservers. Index
+* For replica pageservers the solution would be for primary to broadcast index changes to any followers with an ability to check index files in s3 and restore the full state. To properly merge changes with index files we can use a counter that is persisted in an index file, is incremented on every change to it and passed along with broadcasted change. This way we can determine whether we need to apply change to the index state or not.
+* Responsibility for running background jobs is assigned externally. Pageserver keeps locally persistent flag for each tenant that indicates whether this pageserver is considered as primary one or not. TODO what happends if we crash and cannot start for some extended period of time? Control plane can assign ownership to some other pageserver. Pageserver needs some way to check if its still the blessed one. Maybe by explicit request to control plane on start.
+
+Requirement for deterministic layer generation was considered overly strict because of two reasons:
+* It can limit possible optimizations e g when pageserver wants to reshuffle some data locally and doesnt want to coordinate this
+* The deterministic algorithm itself can change so during deployments for some tim there will be two different version running at the same time which can cause non determinism
+
+### External elections
+
+The above case with lost state in this schema with externally managed leadership is represented like this:
+
+Note that here we keep objects list in the index file.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant PS1
+    participant CP as Control Plane
+    participant S3
+    participant PS2
+
+    note over PS1,PS2: PS1 starts up and still a leader
+    PS1->>CP: Am I still the leader for Tenant X?
+    activate CP
+    CP->>PS1: Yes
+    deactivate CP
+    PS1->>S3: Fetch PS1 index.
+    note over PS1: Continue operations, start backround jobs
+    note over PS1,PS2: PS1 starts up and still and is not a leader anymore
+    PS1->>CP: Am I still the leader for Tenant X?
+    CP->>PS1: No
+    PS1->>PS2: Subscribe to index changes
+    PS1->>S3: Fetch PS1 and PS2 indexes
+    note over PS1: Combine index file to include layers <br> from both indexes to be able <br> to see newer files from leader (PS2)
+    note over PS1: Continue operations, do not start background jobs
+```
+
+### Internal elections
+
+To manage leadership internally we can use broker to exchange pings so nodes can decide on the leader roles. In case multiple pageservers are active leader is the one with lowest node id.
+
+Operations with internally managed elections:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant PS1
+    participant S3
+    participant PS2
+
+    note over PS1: Starts up
+    note over PS1: Subscribes to changes, waits for two ping <br> timeouts to see if there is a leader
+    PS1->>S3: Fetch indexes from s3
+    alt there is a leader
+        note over PS1: do not start background jobs, <br> continue applying index updates
+    else there is no leader
+        note over PS1: start background jobs, <br> broadcast index changes
+    end
+
+    note over PS1,PS2: Then the picture is similar to external elections <br> the difference is that follower can become a leader <br> if there are no pings after some timeout new leader gets elected
+```
+
+### Eviction
+
+When two pageservers operate on a tenant for extended period of time follower doesnt perform write operations in s3.
+When layer is evicted follower relies on updates from primary to get info about layers it needs to cover range for evicted layer.
+
+Note that it wont match evicted layer exactly, so layers will overlap and lookup code needs to correctly handle that.
+
+### Relocation flow
+
+Actions become:
+* Attach tenant to new pageserver
+* New pageserver becomes follower since previous one is still leading
+* New pageserver starts replicating from safekeepers but does not upload layers
+* Detach is called on the old one
+* New pageserver becomes leader after it realizes that old one disappeared
+
+### Index File
+
+Using `s3 ls` on startup simplifies things, but we still need metadata, so we need to fetch index files anyway. If they contain list of files we can combine them and avoid costly `s3 ls`
+
+### Remaining issues
+
+* More than one remote consistent lsn for safekeepers to know
+
+Anything else?
+
+### Proposed solution
+
+To recap. On meeting we converged on approach with external elections but I think it will be overall harder to manage and will introduce a dependency on control plane for pageserver. Using separate index files for each pageserver consisting of log of operations and a metadata snapshot should be enough.
+
+### What we need to get there?
+
+* Change index file structure to contain log of changes instead of just the file list
+* Implement pinging/elections for pageservers
