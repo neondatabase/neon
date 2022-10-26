@@ -12,10 +12,10 @@ use tracing::*;
 use walkdir::WalkDir;
 
 use crate::pgdatadir_mapping::*;
-use crate::reltag::{RelTag, SlruKind};
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
+use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::WalStreamDecoder;
