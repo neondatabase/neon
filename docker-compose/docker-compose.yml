@@ -1,0 +1,200 @@
+version: '3'
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.4
+    ports:
+      - 2379:2379
+      - 2380:2380
+    environment:
+      # This signifficantly speeds up etcd and we anyway don't data persistency there.
+      ETCD_UNSAFE_NO_FSYNC: "1"
+    command: 
+      - "etcd"
+      - "--auto-compaction-mode=revision"
+      - "--auto-compaction-retention=1"
+      - "--name=etcd-cluster"
+      - "--initial-cluster-state=new"
+      - "--initial-cluster-token=etcd-cluster-1"
+      - "--initial-cluster=etcd-cluster=http://etcd:2380"
+      - "--initial-advertise-peer-urls=http://etcd:2380"
+      - "--advertise-client-urls=http://etcd:2379"
+      - "--listen-client-urls=http://0.0.0.0:2379"
+      - "--listen-peer-urls=http://0.0.0.0:2380"
+      - "--quota-backend-bytes=134217728" # 128 MB
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=password
+    command: server /data --address :9000 --console-address ":9001"
+
+  minio_create_buckets:
+    image: minio/mc
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=password
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command: 
+      - "until (/usr/bin/mc alias set minio http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD) do
+             echo 'Waiting to start minio...' && sleep 1;
+         done;
+         /usr/bin/mc mb minio/neon --region=eu-north-1;
+         exit 0;"
+    depends_on:
+      - minio
+
+  pageserver:
+    image: neondatabase/neon:${TAG:-latest}
+    environment:
+      - BROKER_ENDPOINT='http://etcd:2379'
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=password
+      #- RUST_BACKTRACE=1
+    ports:
+       #- 6400:6400  # pg protocol handler
+       - 9898:9898 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - "/usr/local/bin/pageserver -D /data/.neon/
+                                   -c \"broker_endpoints=[$$BROKER_ENDPOINT]\"
+                                   -c \"listen_pg_addr='0.0.0.0:6400'\"
+                                   -c \"listen_http_addr='0.0.0.0:9898'\"
+                                   -c \"remote_storage={endpoint='http://minio:9000',
+                                                        bucket_name='neon',
+                                                        bucket_region='eu-north-1',
+                                                        prefix_in_bucket='/pageserver/'}\""
+    depends_on:
+      - etcd
+      - minio_create_buckets
+
+  safekeeper1:
+    image: neondatabase/neon:${TAG:-latest}
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper1:5454
+      - SAFEKEEPER_ID=1
+      - BROKER_ENDPOINT=http://etcd:2379
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=password
+      #- RUST_BACKTRACE=1
+    ports:
+      #- 5454:5454 # pg protocol handler
+      - 7676:7676 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoints=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
+    depends_on:
+      - etcd
+      - minio_create_buckets
+
+  safekeeper2:
+    image: neondatabase/neon:${TAG:-latest}
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper2:5454
+      - SAFEKEEPER_ID=2
+      - BROKER_ENDPOINT=http://etcd:2379
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=password
+      #- RUST_BACKTRACE=1
+    ports:
+      #- 5454:5454 # pg protocol handler
+      - 7677:7676 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoints=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
+    depends_on:
+      - etcd
+      - minio_create_buckets
+
+  safekeeper3:
+    image: neondatabase/neon:${TAG:-latest}
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper3:5454
+      - SAFEKEEPER_ID=3
+      - BROKER_ENDPOINT=http://etcd:2379
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=password
+      #- RUST_BACKTRACE=1
+    ports:
+      #- 5454:5454 # pg protocol handler
+      - 7678:7676 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoints=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
+    depends_on:
+      - etcd
+      - minio_create_buckets
+
+  compute:
+    build:
+      context: ./image/compute
+      args:
+        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-14}:${TAG:-latest}
+        - http_proxy=$http_proxy
+        - https_proxy=$https_proxy
+    environment:
+      - PG_VERSION=${PG_VERSION:-14}
+      #- RUST_BACKTRACE=1
+    volumes:
+      - ./compute/var/db/postgres/specs/:/var/db/postgres/specs/
+      - ./compute/shell/:/shell/
+    ports:
+      - 55433:55433 # pg protocol handler
+      - 3080:3080 # http endpoints
+    entrypoint:
+      - "/shell/compute.sh"
+    depends_on:
+      - safekeeper1
+      - safekeeper2
+      - safekeeper3
+      - pageserver
+
+  compute_is_ready:
+    image: postgres:latest
+    entrypoint:
+      - "/bin/bash"
+      - "-c"
+    command:
+      - "until pg_isready -h compute -p 55433 ; do
+            echo 'Waiting to start compute...' && sleep 1;
+         done"
+    depends_on:
+      - compute
