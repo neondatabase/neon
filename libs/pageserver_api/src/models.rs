@@ -7,6 +7,10 @@ use utils::{
     lsn::Lsn,
 };
 
+use crate::reltag::RelTag;
+use anyhow::bail;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+
 /// A state of a tenant in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TenantState {
@@ -218,4 +222,161 @@ pub struct FailpointConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimelineGcRequest {
     pub gc_horizon: Option<u64>,
+}
+
+// Wrapped in libpq CopyData
+pub enum PagestreamFeMessage {
+    Exists(PagestreamExistsRequest),
+    Nblocks(PagestreamNblocksRequest),
+    GetPage(PagestreamGetPageRequest),
+    DbSize(PagestreamDbSizeRequest),
+}
+
+// Wrapped in libpq CopyData
+pub enum PagestreamBeMessage {
+    Exists(PagestreamExistsResponse),
+    Nblocks(PagestreamNblocksResponse),
+    GetPage(PagestreamGetPageResponse),
+    Error(PagestreamErrorResponse),
+    DbSize(PagestreamDbSizeResponse),
+}
+
+#[derive(Debug)]
+pub struct PagestreamExistsRequest {
+    pub latest: bool,
+    pub lsn: Lsn,
+    pub rel: RelTag,
+}
+
+#[derive(Debug)]
+pub struct PagestreamNblocksRequest {
+    pub latest: bool,
+    pub lsn: Lsn,
+    pub rel: RelTag,
+}
+
+#[derive(Debug)]
+pub struct PagestreamGetPageRequest {
+    pub latest: bool,
+    pub lsn: Lsn,
+    pub rel: RelTag,
+    pub blkno: u32,
+}
+
+#[derive(Debug)]
+pub struct PagestreamDbSizeRequest {
+    pub latest: bool,
+    pub lsn: Lsn,
+    pub dbnode: u32,
+}
+
+#[derive(Debug)]
+pub struct PagestreamExistsResponse {
+    pub exists: bool,
+}
+
+#[derive(Debug)]
+pub struct PagestreamNblocksResponse {
+    pub n_blocks: u32,
+}
+
+#[derive(Debug)]
+pub struct PagestreamGetPageResponse {
+    pub page: Bytes,
+}
+
+#[derive(Debug)]
+pub struct PagestreamErrorResponse {
+    pub message: String,
+}
+
+#[derive(Debug)]
+pub struct PagestreamDbSizeResponse {
+    pub db_size: i64,
+}
+
+impl PagestreamFeMessage {
+    pub fn parse(mut body: Bytes) -> anyhow::Result<PagestreamFeMessage> {
+        // TODO these gets can fail
+
+        // these correspond to the NeonMessageTag enum in pagestore_client.h
+        //
+        // TODO: consider using protobuf or serde bincode for less error prone
+        // serialization.
+        let msg_tag = body.get_u8();
+        match msg_tag {
+            0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
+                latest: body.get_u8() != 0,
+                lsn: Lsn::from(body.get_u64()),
+                rel: RelTag {
+                    spcnode: body.get_u32(),
+                    dbnode: body.get_u32(),
+                    relnode: body.get_u32(),
+                    forknum: body.get_u8(),
+                },
+            })),
+            1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
+                latest: body.get_u8() != 0,
+                lsn: Lsn::from(body.get_u64()),
+                rel: RelTag {
+                    spcnode: body.get_u32(),
+                    dbnode: body.get_u32(),
+                    relnode: body.get_u32(),
+                    forknum: body.get_u8(),
+                },
+            })),
+            2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
+                latest: body.get_u8() != 0,
+                lsn: Lsn::from(body.get_u64()),
+                rel: RelTag {
+                    spcnode: body.get_u32(),
+                    dbnode: body.get_u32(),
+                    relnode: body.get_u32(),
+                    forknum: body.get_u8(),
+                },
+                blkno: body.get_u32(),
+            })),
+            3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
+                latest: body.get_u8() != 0,
+                lsn: Lsn::from(body.get_u64()),
+                dbnode: body.get_u32(),
+            })),
+            _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
+        }
+    }
+}
+
+impl PagestreamBeMessage {
+    pub fn serialize(&self) -> Bytes {
+        let mut bytes = BytesMut::new();
+
+        match self {
+            Self::Exists(resp) => {
+                bytes.put_u8(100); /* tag from pagestore_client.h */
+                bytes.put_u8(resp.exists as u8);
+            }
+
+            Self::Nblocks(resp) => {
+                bytes.put_u8(101); /* tag from pagestore_client.h */
+                bytes.put_u32(resp.n_blocks);
+            }
+
+            Self::GetPage(resp) => {
+                bytes.put_u8(102); /* tag from pagestore_client.h */
+                bytes.put(&resp.page[..]);
+            }
+
+            Self::Error(resp) => {
+                bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put(resp.message.as_bytes());
+                bytes.put_u8(0); // null terminator
+            }
+            Self::DbSize(resp) => {
+                bytes.put_u8(104); /* tag from pagestore_client.h */
+                bytes.put_i64(resp.db_size);
+            }
+        }
+
+        bytes.into()
+    }
 }

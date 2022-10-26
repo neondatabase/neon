@@ -7,6 +7,9 @@ edition = "2021"
 serde = { version = "1.0", features = ["derive"] }
 serde_with = "2.0"
 const_format = "0.2.21"
+anyhow = { version = "1.0", features = ["backtrace"] }
+bytes = "1.0.1"
 
 utils = { path = "../utils" }
+postgres_ffi = { path = "../postgres_ffi" }
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

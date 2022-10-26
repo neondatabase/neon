@@ -37,8 +37,8 @@ use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::BlockNumber;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
-use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
+use pageserver_api::reltag::RelTag;
 
 use postgres_ffi::to_pg_timestamp;
 use utils::{
