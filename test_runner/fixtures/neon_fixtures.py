@@ -1628,6 +1628,8 @@ class NeonPageserver(PgProtocol):
     Initializes the repository via `neon init`.
     """
 
+    TEMP_FILE_SUFFIX = "___temp"
+
     def __init__(self, env: NeonEnv, port: PageserverPort, config_override: Optional[str] = None):
         super().__init__(host="localhost", port=port.pg, user="cloud_admin")
         self.env = env

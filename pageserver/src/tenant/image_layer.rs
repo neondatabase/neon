@@ -411,7 +411,7 @@ impl ImageLayer {
 ///
 /// 3. Call `finish`.
 ///
-pub struct ImageLayerWriter {
+struct ImageLayerWriterInner {
     conf: &'static PageServerConf,
     path: PathBuf,
     timeline_id: TimelineId,
@@ -423,14 +423,17 @@ pub struct ImageLayerWriter {
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 }
 
-impl ImageLayerWriter {
-    pub fn new(
+impl ImageLayerWriterInner {
+    ///
+    /// Start building a new image layer.
+    ///
+    fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> anyhow::Result<ImageLayerWriter> {
+    ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
         let path = ImageLayer::temp_path_for(
@@ -455,7 +458,7 @@ impl ImageLayerWriter {
         let block_buf = BlockBuf::new();
         let tree_builder = DiskBtreeBuilder::new(block_buf);
 
-        let writer = ImageLayerWriter {
+        let writer = Self {
             conf,
             path,
             timeline_id,
@@ -474,7 +477,7 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub fn put_image(&mut self, key: Key, img: &[u8]) -> Result<()> {
+    fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
         let off = self.blob_writer.write_blob(img)?;
 
@@ -485,7 +488,10 @@ impl ImageLayerWriter {
         Ok(())
     }
 
-    pub fn finish(self) -> anyhow::Result<ImageLayer> {
+    ///
+    /// Finish writing the image layer.
+    ///
+    fn finish(self) -> anyhow::Result<ImageLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -550,5 +556,78 @@ impl ImageLayerWriter {
         trace!("created image layer {}", layer.path().display());
 
         Ok(layer)
+    }
+}
+
+/// A builder object for constructing a new image layer.
+///
+/// Usage:
+///
+/// 1. Create the ImageLayerWriter by calling ImageLayerWriter::new(...)
+///
+/// 2. Write the contents by calling `put_page_image` for every key-value
+///    pair in the key range.
+///
+/// 3. Call `finish`.
+///
+/// # Note
+///
+/// As described in https://github.com/neondatabase/neon/issues/2650, it's
+/// possible for the writer to drop before `finish` is actually called. So this
+/// could lead to odd temporary files in the directory, exhausting file system.
+/// This structure wraps `ImageLayerWriterInner` and also contains `Drop`
+/// implementation that cleans up the temporary file in failure. It's not
+/// possible to do this directly in `ImageLayerWriterInner` since `finish` moves
+/// out some fields, making it impossible to implement `Drop`.
+///
+#[must_use]
+pub struct ImageLayerWriter {
+    inner: Option<ImageLayerWriterInner>,
+}
+
+impl ImageLayerWriter {
+    ///
+    /// Start building a new image layer.
+    ///
+    pub fn new(
+        conf: &'static PageServerConf,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
+        key_range: &Range<Key>,
+        lsn: Lsn,
+    ) -> anyhow::Result<ImageLayerWriter> {
+        Ok(Self {
+            inner: Some(ImageLayerWriterInner::new(
+                conf,
+                timeline_id,
+                tenant_id,
+                key_range,
+                lsn,
+            )?),
+        })
+    }
+
+    ///
+    /// Write next value to the file.
+    ///
+    /// The page versions must be appended in blknum order.
+    ///
+    pub fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_image(key, img)
+    }
+
+    ///
+    /// Finish writing the image layer.
+    ///
+    pub fn finish(mut self) -> anyhow::Result<ImageLayer> {
+        self.inner.take().unwrap().finish()
+    }
+}
+
+impl Drop for ImageLayerWriter {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.blob_writer.into_inner().remove();
+        }
     }
 }
