@@ -2,6 +2,7 @@ import pytest
 from fixtures.neon_fixtures import NeonEnv, NeonPageserver
 
 
+@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/2703")
 def test_image_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
@@ -45,6 +46,7 @@ def test_image_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     ), "pageserver should clean its temporary new image layer files on failure"
 
 
+@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/2703")
 def test_delta_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
@@ -73,7 +75,7 @@ def test_delta_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     )
 
     pageserver_http.configure_failpoints(("delta-layer-writer-fail-before-finish", "return"))
-    # Note: we cannot test whether the exception is exactly 'image-layer-writer-fail-before-finish'
+    # Note: we cannot test whether the exception is exactly 'delta-layer-writer-fail-before-finish'
     # since our code does it in loop, we cannot get this exact error for our request.
     with pytest.raises(Exception):
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
