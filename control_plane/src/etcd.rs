@@ -52,6 +52,10 @@ pub fn start_etcd_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
             // size smaller. Our test etcd clusters are very small.
             // See https://github.com/etcd-io/etcd/issues/7910
             "--quota-backend-bytes=100000000".to_string(),
+            // etcd doesn't compact (vacuum) with default settings,
+            // enable it to prevent space exhaustion.
+            "--auto-compaction-mode=revision".to_string(),
+            "--auto-compaction-retention=1".to_string(),
         ])
         .stdout(Stdio::from(etcd_stdout_file))
         .stderr(Stdio::from(etcd_stderr_file))
