@@ -1,0 +1,35 @@
+storage:
+  vars:
+    bucket_name: neon-prod-storage-eu-central-1
+    bucket_region: eu-central-1
+    console_mgmt_base_url: http://console-release.local
+    etcd_endpoints: etcd-0.eu-central-1.aws.neon.tech:2379
+    pageserver_config_stub:
+      pg_distrib_dir: /usr/local
+      remote_storage:
+        bucket_name: "{{ bucket_name }}"
+        bucket_region: "{{ bucket_region }}"
+        prefix_in_bucket: "pageserver/v1"
+    safekeeper_s3_prefix: safekeeper/v1/wal
+    hostname_suffix: ""
+    remote_user: ssm-user
+    ansible_aws_ssm_region: eu-central-1
+    ansible_aws_ssm_bucket_name: neon-prod-storage-eu-central-1
+    console_region_id: aws-eu-central-1
+
+  children:
+    pageservers:
+      hosts:
+        pageserver-0.eu-central-1.aws.neon.tech:
+          ansible_host:  i-0cd8d316ecbb715be
+        pageserver-1.eu-central-1.aws.neon.tech:
+          ansible_host:  i-090044ed3d383fef0
+
+    safekeepers:
+      hosts:
+        safekeeper-0.eu-central-1.aws.neon.tech:
+          ansible_host:  i-0b238612d2318a050
+        safekeeper-1.eu-central-1.aws.neon.tech:
+          ansible_host:  i-07b9c45e5c2637cd4
+        safekeeper-2.eu-central-1.aws.neon.tech:
+          ansible_host:  i-020257302c3c93d88

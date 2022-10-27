@@ -14,6 +14,7 @@ storage:
     hostname_suffix: ""
     remote_user: ssm-user
     ansible_aws_ssm_region: us-east-2
+    ansible_aws_ssm_bucket_name: neon-staging-storage-us-east-2
     console_region_id: aws-us-east-2
 
   children:
