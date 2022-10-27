@@ -625,11 +625,11 @@ jobs:
           (github.ref_name == 'main' || github.ref_name == 'release') &&
           github.event_name != 'workflow_dispatch'
         run: |
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.us-east-2.amazonaws.com/neon:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.us-east-2.amazonaws.com/compute-tools:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.us-east-2.amazonaws.com/compute-node:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.us-east-2.amazonaws.com/compute-node-v14:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.us-east-2.amazonaws.com/compute-node-v15:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
 
       - name: Configure Docker Hub login
         run: |
