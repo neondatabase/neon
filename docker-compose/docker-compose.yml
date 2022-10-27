@@ -2,6 +2,7 @@ version: '3'
 
 services:
   etcd:
+    restart: always
     image: quay.io/coreos/etcd:v3.5.4
     ports:
       - 2379:2379
@@ -9,7 +10,7 @@ services:
     environment:
       # This signifficantly speeds up etcd and we anyway don't data persistency there.
       ETCD_UNSAFE_NO_FSYNC: "1"
-    command: 
+    command:
       - "etcd"
       - "--auto-compaction-mode=revision"
       - "--auto-compaction-retention=1"
@@ -24,6 +25,7 @@ services:
       - "--quota-backend-bytes=134217728" # 128 MB
 
   minio:
+    restart: always
     image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z
     ports:
       - 9000:9000
@@ -41,7 +43,7 @@ services:
     entrypoint:
       - "/bin/sh"
       - "-c"
-    command: 
+    command:
       - "until (/usr/bin/mc alias set minio http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD) do
              echo 'Waiting to start minio...' && sleep 1;
          done;
@@ -51,6 +53,7 @@ services:
       - minio
 
   pageserver:
+    restart: always
     image: neondatabase/neon:${TAG:-latest}
     environment:
       - BROKER_ENDPOINT='http://etcd:2379'
@@ -77,6 +80,7 @@ services:
       - minio_create_buckets
 
   safekeeper1:
+    restart: always
     image: neondatabase/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper1:5454
@@ -106,6 +110,7 @@ services:
       - minio_create_buckets
 
   safekeeper2:
+    restart: always
     image: neondatabase/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper2:5454
@@ -135,6 +140,7 @@ services:
       - minio_create_buckets
 
   safekeeper3:
+    restart: always
     image: neondatabase/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper3:5454
@@ -164,6 +170,7 @@ services:
       - minio_create_buckets
 
   compute:
+    restart: always
     build:
       context: ./image/compute
       args:
