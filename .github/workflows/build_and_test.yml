@@ -870,10 +870,10 @@ jobs:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-#    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-#    if: |
-#      (github.ref_name == 'main') &&
-#      github.event_name != 'workflow_dispatch'
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    if: |
+      (github.ref_name == 'main') &&
+      github.event_name != 'workflow_dispatch'
     defaults:
       run:
         shell: bash
@@ -896,8 +896,7 @@ jobs:
 
       - name: Re-deploy proxy
         run: |
-          # DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          DOCKER_TAG=2257
+          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   deploy-proxy-prod-new:
