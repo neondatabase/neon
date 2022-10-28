@@ -870,10 +870,10 @@ jobs:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-#    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-#    if: |
-#      (github.ref_name == 'main') &&
-#      github.event_name != 'workflow_dispatch'
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    if: |
+      (github.ref_name == 'main') &&
+      github.event_name != 'workflow_dispatch'
     defaults:
       run:
         shell: bash
@@ -893,6 +893,39 @@ jobs:
         run: |
           helm repo add neondatabase https://neondatabase.github.io/helm-charts
           aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}  --role-arn arn:aws:iam::369495373322:role/github-runner
+
+      - name: Re-deploy proxy
+        run: |
+          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+
+  deploy-proxy-prod-new:
+    runs-on: prod
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+#    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+#    if: |
+#      (github.ref_name == 'release') &&
+#      github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - target_region:  us-east-2
+            target_cluster: prod-us-east-2-delta
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure environment
+        run: |
+          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+          aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}  --role-arn arn:aws:iam::093970136003:role/github-runner
 
       - name: Re-deploy proxy
         run: |
