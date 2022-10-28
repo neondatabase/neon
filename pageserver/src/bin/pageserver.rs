@@ -14,7 +14,7 @@ use metrics::set_build_info_metric;
 
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, profiling, task_mgr,
+    http, page_cache, page_image_cache, page_service, profiling, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
@@ -101,6 +101,7 @@ fn main() -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
     page_cache::init(conf.page_cache_size);
+    page_image_cache::init(64 * conf.page_cache_size); // temporary hack for benchmarking
 
     start_pageserver(conf, daemonize).context("Failed to start pageserver")?;
 
