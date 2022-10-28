@@ -74,6 +74,7 @@ runs:
       run: ./scripts/pysync
 
     - name: Download compatibility snapshot for Postgres 14
+      if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg14
