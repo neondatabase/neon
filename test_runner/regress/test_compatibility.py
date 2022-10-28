@@ -259,8 +259,8 @@ def test_prepare_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_
     pageserver_http = env.pageserver.http_client()
     lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(pageserver_http, tenant_id, timeline_id, lsn)
 
     env.postgres.stop_all()
