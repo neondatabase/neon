@@ -319,6 +319,12 @@ impl VirtualFile {
 
         Ok(result)
     }
+
+    pub fn remove(self) {
+        let path = self.path.clone();
+        drop(self);
+        std::fs::remove_file(path).expect("failed to remove the virtual file");
+    }
 }
 
 impl Drop for VirtualFile {

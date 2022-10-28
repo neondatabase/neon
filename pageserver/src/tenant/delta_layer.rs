@@ -610,9 +610,9 @@ impl DeltaLayer {
 ///
 /// 3. Call `finish`.
 ///
-pub struct DeltaLayerWriter {
+struct DeltaLayerWriterInner {
     conf: &'static PageServerConf,
-    path: PathBuf,
+    pub path: PathBuf,
     timeline_id: TimelineId,
     tenant_id: TenantId,
 
@@ -624,17 +624,17 @@ pub struct DeltaLayerWriter {
     blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
 }
 
-impl DeltaLayerWriter {
+impl DeltaLayerWriterInner {
     ///
     /// Start building a new delta layer.
     ///
-    pub fn new(
+    fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
         key_start: Key,
         lsn_range: Range<Lsn>,
-    ) -> Result<DeltaLayerWriter> {
+    ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename. We don't know
         // the end key yet, so we cannot form the final filename yet. We will
         // rename it when we're done.
@@ -653,7 +653,7 @@ impl DeltaLayerWriter {
         let block_buf = BlockBuf::new();
         let tree_builder = DiskBtreeBuilder::new(block_buf);
 
-        Ok(DeltaLayerWriter {
+        Ok(Self {
             conf,
             path,
             timeline_id,
@@ -670,17 +670,17 @@ impl DeltaLayerWriter {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+    fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
         self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init())
     }
 
-    pub fn put_value_bytes(
+    fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
         val: &[u8],
         will_init: bool,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         assert!(self.lsn_range.start <= lsn);
 
         let off = self.blob_writer.write_blob(val)?;
@@ -693,14 +693,14 @@ impl DeltaLayerWriter {
         Ok(())
     }
 
-    pub fn size(&self) -> u64 {
+    fn size(&self) -> u64 {
         self.blob_writer.size() + self.tree.borrow_writer().size()
     }
 
     ///
     /// Finish writing the delta layer.
     ///
-    pub fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+    fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -765,6 +765,102 @@ impl DeltaLayerWriter {
         trace!("created delta layer {}", final_path.display());
 
         Ok(layer)
+    }
+}
+
+/// A builder object for constructing a new delta layer.
+///
+/// Usage:
+///
+/// 1. Create the DeltaLayerWriter by calling DeltaLayerWriter::new(...)
+///
+/// 2. Write the contents by calling `put_value` for every page
+///    version to store in the layer.
+///
+/// 3. Call `finish`.
+///
+/// # Note
+///
+/// As described in https://github.com/neondatabase/neon/issues/2650, it's
+/// possible for the writer to drop before `finish` is actually called. So this
+/// could lead to odd temporary files in the directory, exhausting file system.
+/// This structure wraps `DeltaLayerWriterInner` and also contains `Drop`
+/// implementation that cleans up the temporary file in failure. It's not
+/// possible to do this directly in `DeltaLayerWriterInner` since `finish` moves
+/// out some fields, making it impossible to implement `Drop`.
+///
+#[must_use]
+pub struct DeltaLayerWriter {
+    inner: Option<DeltaLayerWriterInner>,
+}
+
+impl DeltaLayerWriter {
+    ///
+    /// Start building a new delta layer.
+    ///
+    pub fn new(
+        conf: &'static PageServerConf,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
+        key_start: Key,
+        lsn_range: Range<Lsn>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: Some(DeltaLayerWriterInner::new(
+                conf,
+                timeline_id,
+                tenant_id,
+                key_start,
+                lsn_range,
+            )?),
+        })
+    }
+
+    ///
+    /// Append a key-value pair to the file.
+    ///
+    /// The values must be appended in key, lsn order.
+    ///
+    pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_value(key, lsn, val)
+    }
+
+    pub fn put_value_bytes(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        val: &[u8],
+        will_init: bool,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .as_mut()
+            .unwrap()
+            .put_value_bytes(key, lsn, val, will_init)
+    }
+
+    pub fn size(&self) -> u64 {
+        self.inner.as_ref().unwrap().size()
+    }
+
+    ///
+    /// Finish writing the delta layer.
+    ///
+    pub fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+        self.inner.take().unwrap().finish(key_end)
+    }
+}
+
+impl Drop for DeltaLayerWriter {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            match inner.blob_writer.into_inner().into_inner() {
+                Ok(vfile) => vfile.remove(),
+                Err(err) => warn!(
+                    "error while flushing buffer of image layer temporary file: {}",
+                    err
+                ),
+            }
+        }
     }
 }
 

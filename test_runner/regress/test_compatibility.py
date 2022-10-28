@@ -19,6 +19,8 @@ from fixtures.neon_fixtures import (
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
+DEFAILT_LOCAL_SNAPSHOT_DIR = "test_output/test_prepare_snapshot/compatibility_snapshot_pg14"
+
 
 def dump_differs(first: Path, second: Path, output: Path) -> bool:
     """
@@ -76,14 +78,18 @@ class PortReplacer(object):
         raise TypeError(f"unsupported type {type(value)} of {value=}")
 
 
+@pytest.mark.order(after="test_prepare_snapshot")
 def test_backward_compatibility(
     pg_bin: PgBin, port_distributor: PortDistributor, test_output_dir: Path, request: FixtureRequest
 ):
-    compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
-    assert (
-        compatibility_snapshot_dir_env is not None
-    ), "COMPATIBILITY_SNAPSHOT_DIR is not set. It should be set to `compatibility_snapshot_pg14` path generateted by test_prepare_snapshot"
-    compatibility_snapshot_dir = Path(compatibility_snapshot_dir_env).resolve()
+    compatibility_snapshot_dir = Path(
+        os.environ.get("COMPATIBILITY_SNAPSHOT_DIR", DEFAILT_LOCAL_SNAPSHOT_DIR)
+    )
+    assert compatibility_snapshot_dir.exists(), (
+        f"{compatibility_snapshot_dir} doesn't exist. Please run `test_prepare_snapshot` test first "
+        "to create the snapshot or set COMPATIBILITY_SNAPSHOT_DIR env variable to the existing snapshot"
+    )
+    compatibility_snapshot_dir = compatibility_snapshot_dir.resolve()
 
     # Make compatibility snapshot artifacts pickupable by Allure
     # by copying the snapshot directory to the curent test output directory.
@@ -229,7 +235,6 @@ def test_backward_compatibility(
     assert not initial_dump_differs, "initial dump differs"
 
 
-@pytest.mark.order(after="test_backward_compatibility")
 # Note: if renaming this test, don't forget to update a reference to it in a workflow file:
 # "Upload compatibility snapshot" step in .github/actions/run-python-test-set/action.yml
 def test_prepare_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path):

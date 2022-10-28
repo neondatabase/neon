@@ -1541,6 +1541,10 @@ impl Timeline {
                     lsn,
                 )?;
 
+                fail_point!("image-layer-writer-fail-before-finish", |_| {
+                    anyhow::bail!("failpoint image-layer-writer-fail-before-finish");
+                });
+
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
@@ -1835,6 +1839,11 @@ impl Timeline {
                     },
                 )?);
             }
+
+            fail_point!("delta-layer-writer-fail-before-finish", |_| {
+                anyhow::bail!("failpoint delta-layer-writer-fail-before-finish");
+            });
+
             writer.as_mut().unwrap().put_value(key, lsn, value)?;
             prev_key = Some(key);
         }
