@@ -275,6 +275,7 @@ impl PageServerHandler {
         pgb.flush().await?;
 
         let metrics = PageRequestMetrics::new(&tenant_id, &timeline_id);
+        let mut n_buffered_responses = 0usize;
 
         loop {
             let msg = tokio::select! {
@@ -312,7 +313,7 @@ impl PageServerHandler {
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
-                    do_flush = !req.prefetch;
+                    do_flush = !req.prefetch || n_buffered_responses > MAX_BUFFERED_RESPONSES;
                     self.handle_get_page_at_lsn_request(&timeline, &req).await
                 }
                 PagestreamFeMessage::DbSize(req) => {
@@ -331,8 +332,10 @@ impl PageServerHandler {
             });
 
             pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
+            n_buffered_responses += 1;
             if do_flush {
                 pgb.flush().await?;
+                n_buffered_responses = 0;
             }
         }
         Ok(())
