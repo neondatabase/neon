@@ -238,7 +238,7 @@ extern void forget_cached_relsize(RelFileNode rnode, ForkNumber forknum);
 extern const char *slru_kind_to_string(NeonSlruKind kind);
 extern bool slru_kind_from_string(const char* str, NeonSlruKind* kind);
 extern bool neon_slru_kind_check(SlruCtl ctl);
-extern bool neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, XLogRecPtr min_lsn, char *buffer);
-extern bool neon_slru_page_exists(SlruCtl ctl, int segno, off_t offset);
+extern bool neon_slru_read_page(SlruCtl ctl, int segno, BlockNumber blkno, XLogRecPtr min_lsn, char *buffer);
+extern bool neon_slru_page_exists(SlruCtl ctl, int segno, BlockNumber blkno);
 
 #endif

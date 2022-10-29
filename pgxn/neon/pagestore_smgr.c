@@ -1219,14 +1219,16 @@ neon_get_request_lsn(bool *latest, int region, RelFileNode rnode, ForkNumber for
 		elog(DEBUG1, "am walsender neon_get_request_lsn lsn 0 ");
 	}
 
-	// Since only keep track of the latest written LSN of the current region, we need to 
-	// rely on zenith to find the latest LSN. Hence, it is insufficient to use RegionIsRemote(region)
-	// because the global region is also separate from the current region.
+	/*
+	 * Remotexact
+	 * For region that is not the current one, we keep track of the first LSN fetched from
+	 * neon of a region. Any subsequent request of the same transaction to neon must reuse
+	 * the LSN for that region to avoid inconsistent snapshot read.
+	 */
 	else if (IsMultiRegion() && region != current_region)
 	{
 		*latest = false;
 		lsn = get_region_lsn(region);
-		elog(LOG, "get lsn %X/%X for region %d", LSN_FORMAT_ARGS(lsn), region);
 		if (lsn == InvalidXLogRecPtr)
 			*latest = true;
 	}
@@ -2508,22 +2510,23 @@ neon_slru_kind_check(SlruCtl ctl)
 	return false;
 }
 
+#define BlockNumberToRegion(blkno) (blkno % MAX_REGIONS)
+
 /**
  * neon_slru_read_page() -- Read the specified block from a Simple LRU.
  *
  * NOTE: Never call ereport(ERROR) in here to comply with the behavior expected in slru.c
  */
 bool
-neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, XLogRecPtr min_lsn, char *buffer)
+neon_slru_read_page(SlruCtl ctl, int segno, BlockNumber blkno, XLogRecPtr lsn, char *buffer)
 {
 	NeonResponse 				*resp;
 	NeonGetSlruPageResponse 	*get_slru_page_resp;
 	NeonSlruKind	kind;
 	bool			latest;
-	XLogRecPtr		request_lsn = min_lsn;
+	XLogRecPtr		request_lsn = lsn;
 	bool 			read_ok = false;
-	// FIXME: select the right region for specific slru kinds
-	int				region = current_region;
+	int				region = BlockNumberToRegion(blkno);
 	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
 
 	if (!slru_kind_from_string(ctl->Dir, &kind))
@@ -2532,9 +2535,8 @@ neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, XLogRecPtr min_lsn, ch
 		return false;
 	}
 
-	// FIXME: select the right region for specific slru kinds
-	// IF the caller has set a min_lsn, then use the same for the request.
-	if (min_lsn == InvalidXLogRecPtr) {
+	// IF the caller has set a lsn, then use the same for the request.
+	if (lsn == InvalidXLogRecPtr) {
         request_lsn =
             neon_get_request_lsn(&latest, region, dummy_node, MAIN_FORKNUM,
                                 REL_METADATA_PSEUDO_BLOCKNO);
@@ -2564,7 +2566,7 @@ neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, XLogRecPtr min_lsn, ch
 			.req.region = region,
 			.kind = kind,
 			.segno = segno,
-			.blkno = offset,
+			.blkno = blkno,
 			.check_exists_only = false
 		};
 
@@ -2595,12 +2597,13 @@ neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, XLogRecPtr min_lsn, ch
 		case T_NeonErrorResponse:
 			ereport(WARNING,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read block %lu in SLRU %s/%u in region %d, from page server at lsn %X/%08X",
-							offset,
+					 errmsg("could not read block %u in SLRU %s/%u in region %d, from page server at lsn %X/%08X (latest = %d)",
+							blkno,
 							slru_kind_to_string(kind),
 							segno,
 							region,
-							(uint32) (request_lsn >> 32), (uint32) request_lsn),
+							(uint32) (request_lsn >> 32), (uint32) request_lsn,
+							latest),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
@@ -2615,14 +2618,13 @@ neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, XLogRecPtr min_lsn, ch
 }
 
 bool
-neon_slru_page_exists(SlruCtl ctl, int segno, off_t offset)
+neon_slru_page_exists(SlruCtl ctl, int segno, BlockNumber blkno)
 {
 	NeonResponse	*resp;
 	NeonSlruKind	kind;
 	bool			latest;
 	XLogRecPtr		request_lsn;
-	// FIXME: select the right region for specific slru kinds
-	int				region = current_region;
+	int				region = BlockNumberToRegion(blkno);
 	bool			exists = false;
 	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
 
@@ -2632,8 +2634,12 @@ neon_slru_page_exists(SlruCtl ctl, int segno, off_t offset)
 		return false;
 	}
 
-	// FIXME: select the right region for specific slru kinds
 	request_lsn = neon_get_request_lsn(&latest, region, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+
+	/* See comment in neon_slru_read_page */
+	if (RecoveryInProgress() && request_lsn == InvalidXLogRecPtr) 
+		latest = true;
+
 	{
 		NeonGetSlruPageRequest request = {
 			.req.tag = T_NeonGetSlruPageRequest,
@@ -2642,7 +2648,7 @@ neon_slru_page_exists(SlruCtl ctl, int segno, off_t offset)
 			.req.region = region,
 			.kind = kind,
 			.segno = segno,
-			.blkno = offset,
+			.blkno = blkno,
 			.check_exists_only = true
 		};
 
@@ -2658,12 +2664,13 @@ neon_slru_page_exists(SlruCtl ctl, int segno, off_t offset)
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read block %lu in SLRU %s/%u in region %d from page server at lsn %X/%08X",
-							offset,
+					 errmsg("could not check existence of block %u in SLRU %s/%u in region %d from page server at lsn %X/%08X (latest = %d)",
+							blkno,
 							slru_kind_to_string(kind),
 							segno,
 							region,
-							(uint32) (request_lsn >> 32), (uint32) request_lsn),
+							(uint32) (request_lsn >> 32), (uint32) request_lsn,
+							latest),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
