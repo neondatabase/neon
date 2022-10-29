@@ -23,6 +23,7 @@
 #include "rewrite/rewriteHandler.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 
 typedef struct ApplyExecutionData
 {
@@ -51,6 +52,8 @@ static void apply_handle_delete(StringInfo s, bool skip);
 static void apply_handle_delete_internal(ApplyExecutionData *edata,
 										 ResultRelInfo *relinfo,
 									     TupleTableSlot *remoteslot);
+static void begin_apply(void);
+static void end_apply(void);
 static bool FindReplTupleInLocalRel(EState *estate, Relation localrel,
 									TupleTableSlot *remoteslot,
 									TupleTableSlot **localslot);
@@ -106,6 +109,8 @@ apply_writes(RWSet *rwset)
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg_internal("[remotexact] invalid write set message type \"%c\"", action)));
 		}
+
+		CommandCounterIncrement();
 	}
 }
 
@@ -127,6 +132,8 @@ apply_handle_insert(StringInfo s, bool skip)
 
 	if (skip)
 		return;
+
+	begin_apply();
 
 	rel = open_relation(relid, RowExclusiveLock);
 
@@ -151,6 +158,8 @@ apply_handle_insert(StringInfo s, bool skip)
 	finish_edata(edata);
 
 	close_relation(rel, NoLock);
+	
+	end_apply();
 }
 
 /*
@@ -192,6 +201,8 @@ apply_handle_update(StringInfo s, bool skip)
 
 	if (skip)
 		return;
+
+	begin_apply();
 
 	rel = open_relation(relid, RowExclusiveLock);
 
@@ -245,6 +256,8 @@ apply_handle_update(StringInfo s, bool skip)
 	finish_edata(edata);
 
 	close_relation(rel, NoLock);
+
+	end_apply();
 }
 
 /*
@@ -322,6 +335,8 @@ apply_handle_delete(StringInfo s, bool skip)
 	if (skip)
 		return;
 
+	begin_apply();
+
 	rel = open_relation(relid, RowExclusiveLock);
 
 	/* Check if we can do the delete. */
@@ -348,6 +363,8 @@ apply_handle_delete(StringInfo s, bool skip)
 	finish_edata(edata);
 
 	close_relation(rel, NoLock);
+
+	end_apply();
 }
 
 /*
@@ -394,6 +411,23 @@ apply_handle_delete_internal(ApplyExecutionData *edata,
 	/* Cleanup. */
 	ExecCloseIndices(relinfo);
 	EvalPlanQualEnd(&epqstate);
+}
+
+static void
+begin_apply(void)
+{
+	if (!IsTransactionState())
+		StartTransactionCommand();
+
+	PushActiveSnapshot(GetTransactionSnapshot());
+}
+
+static void
+end_apply(void)
+{
+	PopActiveSnapshot();
+
+	CommandCounterIncrement();
 }
 
 /*
