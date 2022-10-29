@@ -91,7 +91,7 @@ get_region_lsn(int region)
 	// LSN of the current region is already tracked by postgres
 	AssertArg(region != current_region);
 	AssertArg(region < MAX_REGIONS);
-
+	// TODO (ctring): If this is 0, proactively contact neon for the latest lsn
 	return region_lsns[region];
 }
 
