@@ -60,7 +60,6 @@ typedef struct
 {
 	NeonMessageTag tag;
 	bool		latest;			/* if true, request latest page version */
-	bool		prefetch;		/* if true, then request is followed by more prefetch requests */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
 }			NeonRequest;
 
@@ -172,7 +171,7 @@ extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
 						BlockNumber blocknum, char *buffer, bool skipFsync);
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum);
-extern void neon_reset_prefetch(SMgrRelation reln);
+extern bool neon_prefetch_in_progress(SMgrRelation reln);
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
 
