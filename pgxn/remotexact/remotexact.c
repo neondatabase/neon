@@ -77,17 +77,6 @@ static bool connect_to_txn_server(void);
 static int call_PQgetCopyData(PGconn *conn, char **buffer);
 static void clean_up_xact_callback(XactEvent event, void *arg);
 
-/* Set the statusFlag for MyProc to indicate that this is a remote xact. 
- * The PROC_IS_REMOTEXACT enables other processes to idenitfy this process as
- * executing a remote xact, thus avoiding deadlocks by aborting xacts. 
- */
-static inline void set_remotexact_procflags(void) {
-	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags |= PROC_IS_REMOTEXACT;
-	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-	LWLockRelease(ProcArrayLock);
-}
-
 /* Unet the PROC_IS_REMOTEXACT statusFlag for MyProc once the remotexact
  * completes its execution. 
  */
@@ -146,8 +135,15 @@ rwset_add_region(int region)
 	Assert(RegionIsValid(region));
 	Assert(rwset_collection_buffer != NULL);
 
-	// Mark the xact as remote in the procarray before adding the region.
-	set_remotexact_procflags();
+	/* Mark the xact as remote in the procarray before adding the region.
+	 * We do this by setting isRemoteXact to ture. Since we are writing to
+	 * our own process, we don't need to lock the ProcArray. Also since its
+	 * a volatile variable, we know that any subsequent reader will see the
+	 * value as true. Any process running a remotexact will idenitfy this
+	 * process as executing a remotexact while checking for deadlocks, thus
+	 * detecting a potential deadlock. 
+	 */
+	MyProc->isRemoteXact = true;
 
 	/* Set the corresponding region bit in the header */
 	rwset_collection_buffer->header.region_set |= SingleRegion(region);
@@ -595,7 +591,11 @@ connect_to_txn_server(void)
 static void
 clean_up_xact_callback(XactEvent event, void *arg)
 {
-	unset_remotexact_procflags();
+	/* Unet the PROC_IS_REMOTEXACT statusFlag for MyProc once the remotexact
+	* completes its execution. We don't need to lock the ProcArray because we
+	* are writing to out own process.
+	*/
+	MyProc->isRemoteXact = false;
 	if (event == XACT_EVENT_ABORT ||
 		event == XACT_EVENT_PARALLEL_ABORT ||
 		event == XACT_EVENT_COMMIT ||

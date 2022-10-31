@@ -32,22 +32,22 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 
 	ereport(LOG, errmsg("%s", RWSetToString(rwset)));
 
-	// Mark the xact as remote before starting validation. 
-	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags |= PROC_IS_REMOTEXACT;
-	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-	LWLockRelease(ProcArrayLock);
+	/* Mark the xact as remote before starting validation by setting the
+	 * isRemoteXact flag in MyProc. We don't lock the ProcArray because its
+	 * our own process.
+	 */
+	MyProc->isRemoteXact = true;
 
 	// Apply the writes
 	apply_writes(rwset);
 
 	RWSetFree(rwset);
 
-	// Unset REMOTEXACT flag after validation is complete. 
-	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags &= ~PROC_IS_REMOTEXACT;
-	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-	LWLockRelease(ProcArrayLock);
+	/* Mark the xact as local because validation is complete by unsetting the
+	 * isRemoteXact flag in MyProc. We don't lock the ProcArray because its
+	 * our own process.
+	 */
+	MyProc->isRemoteXact = false;
 
 	PG_RETURN_BOOL(true);
 }
