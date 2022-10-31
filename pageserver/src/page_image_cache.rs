@@ -29,6 +29,19 @@ enum PageImageState {
     Loading(Option<Arc<Condvar>>), // page in process of loading, Condvar is created on demand when some thread need to wait load completion
 }
 
+impl std::fmt::Debug for PageImageState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vacant => write!(f, "Vacant"),
+            Self::Loaded(arg0) => f
+                .debug_tuple("Loaded")
+                .field(&arg0.as_ref().map(|_| "<loaded>").unwrap_or("<failed>"))
+                .finish(),
+            Self::Loading(arg0) => f.debug_tuple("Loading").field(arg0).finish(),
+        }
+    }
+}
+
 struct CacheEntry {
     key: MaterializedPageHashKey,
 
@@ -276,14 +289,10 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
         let res = timeline.get_rel_page_at_lsn(rel, blkno, lsn, true);
 
         cache = this.lock().unwrap();
-        if let PageImageState::Loading(event) = &cache.pages[index].state {
-            // Are there soMe waiting threads?
-            if let Some(cv) = event {
-                // If so, then wakeup them
-                cv.notify_all();
-            }
-        } else {
-            bail!("Loading state is expected");
+        match &cache.pages[index].state {
+            PageImageState::Loading(Some(cv)) => cv.notify_all(),
+            PageImageState::Loading(None) => {}
+            other => bail!("expected Loading(_), found {other:?}"),
         }
         if cache.is_empty(index) {
             // entry was not marked as deleted {
