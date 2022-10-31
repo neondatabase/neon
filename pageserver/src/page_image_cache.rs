@@ -25,7 +25,7 @@ const TEST_PAGE_CACHE_SIZE: usize = 50;
 
 enum PageImageState {
     Vacant,                        // entry is not used
-    Loaded(Bytes),                 // page is loaded
+    Loaded(Option<Bytes>),         // page is loaded or has failed
     Loading(Option<Arc<Condvar>>), // page in process of loading, Condvar is created on demand when some thread need to wait load completion
 }
 
@@ -210,7 +210,7 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
                         let page = cached_page.clone();
                         cache.unlink(index);
                         cache.link_after(0, index);
-                        return Ok(page);
+                        return page.ok_or(anyhow::anyhow!("page loading failed earlier"));
                     }
                     PageImageState::Loading(event) => {
                         // Create event on which to sleep if not yet assigned
@@ -273,7 +273,7 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
         drop(cache); //release lock
 
         // Load page
-        let page = timeline.get_rel_page_at_lsn(rel, blkno, lsn, true)?;
+        let res = timeline.get_rel_page_at_lsn(rel, blkno, lsn, true);
 
         cache = this.lock().unwrap();
         if let PageImageState::Loading(event) = &cache.pages[index].state {
@@ -288,7 +288,12 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
         if cache.is_empty(index) {
             // entry was not marked as deleted {
             // Page is loaded
-            cache.pages[index].state = PageImageState::Loaded(page.clone());
+
+            // match &res { ... } is same as `res.as_ref().ok().cloned()`
+            cache.pages[index].state = PageImageState::Loaded(match &res {
+                Ok(page) => Some(page.clone()),
+                Err(_) => None,
+            });
             // Link the page to the head of LRU list
             cache.link_after(0, index);
         } else {
@@ -297,6 +302,7 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
             cache.pages[index].next = cache.free_list;
             cache.free_list = index;
         }
-        return Ok(page);
+        // only the first one gets the full error from `get_rel_page_at_lsn`
+        return res;
     }
 }
