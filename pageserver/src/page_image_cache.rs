@@ -288,12 +288,7 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
         if cache.is_empty(index) {
             // entry was not marked as deleted {
             // Page is loaded
-
-            // match &res { ... } is same as `res.as_ref().ok().cloned()`
-            cache.pages[index].state = PageImageState::Loaded(match &res {
-                Ok(page) => Some(page.clone()),
-                Err(_) => None,
-            });
+            cache.pages[index].state = PageImageState::Loaded(res.as_ref().ok().cloned());
             // Link the page to the head of LRU list
             cache.link_after(0, index);
         } else {
