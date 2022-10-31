@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use utils::{
-    connstring::connection_host_port,
     id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
@@ -300,7 +299,8 @@ impl PostgresNode {
 
         // Configure the node to fetch pages from pageserver
         let pageserver_connstr = {
-            let (host, port) = connection_host_port(&self.pageserver.pg_connection_config);
+            let config = &self.pageserver.pg_connection_config;
+            let (host, port) = (config.host(), config.port());
 
             // Set up authentication
             //

@@ -836,15 +836,20 @@ fn wal_stream_connection_string(
     listen_pg_addr_str: &str,
 ) -> anyhow::Result<String> {
     let sk_connstr = format!("postgresql://no_user@{listen_pg_addr_str}/no_db");
-    let me_conf = sk_connstr
-        .parse::<postgres::config::Config>()
-        .with_context(|| {
-            format!("Failed to parse pageserver connection string '{sk_connstr}' as a postgres one")
-        })?;
-    let (host, port) = utils::connstring::connection_host_port(&me_conf);
-    Ok(format!(
-        "host={host} port={port} options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
-    ))
+    sk_connstr
+        .parse()
+        .context("bad url")
+        .and_then(|url: url::Url| {
+            let host = url.host_str().context("host is missing")?;
+            let port = url.port().unwrap_or(5432); // default PG port
+
+            Ok(format!(
+                "host={host} \
+                 port={port} \
+                 options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
+            ))
+        })
+        .with_context(|| format!("Failed to parse pageserver connection URL '{sk_connstr}'"))
 }
 
 #[cfg(test)]
@@ -892,7 +897,7 @@ mod tests {
                         peer_horizon_lsn: None,
                         local_start_lsn: None,
 
-                        safekeeper_connstr: Some("no commit_lsn".to_string()),
+                        safekeeper_connstr: Some("no_commit_lsn".to_string()),
                     },
                     etcd_version: 0,
                     latest_update: now,
@@ -909,7 +914,7 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         local_start_lsn: None,
-                        safekeeper_connstr: Some("no commit_lsn".to_string()),
+                        safekeeper_connstr: Some("no_commit_lsn".to_string()),
                     },
                     etcd_version: 0,
                     latest_update: now,
@@ -1005,7 +1010,7 @@ mod tests {
                         peer_horizon_lsn: None,
                         local_start_lsn: None,
 
-                        safekeeper_connstr: Some("not advanced Lsn".to_string()),
+                        safekeeper_connstr: Some("not_advanced_lsn".to_string()),
                     },
                     etcd_version: 0,
                     latest_update: now,
@@ -1023,7 +1028,7 @@ mod tests {
                         peer_horizon_lsn: None,
                         local_start_lsn: None,
 
-                        safekeeper_connstr: Some("not enough advanced Lsn".to_string()),
+                        safekeeper_connstr: Some("not_enough_advanced_lsn".to_string()),
                     },
                     etcd_version: 0,
                     latest_update: now,
@@ -1093,7 +1098,7 @@ mod tests {
                         peer_horizon_lsn: None,
                         local_start_lsn: None,
 
-                        safekeeper_connstr: Some("smaller commit_lsn".to_string()),
+                        safekeeper_connstr: Some("smaller_commit_lsn".to_string()),
                     },
                     etcd_version: 0,
                     latest_update: now,
@@ -1283,7 +1288,7 @@ mod tests {
                         peer_horizon_lsn: None,
                         local_start_lsn: None,
 
-                        safekeeper_connstr: Some("advanced by Lsn safekeeper".to_string()),
+                        safekeeper_connstr: Some("advanced_by_lsn_safekeeper".to_string()),
                     },
                     etcd_version: 0,
                     latest_update: now,
@@ -1307,7 +1312,7 @@ mod tests {
         );
         assert!(over_threshcurrent_candidate
             .wal_source_connstr
-            .contains("advanced by Lsn safekeeper"));
+            .contains("advanced_by_lsn_safekeeper"));
 
         Ok(())
     }

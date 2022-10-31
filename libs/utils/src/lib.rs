@@ -19,9 +19,6 @@ pub mod postgres_backend;
 pub mod postgres_backend_async;
 pub mod pq_proto;
 
-// dealing with connstring parsing and handy access to it's parts
-pub mod connstring;
-
 // helper functions for creating and fsyncing
 pub mod crashsafe;
 
