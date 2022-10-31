@@ -37,6 +37,7 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 	 * our own process.
 	 */
 	MyProc->isRemoteXact = true;
+	pg_write_barrier();
 
 	// Apply the writes
 	apply_writes(rwset);
@@ -48,6 +49,7 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 	 * our own process.
 	 */
 	MyProc->isRemoteXact = false;
+	pg_write_barrier();
 
 	PG_RETURN_BOOL(true);
 }

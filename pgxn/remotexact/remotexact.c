@@ -77,16 +77,6 @@ static bool connect_to_txn_server(void);
 static int call_PQgetCopyData(PGconn *conn, char **buffer);
 static void clean_up_xact_callback(XactEvent event, void *arg);
 
-/* Unet the PROC_IS_REMOTEXACT statusFlag for MyProc once the remotexact
- * completes its execution. 
- */
-static inline void unset_remotexact_procflags(void) {
-	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags &= ~PROC_IS_REMOTEXACT;
-	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-	LWLockRelease(ProcArrayLock);
-}
-
 static void
 init_rwset_collection_buffer(Oid dbid)
 {
@@ -135,7 +125,8 @@ rwset_add_region(int region)
 	Assert(RegionIsValid(region));
 	Assert(rwset_collection_buffer != NULL);
 
-	/* Mark the xact as remote in the procarray before adding the region.
+	/* Mark the proc as executing a remotexact in the procarray before adding
+	 * the first remote region to the rwset.
 	 * We do this by setting isRemoteXact to ture. Since we are writing to
 	 * our own process, we don't need to lock the ProcArray. Also since its
 	 * a volatile variable, we know that any subsequent reader will see the
@@ -143,9 +134,13 @@ rwset_add_region(int region)
 	 * process as executing a remotexact while checking for deadlocks, thus
 	 * detecting a potential deadlock. 
 	 */
-	MyProc->isRemoteXact = true;
-
-	/* Set the corresponding region bit in the header */
+	if (region != current_region &&
+		rwset_collection_buffer->header.region_set ==
+			SingleRegion(current_region)) {
+		MyProc->isRemoteXact = true;
+		pg_write_barrier();
+	}
+        /* Set the corresponding region bit in the header */
 	rwset_collection_buffer->header.region_set |= SingleRegion(region);
 }
 
@@ -596,6 +591,7 @@ clean_up_xact_callback(XactEvent event, void *arg)
 	* are writing to out own process.
 	*/
 	MyProc->isRemoteXact = false;
+	pg_write_barrier();
 	if (event == XACT_EVENT_ABORT ||
 		event == XACT_EVENT_PARALLEL_ABORT ||
 		event == XACT_EVENT_COMMIT ||
