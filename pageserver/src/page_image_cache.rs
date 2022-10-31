@@ -25,7 +25,7 @@ const TEST_PAGE_CACHE_SIZE: usize = 50;
 
 enum PageImageState {
     Vacant,                        // entry is not used
-    Loaded(Bytes),            // page is loaded
+    Loaded(Bytes),                 // page is loaded
     Loading(Option<Arc<Condvar>>), // page in process of loading, Condvar is created on demand when some thread need to wait load completion
 }
 
@@ -189,12 +189,7 @@ pub fn remove(key: Key, tenant_id: TenantId, timeline_id: TimelineId) {
 }
 
 // Find or load page image in the cache
-pub fn lookup(
-    timeline: &Timeline,
-    rel: RelTag,
-    blkno: BlockNumber,
-    lsn: Lsn,
-) -> Result<Bytes> {
+pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) -> Result<Bytes> {
     let key = MaterializedPageHashKey {
         key: rel_block_to_key(rel, blkno),
         tenant_id: timeline.tenant_id,

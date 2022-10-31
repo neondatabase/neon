@@ -584,10 +584,10 @@ impl PageServerHandler {
         let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
 
         let page = if req.latest {
-            page_image_cache::lookup(timeline, req.rel, req.blkno, lsn)?
+            page_image_cache::lookup(timeline, req.rel, req.blkno, lsn)
         } else {
-            Arc::new(timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, false)?)
-        };
+            timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, false)
+        }?;
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
