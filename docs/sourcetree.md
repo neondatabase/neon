@@ -52,6 +52,10 @@ PostgreSQL extension that implements storage manager API and network communicati
 
 PostgreSQL extension that contains functions needed for testing and debugging.
 
+`/pgxn/neon_walredo`:
+
+Library to run Postgres as a "WAL redo process" in the pageserver.
+
 `/safekeeper`:
 
 The neon WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.

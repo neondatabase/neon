@@ -10,7 +10,7 @@
 //! process. Then we get the page image back. Communication with the
 //! postgres process happens via stdin/stdout
 //!
-//! See src/backend/tcop/zenith_wal_redo.c for the other side of
+//! See pgxn/neon_walredo/walredoproc.c for the other side of
 //! this communication.
 //!
 //! The Postgres process is assumed to be secure against malicious WAL
@@ -644,14 +644,12 @@ impl PostgresRedoProcess {
                 ),
             ));
         } else {
-            // Limit shared cache for wal-redo-postres
+            // Limit shared cache for wal-redo-postgres
             let mut config = OpenOptions::new()
                 .append(true)
                 .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
             config.write_all(b"shared_buffers=128kB\n")?;
             config.write_all(b"fsync=off\n")?;
-            config.write_all(b"shared_preload_libraries=neon\n")?;
-            config.write_all(b"neon.wal_redo=on\n")?;
         }
 
         // Start postgres itself
@@ -664,10 +662,11 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("PGDATA", &datadir)
-            // The redo process is not trusted, so it runs in seccomp mode
-            // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't
-            // inherit any file descriptors from the pageserver that would allow
-            // an attacker to do bad things.
+            // The redo process is not trusted, and runs in seccomp mode that
+            // doesn't allow it to open any files. We have to also make sure it
+            // doesn't inherit any file descriptors from the pageserver, that
+            // would allow an attacker to read any files that happen to be open
+            // in the pageserver.
             //
             // The Rust standard library makes sure to mark any file descriptors with
             // as close-on-exec by default, but that's not enough, since we use
@@ -844,7 +843,7 @@ impl PostgresRedoProcess {
 }
 
 // Functions for constructing messages to send to the postgres WAL redo
-// process. See vendor/postgres/src/backend/tcop/zenith_wal_redo.c for
+// process. See pgxn/neon_walredo/walredoproc.c for
 // explanation of the protocol.
 
 fn build_begin_redo_for_block_msg(tag: BufferTag, buf: &mut Vec<u8>) {

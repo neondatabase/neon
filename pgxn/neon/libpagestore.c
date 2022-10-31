@@ -419,15 +419,6 @@ pg_init_libpagestore(void)
 							   0,	/* no flags required */
 							   check_neon_id, NULL, NULL);
 
-	DefineCustomBoolVariable("neon.wal_redo",
-							 "start in wal-redo mode",
-							 NULL,
-							 &wal_redo,
-							 false,
-							 PGC_POSTMASTER,
-							 0,
-							 NULL, NULL, NULL);
-
 	DefineCustomIntVariable("neon.max_cluster_size",
 							"cluster size limit",
 							NULL,
@@ -452,13 +443,7 @@ pg_init_libpagestore(void)
 	neon_timeline_walproposer = neon_timeline;
 	neon_tenant_walproposer = neon_tenant;
 
-	if (wal_redo)
-	{
-		neon_log(PageStoreTrace, "set inmem_smgr hook");
-		smgr_hook = smgr_inmem;
-		smgr_init_hook = smgr_init_inmem;
-	}
-	else if (page_server_connstring && page_server_connstring[0])
+	if (page_server_connstring && page_server_connstring[0])
 	{
 		neon_log(PageStoreTrace, "set neon_smgr hook");
 		smgr_hook = smgr_neon;

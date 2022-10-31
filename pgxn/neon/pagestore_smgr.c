@@ -99,7 +99,6 @@ char	   *page_server_connstring;
 /*with substituted password*/
 char	   *neon_timeline;
 char	   *neon_tenant;
-bool		wal_redo = false;
 int32		max_cluster_size;
 
 /* unlogged relation build states */
