@@ -25,7 +25,7 @@ const TEST_PAGE_CACHE_SIZE: usize = 50;
 
 enum PageImageState {
     Vacant,                        // entry is not used
-    Loaded(Arc<Bytes>),            // page is loaded
+    Loaded(Bytes),            // page is loaded
     Loading(Option<Arc<Condvar>>), // page in process of loading, Condvar is created on demand when some thread need to wait load completion
 }
 
@@ -194,7 +194,7 @@ pub fn lookup(
     rel: RelTag,
     blkno: BlockNumber,
     lsn: Lsn,
-) -> Result<Arc<Bytes>> {
+) -> Result<Bytes> {
     let key = MaterializedPageHashKey {
         key: rel_block_to_key(rel, blkno),
         tenant_id: timeline.tenant_id,
@@ -278,7 +278,7 @@ pub fn lookup(
         drop(cache); //release lock
 
         // Load page
-        let page = Arc::new(timeline.get_rel_page_at_lsn(rel, blkno, lsn, true)?);
+        let page = timeline.get_rel_page_at_lsn(rel, blkno, lsn, true)?;
 
         cache = this.lock().unwrap();
         if let PageImageState::Loading(event) = &cache.pages[index].state {

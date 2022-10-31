@@ -282,7 +282,7 @@ pub struct PagestreamNblocksResponse {
 
 #[derive(Debug)]
 pub struct PagestreamGetPageResponse {
-    pub page: std::sync::Arc<Bytes>,
+    pub page: Bytes,
 }
 
 #[derive(Debug)]
