@@ -93,7 +93,7 @@ pub fn spawn_connection_manager_task(
             }
         }
         .instrument(
-            info_span!("wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id),
+            info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id),
         ),
     );
 }
