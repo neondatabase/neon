@@ -210,7 +210,7 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
                         let page = cached_page.clone();
                         cache.unlink(index);
                         cache.link_after(0, index);
-                        return page.ok_or(anyhow::anyhow!("page loading failed earlier"));
+                        return page.ok_or_else(|| anyhow::anyhow!("page loading failed earlier"));
                     }
                     PageImageState::Loading(event) => {
                         // Create event on which to sleep if not yet assigned
