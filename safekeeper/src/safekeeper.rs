@@ -18,11 +18,11 @@ use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::wal_storage;
+use pq_proto::{ReplicationFeedback, SystemId};
 use utils::{
     bin_ser::LeSer,
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    pq_proto::{ReplicationFeedback, SystemId},
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;

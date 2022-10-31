@@ -1,8 +1,6 @@
 //! `utils` is intended to be a place to put code that is shared
 //! between other crates in this repository.
 
-#![allow(clippy::manual_range_contains)]
-
 /// `Lsn` type implements common tasks on Log Sequence Numbers
 pub mod lsn;
 /// SeqWait allows waiting for a future sequence number to arrive
@@ -17,7 +15,6 @@ pub mod vec_map;
 pub mod bin_ser;
 pub mod postgres_backend;
 pub mod postgres_backend_async;
-pub mod pq_proto;
 
 // helper functions for creating and fsyncing
 pub mod crashsafe;
@@ -41,9 +38,6 @@ pub mod lock_file;
 // Misc
 pub mod accum;
 pub mod shutdown;
-
-// Tools for calling certain async methods in sync contexts
-pub mod sync;
 
 // Utility for binding TcpListeners with proper socket options.
 pub mod tcp_listener;

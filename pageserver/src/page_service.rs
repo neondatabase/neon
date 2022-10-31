@@ -19,6 +19,7 @@ use pageserver_api::models::{
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
     PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
+use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::io;
 use std::net::TcpListener;
 use std::str;
@@ -33,7 +34,6 @@ use utils::{
     lsn::Lsn,
     postgres_backend::AuthType,
     postgres_backend_async::{self, PostgresBackend},
-    pq_proto::{BeMessage, FeMessage, RowDescriptor},
     simple_rcu::RcuReadGuard,
 };
 

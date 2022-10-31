@@ -1,15 +1,13 @@
 use crate::auth;
 use anyhow::Context;
+use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use serde::Deserialize;
 use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
 use tracing::{error, info};
-use utils::{
-    postgres_backend::{self, AuthType, PostgresBackend},
-    pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
-};
+use utils::postgres_backend::{self, AuthType, PostgresBackend};
 
 /// TODO: move all of that to auth-backend/link.rs when we ditch legacy-console backend
 

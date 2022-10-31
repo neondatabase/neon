@@ -2,26 +2,20 @@
 //! to glue together SafeKeeper and all other background services.
 
 use anyhow::{bail, Result};
-
 use etcd_broker::subscription_value::SkTimelineInfo;
-
-use postgres_ffi::XLogSegNo;
-
-use tokio::{sync::watch, time::Instant};
-
-use std::cmp::{max, min};
-
 use parking_lot::{Mutex, MutexGuard};
-
+use postgres_ffi::XLogSegNo;
+use pq_proto::ReplicationFeedback;
+use std::cmp::{max, min};
 use std::path::PathBuf;
-
-use tokio::sync::mpsc::Sender;
+use tokio::{
+    sync::{mpsc::Sender, watch},
+    time::Instant,
+};
 use tracing::*;
-
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
-    pq_proto::ReplicationFeedback,
 };
 
 use crate::safekeeper::{

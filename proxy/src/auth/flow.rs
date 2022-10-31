@@ -2,9 +2,9 @@
 
 use super::{AuthErrorImpl, PasswordHackPayload};
 use crate::{sasl, scram, stream::PqStream};
+use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
-use utils::pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 
 /// Every authentication selector is supposed to implement this trait.
 pub trait AuthMethod {

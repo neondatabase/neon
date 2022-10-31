@@ -2,7 +2,9 @@
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
 
-use crate::sync::{AsyncishRead, SyncFuture};
+// Tools for calling certain async methods in sync contexts.
+pub mod sync;
+
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_protocol::PG_EPOCH;
@@ -16,6 +18,7 @@ use std::{
     str,
     time::{Duration, SystemTime},
 };
+use sync::{AsyncishRead, SyncFuture};
 use tokio::io::AsyncReadExt;
 use tracing::{trace, warn};
 
@@ -198,7 +201,7 @@ impl FeMessage {
     ///
     /// ```
     /// # use std::io;
-    /// # use utils::pq_proto::FeMessage;
+    /// # use pq_proto::FeMessage;
     /// #
     /// # fn process_message(msg: FeMessage) -> anyhow::Result<()> {
     /// #     Ok(())
@@ -302,6 +305,7 @@ impl FeStartupPacket {
                 Err(e) => return Err(e.into()),
             };
 
+            #[allow(clippy::manual_range_contains)]
             if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
                 bail!("invalid message length");
             }

@@ -1,12 +1,12 @@
 use crate::{cancellation::CancelClosure, error::UserFacingError};
 use futures::TryFutureExt;
 use itertools::Itertools;
+use pq_proto::StartupMessageParams;
 use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::NoTls;
 use tracing::{error, info};
-use utils::pq_proto::StartupMessageParams;
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -44,7 +44,7 @@ pub type ComputeConnCfg = tokio_postgres::Config;
 
 /// Various compute node info for establishing connection etc.
 pub struct NodeInfo {
-    /// Did we send [`utils::pq_proto::BeMessage::AuthenticationOk`]?
+    /// Did we send [`pq_proto::BeMessage::AuthenticationOk`]?
     pub reported_auth_ok: bool,
     /// Compute node connection params.
     pub config: tokio_postgres::Config,

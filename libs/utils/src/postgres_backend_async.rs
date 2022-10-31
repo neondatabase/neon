@@ -4,9 +4,9 @@
 //! is rather narrow, but we can extend it once required.
 
 use crate::postgres_backend::AuthType;
-use crate::pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage, FeStartupPacket};
 use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
+use pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage, FeStartupPacket};
 use rand::Rng;
 use std::future::Future;
 use std::net::SocketAddr;

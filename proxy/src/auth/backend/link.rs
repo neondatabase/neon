@@ -1,8 +1,8 @@
 use crate::{auth, compute, error::UserFacingError, stream::PqStream, waiters};
+use pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span};
-use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 #[derive(Debug, Error)]
 pub enum LinkAuthError {

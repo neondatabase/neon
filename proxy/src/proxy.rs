@@ -6,10 +6,10 @@ use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use metrics::{register_int_counter, IntCounter};
 use once_cell::sync::Lazy;
+use pq_proto::{BeMessage as Be, *};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, info_span, Instrument};
-use utils::pq_proto::{BeMessage as Be, *};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
