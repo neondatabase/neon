@@ -600,6 +600,7 @@ dependencies = [
  "tar",
  "thiserror",
  "toml",
+ "url",
  "utils",
  "workspace_hack",
 ]

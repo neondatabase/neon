@@ -9,12 +9,12 @@ use anyhow::bail;
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
-use utils::{connstring::connection_address, http::error::HttpErrorBody, id::NodeId};
+use utils::{http::error::HttpErrorBody, id::NodeId};
 
+use crate::connection::PgConnectionConfig;
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
 use crate::{fill_aws_secrets_vars, fill_rust_env_vars, read_pidfile};
@@ -63,7 +63,7 @@ pub struct SafekeeperNode {
 
     pub conf: SafekeeperConf,
 
-    pub pg_connection_config: Config,
+    pub pg_connection_config: PgConnectionConfig,
     pub env: LocalEnv,
     pub http_client: Client,
     pub http_base_url: String,
@@ -87,9 +87,9 @@ impl SafekeeperNode {
     }
 
     /// Construct libpq connection string for connecting to this safekeeper.
-    fn safekeeper_connection_config(port: u16) -> Config {
+    fn safekeeper_connection_config(port: u16) -> PgConnectionConfig {
         // TODO safekeeper authentication not implemented yet
-        format!("postgresql://no_user@127.0.0.1:{}/no_db", port)
+        format!("postgresql://no_user@127.0.0.1:{port}/no_db")
             .parse()
             .unwrap()
     }
@@ -109,7 +109,7 @@ impl SafekeeperNode {
     pub fn start(&self) -> anyhow::Result<()> {
         print!(
             "Starting safekeeper at '{}' in '{}'",
-            connection_address(&self.pg_connection_config),
+            self.pg_connection_config.raw_address(),
             self.datadir_path().display()
         );
         io::stdout().flush().unwrap();

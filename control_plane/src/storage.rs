@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 use std::{io, result, thread};
 
+use crate::connection::PgConnectionConfig;
 use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
@@ -14,12 +15,10 @@ use nix::unistd::Pid;
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
-use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use utils::{
-    connstring::connection_address,
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -75,7 +74,7 @@ impl ResponseErrorMessageExt for Response {
 //
 #[derive(Debug)]
 pub struct PageServerNode {
-    pub pg_connection_config: Config,
+    pub pg_connection_config: PgConnectionConfig,
     pub env: LocalEnv,
     pub http_client: Client,
     pub http_base_url: String,
@@ -101,7 +100,7 @@ impl PageServerNode {
     }
 
     /// Construct libpq connection string for connecting to the pageserver.
-    fn pageserver_connection_config(password: &str, listen_addr: &str) -> Config {
+    fn pageserver_connection_config(password: &str, listen_addr: &str) -> PgConnectionConfig {
         format!("postgresql://no_user:{password}@{listen_addr}/no_db")
             .parse()
             .unwrap()
@@ -212,7 +211,7 @@ impl PageServerNode {
     ) -> anyhow::Result<()> {
         println!(
             "Starting pageserver at '{}' in '{}'",
-            connection_address(&self.pg_connection_config),
+            self.pg_connection_config.raw_address(),
             datadir.display()
         );
         io::stdout().flush()?;
@@ -343,14 +342,14 @@ impl PageServerNode {
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
-        let mut client = self.pg_connection_config.connect(NoTls).unwrap();
+        let mut client = self.pg_connection_config.connect_no_tls().unwrap();
 
         println!("Pageserver query: '{sql}'");
         client.simple_query(sql).unwrap()
     }
 
     pub fn page_server_psql_client(&self) -> result::Result<postgres::Client, postgres::Error> {
-        self.pg_connection_config.connect(NoTls)
+        self.pg_connection_config.connect_no_tls()
     }
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
@@ -549,7 +548,7 @@ impl PageServerNode {
         pg_wal: Option<(Lsn, PathBuf)>,
         pg_version: u32,
     ) -> anyhow::Result<()> {
-        let mut client = self.pg_connection_config.connect(NoTls).unwrap();
+        let mut client = self.pg_connection_config.connect_no_tls().unwrap();
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
