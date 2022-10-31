@@ -24,9 +24,12 @@ static PAGE_CACHE: OnceCell<Mutex<PageImageCache>> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
 
 enum PageImageState {
-    Vacant,                        // entry is not used
-    Loaded(Option<Bytes>),         // page is loaded or has failed
-    Loading(Option<Arc<Condvar>>), // page in process of loading, Condvar is created on demand when some thread need to wait load completion
+    // entry is not used
+    Vacant,
+    // page is loaded or has failed
+    Loaded(Option<Bytes>),
+    // page in process of loading, Condvar is created on demand when some thread need to wait load completion
+    Loading(Option<Arc<Condvar>>),
 }
 
 impl std::fmt::Debug for PageImageState {
