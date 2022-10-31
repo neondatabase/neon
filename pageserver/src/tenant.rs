@@ -523,7 +523,6 @@ impl Tenant {
         let timelines = self.timelines.lock().unwrap();
         let timelines_to_compact = timelines
             .iter()
-            .filter(|(_, timeline)| timeline.is_active())
             .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
             .collect::<Vec<_>>();
         drop(timelines);
@@ -995,7 +994,6 @@ impl Tenant {
 
             timelines
                 .iter()
-                .filter(|(_, timeline)| timeline.is_active())
                 .map(|(timeline_id, timeline_entry)| {
                     // This is unresolved question for now, how to do gc in presence of remote timelines
                     // especially when this is combined with branching.
