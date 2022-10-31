@@ -2145,6 +2145,7 @@ dependencies = [
  "postgres-types",
  "postgres_ffi",
  "pprof",
+ "pq_proto",
  "rand",
  "regex",
  "remote_storage",
@@ -2439,6 +2440,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb9f9e6e233e5c4a35559a617bf40a4ec447db2e84c20b55a6f83167b7e57872"
 
 [[package]]
+name = "pq_proto"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "pin-project-lite",
+ "postgres-protocol",
+ "rand",
+ "serde",
+ "tokio",
+ "tracing",
+ "workspace_hack",
+]
+
+[[package]]
 name = "prettyplease"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2570,6 +2586,7 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.1",
  "pin-project-lite",
+ "pq_proto",
  "rand",
  "rcgen",
  "reqwest",
@@ -3086,6 +3103,7 @@ dependencies = [
  "postgres",
  "postgres-protocol",
  "postgres_ffi",
+ "pq_proto",
  "regex",
  "remote_storage",
  "safekeeper_api",
@@ -4046,9 +4064,7 @@ dependencies = [
  "metrics",
  "nix 0.25.0",
  "once_cell",
- "pin-project-lite",
- "postgres",
- "postgres-protocol",
+ "pq_proto",
  "rand",
  "routerify",
  "rustls",
@@ -4373,6 +4389,9 @@ dependencies = [
  "crossbeam-utils",
  "either",
  "fail",
+ "futures-channel",
+ "futures-task",
+ "futures-util",
  "hashbrown",
  "indexmap",
  "libc",
@@ -4386,6 +4405,7 @@ dependencies = [
  "rand",
  "regex",
  "regex-syntax",
+ "reqwest",
  "scopeguard",
  "serde",
  "stable_deref_trait",

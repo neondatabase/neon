@@ -383,7 +383,7 @@ impl Collector for TimelineCollector {
             let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
 
-            let mut most_advanced: Option<utils::pq_proto::ReplicationFeedback> = None;
+            let mut most_advanced: Option<pq_proto::ReplicationFeedback> = None;
             for replica in tli.replicas.iter() {
                 if let Some(replica_feedback) = replica.pageserver_feedback {
                     if let Some(current) = most_advanced {

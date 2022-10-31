@@ -23,11 +23,8 @@ use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 
 use crate::handler::SafekeeperPostgresHandler;
-use utils::{
-    postgres_backend::PostgresBackend,
-    pq_proto::{BeMessage, FeMessage},
-    sock_split::ReadStream,
-};
+use pq_proto::{BeMessage, FeMessage};
+use utils::{postgres_backend::PostgresBackend, sock_split::ReadStream};
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection

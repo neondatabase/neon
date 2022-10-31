@@ -29,7 +29,7 @@ impl<S, T: Future> SyncFuture<S, T> {
     /// Example:
     ///
     /// ```
-    /// # use utils::sync::SyncFuture;
+    /// # use pq_proto::sync::SyncFuture;
     /// # use std::future::Future;
     /// # use tokio::io::AsyncReadExt;
     /// #

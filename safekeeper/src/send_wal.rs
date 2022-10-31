@@ -17,16 +17,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{str, thread};
 
+use pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
 use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
 use tracing::*;
-use utils::{
-    bin_ser::BeSer,
-    lsn::Lsn,
-    postgres_backend::PostgresBackend,
-    pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody},
-    sock_split::ReadStream,
-};
+use utils::{bin_ser::BeSer, lsn::Lsn, postgres_backend::PostgresBackend, sock_split::ReadStream};
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';

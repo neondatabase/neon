@@ -2,6 +2,7 @@ use crate::error::UserFacingError;
 use anyhow::bail;
 use bytes::BytesMut;
 use pin_project_lite::pin_project;
+use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
 use rustls::ServerConfig;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -9,7 +10,6 @@ use std::{io, task};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_rustls::server::TlsStream;
-use utils::pq_proto::{BeMessage, FeMessage, FeStartupPacket};
 
 pin_project! {
     /// Stream wrapper which implements libpq's protocol.

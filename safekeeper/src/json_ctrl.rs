@@ -24,11 +24,8 @@ use crate::timeline::Timeline;
 use crate::GlobalTimelines;
 use postgres_ffi::encode_logical_message;
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use utils::{
-    lsn::Lsn,
-    postgres_backend::PostgresBackend,
-    pq_proto::{BeMessage, RowDescriptor, TEXT_OID},
-};
+use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
+use utils::{lsn::Lsn, postgres_backend::PostgresBackend};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {
