@@ -4,7 +4,7 @@
 # version, we can consider updating.
 # See https://tracker.debian.org/pkg/rustc for more details on Debian rustc package,
 # we use "unstable" version number as the highest version used in the project by default.
-channel = "1.61" # do update GitHub CI cache values for rust builds, when changing this value
+channel = "1.62.1" # do update GitHub CI cache values for rust builds, when changing this value
 profile = "default"
 # The default profile includes rustc, rust-std, cargo, rust-docs, rustfmt and clippy.
 # https://rust-lang.github.io/rustup/concepts/profiles.html
