@@ -184,6 +184,7 @@ async fn build_timeline_info(
 
 // healthcheck handler
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
     let config = get_config(&request);
     json_response(StatusCode::OK, StatusResponse { id: config.id })
 }
