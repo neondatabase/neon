@@ -2,14 +2,13 @@
 //! Applies common set-up such as log and pid files (if needed) to every process.
 //!
 //! Neon CLI does not run in background, so it needs to store the information about
-//! spawned processes which it does in this module.
-//! We do that by storing the pid of the process running in the "${process_name}.pid" file.
-//! Those files either created by the processes itself
+//! spawned processes, which it does in this module.
+//! We do that by storing the pid of the process in the "${process_name}.pid" file.
+//! The pid file can be created by the process itself
 //! (Neon storage binaries do that and also ensure that a lock is taken onto that file)
 //! or we create such file after starting the process
 //! (non-Neon binaries don't necessarily follow our pidfile conventions).
-//! The file contents is later used to stop the services, since Neon CLI gets stopped between
-//! invocations and cannot possibly know about particular running processes otherwise.
+//! The pid stored in the file is later used to stop the service.
 //!
 //! See [`lock_file`] module for more info.
 
@@ -30,17 +29,16 @@ use utils::lock_file;
 const RETRIES: u32 = 15;
 const RETRY_TIMEOUT_MILLIS: u64 = 500;
 
-/// Ensures process startup handles pidfile, either by creating the new one
-/// or by checking the one that the spawned process should create.
+/// Argument to `start_process`, to indicate whether it should create pidfile or if the process creates
+/// it itself.
 pub enum InitialPidFile<'t> {
-    /// Creates a special pidfile, to allow future CLI invocations to manipulate the process.
+    /// Create a pidfile, to allow future CLI invocations to manipulate the process.
     Create(&'t Path),
-    /// A process is creating the pidfile itself, need to wait for that event.
+    /// The process will create the pidfile itself, need to wait for that event.
     Expect(&'t Path),
 }
 
-/// Starts the background child process using the parameters given.
-/// Ensure that the pid file is created and contains the correct pid value.
+/// Start a background child process using the parameters given.
 pub fn start_process<F, S: AsRef<OsStr>>(
     process_name: &str,
     datadir: &Path,
@@ -85,10 +83,8 @@ where
         InitialPidFile::Create(target_pid_file_path) => {
             match lock_file::create_lock_file(target_pid_file_path, pid.to_string()) {
                 lock_file::LockCreationResult::Created { .. } => {
-                    // We use "lock" file here only to create a pid file for the non-storage binaries that need to leave
-                    // a file with pid so that neon_local could shut it down later.
-                    // So, drop the file that's created, hence drop the lock: we don't use it for non-storage processes,
-                    // the should take care of that themselves.
+                    // We use "lock" file here only to create the pid file. The lock on the pidfile will be dropped as soon
+                    // as this CLI invocation exits, so it's a bit useless, but doesn't any harm either.
                 }
                 lock_file::LockCreationResult::AlreadyLocked { .. } => {
                     anyhow::bail!("Cannot write pid file for {process_name} at path {target_pid_file_path:?}: file is already locked by another process")
@@ -134,7 +130,7 @@ where
     anyhow::bail!("{process_name} could not start in {RETRIES} attempts");
 }
 
-/// Stops the process, using the pid file given, ensures that the process is not running before returning.
+/// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
 pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> anyhow::Result<()> {
     if !pid_file.exists() {
         println!("{process_name} is already stopped: no pid file {pid_file:?} is present");
