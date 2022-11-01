@@ -106,7 +106,7 @@ jobs:
             !~/.cargo/registry/src
             ~/.cargo/git
             target
-          key: v5-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust
+          key: v6-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust
 
       - name: Run cargo clippy
         run: ./run_clippy.sh
