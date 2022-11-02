@@ -17,6 +17,7 @@ use itertools::Itertools;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
@@ -25,8 +26,10 @@ use tracing::*;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
+use postgres_ffi::pg_constants::{
+    AUTOPREWARM_FILE_NAME, PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA,
+};
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
-use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
 use postgres_ffi::TransactionId;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::PG_TLI;
@@ -145,6 +148,7 @@ where
                 self.ar.append(&header, &mut io::empty())?;
             }
         }
+        self.add_prewarm_file()?;
 
         // Gather non-relational files from object storage pages.
         for kind in [
@@ -215,6 +219,21 @@ where
             add_file(seg, &segment_data)?;
         }
 
+        Ok(())
+    }
+
+    //
+    // Include "autoprewarm-bin.blocks" in archive (if exists)
+    //
+    fn add_prewarm_file(&mut self) -> anyhow::Result<()> {
+        let path = self
+            .timeline
+            .conf
+            .timeline_path(&self.timeline.timeline_id, &self.timeline.tenant_id)
+            .join(AUTOPREWARM_FILE_NAME);
+        if PathBuf::from(&path).exists() {
+            self.ar.append_path_with_name(path, AUTOPREWARM_FILE_NAME)?;
+        }
         Ok(())
     }
 

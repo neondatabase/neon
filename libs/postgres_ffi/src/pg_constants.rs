@@ -232,3 +232,6 @@ pub const PGDATA_SPECIAL_FILES: [&str; 3] =
     ["pg_hba.conf", "pg_ident.conf", "postgresql.auto.conf"];
 
 pub static PG_HBA: &str = include_str!("../samples/pg_hba.conf");
+
+pub static AUTOPREWARM_FILE_NAME: &str = "autoprewarm.blocks";
+pub const SMGR_FCNTL_CACHE_SNAPSHOT: u32 = 1;

@@ -62,8 +62,8 @@ use crate::{
 };
 
 pub struct Timeline {
-    conf: &'static PageServerConf,
-    tenant_conf: Arc<RwLock<TenantConfOpt>>,
+    pub conf: &'static PageServerConf,
+    pub tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,

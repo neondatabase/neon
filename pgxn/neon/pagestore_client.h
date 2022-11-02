@@ -32,6 +32,7 @@ typedef enum
 	T_NeonNblocksRequest,
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
+	T_NeonFcntlRequest,
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -90,6 +91,14 @@ typedef struct
 	ForkNumber	forknum;
 	BlockNumber blkno;
 }			NeonGetPageRequest;
+
+typedef struct
+{
+	NeonRequest req;
+	int cmd;
+	int size;
+	char data[1];
+}			NeonFcntlRequest;
 
 /* supertype of all the Neon*Response structs below */
 typedef struct

@@ -15,10 +15,11 @@ use futures::{Stream, StreamExt};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
-    PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
-    PagestreamNblocksRequest, PagestreamNblocksResponse,
+    PagestreamFcntlRequest, PagestreamFeMessage, PagestreamGetPageRequest,
+    PagestreamGetPageResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
 use std::io;
+use std::io::Write;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
@@ -45,9 +46,12 @@ use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
 use crate::tenant_mgr;
+use crate::virtual_file::VirtualFile;
 use crate::CheckpointConfig;
-
-use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
+use crate::TEMP_FILE_SUFFIX;
+use postgres_ffi::pg_constants::{
+    AUTOPREWARM_FILE_NAME, DEFAULTTABLESPACE_OID, SMGR_FCNTL_CACHE_SNAPSHOT,
+};
 use postgres_ffi::BLCKSZ;
 
 fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + '_ {
@@ -317,6 +321,10 @@ impl PageServerHandler {
                     let _timer = metrics.get_db_size.start_timer();
                     self.handle_db_size_request(&timeline, &req).await
                 }
+                PagestreamFeMessage::Fcntl(req) => {
+                    self.handle_fcntl_request(&timeline, &req).await?;
+                    continue;
+                }
             };
 
             let response = response.unwrap_or_else(|e| {
@@ -584,6 +592,33 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
+    }
+
+    async fn handle_fcntl_request(
+        &self,
+        timeline: &Timeline,
+        req: &PagestreamFcntlRequest,
+    ) -> Result<()> {
+        if req.cmd == SMGR_FCNTL_CACHE_SNAPSHOT {
+            let temp_path = self
+                .conf
+                .timeline_path(&timeline.timeline_id, &timeline.tenant_id)
+                .join(format!("{AUTOPREWARM_FILE_NAME}.{TEMP_FILE_SUFFIX}"));
+            let mut file = VirtualFile::open_with_options(
+                &temp_path,
+                std::fs::OpenOptions::new().write(true).create_new(true),
+            )?;
+            file.write_all(&req.data)?;
+            drop(file);
+            let final_path = self
+                .conf
+                .timeline_path(&timeline.timeline_id, &timeline.tenant_id)
+                .join(AUTOPREWARM_FILE_NAME);
+            std::fs::rename(temp_path, &final_path)?;
+        } else {
+            warn!("Fcntl request {} is not supported", req.cmd);
+        }
+        Ok(())
     }
 
     #[instrument(skip(self, pgb))]

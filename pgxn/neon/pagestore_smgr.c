@@ -220,6 +220,15 @@ nm_pack_request(NeonRequest * msg)
 
 				break;
 			}
+		case T_NeonFcntlRequest:
+			{
+				NeonFcntlRequest *msg_req = (NeonFcntlRequest *) msg;
+				pq_sendint32(&s, msg_req->cmd);
+				pq_sendint32(&s, msg_req->size);
+				pq_sendbytes(&s, msg_req->data, msg_req->size);
+
+				break;
+			}
 
 			/* pagestore -> pagestore_client. We never need to create these. */
 		case T_NeonExistsResponse:
@@ -1012,6 +1021,19 @@ bool
 neon_prefetch_in_progress(SMgrRelation reln)
 {
 	return n_prefetch_requests + n_prefetch_responses != 0;
+}
+
+
+void
+neon_fcntl(SMgrRelation reln, int cmd, void const* data, size_t size)
+{
+	NeonFcntlRequest* req = (NeonFcntlRequest *)palloc(sizeof(NeonFcntlRequest) + size);
+	req->req.tag = T_NeonFcntlRequest;
+	req->cmd = cmd;
+	req->size = (int)size;
+	memcpy(req->data, data, size);
+	page_server->send((NeonRequest*) req);
+	page_server->flush();
 }
 
 /*
@@ -1827,6 +1849,7 @@ static const struct f_smgr neon_smgr =
 	.smgr_start_unlogged_build = neon_start_unlogged_build,
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
 	.smgr_end_unlogged_build = neon_end_unlogged_build,
+	.smgr_fcntl = neon_fcntl
 };
 
 const f_smgr *

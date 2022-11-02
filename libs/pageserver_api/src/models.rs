@@ -230,6 +230,7 @@ pub enum PagestreamFeMessage {
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
+    Fcntl(PagestreamFcntlRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -268,6 +269,12 @@ pub struct PagestreamDbSizeRequest {
     pub latest: bool,
     pub lsn: Lsn,
     pub dbnode: u32,
+}
+
+#[derive(Debug)]
+pub struct PagestreamFcntlRequest {
+    pub cmd: u32,
+    pub data: Bytes,
 }
 
 #[derive(Debug)]
@@ -341,6 +348,14 @@ impl PagestreamFeMessage {
                 lsn: Lsn::from(body.get_u64()),
                 dbnode: body.get_u32(),
             })),
+            4 => {
+                let cmd = body.get_u32();
+                let size = body.get_u32() as usize;
+                Ok(PagestreamFeMessage::Fcntl(PagestreamFcntlRequest {
+                    cmd,
+                    data: body.copy_to_bytes(size),
+                }))
+            }
             _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
         }
     }
