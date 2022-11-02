@@ -240,17 +240,17 @@ fn graphviz_price_tree(segments: &[Segment], tree: &SegmentPrice) {
 #[test]
 fn scenarios_return_same_price() {
     type ScenarioFn = fn() -> (Vec<Segment>, SegmentPrice);
-    let truths: &[(ScenarioFn, _)] = &[
-        (scenario_1, 8000),
-        (scenario_2, 9000),
-        (scenario_3, 13000),
-        (scenario_4, 16000),
-        (scenario_5, 17000),
-        (scenario_6, 333_792_000),
+    let truths: &[(u32, ScenarioFn, _)] = &[
+        (line!(), scenario_1, 8000),
+        (line!(), scenario_2, 9000),
+        (line!(), scenario_3, 13000),
+        (line!(), scenario_4, 16000),
+        (line!(), scenario_5, 17000),
+        (line!(), scenario_6, 333_792_000),
     ];
 
-    for (scenario, expected) in truths {
+    for (line, scenario, expected) in truths {
         let (_, price) = scenario();
-        assert_eq!(*expected, price.total_children());
+        assert_eq!(*expected, price.total_children(), "scenario on line {line}");
     }
 }
