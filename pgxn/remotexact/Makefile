@@ -4,9 +4,10 @@ MODULE_big = remotexact
 OBJS = \
 	$(WIN32RES)\
 	apply.o \
+	funcs.o \
 	remotexact.o \
 	rwset.o \
-	funcs.o 
+	validate.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
