@@ -2190,6 +2190,7 @@ name = "pageserver_api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "byteorder",
  "bytes",
  "const_format",
  "postgres_ffi",
