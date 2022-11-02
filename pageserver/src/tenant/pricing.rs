@@ -48,11 +48,21 @@ pub(super) async fn gather_inputs(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    // TODO: spawn_blocking, this will update latest_gc_cutoff_lsn, which can take a
-    // long time.
+    // TODO: spawn blocking?
     let timelines = tenant
         .refresh_gc_info(None)
-        .expect("should had succeeded in refreshing gc_info");
+        .context("Failed to refresh gc_info before gathering inputs")?;
+
+    if timelines.is_empty() {
+        // All timelines are below tenant's gc_horizon; alternative would be to use
+        // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
+        // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
+        return Ok(ModelInputs {
+            updates: vec![],
+            retention_period: 0,
+            timeline_inputs: HashMap::new(),
+        });
+    }
 
     // record the used/inserted cache keys here, to remove extras not to start leaking
     // after initial run the cache should be quite stable, but live timelines will eventually
