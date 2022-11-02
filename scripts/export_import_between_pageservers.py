@@ -378,7 +378,7 @@ def reconstruct_paths(log_dir, pg_bin, base_tar, port: int):
 
         # Start a vanilla postgres from the given datadir and query it to find
         # what relfiles should exist, but possibly don't.
-        with VanillaPostgres(restored_dir, pg_bin, port, init=False) as vanilla_pg:
+        with VanillaPostgres(Path(restored_dir), pg_bin, port, init=False) as vanilla_pg:
             vanilla_pg.configure([f"port={port}"])
             vanilla_pg.start(log_path=os.path.join(log_dir, "tmp_pg.log"))
 
