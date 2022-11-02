@@ -955,8 +955,9 @@ impl Tenant {
     //                 +-----baz-------->
     //
     //
-    // 1. Grab 'gc_cs' mutex to prevent new timelines from being created
-    // 2. Scan all timelines, and on each timeline, make note of the
+    // 1. Grab 'gc_cs' mutex to prevent new timelines from being created while Timeline's
+    //    `gc_infos` are being refreshed
+    // 2. Scan collected timelines, and on each timeline, make note of the
     //    all the points where other timelines have been branched off.
     //    We will refrain from removing page versions at those LSNs.
     // 3. For each timeline, scan all layer files on the timeline.
@@ -977,6 +978,67 @@ impl Tenant {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
+        let gc_timelines = self.refresh_gc_info_internal(target_timeline_id, horizon, pitr)?;
+
+        // Perform GC for each timeline.
+        //
+        // Note that we don't hold the GC lock here because we don't want
+        // to delay the branch creation task, which requires the GC lock.
+        // A timeline GC iteration can be slow because it may need to wait for
+        // compaction (both require `layer_removal_cs` lock),
+        // but the GC iteration can run concurrently with branch creation.
+        //
+        // See comments in [`Tenant::branch_timeline`] for more information
+        // about why branch creation task can run concurrently with timeline's GC iteration.
+        for timeline in gc_timelines {
+            if task_mgr::is_shutdown_requested() {
+                // We were requested to shut down. Stop and return with the progress we
+                // made.
+                break;
+            }
+
+            // If requested, force flush all in-memory layers to disk first,
+            // so that they too can be garbage collected. That's
+            // used in tests, so we want as deterministic results as possible.
+            if checkpoint_before_gc {
+                timeline.checkpoint(CheckpointConfig::Forced)?;
+                info!(
+                    "timeline {} checkpoint_before_gc done",
+                    timeline.timeline_id
+                );
+            }
+
+            let result = timeline.gc()?;
+            totals += result;
+        }
+
+        totals.elapsed = now.elapsed();
+        Ok(totals)
+    }
+
+    /// Refreshes the Timeline::gc_info for all timelines or only the given timeline, returning the
+    /// vector of active timelines (or just one, if target_timeline_id was specified).
+    ///
+    /// This is usually executed as part of periodic gc, but can now be triggered more often.
+    pub fn refresh_gc_info(
+        &self,
+        target_timeline_id: Option<TimelineId>,
+    ) -> anyhow::Result<Vec<Arc<Timeline>>> {
+        // TODO: since this method can now be called at different rates than the configured gc
+        // loop, it might be that these configuration values get applied faster than what it was
+        // previously, since these were only read from the gc task.
+        let horizon = self.get_gc_horizon();
+        let pitr = self.get_pitr_interval();
+
+        self.refresh_gc_info_internal(target_timeline_id, horizon, pitr)
+    }
+
+    fn refresh_gc_info_internal(
+        &self,
+        target_timeline_id: Option<TimelineId>,
+        horizon: u64,
+        pitr: Duration,
+    ) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // grab mutex to prevent new timelines from being created here.
         let gc_cs = self.gc_cs.lock().unwrap();
 
@@ -995,9 +1057,6 @@ impl Tenant {
             timelines
                 .iter()
                 .map(|(timeline_id, timeline_entry)| {
-                    // This is unresolved question for now, how to do gc in presence of remote timelines
-                    // especially when this is combined with branching.
-                    // Somewhat related: https://github.com/neondatabase/neon/issues/999
                     if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
                         // If target_timeline is specified, we only need to know branchpoints of its children
                         if let Some(timeline_id) = target_timeline_id {
@@ -1052,40 +1111,7 @@ impl Tenant {
         }
         drop(gc_cs);
 
-        // Perform GC for each timeline.
-        //
-        // Note that we don't hold the GC lock here because we don't want
-        // to delay the branch creation task, which requires the GC lock.
-        // A timeline GC iteration can be slow because it may need to wait for
-        // compaction (both require `layer_removal_cs` lock),
-        // but the GC iteration can run concurrently with branch creation.
-        //
-        // See comments in [`Tenant::branch_timeline`] for more information
-        // about why branch creation task can run concurrently with timeline's GC iteration.
-        for timeline in gc_timelines {
-            if task_mgr::is_shutdown_requested() {
-                // We were requested to shut down. Stop and return with the progress we
-                // made.
-                break;
-            }
-
-            // If requested, force flush all in-memory layers to disk first,
-            // so that they too can be garbage collected. That's
-            // used in tests, so we want as deterministic results as possible.
-            if checkpoint_before_gc {
-                timeline.checkpoint(CheckpointConfig::Forced)?;
-                info!(
-                    "timeline {} checkpoint_before_gc done",
-                    timeline.timeline_id
-                );
-            }
-
-            let result = timeline.gc()?;
-            totals += result;
-        }
-
-        totals.elapsed = now.elapsed();
-        Ok(totals)
+        Ok(gc_timelines)
     }
 
     /// Branch an existing timeline
