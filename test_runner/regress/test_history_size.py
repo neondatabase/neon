@@ -275,3 +275,70 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
     http_client.timeline_delete(tenant_id, second_branch_timeline_id)
     size_after_deleting_second = history_size(http_client, tenant_id)[0]
     assert size_after_deleting_second < size_after_deleting_first
+
+
+def test_history_size_with_broken_timeline(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={128 * 1024}}}"
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    main_branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
+
+    http_client = env.pageserver.http_client()
+
+    main_pg = env.postgres.create_start(main_branch_name, tenant_id=tenant_id)
+
+    batch_size = 10000
+
+    with main_pg.cursor() as cur:
+        cur.execute(
+            f"CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, {batch_size}) s(i)"
+        )
+
+    wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
+    size_at_branch = history_size(http_client, tenant_id)[0]
+    assert size_at_branch > 0
+
+    first_branch_timeline_id = env.neon_cli.create_branch(
+        "first-branch", main_branch_name, tenant_id
+    )
+    size_after_branch = history_size(http_client, tenant_id)[0]
+    assert size_after_branch > size_at_branch
+
+    first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
+
+    with first_branch_pg.cursor() as cur:
+        cur.execute(
+            f"CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, {batch_size}) s(i)"
+        )
+
+    wait_for_last_flush_lsn(env, first_branch_pg, tenant_id, first_branch_timeline_id)
+    size_after_growing_branch = history_size(http_client, tenant_id)[0]
+    assert size_after_growing_branch > size_at_branch
+
+    first_branch_pg.stop()
+    main_pg.stop()
+
+    http_client.timeline_checkpoint(tenant_id, first_branch_timeline_id)
+
+    env.pageserver.stop()
+
+    layer_removed = False
+    for path in Path.iterdir(env.timeline_dir(tenant_id, first_branch_timeline_id)):
+        log.info(f"iterating timeline dir: {path.name}")
+        if not layer_removed and path.name.startswith("00000"):
+            os.remove(path)
+            layer_removed = True
+            break
+    assert layer_removed
+
+    env.pageserver.start()
+    main_pg.start()
+    first_branch_pg.start()
+
+    # was expecting that this timeline would be broken
+    with first_branch_pg.cursor() as cur:
+        with pytest.raises(Exception, match="""relation "t1" does not exist"""):
+            cur.execute("SELECT count(1) FROM t1")
+
+    size_after_breaking_timeline = history_size(http_client, tenant_id)[0]
+    assert size_after_breaking_timeline == size_after_growing_branch
