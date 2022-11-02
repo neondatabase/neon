@@ -8,8 +8,8 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverApiException,
-    NeonPageserverHttpClient,
+    PageserverApiException,
+    PageserverHttpClient,
     wait_for_last_flush_lsn,
 )
 from fixtures.types import Lsn, TenantId
@@ -41,7 +41,7 @@ def test_empty_tenant_history_size(neon_simple_env: NeonEnv):
     assert size == 0
 
 
-def history_size(http_client: NeonPageserverHttpClient, tenant_id: TenantId) -> Tuple[int, Any]:
+def history_size(http_client: PageserverHttpClient, tenant_id: TenantId) -> Tuple[int, Any]:
     res = http_client.get(f"http://localhost:{http_client.port}/v1/tenant/{tenant_id}/history_size")
     http_client.verbose_error(res)
     res = res.json()
@@ -257,7 +257,7 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
             http_client.timeline_delete(tenant_id, first_branch_timeline_id)
             deleted = True
             break
-        except NeonPageserverApiException as e:
+        except PageserverApiException as e:
             # compaction is ok but just retry if this fails
             if (
                 str(e)
