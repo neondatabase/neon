@@ -1,7 +1,6 @@
 /* contrib/remotexact/remotexact.c */
 #include "postgres.h"
 
-#include "access/csn_snapshot.h"
 #include "access/xact.h"
 #include "access/remotexact.h"
 #include "fmgr.h"
@@ -17,6 +16,7 @@
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapshot.h"
 #include "utils/wait_event.h"
 #include "miscadmin.h"
 
@@ -63,10 +63,9 @@ bool		Connected = false;
 static void init_rwset_collection_buffer(Oid dbid);
 static void rwset_add_region(int region);
 
-static void rx_collect_region(Relation relation);
-static void rx_collect_relation(Oid dbid, Oid relid);
-static void rx_collect_page(Oid dbid, Oid relid, BlockNumber blkno);
-static void rx_collect_tuple(Oid dbid, Oid relid, BlockNumber blkno, OffsetNumber tid);
+static void rx_collect_relation(int region, Oid dbid, Oid relid);
+static void rx_collect_page(int region, Oid dbid, Oid relid, BlockNumber blkno);
+static void rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumber tid);
 static void rx_collect_insert(Relation relation, HeapTuple newtuple);
 static void rx_collect_update(Relation relation, HeapTuple oldtuple, HeapTuple newtuple);
 static void rx_collect_delete(Relation relation, HeapTuple oldtuple);
@@ -140,74 +139,61 @@ rwset_add_region(int region)
 		MyProc->isRemoteXact = true;
 		pg_write_barrier();
 	}
-        /* Set the corresponding region bit in the header */
+    
+	/* Set the corresponding region bit in the header */
 	rwset_collection_buffer->header.region_set |= SingleRegion(region);
 }
 
 static void
-rx_collect_region(Relation relation)
+rx_collect_relation(int region, Oid dbid, Oid relid)
 {
-	int	region = RelationGetRegion(relation);
-	int	max_nregions = BITS_PER_BYTE * sizeof(uint64);
-	CollectedRelation *crel;
+	CollectedRelation *relation;
 
-	if (region < 0 || region >= max_nregions)
-		ereport(ERROR,
-				errmsg("[remotexact] Region id is out of bound"),
-				errdetail("region id: %u, min: 0, max: %u", region, max_nregions));
-
-	init_rwset_collection_buffer(relation->rd_node.dbNode);
-
-	crel = get_collected_relation(RelationGetRelid(relation), false);
-	Assert(crel != NULL);
-
-	/* Set the region for the individual relation */
-	crel->region = region;
+	init_rwset_collection_buffer(dbid);
+	relation = get_collected_relation(relid, true);
+	relation->region = region;
+	relation->is_index = false;
 
 	rwset_add_region(region);
 }
 
 static void
-rx_collect_relation(Oid dbid, Oid relid)
+rx_collect_page(int region, Oid dbid, Oid relid, BlockNumber blkno)
 {
-	CollectedRelation *collected_relation;
-
-	init_rwset_collection_buffer(dbid);
-	collected_relation = get_collected_relation(relid, true);
-	collected_relation->is_index = false;
-}
-
-static void
-rx_collect_page(Oid dbid, Oid relid, BlockNumber blkno)
-{
-	CollectedRelation *collected_relation;
+	CollectedRelation *relation;
 	StringInfo	buf = NULL;
 
 	init_rwset_collection_buffer(dbid);
 
-	collected_relation = get_collected_relation(relid, true);
-	collected_relation->is_index = true;
-	collected_relation->nitems++;
+	relation = get_collected_relation(relid, true);
+	relation->region = region;
+	relation->is_index = true;
+	relation->nitems++;
 
-	buf = &collected_relation->pages;
+	buf = &relation->pages;
 	pq_sendint32(buf, blkno);
+
+	rwset_add_region(region);
 }
 
 static void
-rx_collect_tuple(Oid dbid, Oid relid, BlockNumber blkno, OffsetNumber offset)
+rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumber offset)
 {
-	CollectedRelation *collected_relation;
+	CollectedRelation *relation;
 	StringInfo	buf = NULL;
 
 	init_rwset_collection_buffer(dbid);
 
-	collected_relation = get_collected_relation(relid, true);
-	collected_relation->is_index = false;
-	collected_relation->nitems++;
+	relation = get_collected_relation(relid, true);
+	relation->region = region;
+	relation->is_index = false;
+	relation->nitems++;
 
-	buf = &collected_relation->tuples;
+	buf = &relation->tuples;
 	pq_sendint32(buf, blkno);
 	pq_sendint16(buf, offset);
+
+	rwset_add_region(region);
 }
 
 static void
@@ -586,10 +572,11 @@ connect_to_txn_server(void)
 static void
 clean_up_xact_callback(XactEvent event, void *arg)
 {
-	/* Unet the PROC_IS_REMOTEXACT statusFlag for MyProc once the remotexact
-	* completes its execution. We don't need to lock the ProcArray because we
-	* are writing to out own process.
-	*/
+	/* 
+	 * Unset the PROC_IS_REMOTEXACT statusFlag for MyProc once the remotexact
+	 * completes its execution. We don't need to lock the ProcArray because we
+	 * are writing to out own process.
+	 */
 	MyProc->isRemoteXact = false;
 	pg_write_barrier();
 	if (event == XACT_EVENT_ABORT ||
@@ -601,7 +588,6 @@ clean_up_xact_callback(XactEvent event, void *arg)
 
 static const RemoteXactHook remote_xact_hook =
 {
-	.collect_region = rx_collect_region,
 	.collect_tuple = rx_collect_tuple,
 	.collect_relation = rx_collect_relation,
 	.collect_page = rx_collect_page,
