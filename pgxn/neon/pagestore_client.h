@@ -115,7 +115,7 @@ typedef struct
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 }			NeonGetPageResponse;
 
-#define PS_GETPAGERESPONSE_SIZE (offsetof(NeonGetPageResponse, page) + BLCKSZ)
+#define PS_GETPAGERESPONSE_SIZE (MAXALIGN(offsetof(NeonGetPageResponse, page) + BLCKSZ))
 
 typedef struct
 {
@@ -140,7 +140,6 @@ extern char *nm_to_string(NeonMessage * msg);
 
 typedef struct
 {
-	NeonResponse *(*request) (NeonRequest * request);
 	void		(*send) (NeonRequest * request);
 	NeonResponse *(*receive) (void);
 	void		(*flush) (void);

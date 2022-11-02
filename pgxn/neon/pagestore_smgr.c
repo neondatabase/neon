@@ -137,10 +137,12 @@ XLogRecPtr	prefetch_lsn;
 
 static void consume_prefetch_responses(void);
 static uint64 prefetch_register_buffer(BufferTag tag);
-static void prefetch_read(PrefetchRequest *entry);
-static void prefetch_request(PrefetchRequest *slot);
+static bool prefetch_read(PrefetchRequest *slot);
+static void prefetch_do_request(PrefetchRequest *slot);
 static void prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup(void);
+static inline void prefetch_set_unused(uint64 ring_index);
+static inline void prefetch_clear_buf(uint64 index);
 
 static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
 									   ForkNumber forknum, BlockNumber blkno);
@@ -149,23 +151,22 @@ static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
 
 typedef struct PrfHashEntry {
 	PrefetchRequest *slot;
-	int status;
+	uint32 status;
+	uint32 hash;
 } PrfHashEntry;
 
 #define SH_PREFIX			prfh 
 #define SH_ELEMENT_TYPE		PrfHashEntry
-#define SH_KEY_TYPE			BufferTag
-#define SH_KEY				slot->buftag
-#define SH_HASH_KEY(tb, key) (\
-	hash_combine(murmurhash32((key).rnode.dbNode), \
-		hash_combine(murmurhash32((key).rnode.relNode), \
-			hash_combine(murmurhash32((key).blockNum), \
-				murmurhash32((key).forkNum) \
-			) \
-		) \
-	) \
+#define SH_KEY_TYPE			PrefetchRequest *
+#define SH_KEY				slot
+#define SH_STORE_HASH
+#define SH_GET_HASH(tb, a)	((a)->hash)
+#define SH_HASH_KEY(tb, key) hash_bytes( \
+	((const unsigned char *) &(key)->buftag), \
+	sizeof(BufferTag) \
 )
-#define SH_EQUAL(tb, a, b)	BUFFERTAGS_EQUAL(a, b)
+
+#define SH_EQUAL(tb, a, b)	(BUFFERTAGS_EQUAL((a)->buftag, (b)->buftag))
 #define SH_SCOPE			static inline
 #define SH_DEFINE
 #define SH_DECLARE
@@ -200,6 +201,10 @@ prefetch_cleanup(void)
 	}
 }
 
+/* 
+ * Wait for slot of ring_index to have received its response.
+ * The caller is responsible for making sure the request buffer is flushed.
+ */
 static void
 prefetch_wait_for(uint64 ring_index)
 {
@@ -208,12 +213,15 @@ prefetch_wait_for(uint64 ring_index)
 
 	Assert(MyPState->ring_unused > ring_index);
 
-	while (MyPState->ring_receive >= ring_index)
+	while (MyPState->ring_receive <= ring_index)
 	{
 		index = (MyPState->ring_receive % READ_BUFFER_SIZE);
 		entry = &MyPState->prf_buffer[index];
 
-		prefetch_read(entry);
+		Assert(entry->status == PRFS_REQUESTED);
+
+		if (!prefetch_read(entry))
+			prefetch_clear_buf(ring_index);
 
 		MyPState->ring_receive++;
 	}
@@ -221,25 +229,46 @@ prefetch_wait_for(uint64 ring_index)
 
 /*
  * Read the response of a prefetch request into its slot.
+ * 
+ * The caller is responsible for making sure that the request for this buffer
+ * was flushed to the PageServer.
  */
-static void
-prefetch_read(PrefetchRequest *entry)
+static bool
+prefetch_read(PrefetchRequest *slot)
 {
-	NeonGetPageResponse *response;
-	MemoryContext old;
+	NeonResponse *response;
 
-	Assert(entry->status == PRFS_REQUESTED);
+	Assert(slot->status == PRFS_REQUESTED);
+	Assert(slot->response == NULL);
 
-	old = MemoryContextSwitchTo(MyPState->bufctx);
-	response = (NeonGetPageResponse *) page_server->receive();
-	MyPState->n_responses_buffered += 1;
-	MyPState->n_requestes_inflight -= 1;
+	response = (NeonResponse *) page_server->receive();
+	
+	if (response->tag == T_NeonGetPageResponse)
+	{
+		MyPState->n_responses_buffered += 1;
+		MyPState->n_requestes_inflight -= 1;
 
-	Assert(response->tag == T_NeonGetPageResponse);
+		slot->status = PRFS_RECEIVED;
+		slot->response = (NeonGetPageResponse *) response;
+		return true;
+	}
+	else if (response->tag == T_NeonErrorResponse)
+	{
+		slot->status = PRFS_TAG_REMAINS;
+		slot->response = NULL;
+		MyPState->n_requestes_inflight -= 1;
+		MyPState->n_unused += 1;
 
-	entry->status = PRFS_RECEIVED;
-	entry->response = response;
-	MemoryContextSwitchTo(old);
+		elog(WARNING, "Error response from PageServer: %s",
+			 ((NeonErrorResponse *) response)->message);
+		return false;
+	}
+	else
+	{
+		elog(ERROR, "Unexpected response for getblock: %s",
+			 nm_to_string((NeonMessage *) response));
+		return false;
+	}
 }
 
 /*
@@ -290,7 +319,6 @@ prefetch_set_unused(uint64 ring_index)
 	if (slot->status == PRFS_RECEIVED)
 	{
 		MemoryContext old;
-		
 		old = MemoryContextSwitchTo(MyPState->bufctx);
 
 		pfree(slot->response);
@@ -301,8 +329,12 @@ prefetch_set_unused(uint64 ring_index)
 		MyPState->n_responses_buffered -= 1;
 		MyPState->n_unused += 1;
 	}
+	else
+	{
+		Assert(slot->response == NULL);
+	}
 
-	prfh_delete(MyPState->prf_hash, slot->buftag);
+	prfh_delete(MyPState->prf_hash, slot);
 
 	/* clear all fields */
 	MemSet(slot, 0, sizeof(PrefetchRequest));
@@ -314,13 +346,13 @@ prefetch_set_unused(uint64 ring_index)
 }
 
 /*
- * prefetch_request() - communicate a prefetch request to pageserver
+ * prefetch_do_request() - communicate a prefetch request to pageserver
  *
  * Sends the prefetch request of slot to the pageserver, and updates the
  * state of the slot.
  */
 static void
-prefetch_request(PrefetchRequest *slot)
+prefetch_do_request(PrefetchRequest *slot)
 {
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
@@ -342,6 +374,7 @@ prefetch_request(PrefetchRequest *slot)
 	MyPState->n_requestes_inflight++;
 
 	page_server->send((NeonRequest *) &request);
+	Assert(slot->response == NULL);
 	slot->status = PRFS_REQUESTED;
 }
 
@@ -355,18 +388,18 @@ prefetch_register_buffer(BufferTag tag)
 {
 	int		index;
 	bool	found;
-	uint64	ring_index,
-			lastofrelfork = 0;
+	uint64	ring_index;
 	PrefetchRequest *slot;
 	PrfHashEntry *entry;
 
-	entry = prfh_lookup(MyPState->prf_hash, tag);
+	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &tag);
 
 	if (entry != NULL)
 	{
 		slot = entry->slot;
+		ring_index = slot->my_ring_index;
 		index = (ring_index % READ_BUFFER_SIZE);
-		slot = &MyPState->prf_buffer[index];
+		Assert(slot == &MyPState->prf_buffer[index]);
 
 		Assert(slot->status != PRFS_UNUSED);
 		Assert(BUFFERTAGS_EQUAL(slot->buftag, tag));
@@ -396,13 +429,14 @@ prefetch_register_buffer(BufferTag tag)
 		{
 			case PRFS_REQUESTED:
 				Assert(MyPState->ring_receive == MyPState->ring_last);
+				page_server->flush();
 				prefetch_read(slot);
 				MyPState->ring_receive++;
-				prefetch_set_unused(ring_index); /* ring_last is auto-updated */
+				prefetch_set_unused(MyPState->ring_last); /* ring_last is auto-updated */
 				break;
 			case PRFS_RECEIVED:
 			case PRFS_TAG_REMAINS:
-				prefetch_set_unused(ring_index);
+				prefetch_set_unused(MyPState->ring_last);
 				break;
 			default:
 				pg_unreachable();
@@ -412,14 +446,13 @@ prefetch_register_buffer(BufferTag tag)
 	Assert(slot->status == PRFS_UNUSED);
 
 	slot->buftag = tag;
+	slot->my_ring_index = ring_index;
 
-	entry = prfh_insert(MyPState->prf_hash, tag, &found);
+	entry = prfh_insert(MyPState->prf_hash, slot, &found);
 
 	Assert(!found);
 
-	entry->slot = slot;
-
-	prefetch_request(slot);
+	prefetch_do_request(slot);
 
 	Assert(slot->status == PRFS_REQUESTED);
 
@@ -548,12 +581,15 @@ nm_unpack_response(StringInfo s)
 
 		case T_NeonGetPageResponse:
 			{
-				NeonGetPageResponse *msg_resp = palloc0(offsetof(NeonGetPageResponse, page) + BLCKSZ);
+				NeonGetPageResponse *msg_resp;
 
+				msg_resp = MemoryContextAllocZero(MyPState->bufctx, PS_GETPAGERESPONSE_SIZE);
 				msg_resp->tag = tag;
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
+				
+				Assert(msg_resp->tag == T_NeonGetPageResponse);
 
 				resp = (NeonResponse *) msg_resp;
 				break;
@@ -906,7 +942,7 @@ neon_init(void)
 	
 	MyPState->bufctx = SlabContextCreate(TopMemoryContext,
 										 "NeonSMGR/prefetch",
-										 PS_GETPAGERESPONSE_SIZE * 16,
+										 SLAB_DEFAULT_BLOCK_SIZE * 16,
 										 PS_GETPAGERESPONSE_SIZE);
 	MyPState->hashctx = AllocSetContextCreate(TopMemoryContext,
 											  "NeonSMGR/prefetch",
@@ -1384,7 +1420,8 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	NeonResponse *resp;
 	int			i;
 	BufferTag	buftag;
-	uint64		bufindex;
+	uint64		ring_index;
+	PrfHashEntry *entry;
 
 	buftag = (BufferTag) {
 		.rnode = rnode,
@@ -1395,29 +1432,24 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	/*
 	 * Try to find prefetched page in the list of received pages.
 	 */
-	for (uint64 ring_index = MyPState->ring_last; ring_index < MyPState->ring_unused; ring_index++)
+	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
+
+	if (entry != NULL)
 	{
 		PrefetchRequest *slot;
-		i = (ring_index % READ_BUFFER_SIZE);
+		slot = entry->slot;
+		ring_index = slot->my_ring_index;
 
-		slot = &MyPState->prf_buffer[i];
-
-		/*
-		 * Slots between ring_last (incl) and ring_unused (excl) should still
-		 * have their buffer tags, even when they do not contain data.
-		 */
 		Assert(slot->status != PRFS_UNUSED);
+		Assert(&MyPState->prf_buffer[ring_index % READ_BUFFER_SIZE] == slot);
+		Assert(MyPState->ring_last <= ring_index &&
+			   MyPState->ring_unused > ring_index);
 
-		/* used entries may be removed */
-		if (slot->status == PRFS_TAG_REMAINS)
-			continue;
-
-		if (!BUFFERTAGS_EQUAL(slot->buftag, buftag))
-			continue;
 
 		if (slot->status == PRFS_REQUESTED)
 		{
-			prefetch_wait_for(ring_index);
+			page_server->flush();
+			prefetch_wait_for(slot->my_ring_index);
 			Assert(slot->status == PRFS_RECEIVED);
 		}
 
@@ -1439,14 +1471,14 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 				n_prefetch_hits += 1;
 				memcpy(buffer, page, BLCKSZ);
 
-				prefetch_clear_buf(ring_index); /* use this buffer; reset it for reuse */
+				/* buffer was used, clean up for later reuse */
+				prefetch_clear_buf(ring_index); 
 				prefetch_cleanup();
 				return;
 			}
 			else
 			{
 				prefetch_set_unused(ring_index); /* can't use this buffer */
-				break;
 			}
 		}
 	}
@@ -1458,11 +1490,13 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	 */
 	n_prefetch_misses += 1;
 
-	bufindex = prefetch_register_buffer(buftag);
+	ring_index = prefetch_register_buffer(buftag);
 
-	prefetch_wait_for(bufindex);
+	page_server->flush();
 
-	resp = (NeonResponse *) MyPState->prf_buffer[bufindex % READ_BUFFER_SIZE].response;
+	prefetch_wait_for(ring_index);
+
+	resp = (NeonResponse *) MyPState->prf_buffer[ring_index % READ_BUFFER_SIZE].response;
 
 	switch (resp->tag)
 	{
@@ -1488,7 +1522,9 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
 
-	pfree(resp);
+	/* buffer was used, clean up for later reuse */
+	prefetch_clear_buf(ring_index);
+	prefetch_cleanup();
 }
 
 /*

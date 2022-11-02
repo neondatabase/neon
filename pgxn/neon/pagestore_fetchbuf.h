@@ -29,17 +29,11 @@ typedef enum PrefetchStatus {
 } PrefetchStatus;
 
 typedef struct PrefetchRequest {
-	BufferTag	buftag;
+	BufferTag	buftag; /* must be first entry in the struct */
 	XLogRecPtr	effective_request_lsn;
 	NeonGetPageResponse *response; /* may be null */
 	PrefetchStatus status;
-
-	/*
-	 * Relative offsets to next/prev of the relation fork in buftag.
-	 * nextOfRel points forward, prevOfRel backwards.
-	 */
-	uint8		nextOfRel; /* relative offset to next prefetch on this relfork */
-	uint8		prevOfRel; /* relative offset to previous prefetch on this relfork */
+	uint64		my_ring_index;
 } PrefetchRequest;
 
 /*

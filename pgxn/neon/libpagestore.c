@@ -264,16 +264,7 @@ pageserver_flush(void)
 	}
 }
 
-static NeonResponse *
-pageserver_call(NeonRequest * request)
-{
-	pageserver_send(request);
-	pageserver_flush();
-	return pageserver_receive();
-}
-
 page_server_api api = {
-	.request = pageserver_call,
 	.send = pageserver_send,
 	.flush = pageserver_flush,
 	.receive = pageserver_receive
