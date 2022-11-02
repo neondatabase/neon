@@ -22,7 +22,7 @@
 #define READ_BUFFER_SIZE 128
 
 typedef enum PrefetchStatus {
-	PRFS_EMPTY = 0, /* no valid data */
+	PRFS_UNUSED = 0, /* unused slot */
 	PRFS_REQUESTED, /* request is sent to PS, all fields except response valid */
 	PRFS_RECEIVED, /* all fields valid, response contains data */
 	PRFS_TAG_REMAINS, /* only buftag, *OfRel are still valid */
@@ -33,6 +33,7 @@ typedef struct PrefetchRequest {
 	XLogRecPtr	effective_request_lsn;
 	NeonGetPageResponse *response; /* may be null */
 	PrefetchStatus status;
+
 	/*
 	 * Relative offsets to next/prev of the relation fork in buftag.
 	 * nextOfRel points forward, prevOfRel backwards.
@@ -60,7 +61,8 @@ typedef struct PrefetchRequest {
  * the need for core modifications in the heap AM for prefetching buffers.
  */
 typedef struct PrefetchState {
-	MemoryContext context; /* context for prf_buffer[].response allocations */
+	MemoryContext bufctx; /* context for prf_buffer[].response allocations */
+	MemoryContext hashctx; /* context for prf_buffer */
 
 	/* buffer indexes */
 	uint64	ring_unused;		/* first unused slot */
@@ -68,11 +70,12 @@ typedef struct PrefetchState {
 	uint64	ring_last;			/* min slot with a response value */
 
 	/* metrics / statistics  */
-	int n_responses_buffered;	/* count of PS responses not yet in buffers */
-	int n_requestes_inflight;	/* count of PS requests considered in flight */
-	int n_unused;				/* count of buffers < unused, > last, that are also unused */
+	int		n_responses_buffered;	/* count of PS responses not yet in buffers */
+	int		n_requestes_inflight;	/* count of PS requests considered in flight */
+	int		n_unused;				/* count of buffers < unused, > last, that are also unused */
 
-	/* the buffer slots */
+	/* the buffers */
+	struct prfh_hash *prf_hash;
 	PrefetchRequest prf_buffer[READ_BUFFER_SIZE]; /* prefetch buffers */
 } PrefetchState;
 

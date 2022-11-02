@@ -51,20 +51,19 @@
 #include "access/xlog_internal.h"
 #include "access/xlogdefs.h"
 #include "catalog/pg_class.h"
+#include "common/hashfn.h"
 #include "pagestore_client.h"
 #include "pagestore_fetchbuf.h"
 #include "postmaster/interrupt.h"
+#include "postmaster/autovacuum.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/relfilenode.h"
 #include "storage/buf_internals.h"
 #include "storage/smgr.h"
 #include "storage/md.h"
-#include "fmgr.h"
-#include "miscadmin.h"
 #include "pgstat.h"
-#include "catalog/pg_tablespace_d.h"
-#include "postmaster/autovacuum.h"
+
 
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogutils.h"
@@ -128,8 +127,6 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
  * all prefetch responses has to be consumed.
  */
 
-BufferTag	prefetch_requests[READ_BUFFER_SIZE];
-
 PrefetchState *MyPState;
 
 int			n_prefetch_hits;
@@ -148,13 +145,40 @@ static void prefetch_cleanup(void);
 static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
 									   ForkNumber forknum, BlockNumber blkno);
 
+/* prefetch buffer lookup hash table */
+
+typedef struct PrfHashEntry {
+	PrefetchRequest *slot;
+	int status;
+} PrfHashEntry;
+
+#define SH_PREFIX			prfh 
+#define SH_ELEMENT_TYPE		PrfHashEntry
+#define SH_KEY_TYPE			BufferTag
+#define SH_KEY				slot->buftag
+#define SH_HASH_KEY(tb, key) (\
+	hash_combine(murmurhash32((key).rnode.dbNode), \
+		hash_combine(murmurhash32((key).rnode.relNode), \
+			hash_combine(murmurhash32((key).blockNum), \
+				murmurhash32((key).forkNum) \
+			) \
+		) \
+	) \
+)
+#define SH_EQUAL(tb, a, b)	BUFFERTAGS_EQUAL(a, b)
+#define SH_SCOPE			static inline
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
 /*
  * Make sure that there are no responses still in the buffer.
  */
 static void
 consume_prefetch_responses(void)
 {
-	prefetch_wait_for(MyPState->ring_unused - 1);
+	if (MyPState->ring_receive < MyPState->ring_unused)
+		prefetch_wait_for(MyPState->ring_unused - 1);
 }
 
 static void
@@ -162,12 +186,15 @@ prefetch_cleanup(void)
 {
 	int		index;
 	uint64	ring_index;
+	PrefetchRequest *slot;
+
 	while (MyPState->ring_last < MyPState->ring_receive) {
 		ring_index = MyPState->ring_last;
 		index = (ring_index % READ_BUFFER_SIZE);
-		
-		if (MyPState->prf_buffer[index].status == PRFS_EMPTY)
-			MyPState->ring_last++;
+		slot = &MyPState->prf_buffer[index];
+
+		if (slot->status == PRFS_UNUSED)
+			MyPState->ring_last += 1;
 		else
 			break;
 	}
@@ -203,7 +230,7 @@ prefetch_read(PrefetchRequest *entry)
 
 	Assert(entry->status == PRFS_REQUESTED);
 
-	old = MemoryContextSwitchTo(MyPState->context);
+	old = MemoryContextSwitchTo(MyPState->bufctx);
 	response = (NeonGetPageResponse *) page_server->receive();
 	MyPState->n_responses_buffered += 1;
 	MyPState->n_requestes_inflight -= 1;
@@ -216,13 +243,13 @@ prefetch_read(PrefetchRequest *entry)
 }
 
 /*
- * prefetch_clear - clear the prefetch buffer of ring_index
+ * prefetch_clear_buf - clear the prefetch buffer of ring_index
  * 
  * It clears the prefetch buffer, but leaves the slot's metadata intact.
  * Leaves the slot state as PRFS_TAG_REMAINS.
  */
 static inline void
-prefetch_clear(uint64 ring_index)
+prefetch_clear_buf(uint64 ring_index)
 {
 	PrefetchRequest *slot = &MyPState->prf_buffer[ring_index % READ_BUFFER_SIZE];
 	MemoryContext old;
@@ -231,7 +258,7 @@ prefetch_clear(uint64 ring_index)
 	Assert(ring_index >= MyPState->ring_last &&
 		   ring_index < MyPState->ring_unused);
 
-	old = MemoryContextSwitchTo(MyPState->context);
+	old = MemoryContextSwitchTo(MyPState->bufctx);
 	pfree(slot->response);
 	slot->response = NULL;
 	MemoryContextSwitchTo(old);
@@ -240,26 +267,20 @@ prefetch_clear(uint64 ring_index)
 	MyPState->n_unused += 1;
 
 	slot->status = PRFS_TAG_REMAINS;
-
-	if (MyPState->ring_last == ring_index)
-	{
-		MyPState->ring_last += 1;
-		MyPState->n_unused -= 1;
-	}
 }
 
 /*
- * prefetch_empty() - clear a received prefetch slot
+ * prefetch_set_unused() - clear a received prefetch slot
  *
  * The slot at ring_index must be a current member of the ring buffer,
  * and may not be in the PRFS_REQUESTED state.
  */
 static inline void
-prefetch_empty(uint64 ring_index)
+prefetch_set_unused(uint64 ring_index)
 {
 	PrefetchRequest *slot = &MyPState->prf_buffer[ring_index % READ_BUFFER_SIZE];
 
-	if (slot->status == PRFS_EMPTY)
+	if (slot->status == PRFS_UNUSED)
 		return;
 
 	Assert(slot->status == PRFS_RECEIVED || slot->status == PRFS_TAG_REMAINS);
@@ -268,53 +289,28 @@ prefetch_empty(uint64 ring_index)
 
 	if (slot->status == PRFS_RECEIVED)
 	{
-		MemoryContext old = MemoryContextSwitchTo(MyPState->context);
+		MemoryContext old;
+		
+		old = MemoryContextSwitchTo(MyPState->bufctx);
+
 		pfree(slot->response);
 		slot->response = NULL;
+
 		MemoryContextSwitchTo(old);
 
 		MyPState->n_responses_buffered -= 1;
 		MyPState->n_unused += 1;
 	}
 
-	/* update link to next list item */
-	if (slot->nextOfRel > 0)
-	{ 
-		PrefetchRequest* next_slot = &MyPState->prf_buffer[
-			(ring_index + slot->nextOfRel) % READ_BUFFER_SIZE];
-		
-		if (slot->prevOfRel != 0 && ((int) slot->prevOfRel + (int) slot->nextOfRel) <= UINT8_MAX)
-		{
-			next_slot->prevOfRel = (slot->prevOfRel + slot->nextOfRel);
-		}
-		else
-			next_slot->prevOfRel = 0;
-	}
-
-	/* update link to prev list item */
-	if (slot->prevOfRel > 0 &&
-		(ring_index - slot->prevOfRel) >= MyPState->ring_last)
-	{
-		PrefetchRequest* prev_slot = &MyPState->prf_buffer[
-			(ring_index - slot->prevOfRel) % READ_BUFFER_SIZE];
-
-		if (slot->nextOfRel != 0 && ((int) slot->prevOfRel + (int) slot->nextOfRel) <= UINT8_MAX)
-		{
-			prev_slot->nextOfRel = (slot->prevOfRel + slot->nextOfRel);
-		}
-		else
-			prev_slot->nextOfRel = 0;
-	}
-	
-	if (MyPState->ring_last == ring_index)
-	{
-		MyPState->ring_last += 1;
-		MyPState->n_unused -= 1;
-	}
+	prfh_delete(MyPState->prf_hash, slot->buftag);
 
 	/* clear all fields */
 	MemSet(slot, 0, sizeof(PrefetchRequest));
-	slot->status = PRFS_EMPTY;
+	slot->status = PRFS_UNUSED;
+
+	/* run cleanup if we're holding back ring_last */
+	if (MyPState->ring_last == ring_index)
+		prefetch_cleanup();
 }
 
 /*
@@ -357,43 +353,34 @@ prefetch_request(PrefetchRequest *slot)
 static uint64
 prefetch_register_buffer(BufferTag tag)
 {
-	int		index,
-			step = 1;
+	int		index;
+	bool	found;
 	uint64	ring_index,
 			lastofrelfork = 0;
 	PrefetchRequest *slot;
-	MemoryContext old;
+	PrfHashEntry *entry;
 
-	/* Check that there is no prefetch for the requested buffer already */
-	for (uint64 i = MyPState->ring_last; i < MyPState->ring_unused; i += step)
+	entry = prfh_lookup(MyPState->prf_hash, tag);
+
+	if (entry != NULL)
 	{
-		index = (i % READ_BUFFER_SIZE);
+		slot = entry->slot;
+		index = (ring_index % READ_BUFFER_SIZE);
 		slot = &MyPState->prf_buffer[index];
 
-		step = 1;
+		Assert(slot->status != PRFS_UNUSED);
+		Assert(BUFFERTAGS_EQUAL(slot->buftag, tag));
 
-		if (slot->status == PRFS_EMPTY)
-			continue;
-
-		if (!RelFileNodeEquals(slot->buftag.rnode, tag.rnode))
-			continue;
-
-		if (slot->buftag.forkNum != tag.forkNum)
-			continue;
-
-		/* same relation & fork */
-		if (slot->buftag.blockNum == tag.blockNum)
+		/* we received a prefetch for a page that was recently read */
+		if (slot->status == PRFS_TAG_REMAINS)
+		{
+			prefetch_set_unused(ring_index);
+		}
+		else
 		{
 			n_prefetch_dupes++;
-			return i;
+			return ring_index;
 		}
-
-		lastofrelfork = i;
-
-		if (slot->nextOfRel == 0)
-			break; /* last of this relations' data received */
-
-		step = (int) slot->nextOfRel;
 	}
 
 	ring_index = MyPState->ring_unused;
@@ -402,7 +389,7 @@ prefetch_register_buffer(BufferTag tag)
 
 	if (MyPState->ring_last == (MyPState->ring_unused - READ_BUFFER_SIZE))
 	{
-		Assert(slot->status != PRFS_EMPTY);
+		Assert(slot->status != PRFS_UNUSED);
 
 		/* We have the slot for ring_last, so that must still be in progress */
 		switch (slot->status)
@@ -411,38 +398,32 @@ prefetch_register_buffer(BufferTag tag)
 				Assert(MyPState->ring_receive == MyPState->ring_last);
 				prefetch_read(slot);
 				MyPState->ring_receive++;
-				prefetch_empty(ring_index); /* ring_last is auto-updated */
+				prefetch_set_unused(ring_index); /* ring_last is auto-updated */
 				break;
 			case PRFS_RECEIVED:
-				prefetch_empty(ring_index);
+			case PRFS_TAG_REMAINS:
+				prefetch_set_unused(ring_index);
 				break;
 			default:
 				pg_unreachable();
 		}
 	}
 
-	if (slot->status == PRFS_TAG_REMAINS)
-		prefetch_empty(ring_index);
-
-	Assert(slot->status == PRFS_EMPTY);
+	Assert(slot->status == PRFS_UNUSED);
 
 	slot->buftag = tag;
+
+	entry = prfh_insert(MyPState->prf_hash, tag, &found);
+
+	Assert(!found);
+
+	entry->slot = slot;
 
 	prefetch_request(slot);
 
 	Assert(slot->status == PRFS_REQUESTED);
 
-	if (lastofrelfork > 0 &&
-		(ring_index - lastofrelfork) <= UINT8_MAX &&
-		(lastofrelfork >= MyPState->ring_last))
-	{
-		int	prev_index = (lastofrelfork % READ_BUFFER_SIZE);
-		uint8 distance = (ring_index - lastofrelfork);
-		slot->prevOfRel = distance;
-		MyPState->prf_buffer[prev_index].nextOfRel = distance;
-	}
-
-	MyPState->ring_unused++; /* Actually allocate the slot */
+	MyPState->ring_unused += 1; /* Actually allocate the slot */
 
 	return ring_index;
 }
@@ -916,12 +897,26 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 void
 neon_init(void)
 {
+	HASHCTL info;
+
+	if (MyPState != NULL)
+		return;
+
 	MyPState = palloc0(sizeof(PrefetchState));
 	
-	MyPState->context = SlabContextCreate(TopMemoryContext,
+	MyPState->bufctx = SlabContextCreate(TopMemoryContext,
 										 "NeonSMGR/prefetch",
 										 PS_GETPAGERESPONSE_SIZE * 16,
 										 PS_GETPAGERESPONSE_SIZE);
+	MyPState->hashctx = AllocSetContextCreate(TopMemoryContext,
+											  "NeonSMGR/prefetch",
+											  ALLOCSET_DEFAULT_SIZES);
+
+	info.keysize = sizeof(BufferTag);
+	info.entrysize = sizeof(uint64);
+
+	MyPState->prf_hash = prfh_create(MyPState->hashctx,
+									 READ_BUFFER_SIZE, NULL);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	mdinit();
@@ -1411,7 +1406,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		 * Slots between ring_last (incl) and ring_unused (excl) should still
 		 * have their buffer tags, even when they do not contain data.
 		 */
-		Assert(slot->status != PRFS_EMPTY);
+		Assert(slot->status != PRFS_UNUSED);
 
 		/* used entries may be removed */
 		if (slot->status == PRFS_TAG_REMAINS)
@@ -1444,13 +1439,13 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 				n_prefetch_hits += 1;
 				memcpy(buffer, page, BLCKSZ);
 
-				prefetch_clear(ring_index); /* use this buffer; reset it for reuse */
+				prefetch_clear_buf(ring_index); /* use this buffer; reset it for reuse */
 				prefetch_cleanup();
 				return;
 			}
 			else
 			{
-				prefetch_empty(ring_index); /* can't use this buffer */
+				prefetch_set_unused(ring_index); /* can't use this buffer */
 				break;
 			}
 		}
