@@ -23,8 +23,8 @@ pub struct ModelInputs {
     timeline_inputs: HashMap<TimelineId, TimelineInputs>,
 }
 
-/// Collect all relevant LSNs to the inputs, even though they will only be helpful in the
-/// serialized form.
+/// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
+/// part of [`ModelInputs`] from the HTTP api, explaining the inputs.
 #[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct TimelineInputs {
