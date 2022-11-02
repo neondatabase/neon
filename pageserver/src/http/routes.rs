@@ -523,9 +523,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     check_permission(&request, Some(tenant_id))?;
 
     // if tenant is in progress of downloading it can be absent in global tenant map
-    let tenant = tokio::task::spawn_blocking(move || tenant_mgr::get_tenant(tenant_id, false))
-        .await
-        .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
+    let tenant = tenant_mgr::get_tenant(tenant_id, false);
 
     let state = get_state(&request);
     let remote_index = &state.remote_index;
