@@ -42,12 +42,12 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
 
 
 def get_tenant_size(http_client: PageserverHttpClient, tenant_id: TenantId) -> Tuple[int, Any]:
-    res = http_client.get(f"http://localhost:{http_client.port}/v1/tenant/{tenant_id}/tenant_size")
+    res = http_client.get(f"http://localhost:{http_client.port}/v1/tenant/{tenant_id}/size")
     http_client.verbose_error(res)
     res = res.json()
     assert isinstance(res, dict)
     assert TenantId(res["id"]) == tenant_id
-    size = res["tenant_size"]
+    size = res["size"]
     assert type(size) == int
     # there are additional inputs, which are the collected raw information before being fed to the tenant_size_model
     return (size, res.get("inputs", None))
