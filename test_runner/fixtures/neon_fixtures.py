@@ -2743,7 +2743,7 @@ def wait_for_last_record_lsn(
     timeline: TimelineId,
     lsn: Lsn,
 ) -> Lsn:
-    """waits for pageserver to catch up to a certain lsn"""
+    """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
     for i in range(10):
         current_lsn = last_record_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
@@ -2762,7 +2762,7 @@ def wait_for_last_record_lsn(
 def wait_for_last_flush_lsn(
     env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
-    """Wait for pageserver to catch up the latest flush LSN"""
+    """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
     last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
 
