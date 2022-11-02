@@ -75,7 +75,7 @@ pub(super) async fn gather_inputs(
     let mut timeline_inputs = HashMap::with_capacity(timelines.len());
 
     // used to determine the `retention_period` for the pricing model
-    let mut min_max_cutoff_distance = None;
+    let mut max_cutoff_distance = None;
 
     // this will probably conflict with on-demand downloaded layers, or at least force them all
     // to be downloaded
@@ -126,15 +126,14 @@ pub(super) async fn gather_inputs(
         };
 
         // update this to have a retention_period later for the pricing_model
-        // it is currently unsure what this should be.
+        // pricing_model compares this to the last segments start_lsn
         if let Some(cutoff_distance) = last_record_lsn.checked_sub(next_gc_cutoff) {
-            match min_max_cutoff_distance.as_mut() {
-                Some((min, max)) => {
-                    *min = std::cmp::min(*min, cutoff_distance);
+            match max_cutoff_distance.as_mut() {
+                Some(max) => {
                     *max = std::cmp::max(*max, cutoff_distance);
                 }
                 _ => {
-                    min_max_cutoff_distance = Some((cutoff_distance, cutoff_distance));
+                    max_cutoff_distance = Some(cutoff_distance);
                 }
             }
         }
@@ -230,17 +229,12 @@ pub(super) async fn gather_inputs(
     // handled by the variant order in `Command`.
     updates.sort_unstable();
 
-    let retention_period = match min_max_cutoff_distance {
-        Some((_min, max)) => max.0,
+    let retention_period = match max_cutoff_distance {
+        Some(max) => max.0,
         None => {
             anyhow::bail!("the first branch should have a gc_cutoff after it's branch point at 0")
         }
     };
-
-    debug!(
-        "decided retention_period from {:?}: {retention_period}",
-        min_max_cutoff_distance
-    );
 
     Ok(ModelInputs {
         updates,
