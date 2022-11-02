@@ -2145,6 +2145,7 @@ dependencies = [
  "postgres-types",
  "postgres_ffi",
  "pprof",
+ "pricing_model",
  "rand",
  "regex",
  "remote_storage",
@@ -2444,6 +2445,13 @@ checksum = "c142c0e46b57171fe0c528bee8c5b7569e80f0c17e377cd0e30ea57dbc11bb51"
 dependencies = [
  "proc-macro2",
  "syn",
+]
+
+[[package]]
+name = "pricing_model"
+version = "0.1.0"
+dependencies = [
+ "workspace_hack",
 ]
 
 [[package]]
