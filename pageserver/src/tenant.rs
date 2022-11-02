@@ -1482,13 +1482,11 @@ impl Tenant {
     /// Future is cancellation safe. Only one calculation can be running at once per tenant.
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     pub async fn gather_pricing_inputs(&self) -> anyhow::Result<pricing::ModelInputs> {
-        use pricing::gather_inputs;
-
         let logical_sizes_at_once = self.conf.concurrent_pricing_logical_size_queries.inner();
 
         let mut shared_cache = self.cached_logical_sizes.lock().await;
 
-        gather_inputs(self, logical_sizes_at_once, &mut *shared_cache).await
+        pricing::gather_inputs(self, logical_sizes_at_once, &mut *shared_cache).await
     }
 }
 
