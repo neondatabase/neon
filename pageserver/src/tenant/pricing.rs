@@ -441,39 +441,6 @@ fn updates_sort() {
 }
 
 #[test]
-fn serialize_updates() {
-    use std::str::FromStr;
-
-    let ids = [
-        TimelineId::from_str("7ff1edab8182025f15ae33482edb590a").unwrap(),
-        TimelineId::from_str("b68d6691c895ad0a70809470020929ef").unwrap(),
-    ];
-
-    let updates = vec![
-        Update {
-            lsn: Lsn(0),
-            command: Command::BranchFrom(None),
-            timeline_id: ids[0],
-        },
-        Update {
-            lsn: Lsn::from_str("0/10E49380").unwrap(),
-            command: Command::Update(42164224),
-            timeline_id: ids[0],
-        },
-        Update {
-            lsn: Lsn::from_str("0/10E49380").unwrap(),
-            command: Command::BranchFrom(Some(ids[0])),
-            timeline_id: ids[1],
-        },
-    ];
-
-    let expected = r#"[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"7ff1edab8182025f15ae33482edb590a"},{"lsn":"0/10E49380","command":{"update":42164224},"timeline_id":"7ff1edab8182025f15ae33482edb590a"},{"lsn":"0/10E49380","command":{"branch_from":"7ff1edab8182025f15ae33482edb590a"},"timeline_id":"b68d6691c895ad0a70809470020929ef"}]"#;
-
-    let actual = serde_json::to_string(&updates).unwrap();
-
-    assert_eq!(expected, actual);
-}
-#[test]
 fn verify_price_for_multiple_branches() {
     // this is generated from integration test test_history_size_with_multiple_sizes, but this way
     // it has the stable lsn's
