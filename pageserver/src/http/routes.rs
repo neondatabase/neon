@@ -227,13 +227,10 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
     let state = get_state(&request);
 
-    let timelines = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
+    let timelines = info_span!("timeline_list", tenant = %tenant_id).in_scope(|| {
         let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
         Ok(tenant.list_timelines())
-    })
-    .await
-    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+    })?;
 
     let mut response_data = Vec::with_capacity(timelines.len());
     for timeline in timelines {
