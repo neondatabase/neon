@@ -980,7 +980,10 @@ impl Timeline {
     ///
     /// NOTE: counted incrementally, includes ancestors, this can be a slow operation.
     pub fn calculate_logical_size(&self, up_to_lsn: Lsn) -> anyhow::Result<u64> {
-        info!("Calculating logical size for timeline {}", self.timeline_id);
+        info!(
+            "Calculating logical size for timeline {} at {}",
+            self.timeline_id, up_to_lsn
+        );
         let timer = if up_to_lsn == self.initdb_lsn {
             self.metrics.init_logical_size_histo.start_timer()
         } else {
