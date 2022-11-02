@@ -177,7 +177,7 @@ def test_backward_compatibility(
         cli.raw_cli(["start"])
         request.addfinalizer(lambda: cli.raw_cli(["stop"]))
 
-        result = cli.pg_start("main")
+        result = cli.pg_start("main", port=port_distributor.get_port())
         request.addfinalizer(lambda: cli.pg_stop("main"))
     except Exception:
         breaking_changes_allowed = (
