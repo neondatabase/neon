@@ -1,3 +1,9 @@
+//! Pricing model related to kept history size testing ground.
+//!
+//! Has a number of scenarios and a `main` for invoking these by number, calculating the history
+//! size or price proxy, outputs graphviz graph. Makefile in directory shows how to use graphviz to
+//! turn scenarios into pngs.
+
 use pricing_model::{Segment, SegmentPrice, Storage};
 
 // Main branch only. Some updates on it.
@@ -5,7 +11,7 @@ fn scenario_1() -> (Vec<Segment>, SegmentPrice) {
     // Create main branch
     let mut storage = Storage::new("main");
 
-    // Bulk load 1 GB of data to it
+    // Bulk load 5 GB of data to it
     storage.insert("main", 5_000);
 
     // Stream of updates
@@ -23,7 +29,7 @@ fn scenario_2() -> (Vec<Segment>, SegmentPrice) {
     // Create main branch
     let mut storage = Storage::new("main");
 
-    // Bulk load 1 GB of data to it
+    // Bulk load 5 GB of data to it
     storage.insert("main", 5_000);
 
     // Stream of updates
@@ -48,7 +54,7 @@ fn scenario_3() -> (Vec<Segment>, SegmentPrice) {
     // Create main branch
     let mut storage = Storage::new("main");
 
-    // Bulk load 1 GB of data to it
+    // Bulk load 5 GB of data to it
     storage.insert("main", 5_000);
 
     // Stream of updates
@@ -75,7 +81,7 @@ fn scenario_4() -> (Vec<Segment>, SegmentPrice) {
     // Create main branch
     let mut storage = Storage::new("main");
 
-    // Bulk load 1 GB of data to it
+    // Bulk load 5 GB of data to it
     storage.insert("main", 5_000);
 
     // Stream of updates
@@ -113,22 +119,28 @@ fn scenario_5() -> (Vec<Segment>, SegmentPrice) {
 }
 
 fn scenario_6() -> (Vec<Segment>, SegmentPrice) {
-    let ids = [
+    use std::borrow::Cow;
+
+    const NO_OP: Cow<'static, str> = Cow::Borrowed("");
+
+    let branches = [
         Some(0x7ff1edab8182025f15ae33482edb590a_u128),
         Some(0xb1719e044db05401a05a2ed588a3ad3f),
         Some(0xb68d6691c895ad0a70809470020929ef),
     ];
 
+    // compared to other scenarios, this one uses bytes instead of kB
+
     let mut storage = Storage::new(None);
 
-    storage.branch(&None, ids[0]); // at 0
-    storage.modify_branch(&ids[0], "".into(), 108951064, 43696128); // at 108951064
-    storage.branch(&ids[0], ids[1]); // at 108951064
-    storage.modify_branch(&ids[1], "".into(), 15560408, -1851392); // at 124511472
-    storage.modify_branch(&ids[0], "".into(), 174464360, -1531904); // at 283415424
-    storage.branch(&ids[0], ids[2]); // at 283415424
-    storage.modify_branch(&ids[2], "".into(), 15906192, 8192); // at 299321616
-    storage.modify_branch(&ids[0], "".into(), 18909976, 32768); // at 302325400
+    storage.branch(&None, branches[0]); // at 0
+    storage.modify_branch(&branches[0], NO_OP, 108951064, 43696128); // at 108951064
+    storage.branch(&branches[0], branches[1]); // at 108951064
+    storage.modify_branch(&branches[1], NO_OP, 15560408, -1851392); // at 124511472
+    storage.modify_branch(&branches[0], NO_OP, 174464360, -1531904); // at 283415424
+    storage.branch(&branches[0], branches[2]); // at 283415424
+    storage.modify_branch(&branches[2], NO_OP, 15906192, 8192); // at 299321616
+    storage.modify_branch(&branches[0], NO_OP, 18909976, 32768); // at 302325400
 
     let price = storage.price(100_000);
 

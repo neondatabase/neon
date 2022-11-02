@@ -1,19 +1,27 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-/// Maintains latest [`Segment`] for each of the branches, faciliates the pricing model
-/// calculations.
+/// Pricing model or history size builder.
+///
+/// Maintains knowledge of the branches and their modifications. Generic over the branch name key
+/// type.
 pub struct Storage<K: 'static> {
     segments: Vec<Segment>,
+
+    /// Mapping from the branch name to the index of a segment describing it's latest state.
     branches: HashMap<K, usize>,
 }
 
-/// State of a branch.
+/// Snapshot of a branch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Segment {
+    /// Previous segment index into ['Storage::segments`], if any.
     parent: Option<usize>,
 
     /// Description of how did we get to this state.
+    ///
+    /// Mainly used in the original scenarios 1..=4 with insert, delete and update. Not used when
+    /// modifying a branch directly.
     pub op: Cow<'static, str>,
 
     /// LSN before this state
@@ -28,6 +36,9 @@ pub struct Segment {
     /// Logical size at this state
     pub end_size: u64,
 
+    /// Indices to [`Storage::segments`]
+    ///
+    /// FIXME: this could be an Option<usize>
     children_after: Vec<usize>,
 
     /// Determined by `retention_period` given to [`Storage::price`]
@@ -219,13 +230,13 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         let mut children = Vec::new();
 
         // try both ways
-        for child_id in seg.children_after.iter() {
+        for &child_id in seg.children_after.iter() {
             // try each child both ways
-            let child = &self.segments[*child_id];
-            let p1 = self.price_from_wal(*child_id);
+            let child = &self.segments[child_id];
+            let p1 = self.price_from_wal(child_id);
 
             let p = if !child.needed {
-                let p2 = self.price_from_snapshot_later(*child_id);
+                let p2 = self.price_from_snapshot_later(child_id);
                 if p1.total() < p2.total() {
                     p1
                 } else {
@@ -252,13 +263,13 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         if seg.needed {
             let mut children = Vec::new();
 
-            for child_id in seg.children_after.iter() {
+            for &child_id in seg.children_after.iter() {
                 // try each child both ways
-                let child = &self.segments[*child_id];
-                let p1 = self.price_from_wal(*child_id);
+                let child = &self.segments[child_id];
+                let p1 = self.price_from_wal(child_id);
 
                 let p = if !child.needed {
-                    let p2 = self.price_from_snapshot_later(*child_id);
+                    let p2 = self.price_from_snapshot_later(child_id);
                     if p1.total() < p2.total() {
                         p1
                     } else {
@@ -278,8 +289,8 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         } else {
             // If any of the direct children are "needed", need to be able to reconstruct here
             let mut children_needed = false;
-            for child in seg.children_after.iter() {
-                let seg = &self.segments[*child];
+            for &child in seg.children_after.iter() {
+                let seg = &self.segments[child];
                 if seg.needed {
                     children_needed = true;
                     break;
