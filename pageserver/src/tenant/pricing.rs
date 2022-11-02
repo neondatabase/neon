@@ -266,9 +266,9 @@ impl ModelInputs {
                     })?;
 
                     let lsn_bytes = {
-                        let now: u64 = lsn.0;
-                        let prev: u64 = latest.0 .0;
-                        debug_assert!(prev <= now, "self.updates should had been sorted");
+                        let Lsn(now) = lsn;
+                        let Lsn(prev) = latest.0;
+                        debug_assert!(prev <= *now, "self.updates should had been sorted");
                         now - prev
                     };
 
