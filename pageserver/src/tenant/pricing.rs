@@ -13,10 +13,30 @@ use tracing::*;
 /// Inputs to the actual pricing model
 ///
 /// Implements [`serde::Serialize`] but is not meant to be part of the public API.
+#[serde_with::serde_as]
 #[derive(Debug, serde::Serialize)]
 pub struct ModelInputs {
     updates: Vec<Update>,
     retention_period: u64,
+    #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
+    timeline_inputs: HashMap<TimelineId, TimelineInputs>,
+}
+
+/// Collect all relevant LSNs to the inputs, even though they will only be helpful in the
+/// serialized form.
+#[serde_with::serde_as]
+#[derive(Debug, serde::Serialize)]
+struct TimelineInputs {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    last_record: Lsn,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    latest_gc_cutoff: Lsn,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    horizon_cutoff: Lsn,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pitr_cutoff: Lsn,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    next_gc_cutoff: Lsn,
 }
 
 pub(super) async fn gather_inputs(
@@ -41,17 +61,18 @@ pub(super) async fn gather_inputs(
 
     let mut updates = Vec::new();
 
-    // most uncertain part of the process: determining the `retention_period` for the pricing
-    // model.
-    //
-    // TODO: this should be based off gc_info.{pitr_cutoff,horizon_cutoff} instead.
-    // [`Timeline::gc`] selects `min(horizon, pitr)` as the next latest_gc_cutoff_lsn.
+    // record the per timline values used to determine `retention_period`
+    let mut timeline_inputs = HashMap::with_capacity(timelines.len());
+
+    // used to determine the `retention_period` for the pricing model
     let mut min_max_cutoff_distance = None;
 
     // this will probably conflict with on-demand downloaded layers, or at least force them all
     // to be downloaded
     for timeline in timelines {
-        let (interesting_lsns, cutoff_distance) = {
+        let last_record_lsn = timeline.get_last_record_lsn();
+
+        let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
             // there's a race between the update (holding tenant.gc_lock) and this read but it
             // might not be an issue, because it's not for Timeline::gc
             let gc_info = timeline.gc_info.read().unwrap();
@@ -59,14 +80,12 @@ pub(super) async fn gather_inputs(
             // similar to gc, but Timeline::get_latest_gc_cutoff_lsn() will not be updated before a
             // new gc run, which we have no control over.
             // maybe this should be moved to gc_info.next_gc_cutoff()?
-            let gc_cutoff = std::cmp::min(gc_info.horizon_cutoff, gc_info.pitr_cutoff);
+            let next_gc_cutoff = std::cmp::min(gc_info.horizon_cutoff, gc_info.pitr_cutoff);
 
-            let last_record_lsn = timeline.get_last_record_lsn();
-
-            let maybe_cutoff = if gc_cutoff > timeline.get_ancestor_lsn() {
+            let maybe_cutoff = if next_gc_cutoff > timeline.get_ancestor_lsn() {
                 // only include these if they are after branching point; otherwise we would end up
                 // with duplicate updates before the actual branching.
-                Some((gc_cutoff, LsnKind::GcCutOff))
+                Some((next_gc_cutoff, LsnKind::GcCutOff))
             } else {
                 None
             };
@@ -90,12 +109,17 @@ pub(super) async fn gather_inputs(
                 .chain(maybe_cutoff)
                 .collect::<Vec<_>>();
 
-            (lsns, last_record_lsn.checked_sub(gc_cutoff))
+            (
+                lsns,
+                gc_info.horizon_cutoff,
+                gc_info.pitr_cutoff,
+                next_gc_cutoff,
+            )
         };
 
         // update this to have a retention_period later for the pricing_model
         // it is currently unsure what this should be.
-        if let Some(cutoff_distance) = cutoff_distance {
+        if let Some(cutoff_distance) = last_record_lsn.checked_sub(next_gc_cutoff) {
             match min_max_cutoff_distance.as_mut() {
                 Some((min, max)) => {
                     *min = std::cmp::min(*min, cutoff_distance);
@@ -131,7 +155,17 @@ pub(super) async fn gather_inputs(
             }
         }
 
-        // should the interests and the this be stored in some document,
+        timeline_inputs.insert(
+            timeline.timeline_id,
+            TimelineInputs {
+                last_record: last_record_lsn,
+                // this is not used above, because it might not have updated recently enough
+                latest_gc_cutoff: *timeline.get_latest_gc_cutoff_lsn(),
+                horizon_cutoff,
+                pitr_cutoff,
+                next_gc_cutoff,
+            },
+        );
     }
 
     let mut have_any_error = false;
@@ -206,6 +240,7 @@ pub(super) async fn gather_inputs(
     Ok(ModelInputs {
         updates,
         retention_period,
+        timeline_inputs,
     })
 }
 
@@ -417,7 +452,7 @@ fn updates_sort() {
 }
 
 #[test]
-fn inputs_serialize() {
+fn serialize_updates() {
     use std::str::FromStr;
 
     let ids = [
@@ -443,14 +478,9 @@ fn inputs_serialize() {
         },
     ];
 
-    let inputs = ModelInputs {
-        updates,
-        retention_period: 123,
-    };
+    let expected = r#"[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"7ff1edab8182025f15ae33482edb590a"},{"lsn":"0/10E49380","command":{"update":42164224},"timeline_id":"7ff1edab8182025f15ae33482edb590a"},{"lsn":"0/10E49380","command":{"branch_from":"7ff1edab8182025f15ae33482edb590a"},"timeline_id":"b68d6691c895ad0a70809470020929ef"}]"#;
 
-    let expected = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"7ff1edab8182025f15ae33482edb590a"},{"lsn":"0/10E49380","command":{"update":42164224},"timeline_id":"7ff1edab8182025f15ae33482edb590a"},{"lsn":"0/10E49380","command":{"branch_from":"7ff1edab8182025f15ae33482edb590a"},"timeline_id":"b68d6691c895ad0a70809470020929ef"},"retention_period":123]"#;
-
-    let actual = serde_json::to_string(&inputs).unwrap();
+    let actual = serde_json::to_string(&updates).unwrap();
 
     assert_eq!(expected, actual);
 }
