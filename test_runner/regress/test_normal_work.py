@@ -1,9 +1,9 @@
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverHttpClient
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PageserverHttpClient
 
 
-def check_tenant(env: NeonEnv, pageserver_http: NeonPageserverHttpClient):
+def check_tenant(env: NeonEnv, pageserver_http: PageserverHttpClient):
     tenant_id, timeline_id = env.neon_cli.create_tenant()
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement

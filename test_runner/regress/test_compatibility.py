@@ -10,7 +10,7 @@ import toml
 from fixtures.neon_fixtures import (
     NeonCli,
     NeonEnvBuilder,
-    NeonPageserverHttpClient,
+    PageserverHttpClient,
     PgBin,
     PortDistributor,
     wait_for_last_record_lsn,
@@ -208,7 +208,7 @@ def test_backward_compatibility(
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
     pageserver_port = snapshot_config["pageserver"]["listen_http_addr"].split(":")[-1]
     auth_token = snapshot_config["pageserver"]["auth_token"]
-    pageserver_http = NeonPageserverHttpClient(
+    pageserver_http = PageserverHttpClient(
         port=pageserver_port,
         is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
         auth_token=auth_token,

@@ -318,12 +318,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boxfnonce"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5988cb1d626264ac94100be357308f29ff7cbdd3b36bda27f450a4ee3f713426"
-
-[[package]]
 name = "bstr"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -848,16 +842,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "daemonize"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70c24513e34f53b640819f0ac9f705b673fcf4006d7aab8778bee72ebfc89815"
-dependencies = [
- "boxfnonce",
- "libc",
 ]
 
 [[package]]
@@ -2141,7 +2125,6 @@ dependencies = [
  "crc32c",
  "criterion",
  "crossbeam-utils",
- "daemonize",
  "etcd_broker",
  "fail",
  "futures",
@@ -3088,7 +3071,6 @@ dependencies = [
  "clap 4.0.15",
  "const_format",
  "crc32c",
- "daemonize",
  "etcd_broker",
  "fs2",
  "git-version",
@@ -3096,6 +3078,7 @@ dependencies = [
  "humantime",
  "hyper",
  "metrics",
+ "nix 0.25.0",
  "once_cell",
  "parking_lot 0.12.1",
  "postgres",

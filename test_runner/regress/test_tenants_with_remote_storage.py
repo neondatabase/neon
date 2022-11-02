@@ -25,10 +25,9 @@ from fixtures.neon_fixtures import (
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_until,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
 
 
 async def tenant_workload(env: NeonEnv, pg: Postgres):

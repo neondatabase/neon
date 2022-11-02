@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import Flag, auto
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union, cast
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, cast
 
 import asyncpg
 import backoff  # type: ignore
@@ -36,7 +36,7 @@ from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
 
-from .utils import allure_attach_from_dir, etcd_path, get_self_dir, subprocess_capture
+from .utils import Fn, allure_attach_from_dir, etcd_path, get_self_dir, subprocess_capture
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -56,7 +56,6 @@ put directly-importable functions into utils.py or another separate file.
 """
 
 Env = Dict[str, str]
-Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 DEFAULT_OUTPUT_DIR = "test_output"
 DEFAULT_BRANCH_NAME = "main"
@@ -965,11 +964,11 @@ def neon_env_builder(
         yield builder
 
 
-class NeonPageserverApiException(Exception):
+class PageserverApiException(Exception):
     pass
 
 
-class NeonPageserverHttpClient(requests.Session):
+class PageserverHttpClient(requests.Session):
     def __init__(self, port: int, is_testing_enabled_or_skip: Fn, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
@@ -987,7 +986,7 @@ class NeonPageserverHttpClient(requests.Session):
                 msg = res.json()["msg"]
             except:  # noqa: E722
                 msg = ""
-            raise NeonPageserverApiException(msg) from e
+            raise PageserverApiException(msg) from e
 
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
@@ -1624,8 +1623,6 @@ class ComputeCtl(AbstractNeonCli):
 class NeonPageserver(PgProtocol):
     """
     An object representing a running pageserver.
-
-    Initializes the repository via `neon init`.
     """
 
     TEMP_FILE_SUFFIX = "___temp"
@@ -1674,8 +1671,8 @@ class NeonPageserver(PgProtocol):
         if '"profiling"' not in self.version:
             pytest.skip("pageserver was built without 'profiling' feature")
 
-    def http_client(self, auth_token: Optional[str] = None) -> NeonPageserverHttpClient:
-        return NeonPageserverHttpClient(
+    def http_client(self, auth_token: Optional[str] = None) -> PageserverHttpClient:
+        return PageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
             is_testing_enabled_or_skip=self.is_testing_enabled_or_skip,
@@ -2260,11 +2257,6 @@ class PostgresFactory:
         return self
 
 
-def read_pid(path: Path) -> int:
-    """Read content of file into number"""
-    return int(path.read_text())
-
-
 @dataclass
 class SafekeeperPort:
     pg: int
@@ -2688,26 +2680,8 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def wait_until(number_of_iterations: int, interval: float, func):
-    """
-    Wait until 'func' returns successfully, without exception. Returns the
-    last return value from the function.
-    """
-    last_exception = None
-    for i in range(number_of_iterations):
-        try:
-            res = func()
-        except Exception as e:
-            log.info("waiting for %s iteration %s failed", func, i + 1)
-            last_exception = e
-            time.sleep(interval)
-            continue
-        return res
-    raise Exception("timed out while waiting for %s" % func) from last_exception
-
-
 def assert_no_in_progress_downloads_for_tenant(
-    pageserver_http_client: NeonPageserverHttpClient,
+    pageserver_http_client: PageserverHttpClient,
     tenant: TenantId,
 ):
     tenant_status = pageserver_http_client.tenant_status(tenant)
@@ -2715,7 +2689,7 @@ def assert_no_in_progress_downloads_for_tenant(
 
 
 def remote_consistent_lsn(
-    pageserver_http_client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
+    pageserver_http_client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
@@ -2730,7 +2704,7 @@ def remote_consistent_lsn(
 
 
 def wait_for_upload(
-    pageserver_http_client: NeonPageserverHttpClient,
+    pageserver_http_client: PageserverHttpClient,
     tenant: TenantId,
     timeline: TimelineId,
     lsn: Lsn,
@@ -2754,7 +2728,7 @@ def wait_for_upload(
 
 
 def last_record_lsn(
-    pageserver_http_client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
+    pageserver_http_client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
@@ -2764,7 +2738,7 @@ def last_record_lsn(
 
 
 def wait_for_last_record_lsn(
-    pageserver_http_client: NeonPageserverHttpClient,
+    pageserver_http_client: PageserverHttpClient,
     tenant: TenantId,
     timeline: TimelineId,
     lsn: Lsn,

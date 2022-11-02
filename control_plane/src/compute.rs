@@ -18,8 +18,8 @@ use utils::{
 };
 
 use crate::local_env::{LocalEnv, DEFAULT_PG_VERSION};
+use crate::pageserver::PageServerNode;
 use crate::postgresql_conf::PostgresConf;
-use crate::storage::PageServerNode;
 
 //
 // ComputeControlPlane

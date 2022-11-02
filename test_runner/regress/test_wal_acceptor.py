@@ -27,6 +27,7 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
     RemoteStorageUsers,
     Safekeeper,
+    SafekeeperHttpClient,
     SafekeeperPort,
     available_remote_storages,
     neon_binpath,
@@ -34,7 +35,7 @@ from fixtures.neon_fixtures import (
     wait_for_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import get_dir_size, query_scalar
+from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
 
 def wait_lsn_force_checkpoint(
@@ -841,7 +842,7 @@ class SafekeeperEnv:
         safekeeper_dir = self.repo_dir / f"sk{i}"
         safekeeper_dir.mkdir(exist_ok=True)
 
-        args = [
+        cmd = [
             self.bin_safekeeper,
             "-l",
             f"127.0.0.1:{port.pg}",
@@ -853,11 +854,22 @@ class SafekeeperEnv:
             str(i),
             "--broker-endpoints",
             self.broker.client_url(),
-            "--daemonize",
         ]
+        log.info(f'Running command "{" ".join(cmd)}"')
 
-        log.info(f'Running command "{" ".join(args)}"')
-        return subprocess.run(args, check=True)
+        safekeeper_client = SafekeeperHttpClient(
+            port=port.http,
+            auth_token=None,
+        )
+        try:
+            safekeeper_process = start_in_background(
+                cmd, safekeeper_dir, "safekeeper.log", safekeeper_client.check_status
+            )
+            return safekeeper_process
+        except Exception as e:
+            log.error(e)
+            safekeeper_process.kill()
+            raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}")
 
     def get_safekeeper_connstrs(self):
         return ",".join([sk_proc.args[2] for sk_proc in self.safekeepers])

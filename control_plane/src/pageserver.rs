@@ -1,17 +1,13 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
-use std::{io, result, thread};
+use std::process::Child;
+use std::{io, result};
 
 use crate::connection::PgConnectionConfig;
 use anyhow::{bail, Context};
-use nix::errno::Errno;
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
@@ -25,8 +21,7 @@ use utils::{
     postgres_backend::AuthType,
 };
 
-use crate::local_env::LocalEnv;
-use crate::{fill_aws_secrets_vars, fill_rust_env_vars, read_pidfile};
+use crate::{background_process, local_env::LocalEnv};
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
@@ -160,7 +155,15 @@ impl PageServerNode {
             init_config_overrides.push("auth_validation_public_key_path='auth_public_key.pem'");
         }
 
-        self.start_node(&init_config_overrides, &self.env.base_data_dir, true)?;
+        let mut pageserver_process = self
+            .start_node(&init_config_overrides, &self.env.base_data_dir, true)
+            .with_context(|| {
+                format!(
+                    "Failed to start a process for pageserver {}",
+                    self.env.pageserver.id,
+                )
+            })?;
+
         let init_result = self
             .try_init_timeline(create_tenant, initial_timeline_id, pg_version)
             .context("Failed to create initial tenant and timeline for pageserver");
@@ -170,7 +173,29 @@ impl PageServerNode {
             }
             Err(e) => eprintln!("{e:#}"),
         }
-        self.stop(false)?;
+        match pageserver_process.kill() {
+            Err(e) => {
+                eprintln!(
+                    "Failed to stop pageserver {} process with pid {}: {e:#}",
+                    self.env.pageserver.id,
+                    pageserver_process.id(),
+                )
+            }
+            Ok(()) => {
+                println!(
+                    "Stopped pageserver {} process with pid {}",
+                    self.env.pageserver.id,
+                    pageserver_process.id(),
+                );
+                // cleanup after pageserver startup, since we do not call regular `stop_process` during init
+                let pid_file = self.pid_file();
+                if let Err(e) = fs::remove_file(&pid_file) {
+                    if e.kind() != io::ErrorKind::NotFound {
+                        eprintln!("Failed to remove pid file {pid_file:?} after stopping the process: {e:#}");
+                    }
+                }
+            }
+        }
         init_result
     }
 
@@ -195,11 +220,14 @@ impl PageServerNode {
         self.env.pageserver_data_dir()
     }
 
-    pub fn pid_file(&self) -> PathBuf {
+    /// The pid file is created by the pageserver process, with its pid stored inside.
+    /// Other pageservers cannot lock the same file and overwrite it for as long as the current
+    /// pageserver runs. (Unless someone removes the file manually; never do that!)
+    fn pid_file(&self) -> PathBuf {
         self.repo_path().join("pageserver.pid")
     }
 
-    pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+    pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
         self.start_node(config_overrides, &self.repo_path(), false)
     }
 
@@ -208,7 +236,7 @@ impl PageServerNode {
         config_overrides: &[&str],
         datadir: &Path,
         update_config: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Child> {
         println!(
             "Starting pageserver at '{}' in '{}'",
             self.pg_connection_config.raw_address(),
@@ -219,10 +247,7 @@ impl PageServerNode {
         let mut args = vec![
             "-D",
             datadir.to_str().with_context(|| {
-                format!(
-                    "Datadir path '{}' cannot be represented as a unicode string",
-                    datadir.display()
-                )
+                format!("Datadir path {datadir:?} cannot be represented as a unicode string")
             })?,
         ];
 
@@ -234,48 +259,18 @@ impl PageServerNode {
             args.extend(["-c", config_override]);
         }
 
-        let mut cmd = Command::new(self.env.pageserver_bin()?);
-        let mut filled_cmd = fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
-        filled_cmd = fill_aws_secrets_vars(filled_cmd);
-
-        if !filled_cmd.status()?.success() {
-            bail!(
-                "Pageserver failed to start. See console output and '{}' for details.",
-                datadir.join("pageserver.log").display()
-            );
-        }
-
-        // It takes a while for the page server to start up. Wait until it is
-        // open for business.
-        const RETRIES: i8 = 15;
-        for retries in 1..RETRIES {
-            match self.check_status() {
-                Ok(()) => {
-                    println!("\nPageserver started");
-                    return Ok(());
-                }
-                Err(err) => {
-                    match err {
-                        PageserverHttpError::Transport(err) => {
-                            if err.is_connect() && retries < 5 {
-                                print!(".");
-                                io::stdout().flush().unwrap();
-                            } else {
-                                if retries == 5 {
-                                    println!() // put a line break after dots for second message
-                                }
-                                println!("Pageserver not responding yet, err {err} retrying ({retries})...");
-                            }
-                        }
-                        PageserverHttpError::Response(msg) => {
-                            bail!("pageserver failed to start: {msg} ")
-                        }
-                    }
-                    thread::sleep(Duration::from_secs(1));
-                }
-            }
-        }
-        bail!("pageserver failed to start in {RETRIES} seconds");
+        background_process::start_process(
+            "pageserver",
+            datadir,
+            &self.env.pageserver_bin(),
+            &args,
+            background_process::InitialPidFile::Expect(&self.pid_file()),
+            || match self.check_status() {
+                Ok(()) => Ok(true),
+                Err(PageserverHttpError::Transport(_)) => Ok(false),
+                Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
+            },
+        )
     }
 
     ///
@@ -287,58 +282,7 @@ impl PageServerNode {
     /// If the server is not running, returns success
     ///
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
-        let pid_file = self.pid_file();
-        if !pid_file.exists() {
-            println!("Pageserver is already stopped");
-            return Ok(());
-        }
-        let pid = Pid::from_raw(read_pidfile(&pid_file)?);
-
-        let sig = if immediate {
-            print!("Stopping pageserver immediately..");
-            Signal::SIGQUIT
-        } else {
-            print!("Stopping pageserver gracefully..");
-            Signal::SIGTERM
-        };
-        io::stdout().flush().unwrap();
-        match kill(pid, sig) {
-            Ok(_) => (),
-            Err(Errno::ESRCH) => {
-                println!("Pageserver with pid {pid} does not exist, but a PID file was found");
-                return Ok(());
-            }
-            Err(err) => bail!(
-                "Failed to send signal to pageserver with pid {pid}: {}",
-                err.desc()
-            ),
-        }
-
-        // Wait until process is gone
-        for i in 0..600 {
-            let signal = None; // Send no signal, just get the error code
-            match kill(pid, signal) {
-                Ok(_) => (), // Process exists, keep waiting
-                Err(Errno::ESRCH) => {
-                    // Process not found, we're done
-                    println!("done!");
-                    return Ok(());
-                }
-                Err(err) => bail!(
-                    "Failed to send signal to pageserver with pid {}: {}",
-                    pid,
-                    err.desc()
-                ),
-            };
-
-            if i % 10 == 0 {
-                print!(".");
-                io::stdout().flush().unwrap();
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-
-        bail!("Failed to stop pageserver with pid {pid}");
+        background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
