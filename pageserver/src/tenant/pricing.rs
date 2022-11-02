@@ -14,7 +14,7 @@ use tracing::*;
 ///
 /// Implements [`serde::Serialize`] but is not meant to be part of the public API.
 #[serde_with::serde_as]
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModelInputs {
     updates: Vec<Update>,
     retention_period: u64,
@@ -25,7 +25,7 @@ pub struct ModelInputs {
 /// Collect all relevant LSNs to the inputs, even though they will only be helpful in the
 /// serialized form.
 #[serde_with::serde_as]
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct TimelineInputs {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     last_record: Lsn,
@@ -308,7 +308,9 @@ impl ModelInputs {
 /// Pricing model works with relative increments over latest branch state.
 /// Updates are absolute, so additional state needs to be tracked when applying.
 #[serde_with::serde_as]
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Copy, serde::Serialize)]
+#[derive(
+    Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Copy, serde::Serialize, serde::Deserialize,
+)]
 struct Update {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     lsn: utils::lsn::Lsn,
@@ -318,11 +320,22 @@ struct Update {
 }
 
 #[serde_with::serde_as]
-#[derive(Debug, PartialOrd, PartialEq, Eq, Ord, Clone, Copy, serde::Serialize)]
+#[derive(PartialOrd, PartialEq, Eq, Ord, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Command {
     Update(u64),
     BranchFrom(#[serde_as(as = "Option<serde_with::DisplayFromStr>")] Option<TimelineId>),
+}
+
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // custom one-line implementation makes it more enjoyable to read {:#?} avoiding 3
+        // linebreaks
+        match self {
+            Self::Update(arg0) => write!(f, "Update({arg0})"),
+            Self::BranchFrom(arg0) => write!(f, "BranchFrom({arg0:?})"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -465,4 +478,14 @@ fn serialize_updates() {
     let actual = serde_json::to_string(&updates).unwrap();
 
     assert_eq!(expected, actual);
+}
+#[test]
+fn verify_price_for_multiple_branches() {
+    // this is generated from integration test test_history_size_with_multiple_sizes, but this way
+    // it has the stable lsn's
+    let doc = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"update":25763840},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/1819818","command":{"update":26075136},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/18B5E40","command":{"update":26427392},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"update":26492928},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"230fc9d756f7363574c0d66533564dcc"},{"lsn":"0/220F438","command":{"update":25239552},"timeline_id":"230fc9d756f7363574c0d66533564dcc"}],"retention_period":131072,"timeline_inputs":{"cd9d9409c216e64bf580904facedb01b":{"last_record":"0/18D5E40","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/18B5E40","pitr_cutoff":"0/18B5E40","next_gc_cutoff":"0/18B5E40"},"10b532a550540bc15385eac4edde416a":{"last_record":"0/1839818","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/1819818","pitr_cutoff":"0/1819818","next_gc_cutoff":"0/1819818"},"230fc9d756f7363574c0d66533564dcc":{"last_record":"0/222F438","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/220F438","pitr_cutoff":"0/220F438","next_gc_cutoff":"0/220F438"}}}"#;
+
+    let inputs: ModelInputs = serde_json::from_str(doc).unwrap();
+
+    assert_eq!(inputs.price().unwrap(), 36_409_872);
 }
