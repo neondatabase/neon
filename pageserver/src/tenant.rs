@@ -1480,6 +1480,7 @@ impl Tenant {
     /// Gathers inputs from all of the timelines to produce a pricing model input.
     ///
     /// Future is cancellation safe. Only one calculation can be running at once per tenant.
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     pub async fn gather_pricing_inputs(&self) -> anyhow::Result<pricing::ModelInputs> {
         use pricing::gather_inputs;
 

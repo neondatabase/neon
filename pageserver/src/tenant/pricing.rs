@@ -96,13 +96,11 @@ pub(super) async fn gather_inputs(
                 .iter()
                 .inspect(|&&x| {
                     trace!(
-                        "retained lsn for {}: {x:?}, is_before_ancestor_lsn={}",
-                        timeline.timeline_id,
+                        timeline_id=%timeline.timeline_id,
+                        "retained lsn: {x:?}, is_before_ancestor_lsn={}",
                         x < timeline.get_ancestor_lsn()
                     )
                 })
-                // unsure why retain_lsns contain all of parents branch points as well, but for
-                // this calculation we must not have them.
                 .filter(|&&lsn| lsn > timeline.get_ancestor_lsn())
                 .cloned()
                 .map(|lsn| (lsn, LsnKind::BranchPoint))
@@ -175,8 +173,8 @@ pub(super) async fn gather_inputs(
         // because of spawn + spawn_blocking
         let res = res.and_then(|inner| inner);
         match res {
-            Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok((size, elapsed)))) => {
-                debug!(timeline_id=%timeline.timeline_id, %lsn, size, ?elapsed, "size calculated");
+            Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size))) => {
+                debug!(timeline_id=%timeline.timeline_id, %lsn, size, "size calculated");
 
                 logical_size_cache.insert((timeline.timeline_id, lsn), size);
                 needed_cache.insert((timeline.timeline_id, lsn));
@@ -190,8 +188,7 @@ pub(super) async fn gather_inputs(
             Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error))) => {
                 warn!(
                     timeline_id=%timeline.timeline_id,
-                    ?error,
-                    "failed to calculate logical size at {lsn}, trying again later"
+                    "failed to calculate logical size at {lsn}: {error:#}"
                 );
                 have_any_error = true;
             }
@@ -222,8 +219,6 @@ pub(super) async fn gather_inputs(
     // is needed before a branch is made out of that branch Command::BranchFrom. this is
     // handled by the variant order in `Command`.
     updates.sort_unstable();
-
-    trace!("updates: {updates:#?}");
 
     let retention_period = match min_max_cutoff_distance {
         Some((_min, max)) => max.0,
@@ -269,6 +264,7 @@ impl ModelInputs {
                     let lsn_bytes = {
                         let now: u64 = lsn.0;
                         let prev: u64 = latest.0 .0;
+                        debug_assert!(prev <= now, "self.updates should had been sorted");
                         now - prev
                     };
 
@@ -278,18 +274,10 @@ impl ModelInputs {
                         })?;
 
                     storage.modify_branch(&Some(*timeline_id), "".into(), lsn_bytes, size_diff);
-                    trace!(
-                        "modify_branch(&Some({}), \"\".into(), {}, {})",
-                        timeline_id,
-                        lsn_bytes,
-                        size_diff
-                    );
-
                     *latest = (*lsn, *sz);
                 }
                 Command::BranchFrom(parent) => {
                     storage.branch(parent, Some(*timeline_id));
-                    trace!("branch(&{:?}, Some({}))", parent, timeline_id);
 
                     let size = parent
                         .as_ref()
@@ -337,7 +325,7 @@ enum LsnKind {
 struct TimelineAtLsnSizeResult(
     Arc<crate::tenant::Timeline>,
     utils::lsn::Lsn,
-    anyhow::Result<(u64, std::time::Duration)>,
+    anyhow::Result<u64>,
 );
 
 #[instrument(skip_all, fields(timeline_id=%timeline.timeline_id, lsn=%lsn))]
@@ -346,29 +334,13 @@ async fn calculate_logical_size(
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
 ) -> Result<TimelineAtLsnSizeResult, tokio::task::JoinError> {
-    // obtain a permit so we limit how many of these tasks actually execute
-    // concurrently. assume that cost of async task is small enough, and more
-    // important resource is the blocking pool.
-    //
-    // panic will not disturb anything, just disable the task, as is meant to be
-    let permit = tokio::sync::Semaphore::acquire_owned(limit).await.unwrap();
-
-    // propagate the #[instrument(...)] to the spawn blocking; it cannot be transferred
-    // automatically..
-    // let span = tracing::Span::current();
+    let permit = tokio::sync::Semaphore::acquire_owned(limit)
+        .await
+        .expect("global semaphore should not had been closed");
 
     tokio::task::spawn_blocking(move || {
-        // let _entered = span.enter();
         let _permit = permit;
-        let started = std::time::Instant::now();
-
         let size_res = timeline.calculate_logical_size(lsn);
-
-        let size_res = size_res.map(|size| {
-            let elapsed = started.elapsed();
-            (size, elapsed)
-        });
-
         TimelineAtLsnSizeResult(timeline, lsn, size_res)
     })
     .await
