@@ -103,15 +103,15 @@ pub(super) async fn gather_inputs(
             let lsns = gc_info
                 .retain_lsns
                 .iter()
-                .inspect(|&&x| {
+                .inspect(|&&lsn| {
                     trace!(
                         timeline_id=%timeline.timeline_id,
-                        "retained lsn: {x:?}, is_before_ancestor_lsn={}",
-                        x < timeline.get_ancestor_lsn()
+                        "retained lsn: {lsn:?}, is_before_ancestor_lsn={}",
+                        lsn < timeline.get_ancestor_lsn()
                     )
                 })
                 .filter(|&&lsn| lsn > timeline.get_ancestor_lsn())
-                .cloned()
+                .copied()
                 .map(|lsn| (lsn, LsnKind::BranchPoint))
                 .chain(maybe_cutoff)
                 .collect::<Vec<_>>();
