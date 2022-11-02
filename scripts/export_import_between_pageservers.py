@@ -740,7 +740,7 @@ if __name__ == "__main__":
         required=False,
         default=55439,
         type=non_zero_tcp_port,
-        help="localhost port to use for temporary postgres instance"
+        help="localhost port to use for temporary postgres instance",
     )
     args = parser.parse_args()
     main(args)
