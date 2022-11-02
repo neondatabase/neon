@@ -500,10 +500,10 @@ impl PageServerConf {
                     LogFormat::from_config(&parse_toml_string(key, item)?)?
                 ),
                 "concurrent_pricing_logical_size_queries" => builder.concurrent_pricing_logical_size_queries({
-                    let s = parse_toml_string(key, item)?;
-                    let u = s.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
-                    let u = NonZeroUsize::new(u).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
-                    ConfigurableSemaphore::new(u)
+                    let input = parse_toml_string(key, item)?;
+                    let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
+                    let permits = NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
+                    ConfigurableSemaphore::new(permits)
                 }),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
