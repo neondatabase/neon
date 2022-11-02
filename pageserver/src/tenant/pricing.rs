@@ -244,6 +244,8 @@ pub(super) async fn gather_inputs(
 
 impl ModelInputs {
     pub fn price(&self) -> anyhow::Result<u64> {
+        // Option<TimelineId> is used for "naming" the branches because it is assumed to be
+        // impossible to always determine the a one main branch.
         let mut storage = pricing_model::Storage::<Option<TimelineId>>::new(None);
 
         // tracking these not to require modifying the current implementation of the pricing model,
