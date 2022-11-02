@@ -48,9 +48,8 @@ pub(super) async fn gather_inputs(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    // TODO: spawn blocking?
     let timelines = tenant
-        .refresh_gc_info(None)
+        .refresh_gc_info()
         .context("Failed to refresh gc_info before gathering inputs")?;
 
     if timelines.is_empty() {

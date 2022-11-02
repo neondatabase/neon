@@ -1026,15 +1026,15 @@ impl Tenant {
     /// vector of active timelines (or just one, if target_timeline_id was specified).
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
-    pub fn refresh_gc_info(
-        &self,
-        target_timeline_id: Option<TimelineId>,
-    ) -> anyhow::Result<Vec<Arc<Timeline>>> {
-        // TODO: since this method can now be called at different rates than the configured gc
-        // loop, it might be that these configuration values get applied faster than what it was
-        // previously, since these were only read from the gc task.
+    pub fn refresh_gc_info(&self) -> anyhow::Result<Vec<Arc<Timeline>>> {
+        // since this method can now be called at different rates than the configured gc loop, it
+        // might be that these configuration values get applied faster than what it was previously,
+        // since these were only read from the gc task.
         let horizon = self.get_gc_horizon();
         let pitr = self.get_pitr_interval();
+
+        // refresh all timelines
+        let target_timeline_id = None;
 
         self.refresh_gc_info_internal(target_timeline_id, horizon, pitr)
     }
