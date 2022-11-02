@@ -49,7 +49,7 @@ pub mod defaults {
 
     pub const DEFAULT_LOG_FORMAT: &str = "plain";
 
-    pub const DEFAULT_CONCURRENT_PRICING_LOGICAL_SIZE_QUERIES: usize =
+    pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize =
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
     ///
@@ -72,7 +72,7 @@ pub mod defaults {
 
 #log_format = '{DEFAULT_LOG_FORMAT}'
 
-#concurrent_pricing_logical_size_queries = '{DEFAULT_CONCURRENT_PRICING_LOGICAL_SIZE_QUERIES}'
+#concurrent_tenant_size_logical_size_queries = '{DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES}'
 
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -140,8 +140,8 @@ pub struct PageServerConf {
 
     pub log_format: LogFormat,
 
-    /// Number of concurrent [`Tenant::gather_pricing_inputs`] allowed.
-    pub concurrent_pricing_logical_size_queries: ConfigurableSemaphore,
+    /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
+    pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,7 +211,7 @@ struct PageServerConfigBuilder {
 
     log_format: BuilderValue<LogFormat>,
 
-    concurrent_pricing_logical_size_queries: BuilderValue<ConfigurableSemaphore>,
+    concurrent_tenant_size_logical_size_queries: BuilderValue<ConfigurableSemaphore>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -241,7 +241,7 @@ impl Default for PageServerConfigBuilder {
             broker_endpoints: Set(Vec::new()),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
-            concurrent_pricing_logical_size_queries: Set(ConfigurableSemaphore::default()),
+            concurrent_tenant_size_logical_size_queries: Set(ConfigurableSemaphore::default()),
         }
     }
 }
@@ -318,8 +318,8 @@ impl PageServerConfigBuilder {
         self.log_format = BuilderValue::Set(log_format)
     }
 
-    pub fn concurrent_pricing_logical_size_queries(&mut self, u: ConfigurableSemaphore) {
-        self.concurrent_pricing_logical_size_queries = BuilderValue::Set(u);
+    pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: ConfigurableSemaphore) {
+        self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
@@ -367,11 +367,11 @@ impl PageServerConfigBuilder {
                 .broker_etcd_prefix
                 .ok_or(anyhow!("missing broker_etcd_prefix"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
-            concurrent_pricing_logical_size_queries: self
-                .concurrent_pricing_logical_size_queries
+            concurrent_tenant_size_logical_size_queries: self
+                .concurrent_tenant_size_logical_size_queries
                 .ok_or(anyhow!(
-                "missing concurrent_pricing_logical_size_queries"
-            ))?,
+                    "missing concurrent_tenant_size_logical_size_queries"
+                ))?,
         })
     }
 }
@@ -499,7 +499,7 @@ impl PageServerConf {
                 "log_format" => builder.log_format(
                     LogFormat::from_config(&parse_toml_string(key, item)?)?
                 ),
-                "concurrent_pricing_logical_size_queries" => builder.concurrent_pricing_logical_size_queries({
+                "concurrent_tenant_size_logical_size_queries" => builder.concurrent_tenant_size_logical_size_queries({
                     let input = parse_toml_string(key, item)?;
                     let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
                     let permits = NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
@@ -618,7 +618,7 @@ impl PageServerConf {
             broker_endpoints: Vec::new(),
             broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
-            concurrent_pricing_logical_size_queries: ConfigurableSemaphore::default(),
+            concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
         }
     }
 }
@@ -701,11 +701,11 @@ impl ConfigurableSemaphore {
         None => panic!("const unwrap is not yet stable"),
     };
 
-    /// Require a non-zero initial permits, because using permits == 0 is a crude way to disable
-    /// a feature such as [`Tenant::gather_pricing_inputs`].
+    /// Initializse using a non-zero amount of permits.
     ///
-    /// Any semaphore using future will behave like [`futures::future::pending`], just waiting
-    /// until new permits are added.
+    /// Require a non-zero initial permits, because using permits == 0 is a crude way to disable a
+    /// feature such as [`Tenant::gather_size_inputs`]. Otherwise any semaphore using future will
+    /// behave like [`futures::future::pending`], just waiting until new permits are added.
     pub fn new(initial_permits: NonZeroUsize) -> Self {
         ConfigurableSemaphore {
             initial_permits,
@@ -807,7 +807,7 @@ log_format = 'json'
                     .expect("Failed to parse a valid broker endpoint URL")],
                 broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
-                concurrent_pricing_logical_size_queries: ConfigurableSemaphore::default(),
+                concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -853,7 +853,7 @@ log_format = 'json'
                     .expect("Failed to parse a valid broker endpoint URL")],
                 broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
                 log_format: LogFormat::Json,
-                concurrent_pricing_logical_size_queries: ConfigurableSemaphore::default(),
+                concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
             },
             "Should be able to parse all basic config values correctly"
         );

@@ -72,7 +72,7 @@ pub mod storage_layer;
 
 mod timeline;
 
-pub mod pricing;
+pub mod size;
 
 use storage_layer::Layer;
 
@@ -123,7 +123,7 @@ pub struct Tenant {
     /// Makes every timeline to backup their files to remote storage.
     upload_layers: bool,
 
-    /// Cached logical sizes updated updated on each [`Tenant::collect_pricing_operations`].
+    /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
 }
 
@@ -1477,16 +1477,19 @@ impl Tenant {
         Ok(())
     }
 
-    /// Gathers inputs from all of the timelines to produce a pricing model input.
+    /// Gathers inputs from all of the timelines to produce a sizing model input.
     ///
     /// Future is cancellation safe. Only one calculation can be running at once per tenant.
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
-    pub async fn gather_pricing_inputs(&self) -> anyhow::Result<pricing::ModelInputs> {
-        let logical_sizes_at_once = self.conf.concurrent_pricing_logical_size_queries.inner();
+    pub async fn gather_size_inputs(&self) -> anyhow::Result<size::ModelInputs> {
+        let logical_sizes_at_once = self
+            .conf
+            .concurrent_tenant_size_logical_size_queries
+            .inner();
 
         let mut shared_cache = self.cached_logical_sizes.lock().await;
 
-        pricing::gather_inputs(self, logical_sizes_at_once, &mut *shared_cache).await
+        size::gather_inputs(self, logical_sizes_at_once, &mut *shared_cache).await
     }
 }
 

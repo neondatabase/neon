@@ -4,7 +4,7 @@
 //! size or price proxy, outputs graphviz graph. Makefile in directory shows how to use graphviz to
 //! turn scenarios into pngs.
 
-use pricing_model::{Segment, SegmentPrice, Storage};
+use tenant_size_model::{Segment, SegmentPrice, Storage};
 
 // Main branch only. Some updates on it.
 fn scenario_1() -> (Vec<Segment>, SegmentPrice) {
@@ -169,7 +169,7 @@ fn main() {
 }
 
 fn graphviz_price_recurse(segments: &[Segment], node: &SegmentPrice) {
-    use pricing_model::SegmentMethod::*;
+    use tenant_size_model::SegmentMethod::*;
 
     let seg_id = node.seg_id;
     let seg = segments.get(seg_id).unwrap();

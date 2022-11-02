@@ -15,11 +15,11 @@ from fixtures.neon_fixtures import (
 from fixtures.types import Lsn, TenantId
 
 
-def test_empty_tenant_history_size(neon_simple_env: NeonEnv):
+def test_empty_tenant_size(neon_simple_env: NeonEnv):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
     http_client = env.pageserver.http_client()
-    size = history_size(http_client, tenant_id)[0]
+    size = get_tenant_size(http_client, tenant_id)[0]
     # we should never have zero, because there should be the initdb however
     # this is questionable if we should have anything in this case, as the
     # gc_cutoff is negative
@@ -32,36 +32,37 @@ def test_empty_tenant_history_size(neon_simple_env: NeonEnv):
             assert row is not None
             assert row[0] == 1
         # running compute should not change the size
-        size = history_size(http_client, tenant_id)[0]
+        size = get_tenant_size(http_client, tenant_id)[0]
         assert size == 0
 
     # after compute has been shut down, the size should be the same, until we
     # increase the size over the gc_horizon
-    size = history_size(http_client, tenant_id)[0]
+    size = get_tenant_size(http_client, tenant_id)[0]
     assert size == 0
 
 
-def history_size(http_client: PageserverHttpClient, tenant_id: TenantId) -> Tuple[int, Any]:
-    res = http_client.get(f"http://localhost:{http_client.port}/v1/tenant/{tenant_id}/history_size")
+def get_tenant_size(http_client: PageserverHttpClient, tenant_id: TenantId) -> Tuple[int, Any]:
+    res = http_client.get(f"http://localhost:{http_client.port}/v1/tenant/{tenant_id}/tenant_size")
     http_client.verbose_error(res)
     res = res.json()
     assert isinstance(res, dict)
     assert TenantId(res["id"]) == tenant_id
-    history_size = res["history_size"]
-    assert type(history_size) == int
-    return (history_size, res.get("inputs", None))
+    size = res["tenant_size"]
+    assert type(size) == int
+    # there are additional inputs, which are the collected raw information before being fed to the tenant_size_model
+    return (size, res.get("inputs", None))
 
 
-def test_single_branch_history_size_grows(neon_env_builder: NeonEnvBuilder):
+def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     """
-    Operate on single branch reading the tenants history size after each transaction.
+    Operate on single branch reading the tenants size after each transaction.
     """
 
     # gc and compaction is not wanted automatically
     # the pitr_interval here is quite problematic, so we cannot really use it.
     # it'd have to be calibrated per test executing env.
     neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={128 * 1024}}}"
-    # in this test we don't run gc or compaction, but the history_size is
+    # in this test we don't run gc or compaction, but the tenant size is
     # expected to use the "next gc" cutoff, so the small amounts should work
 
     env = neon_env_builder.init_start()
@@ -91,7 +92,7 @@ def test_single_branch_history_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size, _ = history_size(http_client, tenant_id)
+            size, _ = get_tenant_size(http_client, tenant_id)
 
             if len(collected_responses) > 0:
                 last_size = collected_responses[-1][1]
@@ -117,7 +118,7 @@ def test_single_branch_history_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size, _ = history_size(http_client, tenant_id)
+            size, _ = get_tenant_size(http_client, tenant_id)
             assert size > collected_responses[-1][1]
             collected_responses.append((current_lsn, size))
 
@@ -131,7 +132,7 @@ def test_single_branch_history_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size, _ = history_size(http_client, tenant_id)
+            size, _ = get_tenant_size(http_client, tenant_id)
             # even though rows have been deleted, the size should not decrease
             assert size > collected_responses[-1][1]
             collected_responses.append((current_lsn, size))
@@ -141,7 +142,7 @@ def test_single_branch_history_size_grows(neon_env_builder: NeonEnvBuilder):
 
         current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-        size, _ = history_size(http_client, tenant_id)
+        size, _ = get_tenant_size(http_client, tenant_id)
 
         assert size > collected_responses[-1][1]
         collected_responses.append((current_lsn, size))
@@ -152,14 +153,14 @@ def test_single_branch_history_size_grows(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start()
 
-    size_after = history_size(http_client, tenant_id)[0]
+    size_after = get_tenant_size(http_client, tenant_id)[0]
 
     assert (
         size_after == collected_responses[-1][1]
     ), "size after restarting pageserver should not have changed"
 
 
-def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
+def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
     """
     Reported size goes up while branches or rows are being added, goes down after removing branches.
     """
@@ -183,7 +184,7 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
-    size_at_branch = history_size(http_client, tenant_id)[0]
+    size_at_branch = get_tenant_size(http_client, tenant_id)[0]
     assert size_at_branch > 0
 
     first_branch_timeline_id = env.neon_cli.create_branch(
@@ -191,7 +192,7 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
     )
 
     # unsure why this happens
-    size_after_branch = history_size(http_client, tenant_id)[0]
+    size_after_branch = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_branch > size_at_branch
 
     first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
@@ -202,7 +203,7 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_for_last_flush_lsn(env, first_branch_pg, tenant_id, first_branch_timeline_id)
-    size_after_growing_branch = history_size(http_client, tenant_id)[0]
+    size_after_growing_branch = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_growing_branch > size_after_branch
 
     with main_pg.cursor() as cur:
@@ -211,13 +212,13 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
-    size_after_continuing_on_main = history_size(http_client, tenant_id)[0]
+    size_after_continuing_on_main = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_continuing_on_main > size_after_growing_branch
 
     second_branch_timeline_id = env.neon_cli.create_branch(
         "second-branch", main_branch_name, tenant_id
     )
-    size_after_branch = history_size(http_client, tenant_id)[0]
+    size_after_branch = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_branch > size_after_continuing_on_main
 
     second_branch_pg = env.postgres.create_start("second-branch", tenant_id=tenant_id)
@@ -228,7 +229,7 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_for_last_flush_lsn(env, second_branch_pg, tenant_id, second_branch_timeline_id)
-    size_after_growing_branch = history_size(http_client, tenant_id)[0]
+    size_after_growing_branch = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_growing_branch > size_after_branch
 
     with second_branch_pg.cursor() as cur:
@@ -237,7 +238,7 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
         cur.execute("VACUUM FULL")
 
     wait_for_last_flush_lsn(env, second_branch_pg, tenant_id, second_branch_timeline_id)
-    size_after_thinning_branch = history_size(http_client, tenant_id)[0]
+    size_after_thinning_branch = get_tenant_size(http_client, tenant_id)[0]
     # size doesn't yet go down
     assert size_after_thinning_branch > size_after_growing_branch
 
@@ -246,7 +247,7 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
     main_pg.stop()
     env.pageserver.stop()
     env.pageserver.start()
-    size_after = history_size(http_client, tenant_id)[0]
+    size_after = get_tenant_size(http_client, tenant_id)[0]
 
     assert size_after == size_after_thinning_branch
 
@@ -266,15 +267,15 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
 
     assert deleted
 
-    size_after_deleting_first = history_size(http_client, tenant_id)[0]
+    size_after_deleting_first = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_deleting_first < size_after_thinning_branch
 
     http_client.timeline_delete(tenant_id, second_branch_timeline_id)
-    size_after_deleting_second = history_size(http_client, tenant_id)[0]
+    size_after_deleting_second = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_deleting_second < size_after_deleting_first
 
 
-def test_history_size_with_broken_timeline(neon_env_builder: NeonEnvBuilder):
+def test_get_tenant_size_with_broken_timeline(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={128 * 1024}}}"
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
@@ -292,13 +293,13 @@ def test_history_size_with_broken_timeline(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
-    size_at_branch = history_size(http_client, tenant_id)[0]
+    size_at_branch = get_tenant_size(http_client, tenant_id)[0]
     assert size_at_branch > 0
 
     first_branch_timeline_id = env.neon_cli.create_branch(
         "first-branch", main_branch_name, tenant_id
     )
-    size_after_branch = history_size(http_client, tenant_id)[0]
+    size_after_branch = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_branch > size_at_branch
 
     first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
@@ -309,7 +310,7 @@ def test_history_size_with_broken_timeline(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_for_last_flush_lsn(env, first_branch_pg, tenant_id, first_branch_timeline_id)
-    size_after_growing_branch = history_size(http_client, tenant_id)[0]
+    size_after_growing_branch = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_growing_branch > size_at_branch
 
     first_branch_pg.stop()
@@ -337,5 +338,5 @@ def test_history_size_with_broken_timeline(neon_env_builder: NeonEnvBuilder):
         with pytest.raises(Exception, match="""relation "t1" does not exist"""):
             cur.execute("SELECT count(1) FROM t1")
 
-    size_after_breaking_timeline = history_size(http_client, tenant_id)[0]
+    size_after_breaking_timeline = get_tenant_size(http_client, tenant_id)[0]
     assert size_after_breaking_timeline == size_after_growing_branch

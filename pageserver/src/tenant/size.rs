@@ -10,9 +10,10 @@ use utils::lsn::Lsn;
 
 use tracing::*;
 
-/// Inputs to the actual pricing model
+/// Inputs to the actual tenant sizing model
 ///
-/// Implements [`serde::Serialize`] but is not meant to be part of the public API.
+/// Implements [`serde::Serialize`] but is not meant to be part of the public API, instead meant to
+/// be a transferrable format between execution environments and developer.
 #[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModelInputs {
@@ -73,7 +74,7 @@ pub(super) async fn gather_inputs(
     // record the per timline values used to determine `retention_period`
     let mut timeline_inputs = HashMap::with_capacity(timelines.len());
 
-    // used to determine the `retention_period` for the pricing model
+    // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
     // this will probably conflict with on-demand downloaded layers, or at least force them all
@@ -124,8 +125,8 @@ pub(super) async fn gather_inputs(
             )
         };
 
-        // update this to have a retention_period later for the pricing_model
-        // pricing_model compares this to the last segments start_lsn
+        // update this to have a retention_period later for the tenant_size_model
+        // tenant_size_model compares this to the last segments start_lsn
         if let Some(cutoff_distance) = last_record_lsn.checked_sub(next_gc_cutoff) {
             match max_cutoff_distance.as_mut() {
                 Some(max) => {
@@ -138,7 +139,7 @@ pub(super) async fn gather_inputs(
         }
 
         // all timelines branch from something, because it might be impossible to pinpoint
-        // which is the pricing models "default" branch.
+        // which is the tenant_size_model's "default" branch.
         updates.push(Update {
             lsn: timeline.get_ancestor_lsn(),
             command: Command::BranchFrom(timeline.get_ancestor_timeline_id()),
@@ -243,12 +244,12 @@ pub(super) async fn gather_inputs(
 }
 
 impl ModelInputs {
-    pub fn price(&self) -> anyhow::Result<u64> {
+    pub fn calculate(&self) -> anyhow::Result<u64> {
         // Option<TimelineId> is used for "naming" the branches because it is assumed to be
         // impossible to always determine the a one main branch.
-        let mut storage = pricing_model::Storage::<Option<TimelineId>>::new(None);
+        let mut storage = tenant_size_model::Storage::<Option<TimelineId>>::new(None);
 
-        // tracking these not to require modifying the current implementation of the pricing model,
+        // tracking these not to require modifying the current implementation of the size model,
         // which works in relative LSNs and sizes.
         let mut last_state: HashMap<TimelineId, (Lsn, u64)> = HashMap::new();
 
@@ -298,9 +299,9 @@ impl ModelInputs {
     }
 }
 
-/// Single pricing model update.
+/// Single size model update.
 ///
-/// Pricing model works with relative increments over latest branch state.
+/// Sizing model works with relative increments over latest branch state.
 /// Updates are absolute, so additional state needs to be tracked when applying.
 #[serde_with::serde_as]
 #[derive(
@@ -442,12 +443,12 @@ fn updates_sort() {
 }
 
 #[test]
-fn verify_price_for_multiple_branches() {
-    // this is generated from integration test test_history_size_with_multiple_sizes, but this way
+fn verify_size_for_multiple_branches() {
+    // this is generated from integration test test_tenant_size_with_multiple_branches, but this way
     // it has the stable lsn's
     let doc = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"update":25763840},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/1819818","command":{"update":26075136},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/18B5E40","command":{"update":26427392},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"update":26492928},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"230fc9d756f7363574c0d66533564dcc"},{"lsn":"0/220F438","command":{"update":25239552},"timeline_id":"230fc9d756f7363574c0d66533564dcc"}],"retention_period":131072,"timeline_inputs":{"cd9d9409c216e64bf580904facedb01b":{"last_record":"0/18D5E40","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/18B5E40","pitr_cutoff":"0/18B5E40","next_gc_cutoff":"0/18B5E40"},"10b532a550540bc15385eac4edde416a":{"last_record":"0/1839818","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/1819818","pitr_cutoff":"0/1819818","next_gc_cutoff":"0/1819818"},"230fc9d756f7363574c0d66533564dcc":{"last_record":"0/222F438","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/220F438","pitr_cutoff":"0/220F438","next_gc_cutoff":"0/220F438"}}}"#;
 
     let inputs: ModelInputs = serde_json::from_str(doc).unwrap();
 
-    assert_eq!(inputs.price().unwrap(), 36_409_872);
+    assert_eq!(inputs.calculate().unwrap(), 36_409_872);
 }
