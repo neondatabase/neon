@@ -205,7 +205,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
             new_lock_contents,
             file,
         } => {
-            info!("Created lock file at {lock_file_path:?} with contenst {new_lock_contents}");
+            info!("Created lock file at {lock_file_path:?} with contents {new_lock_contents}");
             file
         }
         lock_file::LockCreationResult::AlreadyLocked {
