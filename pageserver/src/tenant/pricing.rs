@@ -11,6 +11,9 @@ use utils::lsn::Lsn;
 use tracing::*;
 
 /// Inputs to the actual pricing model
+///
+/// Implements [`serde::Serialize`] but is not meant to be part of the public API.
+#[derive(Debug, serde::Serialize)]
 pub struct ModelInputs {
     updates: Vec<Update>,
     retention_period: u64,
@@ -271,17 +274,22 @@ impl ModelInputs {
 ///
 /// Pricing model works with relative increments over latest branch state.
 /// Updates are absolute, so additional state needs to be tracked when applying.
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
+#[serde_with::serde_as]
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Copy, serde::Serialize)]
 struct Update {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     lsn: utils::lsn::Lsn,
     command: Command,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     timeline_id: TimelineId,
 }
 
-#[derive(Debug, PartialOrd, PartialEq, Eq, Ord, Clone, Copy)]
+#[serde_with::serde_as]
+#[derive(Debug, PartialOrd, PartialEq, Eq, Ord, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 enum Command {
     Update(u64),
-    BranchFrom(Option<TimelineId>),
+    BranchFrom(#[serde_as(as = "Option<serde_with::DisplayFromStr>")] Option<TimelineId>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -406,4 +414,43 @@ fn updates_sort() {
 
         assert_eq!(commands, sorted, "{:#?} vs. {:#?}", commands, sorted);
     }
+}
+
+#[test]
+fn inputs_serialize() {
+    use std::str::FromStr;
+
+    let ids = [
+        TimelineId::from_str("7ff1edab8182025f15ae33482edb590a").unwrap(),
+        TimelineId::from_str("b68d6691c895ad0a70809470020929ef").unwrap(),
+    ];
+
+    let updates = vec![
+        Update {
+            lsn: Lsn(0),
+            command: Command::BranchFrom(None),
+            timeline_id: ids[0],
+        },
+        Update {
+            lsn: Lsn::from_str("0/10E49380").unwrap(),
+            command: Command::Update(42164224),
+            timeline_id: ids[0],
+        },
+        Update {
+            lsn: Lsn::from_str("0/10E49380").unwrap(),
+            command: Command::BranchFrom(Some(ids[0])),
+            timeline_id: ids[1],
+        },
+    ];
+
+    let inputs = ModelInputs {
+        updates,
+        retention_period: 123,
+    };
+
+    let expected = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"7ff1edab8182025f15ae33482edb590a"},{"lsn":"0/10E49380","command":{"update":42164224},"timeline_id":"7ff1edab8182025f15ae33482edb590a"},{"lsn":"0/10E49380","command":{"branch_from":"7ff1edab8182025f15ae33482edb590a"},"timeline_id":"b68d6691c895ad0a70809470020929ef"},"retention_period":123]"#;
+
+    let actual = serde_json::to_string(&inputs).unwrap();
+
+    assert_eq!(expected, actual);
 }
