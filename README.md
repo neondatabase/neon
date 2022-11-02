@@ -223,10 +223,7 @@ Ensure your dependencies are installed as described [here](https://github.com/ne
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
 
-# either:
 CARGO_BUILD_FLAGS="--features=testing" make
-# or:
-make debug
 
 ./scripts/pytest
 ```
