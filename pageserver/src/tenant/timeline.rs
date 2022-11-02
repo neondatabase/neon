@@ -979,9 +979,13 @@ impl Timeline {
     /// Calculate the logical size of the database at the latest LSN.
     ///
     /// NOTE: counted incrementally, includes ancestors, this can be a slow operation.
-    fn calculate_logical_size(&self, up_to_lsn: Lsn) -> anyhow::Result<u64> {
+    pub fn calculate_logical_size(&self, up_to_lsn: Lsn) -> anyhow::Result<u64> {
         info!("Calculating logical size for timeline {}", self.timeline_id);
-        let timer = self.metrics.init_logical_size_histo.start_timer();
+        let timer = if up_to_lsn == self.initdb_lsn {
+            self.metrics.init_logical_size_histo.start_timer()
+        } else {
+            self.metrics.logical_size_histo.start_timer()
+        };
         let logical_size = self.get_current_logical_size_non_incremental(up_to_lsn)?;
         debug!("calculated logical size: {logical_size}");
         timer.stop_and_record();
