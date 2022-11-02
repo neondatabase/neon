@@ -272,6 +272,11 @@ impl LogicalSize {
         self.size_added_after_initial
             .fetch_add(delta, AtomicOrdering::SeqCst);
     }
+
+    /// Returns the initialized (already calculated) value, if any.
+    fn initialized_size(&self) -> Option<u64> {
+        self.initial_logical_size.get().copied()
+    }
 }
 
 pub struct WalReceiverInfo {
@@ -985,6 +990,16 @@ impl Timeline {
             self.timeline_id, up_to_lsn
         );
         let timer = if up_to_lsn == self.initdb_lsn {
+            if let Some(size) = self.current_logical_size.initialized_size() {
+                if size != 0 {
+                    // non-zero size means that the size has already been calculated by this method
+                    // after startup. if the logical size is for a new timeline without layers the
+                    // size will be zero, and we cannot use that, or this caching strategy until
+                    // pageserver restart.
+                    return Ok(size);
+                }
+            }
+
             self.metrics.init_logical_size_histo.start_timer()
         } else {
             self.metrics.logical_size_histo.start_timer()
