@@ -11,11 +11,11 @@
 
 #include "postgres.h"
 
-#include "access/csn_snapshot.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
 #include "storage/block.h"
 #include "storage/itemptr.h"
+#include "utils/snapshot.h"
 
 /*
  * Header of the read/write set
@@ -53,7 +53,7 @@ typedef struct RWSetRelation
 {
 	Oid			relid;
 	int8		region;
-	SnapshotCSN	csn;
+	XidCSN		csn;
 	bool		is_index;
 	dlist_head	pages;
 	dlist_head	tuples;
