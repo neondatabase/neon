@@ -376,8 +376,9 @@ paths:
                   - id
                   - history_size
                 properties:
-                  tenant_id:
+                  id:
                     type: string
+                    format: hex
                   history_size:
                     type: integer
         "401":
