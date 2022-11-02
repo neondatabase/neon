@@ -392,6 +392,8 @@ def test_tenant_relocation(
                 pg_distrib_dir,
                 "--work-dir",
                 os.path.join(test_output_dir),
+                "--tmp-pg-port",
+                str(port_distributor.get_port()),
             ]
             subprocess_capture(test_output_dir, cmd, check=True)
         elif method == "minor":

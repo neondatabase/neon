@@ -370,7 +370,7 @@ def pack_base(log_dir, restored_dir, output_tar):
     shutil.move(tmp_tar_path, output_tar)
 
 
-def reconstruct_paths(log_dir, pg_bin, base_tar):
+def reconstruct_paths(log_dir, pg_bin, base_tar, port: int):
     """Reconstruct what relation files should exist in the datadir by querying postgres."""
     with tempfile.TemporaryDirectory() as restored_dir:
         # Unpack the base tar
@@ -378,8 +378,7 @@ def reconstruct_paths(log_dir, pg_bin, base_tar):
 
         # Start a vanilla postgres from the given datadir and query it to find
         # what relfiles should exist, but possibly don't.
-        port = "55439"  # Probably free
-        with VanillaPostgres(restored_dir, pg_bin, port, init=False) as vanilla_pg:
+        with VanillaPostgres(Path(restored_dir), pg_bin, port, init=False) as vanilla_pg:
             vanilla_pg.configure([f"port={port}"])
             vanilla_pg.start(log_path=os.path.join(log_dir, "tmp_pg.log"))
 
@@ -443,8 +442,8 @@ def touch_missing_rels(log_dir, corrupt_tar, output_tar, paths):
 #      a vanilla postgres from the exported datadir, and query it
 #      to see what empty relations are missing, and then create
 #      those empty files before importing.
-def add_missing_rels(base_tar, output_tar, log_dir, pg_bin):
-    reconstructed_paths = set(reconstruct_paths(log_dir, pg_bin, base_tar))
+def add_missing_rels(base_tar, output_tar, log_dir, pg_bin, tmp_pg_port: int):
+    reconstructed_paths = set(reconstruct_paths(log_dir, pg_bin, base_tar, tmp_pg_port))
     touch_missing_rels(log_dir, base_tar, output_tar, reconstructed_paths)
 
 
@@ -535,7 +534,7 @@ def export_timeline(
 
     # Add missing rels
     pg_bin = PgBin(args.work_dir, args.pg_distrib_dir, pg_version)
-    add_missing_rels(incomplete_filename, tar_filename, args.work_dir, pg_bin)
+    add_missing_rels(incomplete_filename, tar_filename, args.work_dir, pg_bin, args.tmp_pg_port)
 
     # Log more info
     file_size = os.path.getsize(tar_filename)
@@ -633,6 +632,13 @@ def main(args: argparse.Namespace):
                 raise AssertionError(f"Sizes don't match old: {old_size} new: {new_size}")
 
 
+def non_zero_tcp_port(arg: Any):
+    port = int(arg)
+    if port < 1 or port > 65535:
+        raise argparse.ArgumentTypeError(f"invalid tcp port: {arg}")
+    return port
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -727,6 +733,14 @@ if __name__ == "__main__":
         required=True,
         default=False,
         help="directory where temporary tar files are stored",
+    )
+    parser.add_argument(
+        "--tmp-pg-port",
+        dest="tmp_pg_port",
+        required=False,
+        default=55439,
+        type=non_zero_tcp_port,
+        help="localhost port to use for temporary postgres instance",
     )
     args = parser.parse_args()
     main(args)
