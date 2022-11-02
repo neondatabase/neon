@@ -206,7 +206,7 @@ pub(super) async fn gather_inputs(
             }
             Err(join_error) => {
                 // cannot really do anything, as this panic is likely a bug
-                warn!("logical size query panicked, trying again later: {join_error:#}");
+                error!("logical size query panicked: {join_error:#}");
                 have_any_error = true;
             }
         }
