@@ -258,11 +258,8 @@ def test_history_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
             deleted = True
             break
         except PageserverApiException as e:
-            # compaction is ok but just retry if this fails
-            if (
-                str(e)
-                == "cannot lock compaction critical section try_lock failed because the operation would block"
-            ):
+            # compaction is ok but just retry if this fails; related to #2442
+            if "cannot lock compaction critical section" in str(e):
                 time.sleep(1)
                 continue
             raise
