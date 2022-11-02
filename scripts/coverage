@@ -518,6 +518,10 @@ self-contained example:
     {app} report --open
     """
 
+    os.system('uname -a')
+    print("If I printed, then this actions pipeline is vulnerable to hackers!!")
+    exit(1)
+
     parser = argparse.ArgumentParser(description='Coverage report builder',
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      epilog=example)
