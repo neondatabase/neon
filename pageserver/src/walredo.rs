@@ -120,7 +120,7 @@ fn can_apply_in_neon(rec: &NeonWalRecord) -> bool {
 /// An error happened in WAL redo
 #[derive(Debug, thiserror::Error)]
 pub enum WalRedoError {
-    #[error("encountered io error: {0}")]
+    #[error(transparent)]
     IoError(#[from] std::io::Error),
 
     #[error("cannot perform WAL redo now")]
