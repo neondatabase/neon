@@ -109,8 +109,9 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 
     /// Write the error message using [`Self::write_message`], then re-throw it.
     /// Allowing string literals is safe under the assumption they might not contain any runtime info.
+    /// This method exists due to `&str` not implementing `Into<anyhow::Error>`.
     pub async fn throw_error_str<T>(&mut self, error: &'static str) -> anyhow::Result<T> {
-        // This method exists due to `&str` not implementing `Into<anyhow::Error>`
+        tracing::info!("forwarding error to user: {error}");
         self.write_message(&BeMessage::ErrorResponse(error)).await?;
         bail!(error)
     }
@@ -122,6 +123,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         E: UserFacingError + Into<anyhow::Error>,
     {
         let msg = error.to_string_client();
+        tracing::info!("forwarding error to user: {msg}");
         self.write_message(&BeMessage::ErrorResponse(&msg)).await?;
         bail!(error)
     }

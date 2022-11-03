@@ -2092,62 +2092,73 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
+    link_auth_uri: str = "http://dummy-uri"
+
+    class AuthBackend(abc.ABC):
+        """All auth backends must inherit from this class"""
+
+        @property
+        def default_conn_url(self) -> Optional[str]:
+            return None
+
+        @abc.abstractmethod
+        def extra_args(self) -> list[str]:
+            pass
+
+    class Link(AuthBackend):
+        def extra_args(self) -> list[str]:
+            return [
+                # Link auth backend params
+                *["--auth-backend", "link"],
+                *["--uri", NeonProxy.link_auth_uri],
+            ]
+
+    @dataclass(frozen=True)
+    class Postgres(AuthBackend):
+        pg_conn_url: str
+
+        @property
+        def default_conn_url(self) -> Optional[str]:
+            return self.pg_conn_url
+
+        def extra_args(self) -> list[str]:
+            return [
+                # Postgres auth backend params
+                *["--auth-backend", "postgres"],
+                *["--auth-endpoint", self.pg_conn_url],
+            ]
+
     def __init__(
         self,
+        neon_binpath: Path,
         proxy_port: int,
         http_port: int,
         mgmt_port: int,
-        neon_binpath: Path,
-        auth_endpoint=None,
+        auth_backend: NeonProxy.AuthBackend,
     ):
-        super().__init__(dsn=auth_endpoint, port=proxy_port)
-        self.host = "127.0.0.1"
+        host = "127.0.0.1"
+        super().__init__(dsn=auth_backend.default_conn_url, host=host, port=proxy_port)
+
+        self.host = host
         self.http_port = http_port
         self.neon_binpath = neon_binpath
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
-        self.auth_endpoint = auth_endpoint
+        self.auth_backend = auth_backend
         self._popen: Optional[subprocess.Popen[bytes]] = None
-        self.link_auth_uri_prefix = "http://dummy-uri"
 
-    def start(self):
-        """
-        Starts a proxy with option '--auth-backend postgres' and a postgres instance
-        already provided though '--auth-endpoint <postgress-instance>'."
-        """
+    def start(self) -> NeonProxy:
         assert self._popen is None
-        assert self.auth_endpoint is not None
-
-        # Start proxy
         args = [
             str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--mgmt", f"{self.host}:{self.mgmt_port}"],
-            *["--auth-backend", "postgres"],
-            *["--auth-endpoint", self.auth_endpoint],
+            *self.auth_backend.extra_args(),
         ]
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
-
-    def start_with_link_auth(self):
-        """
-        Starts a proxy with option '--auth-backend link' and a dummy authentication link '--uri dummy-auth-link'."
-        """
-        assert self._popen is None
-
-        # Start proxy
-        bin_proxy = str(self.neon_binpath / "proxy")
-        args = [bin_proxy]
-        args.extend(["--http", f"{self.host}:{self.http_port}"])
-        args.extend(["--proxy", f"{self.host}:{self.proxy_port}"])
-        args.extend(["--mgmt", f"{self.host}:{self.mgmt_port}"])
-        args.extend(["--auth-backend", "link"])
-        args.extend(["--uri", self.link_auth_uri_prefix])
-        arg_str = " ".join(args)
-        log.info(f"starting proxy with command line ::: {arg_str}")
-        self._popen = subprocess.Popen(args, stdout=subprocess.PIPE)
-        self._wait_until_ready()
+        return self
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
@@ -2158,7 +2169,7 @@ class NeonProxy(PgProtocol):
         request_result.raise_for_status()
         return request_result.text
 
-    def __enter__(self) -> "NeonProxy":
+    def __enter__(self) -> NeonProxy:
         return self
 
     def __exit__(
@@ -2176,11 +2187,19 @@ class NeonProxy(PgProtocol):
 @pytest.fixture(scope="function")
 def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
+
     http_port = port_distributor.get_port()
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
-    with NeonProxy(proxy_port, http_port, neon_binpath=neon_binpath, mgmt_port=mgmt_port) as proxy:
-        proxy.start_with_link_auth()
+
+    with NeonProxy(
+        neon_binpath=neon_binpath,
+        proxy_port=proxy_port,
+        http_port=http_port,
+        mgmt_port=mgmt_port,
+        auth_backend=NeonProxy.Link(),
+    ) as proxy:
+        proxy.start()
         yield proxy
 
 
@@ -2204,11 +2223,11 @@ def static_proxy(
     http_port = port_distributor.get_port()
 
     with NeonProxy(
+        neon_binpath=neon_binpath,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
-        neon_binpath=neon_binpath,
-        auth_endpoint=auth_endpoint,
+        auth_backend=NeonProxy.Postgres(auth_endpoint),
     ) as proxy:
         proxy.start()
         yield proxy

@@ -49,17 +49,6 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-/// A small combinator for pluggable error logging.
-async fn log_error<R, F>(future: F) -> F::Output
-where
-    F: std::future::Future<Output = anyhow::Result<R>>,
-{
-    future.await.map_err(|err| {
-        error!("{err}");
-        err
-    })
-}
-
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
@@ -80,7 +69,7 @@ pub async fn task_main(
         let session_id = uuid::Uuid::new_v4();
         let cancel_map = Arc::clone(&cancel_map);
         tokio::spawn(
-            log_error(async move {
+            async move {
                 info!("spawned a task for {peer_addr}");
 
                 socket
@@ -88,6 +77,10 @@ pub async fn task_main(
                     .context("failed to set socket option")?;
 
                 handle_client(config, &cancel_map, session_id, socket).await
+            }
+            .unwrap_or_else(|e| {
+                // Acknowledge that the task has finished with an error.
+                error!("per-client task finished with an error: {e:#}");
             })
             .instrument(info_span!("client", session = format_args!("{session_id}"))),
         );
