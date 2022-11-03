@@ -42,6 +42,9 @@ PGconn	   *pageserver_conn = NULL;
 
 char	   *page_server_connstring_raw;
 
+ps_connect_handle ps_connect_hook = NULL;
+ps_disconnect_handle ps_disconnect_hook = NULL;
+
 static void
 pageserver_connect()
 {
@@ -106,6 +109,9 @@ pageserver_connect()
 	neon_log(LOG, "libpagestore: connected to '%s'", page_server_connstring_raw);
 
 	connected = true;
+
+	if (ps_connect_hook)
+		ps_connect_hook();
 }
 
 /*
@@ -164,6 +170,9 @@ pageserver_disconnect(void)
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 		connected = false;
+		
+		if (ps_disconnect_hook)
+			ps_disconnect_hook();
 	}
 }
 
@@ -174,11 +183,7 @@ pageserver_send(NeonRequest * request)
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
-	{
-		PQfinish(pageserver_conn);
-		pageserver_conn = NULL;
-		connected = false;
-	}
+		pageserver_disconnect();
 
 	if (!connected)
 		pageserver_connect();
@@ -255,7 +260,11 @@ pageserver_receive(void)
 static void
 pageserver_flush(void)
 {
-	if (PQflush(pageserver_conn))
+	if (!connected)
+	{
+		neon_log(WARNING, "Tried to flush while disconnected");
+	}
+	else if (PQflush(pageserver_conn))
 	{
 		char	   *msg = PQerrorMessage(pageserver_conn);
 

@@ -145,6 +145,12 @@ typedef struct
 	void		(*flush) (void);
 }			page_server_api;
 
+typedef void (*ps_disconnect_handle)(void);
+typedef void (*ps_connect_handle)(void);
+
+extern ps_disconnect_handle ps_disconnect_hook;
+extern ps_connect_handle ps_connect_hook;
+
 extern page_server_api * page_server;
 
 extern char *page_server_connstring;

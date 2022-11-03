@@ -147,6 +147,10 @@ static inline void prefetch_set_unused(uint64 ring_index);
 static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
 									   ForkNumber forknum, BlockNumber blkno);
 
+ps_disconnect_handle inner_ps_disconnect_hook = NULL;
+void prefetch_on_ps_disconnect(void);
+
+
 /* prefetch buffer lookup hash table */
 
 typedef struct PrfHashEntry {
@@ -250,6 +254,33 @@ prefetch_read(PrefetchRequest *slot)
 
 	slot->status = PRFS_RECEIVED;
 	slot->response = response;
+}
+
+/*
+ * Disconnect hook - drop prefetches when the connection drops
+ * 
+ * If we don't remove the failed prefetches, we'd be serving incorrect
+ * data to the smgr.
+ */
+void
+prefetch_on_ps_disconnect(void)
+{
+	if (inner_ps_disconnect_hook != NULL)
+		inner_ps_disconnect_hook();
+
+	for (; MyPState->ring_receive < MyPState->ring_unused; MyPState->ring_receive++)
+	{
+		PrefetchRequest *slot;
+		int		index = MyPState->ring_receive % READ_BUFFER_SIZE;
+
+		slot = &MyPState->prf_buffer[index];
+		Assert(slot->status == PRFS_REQUESTED);
+		Assert(slot->my_ring_index == MyPState->ring_receive);
+
+		/* clean up the request */
+		slot->status = PRFS_TAG_REMAINS;
+		prefetch_set_unused(MyPState->ring_receive);
+	}
 }
 
 /*
@@ -907,6 +938,8 @@ neon_init(void)
 	MyPState->hashctx = AllocSetContextCreate(TopMemoryContext,
 											  "NeonSMGR/prefetch",
 											  ALLOCSET_DEFAULT_SIZES);
+	inner_ps_disconnect_hook = ps_disconnect_hook;
+	ps_disconnect_hook = prefetch_on_ps_disconnect;
 
 	info.keysize = sizeof(BufferTag);
 	info.entrysize = sizeof(uint64);
