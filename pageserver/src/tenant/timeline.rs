@@ -600,6 +600,46 @@ impl Timeline {
         Ok(size)
     }
 
+    /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
+    /// the in-memory layer, and initiate flushing it if so.
+    ///
+    /// Also flush after a period of time without new data -- it helps
+    /// safekeepers to regard pageserver as caught up and suspend activity.
+    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
+        let last_lsn = self.get_last_record_lsn();
+        let layers = self.layers.read().unwrap();
+        if let Some(open_layer) = &layers.open_layer {
+            let open_layer_size = open_layer.size()?;
+            drop(layers);
+            let last_freeze_at = self.last_freeze_at.load();
+            let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
+            let distance = last_lsn.widening_sub(last_freeze_at);
+            // Checkpointing the open layer can be triggered by layer size or LSN range.
+            // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
+            // we want to stay below that with a big margin.  The LSN distance determines how
+            // much WAL the safekeepers need to store.
+            if distance >= self.get_checkpoint_distance().into()
+                || open_layer_size > self.get_checkpoint_distance()
+                || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
+            {
+                info!(
+                    "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
+                    distance,
+                    open_layer_size,
+                    last_freeze_ts.elapsed()
+                );
+
+                self.freeze_inmem_layer(true);
+                self.last_freeze_at.store(last_lsn);
+                *(self.last_freeze_ts.write().unwrap()) = Instant::now();
+
+                // Wake up the layer flusher
+                self.flush_frozen_layers();
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_state(&self, new_state: TimelineState) {
         match (self.current_state(), new_state) {
             (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
@@ -1274,48 +1314,6 @@ impl Timeline {
             self.last_freeze_at.store(end_lsn);
         }
         drop(layers);
-    }
-
-    ///
-    /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
-    /// the in-memory layer, and initiate flushing it if so.
-    ///
-    /// Also flush after a period of time without new data -- it helps
-    /// safekeepers to regard pageserver as caught up and suspend activity.
-    ///
-    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
-        let last_lsn = self.get_last_record_lsn();
-        let layers = self.layers.read().unwrap();
-        if let Some(open_layer) = &layers.open_layer {
-            let open_layer_size = open_layer.size()?;
-            drop(layers);
-            let last_freeze_at = self.last_freeze_at.load();
-            let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
-            let distance = last_lsn.widening_sub(last_freeze_at);
-            // Checkpointing the open layer can be triggered by layer size or LSN range.
-            // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
-            // we want to stay below that with a big margin.  The LSN distance determines how
-            // much WAL the safekeepers need to store.
-            if distance >= self.get_checkpoint_distance().into()
-                || open_layer_size > self.get_checkpoint_distance()
-                || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
-            {
-                info!(
-                    "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
-                    distance,
-                    open_layer_size,
-                    last_freeze_ts.elapsed()
-                );
-
-                self.freeze_inmem_layer(true);
-                self.last_freeze_at.store(last_lsn);
-                *(self.last_freeze_ts.write().unwrap()) = Instant::now();
-
-                // Wake up the layer flusher
-                self.flush_frozen_layers();
-            }
-        }
-        Ok(())
     }
 
     /// Layer flusher task's main loop.
