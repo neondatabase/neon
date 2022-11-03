@@ -8,12 +8,14 @@ use crate::page_cache::MaterializedPageHashKey;
 use crate::pgdatadir_mapping::{rel_block_to_key, BlockNumber};
 use crate::repository::Key;
 use crate::tenant::Timeline;
+use crate::virtual_file::VirtualFile;
 use anyhow::{bail, Result};
 use bytes::Bytes;
 use once_cell::sync::OnceCell;
 use pageserver_api::reltag::RelTag;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Condvar, Mutex};
 use utils::{
     id::{TenantId, TimelineId},
@@ -46,7 +48,7 @@ pub struct PageImageCache {
     free_list: usize, // L1 list of free entries
     pages: Vec<CacheEntry>,
     hash_table: Vec<usize>, // indexes in pages array
-	file: Arc<VirtulFile>,
+	file: Arc<VirtualFile>,
 }
 
 ///
@@ -87,9 +89,9 @@ impl PageImageCache {
     fn new(size: usize) -> Self {
         let mut pages: Vec<CacheEntry> = Vec::with_capacity(size + 1);
         let hash_table = vec![0usize; size];
-		let file = arc::new(VirtualFile::open_with_options(
-            "page.cache",
-            OpenOptions::new().write(true).create(true).truncate(true)).unwrap());
+		let file = Arc::new(VirtualFile::open_with_options(
+            &std::path::PathBuf::from("page.cache"),
+            std::fs::OpenOptions::new().write(true).create(true).truncate(true)).unwrap());
         // Dummy key
         let dummy_key = MaterializedPageHashKey {
             key: Key::MIN,
@@ -211,17 +213,17 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
                 // cache hit
                 match &cache.pages[index].state {
                     PageImageState::Loaded(success) => {
-						if success {
+						if *success {
 							// Pin page
 							cache.unlink(index);
 							let file = cache.file.clone();
 							drop(cache);
 							let mut buf = [0u8; PAGE_SZ];
-							file.read_exact_at(&mut buf, index as u64 * PAGE_SZ us u64)?;
+							file.read_exact_at(&mut buf, index as u64 * PAGE_SZ as u64)?;
 							cache = this.lock().unwrap();
 							// Move to the head of LRU list
 							cache.link_after(0, index);
-							return Ok(Bytes::from(buf));
+							return Ok(Bytes::from(buf.to_vec()));
 						} else {
 							return Err(anyhow::anyhow!("page loading failed earlier"));
 						}
@@ -292,7 +294,7 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
 		let mut success = false;
 		if let Ok(page) = &result {
 			success = true;
-			file.write_exact_at(&page, i as u64 * PAGE_SZ as u64)?;
+			file.write_all_at(&page, index as u64 * PAGE_SZ as u64)?;
 		}
         cache = this.lock().unwrap();
         if let PageImageState::Loading(event) = &cache.pages[index].state {
@@ -319,6 +321,6 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
             cache.free_list = index;
         }
         // only the first one gets the full error from `get_rel_page_at_lsn`
-        return res;
+        return result;
     }
 }
