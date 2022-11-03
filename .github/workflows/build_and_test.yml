@@ -45,400 +45,400 @@ jobs:
         shell: bash
         id: build-tag
 
-  build-neon:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
+  # build-neon:
+  #   runs-on: dev
+  #   container:
+  #     image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+  #     options: --init
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       build_type: [ debug, release ]
 
-    env:
-      BUILD_TYPE: ${{ matrix.build_type }}
-      GIT_VERSION: ${{ github.sha }}
+  #   env:
+  #     BUILD_TYPE: ${{ matrix.build_type }}
+  #     GIT_VERSION: ${{ github.sha }}
 
-    steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+  #   steps:
+  #     - name: Fix git ownership
+  #       run: |
+  #         # Workaround for `fatal: detected dubious ownership in repository at ...`
+  #         #
+  #         # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+  #         #   Ref https://github.com/actions/checkout/issues/785
+  #         #
+  #         git config --global --add safe.directory ${{ github.workspace }}
+  #         git config --global --add safe.directory ${GITHUB_WORKSPACE}
 
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 1
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 1
 
-      - name: Set pg 14 revision for caching
-        id: pg_v14_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
-        shell: bash -euxo pipefail {0}
+  #     - name: Set pg 14 revision for caching
+  #       id: pg_v14_rev
+  #       run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Set pg 15 revision for caching
-        id: pg_v15_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
-        shell: bash -euxo pipefail {0}
+  #     - name: Set pg 15 revision for caching
+  #       id: pg_v15_rev
+  #       run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
+  #       shell: bash -euxo pipefail {0}
 
-      # Set some environment variables used by all the steps.
-      #
-      # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
-      #   It also includes --features, if any
-      #
-      # CARGO_FEATURES is passed to "cargo metadata". It is separate from CARGO_FLAGS,
-      #   because "cargo metadata" doesn't accept --release or --debug options
-      #
-      # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
-      # corresponding Cargo.toml files for their descriptions.
-      - name: Set env variables
-        run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-            CARGO_FEATURES="--features testing"
-            CARGO_FLAGS="--locked --timings $CARGO_FEATURES"
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=""
-            CARGO_FEATURES="--features testing,profiling"
-            CARGO_FLAGS="--locked --timings --release $CARGO_FEATURES"
-          fi
-          echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
-          echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
-          echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
-        shell: bash -euxo pipefail {0}
+  #     # Set some environment variables used by all the steps.
+  #     #
+  #     # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
+  #     #   It also includes --features, if any
+  #     #
+  #     # CARGO_FEATURES is passed to "cargo metadata". It is separate from CARGO_FLAGS,
+  #     #   because "cargo metadata" doesn't accept --release or --debug options
+  #     #
+  #     # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
+  #     # corresponding Cargo.toml files for their descriptions.
+  #     - name: Set env variables
+  #       run: |
+  #         if [[ $BUILD_TYPE == "debug" ]]; then
+  #           cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+  #           CARGO_FEATURES="--features testing"
+  #           CARGO_FLAGS="--locked --timings $CARGO_FEATURES"
+  #         elif [[ $BUILD_TYPE == "release" ]]; then
+  #           cov_prefix=""
+  #           CARGO_FEATURES="--features testing,profiling"
+  #           CARGO_FLAGS="--locked --timings --release $CARGO_FEATURES"
+  #         fi
+  #         echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
+  #         echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
+  #         echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
+  #       shell: bash -euxo pipefail {0}
 
-      # Don't include the ~/.cargo/registry/src directory. It contains just
-      # uncompressed versions of the crates in ~/.cargo/registry/cache
-      # directory, and it's faster to let 'cargo' to rebuild it from the
-      # compressed crates.
-      - name: Cache cargo deps
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
-          key: |
-            v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
-            v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-
+  #     # Don't include the ~/.cargo/registry/src directory. It contains just
+  #     # uncompressed versions of the crates in ~/.cargo/registry/cache
+  #     # directory, and it's faster to let 'cargo' to rebuild it from the
+  #     # compressed crates.
+  #     - name: Cache cargo deps
+  #       id: cache_cargo
+  #       uses: actions/cache@v3
+  #       with:
+  #         path: |
+  #           ~/.cargo/registry/
+  #           !~/.cargo/registry/src
+  #           ~/.cargo/git/
+  #           target/
+  #         # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+  #         key: |
+  #           v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
+  #           v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-
 
-      - name: Cache postgres v14 build
-        id: cache_pg_14
-        uses: actions/cache@v3
-        with:
-          path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+  #     - name: Cache postgres v14 build
+  #       id: cache_pg_14
+  #       uses: actions/cache@v3
+  #       with:
+  #         path: pg_install/v14
+  #         key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
-      - name: Cache postgres v15 build
-        id: cache_pg_15
-        uses: actions/cache@v3
-        with:
-          path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+  #     - name: Cache postgres v15 build
+  #       id: cache_pg_15
+  #       uses: actions/cache@v3
+  #       with:
+  #         path: pg_install/v15
+  #         key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
-      - name: Build postgres v14
-        if: steps.cache_pg_14.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v14 -j$(nproc)
-        shell: bash -euxo pipefail {0}
+  #     - name: Build postgres v14
+  #       if: steps.cache_pg_14.outputs.cache-hit != 'true'
+  #       run: mold -run make postgres-v14 -j$(nproc)
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Build postgres v15
-        if: steps.cache_pg_15.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v15 -j$(nproc)
-        shell: bash -euxo pipefail {0}
+  #     - name: Build postgres v15
+  #       if: steps.cache_pg_15.outputs.cache-hit != 'true'
+  #       run: mold -run make postgres-v15 -j$(nproc)
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Build neon extensions
-        run: mold -run make neon-pg-ext -j$(nproc)
-        shell: bash -euxo pipefail {0}
+  #     - name: Build neon extensions
+  #       run: mold -run make neon-pg-ext -j$(nproc)
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Run cargo build
-        run: |
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
-        shell: bash -euxo pipefail {0}
+  #     - name: Run cargo build
+  #       run: |
+  #         ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Run cargo test
-        run: |
-          ${cov_prefix} cargo test $CARGO_FLAGS
-        shell: bash -euxo pipefail {0}
+  #     - name: Run cargo test
+  #       run: |
+  #         ${cov_prefix} cargo test $CARGO_FLAGS
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Install rust binaries
-        run: |
-          # Install target binaries
-          mkdir -p /tmp/neon/bin/
-          binaries=$(
-            ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
-            jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
-          )
-          for bin in $binaries; do
-            SRC=target/$BUILD_TYPE/$bin
-            DST=/tmp/neon/bin/$bin
-            cp "$SRC" "$DST"
-          done
+  #     - name: Install rust binaries
+  #       run: |
+  #         # Install target binaries
+  #         mkdir -p /tmp/neon/bin/
+  #         binaries=$(
+  #           ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
+  #           jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
+  #         )
+  #         for bin in $binaries; do
+  #           SRC=target/$BUILD_TYPE/$bin
+  #           DST=/tmp/neon/bin/$bin
+  #           cp "$SRC" "$DST"
+  #         done
 
-          # Install test executables and write list of all binaries (for code coverage)
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            # Keep bloated coverage data files away from the rest of the artifact
-            mkdir -p /tmp/coverage/
+  #         # Install test executables and write list of all binaries (for code coverage)
+  #         if [[ $BUILD_TYPE == "debug" ]]; then
+  #           # Keep bloated coverage data files away from the rest of the artifact
+  #           mkdir -p /tmp/coverage/
 
-            mkdir -p /tmp/neon/test_bin/
+  #           mkdir -p /tmp/neon/test_bin/
 
-            test_exe_paths=$(
-              ${cov_prefix} cargo test $CARGO_FLAGS --message-format=json --no-run |
-              jq -r '.executable | select(. != null)'
-            )
-            for bin in $test_exe_paths; do
-              SRC=$bin
-              DST=/tmp/neon/test_bin/$(basename $bin)
+  #           test_exe_paths=$(
+  #             ${cov_prefix} cargo test $CARGO_FLAGS --message-format=json --no-run |
+  #             jq -r '.executable | select(. != null)'
+  #           )
+  #           for bin in $test_exe_paths; do
+  #             SRC=$bin
+  #             DST=/tmp/neon/test_bin/$(basename $bin)
 
-              # We don't need debug symbols for code coverage, so strip them out to make
-              # the artifact smaller.
-              strip "$SRC" -o "$DST"
-              echo "$DST" >> /tmp/coverage/binaries.list
-            done
+  #             # We don't need debug symbols for code coverage, so strip them out to make
+  #             # the artifact smaller.
+  #             strip "$SRC" -o "$DST"
+  #             echo "$DST" >> /tmp/coverage/binaries.list
+  #           done
 
-            for bin in $binaries; do
-              echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
-            done
-          fi
-        shell: bash -euxo pipefail {0}
+  #           for bin in $binaries; do
+  #             echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
+  #           done
+  #         fi
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Install postgres binaries
-        run: cp -a pg_install /tmp/neon/pg_install
-        shell: bash -euxo pipefail {0}
+  #     - name: Install postgres binaries
+  #       run: cp -a pg_install /tmp/neon/pg_install
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Upload Neon artifact
-        uses: ./.github/actions/upload
-        with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
-          path: /tmp/neon
+  #     - name: Upload Neon artifact
+  #       uses: ./.github/actions/upload
+  #       with:
+  #         name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
+  #         path: /tmp/neon
 
-      - name: Prepare cargo build timing stats for storing
-        run: |
-          mkdir -p "/tmp/neon/cargo-timings/$BUILD_TYPE/"
-          cp -r ./target/cargo-timings/* "/tmp/neon/cargo-timings/$BUILD_TYPE/"
-        shell: bash -euxo pipefail {0}
-      - name: Upload cargo build stats
-        uses: ./.github/actions/upload
-        with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-build-stats
-          path: /tmp/neon/cargo-timings/
+  #     - name: Prepare cargo build timing stats for storing
+  #       run: |
+  #         mkdir -p "/tmp/neon/cargo-timings/$BUILD_TYPE/"
+  #         cp -r ./target/cargo-timings/* "/tmp/neon/cargo-timings/$BUILD_TYPE/"
+  #       shell: bash -euxo pipefail {0}
+  #     - name: Upload cargo build stats
+  #       uses: ./.github/actions/upload
+  #       with:
+  #         name: neon-${{ runner.os }}-${{ matrix.build_type }}-build-stats
+  #         path: /tmp/neon/cargo-timings/
 
-      # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
-      - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug'
-        uses: ./.github/actions/save-coverage-data
+  #     # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
+  #     - name: Merge and upload coverage data
+  #       if: matrix.build_type == 'debug'
+  #       uses: ./.github/actions/save-coverage-data
 
-  regress-tests:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ build-neon ]
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 2
+  # regress-tests:
+  #   runs-on: dev
+  #   container:
+  #     image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+  #     options: --init
+  #   needs: [ build-neon ]
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       build_type: [ debug, release ]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 2
 
-      - name: Pytest regression tests
-        uses: ./.github/actions/run-python-test-set
-        with:
-          build_type: ${{ matrix.build_type }}
-          test_selection: regress
-          needs_postgres_source: true
-          run_with_real_s3: true
-          real_s3_bucket: ci-tests-s3
-          real_s3_region: us-west-2
-          real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
-          real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
+  #     - name: Pytest regression tests
+  #       uses: ./.github/actions/run-python-test-set
+  #       with:
+  #         build_type: ${{ matrix.build_type }}
+  #         test_selection: regress
+  #         needs_postgres_source: true
+  #         run_with_real_s3: true
+  #         real_s3_bucket: ci-tests-s3
+  #         real_s3_region: us-west-2
+  #         real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
+  #         real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
 
-      - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug'
-        uses: ./.github/actions/save-coverage-data
+  #     - name: Merge and upload coverage data
+  #       if: matrix.build_type == 'debug'
+  #       uses: ./.github/actions/save-coverage-data
 
-  upload-latest-artifacts:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ regress-tests ]
-    if: github.ref_name == 'main'
-    steps:
-      - name: Copy Neon artifact to the latest directory
-        shell: bash -euxo pipefail {0}
-        env:
-          BUCKET: neon-github-public-dev
-          PREFIX: artifacts/${{ github.run_id }}
-        run: |
-          for build_type in debug release; do
-            FILENAME=neon-${{ runner.os }}-${build_type}-artifact.tar.zst
+  # upload-latest-artifacts:
+  #   runs-on: dev
+  #   container:
+  #     image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+  #     options: --init
+  #   needs: [ regress-tests ]
+  #   if: github.ref_name == 'main'
+  #   steps:
+  #     - name: Copy Neon artifact to the latest directory
+  #       shell: bash -euxo pipefail {0}
+  #       env:
+  #         BUCKET: neon-github-public-dev
+  #         PREFIX: artifacts/${{ github.run_id }}
+  #       run: |
+  #         for build_type in debug release; do
+  #           FILENAME=neon-${{ runner.os }}-${build_type}-artifact.tar.zst
 
-            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
-            if [ -z "${S3_KEY}" ]; then
-              echo 2>&1 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
-              exit 1
-            fi
+  #           S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
+  #           if [ -z "${S3_KEY}" ]; then
+  #             echo 2>&1 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
+  #             exit 1
+  #           fi
 
-            time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/artifacts/latest/${FILENAME}
-          done
+  #           time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/artifacts/latest/${FILENAME}
+  #         done
 
-  benchmarks:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ build-neon ]
-    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ release ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 2
+  # benchmarks:
+  #   runs-on: dev
+  #   container:
+  #     image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+  #     options: --init
+  #   needs: [ build-neon ]
+  #   if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       build_type: [ release ]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 2
 
-      - name: Pytest benchmarks
-        uses: ./.github/actions/run-python-test-set
-        with:
-          build_type: ${{ matrix.build_type }}
-          test_selection: performance
-          run_in_parallel: false
-          save_perf_report: ${{ github.ref == 'refs/heads/main' }}
-        env:
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-      # XXX: no coverage data handling here, since benchmarks are run on release builds,
-      # while coverage is currently collected for the debug ones
+  #     - name: Pytest benchmarks
+  #       uses: ./.github/actions/run-python-test-set
+  #       with:
+  #         build_type: ${{ matrix.build_type }}
+  #         test_selection: performance
+  #         run_in_parallel: false
+  #         save_perf_report: ${{ github.ref == 'refs/heads/main' }}
+  #       env:
+  #         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+  #         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+  #     # XXX: no coverage data handling here, since benchmarks are run on release builds,
+  #     # while coverage is currently collected for the debug ones
 
-  merge-allure-report:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ regress-tests, benchmarks ]
-    if: always()
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: false
+  # merge-allure-report:
+  #   runs-on: dev
+  #   container:
+  #     image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+  #     options: --init
+  #   needs: [ regress-tests, benchmarks ]
+  #   if: always()
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       build_type: [ debug, release ]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: false
 
-      - name: Create Allure report
-        id: create-allure-report
-        uses: ./.github/actions/allure-report
-        with:
-          action: generate
-          build_type: ${{ matrix.build_type }}
+  #     - name: Create Allure report
+  #       id: create-allure-report
+  #       uses: ./.github/actions/allure-report
+  #       with:
+  #         action: generate
+  #         build_type: ${{ matrix.build_type }}
 
-      - name: Store Allure test stat in the DB
-        if: ${{ steps.create-allure-report.outputs.report-url }}
-        env:
-          BUILD_TYPE: ${{ matrix.build_type }}
-          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_URL: ${{ steps.create-allure-report.outputs.report-url }}
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
-        shell: bash -euxo pipefail {0}
-        run: |
-          curl --fail --output suites.json ${REPORT_URL%/index.html}/data/suites.json
-          ./scripts/pysync
+  #     - name: Store Allure test stat in the DB
+  #       if: ${{ steps.create-allure-report.outputs.report-url }}
+  #       env:
+  #         BUILD_TYPE: ${{ matrix.build_type }}
+  #         SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  #         REPORT_URL: ${{ steps.create-allure-report.outputs.report-url }}
+  #         TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+  #       shell: bash -euxo pipefail {0}
+  #       run: |
+  #         curl --fail --output suites.json ${REPORT_URL%/index.html}/data/suites.json
+  #         ./scripts/pysync
 
-          DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
+  #         DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
 
-  coverage-report:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ regress-tests ]
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 1
+  # coverage-report:
+  #   runs-on: dev
+  #   container:
+  #     image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+  #     options: --init
+  #   needs: [ regress-tests ]
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       build_type: [ debug ]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 1
 
-      - name: Restore cargo deps cache
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          key: v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
+  #     - name: Restore cargo deps cache
+  #       id: cache_cargo
+  #       uses: actions/cache@v3
+  #       with:
+  #         path: |
+  #           ~/.cargo/registry/
+  #           !~/.cargo/registry/src
+  #           ~/.cargo/git/
+  #           target/
+  #         key: v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
 
-      - name: Get Neon artifact
-        uses: ./.github/actions/download
-        with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
-          path: /tmp/neon
+  #     - name: Get Neon artifact
+  #       uses: ./.github/actions/download
+  #       with:
+  #         name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
+  #         path: /tmp/neon
 
-      - name: Get coverage artifact
-        uses: ./.github/actions/download
-        with:
-          name: coverage-data-artifact
-          path: /tmp/coverage
+  #     - name: Get coverage artifact
+  #       uses: ./.github/actions/download
+  #       with:
+  #         name: coverage-data-artifact
+  #         path: /tmp/coverage
 
-      - name: Merge coverage data
-        run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
-        shell: bash -euxo pipefail {0}
+  #     - name: Merge coverage data
+  #       run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
+  #       shell: bash -euxo pipefail {0}
 
-      - name: Build and upload coverage report
-        run: |
-          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
-          COMMIT_URL=https://github.com/${{ github.repository }}/commit/$COMMIT_SHA
+  #     - name: Build and upload coverage report
+  #       run: |
+  #         COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+  #         COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+  #         COMMIT_URL=https://github.com/${{ github.repository }}/commit/$COMMIT_SHA
 
-          scripts/coverage \
-            --dir=/tmp/coverage report \
-            --input-objects=/tmp/coverage/binaries.list \
-            --commit-url=$COMMIT_URL \
-            --format=github
+  #         scripts/coverage \
+  #           --dir=/tmp/coverage report \
+  #           --input-objects=/tmp/coverage/binaries.list \
+  #           --commit-url=$COMMIT_URL \
+  #           --format=github
 
-          REPORT_URL=https://${{ github.repository_owner }}.github.io/zenith-coverage-data/$COMMIT_SHA
+  #         REPORT_URL=https://${{ github.repository_owner }}.github.io/zenith-coverage-data/$COMMIT_SHA
 
-          scripts/git-upload \
-            --repo=https://${{ secrets.VIP_VAP_ACCESS_TOKEN }}@github.com/${{ github.repository_owner }}/zenith-coverage-data.git \
-            --message="Add code coverage for $COMMIT_URL" \
-            copy /tmp/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
+  #         scripts/git-upload \
+  #           --repo=https://${{ secrets.VIP_VAP_ACCESS_TOKEN }}@github.com/${{ github.repository_owner }}/zenith-coverage-data.git \
+  #           --message="Add code coverage for $COMMIT_URL" \
+  #           copy /tmp/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
 
-          # Add link to the coverage report to the commit
-          curl -f -X POST \
-          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
-          -H "Accept: application/vnd.github.v3+json" \
-          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-          --data \
-            "{
-              \"state\": \"success\",
-              \"context\": \"neon-coverage\",
-              \"description\": \"Coverage report is ready\",
-              \"target_url\": \"$REPORT_URL\"
-            }"
-        shell: bash -euxo pipefail {0}
+  #         # Add link to the coverage report to the commit
+  #         curl -f -X POST \
+  #         https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+  #         -H "Accept: application/vnd.github.v3+json" \
+  #         --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+  #         --data \
+  #           "{
+  #             \"state\": \"success\",
+  #             \"context\": \"neon-coverage\",
+  #             \"description\": \"Coverage report is ready\",
+  #             \"target_url\": \"$REPORT_URL\"
+  #           }"
+  #       shell: bash -euxo pipefail {0}
 
   trigger-e2e-tests:
     runs-on: dev
@@ -666,293 +666,293 @@ jobs:
           crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
-  calculate-deploy-targets:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
-    outputs:
-      matrix-include: ${{ steps.set-matrix.outputs.include }}
-    steps:
-      - id: set-matrix
-        run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA", "console_api_key_secret": "NEON_STAGING_API_KEY"}'
-            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA", "console_api_key_secret": "NEON_CAPTEST_API_KEY"}'
-            echo "include=[$STAGING, $NEON_STRESS]" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
-            echo "include=[$PRODUCTION]" >> $GITHUB_OUTPUT
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
-          fi
+  # calculate-deploy-targets:
+  #   runs-on: [ self-hosted, Linux, k8s-runner ]
+  #   if: |
+  #     (github.ref_name == 'main' || github.ref_name == 'release') &&
+  #     github.event_name != 'workflow_dispatch'
+  #   outputs:
+  #     matrix-include: ${{ steps.set-matrix.outputs.include }}
+  #   steps:
+  #     - id: set-matrix
+  #       run: |
+  #         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+  #           STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA", "console_api_key_secret": "NEON_STAGING_API_KEY"}'
+  #           NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA", "console_api_key_secret": "NEON_CAPTEST_API_KEY"}'
+  #           echo "include=[$STAGING, $NEON_STRESS]" >> $GITHUB_OUTPUT
+  #         elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+  #           PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
+  #           echo "include=[$PRODUCTION]" >> $GITHUB_OUTPUT
+  #         else
+  #           echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+  #           exit 1
+  #         fi
 
-  deploy:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    #container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
-    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
-    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      matrix:
-        include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
+  # deploy:
+  #   runs-on: [ self-hosted, Linux, k8s-runner ]
+  #   #container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+  #   # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
+  #   # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
+  #   needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+  #   if: |
+  #     (github.ref_name == 'main' || github.ref_name == 'release') &&
+  #     github.event_name != 'workflow_dispatch'
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #   strategy:
+  #     matrix:
+  #       include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 0
 
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+  #     - name: Setup python
+  #       uses: actions/setup-python@v4
+  #       with:
+  #         python-version: '3.10'
 
-      - name: Setup ansible
-        run: |
-          export PATH="/root/.local/bin:$PATH"
-          pip install --progress-bar off --user ansible boto3 toml
+  #     - name: Setup ansible
+  #       run: |
+  #         export PATH="/root/.local/bin:$PATH"
+  #         pip install --progress-bar off --user ansible boto3 toml
 
-      - name: Redeploy
-        run: |
-          export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          cd "$(pwd)/.github/ansible"
+  #     - name: Redeploy
+  #       run: |
+  #         export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+  #         cd "$(pwd)/.github/ansible"
 
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            ./get_binaries.sh
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            RELEASE=true ./get_binaries.sh
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
-          fi
+  #         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+  #           ./get_binaries.sh
+  #         elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+  #           RELEASE=true ./get_binaries.sh
+  #         else
+  #           echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+  #           exit 1
+  #         fi
 
-          eval $(ssh-agent)
-          echo "${{ secrets.TELEPORT_SSH_KEY }}"  | tr -d '\n'| base64 --decode >ssh-key
-          echo "${{ secrets.TELEPORT_SSH_CERT }}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
-          chmod 0600 ssh-key
-          ssh-add ssh-key
-          rm -f ssh-key ssh-key-cert.pub
-          ansible-galaxy collection install sivel.toiletwater
-          ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts.yaml -e CONSOLE_API_TOKEN=${{ secrets[matrix.console_api_key_secret] }}
-          rm -f neon_install.tar.gz .neon_current_version
+  #         eval $(ssh-agent)
+  #         echo "${{ secrets.TELEPORT_SSH_KEY }}"  | tr -d '\n'| base64 --decode >ssh-key
+  #         echo "${{ secrets.TELEPORT_SSH_CERT }}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
+  #         chmod 0600 ssh-key
+  #         ssh-add ssh-key
+  #         rm -f ssh-key ssh-key-cert.pub
+  #         ansible-galaxy collection install sivel.toiletwater
+  #         ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts.yaml -e CONSOLE_API_TOKEN=${{ secrets[matrix.console_api_key_secret] }}
+  #         rm -f neon_install.tar.gz .neon_current_version
 
-  deploy-new:
-    runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
-    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-    if: |
-      (github.ref_name == 'main') &&
-      github.event_name != 'workflow_dispatch'
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      matrix:
-        target_region: [ us-east-2 ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
+  # deploy-new:
+  #   runs-on: dev
+  #   container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+  #   # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
+  #   # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
+  #   needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+  #   if: |
+  #     (github.ref_name == 'main') &&
+  #     github.event_name != 'workflow_dispatch'
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #   strategy:
+  #     matrix:
+  #       target_region: [ us-east-2 ]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 0
 
-      - name: Redeploy
-        run: |
-          export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          cd "$(pwd)/.github/ansible"
+  #     - name: Redeploy
+  #       run: |
+  #         export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+  #         cd "$(pwd)/.github/ansible"
 
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            ./get_binaries.sh
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            RELEASE=true ./get_binaries.sh
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
-          fi
+  #         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+  #           ./get_binaries.sh
+  #         elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+  #           RELEASE=true ./get_binaries.sh
+  #         else
+  #           echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+  #           exit 1
+  #         fi
 
-          ansible-galaxy collection install sivel.toiletwater
-          ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{secrets.NEON_STAGING_API_KEY}}
-          rm -f neon_install.tar.gz .neon_current_version
+  #         ansible-galaxy collection install sivel.toiletwater
+  #         ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{secrets.NEON_STAGING_API_KEY}}
+  #         rm -f neon_install.tar.gz .neon_current_version
 
-  deploy-prod-new:
-    runs-on: prod
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
-    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-    if: |
-      (github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      matrix:
-        target_region: [ us-east-2, eu-central-1, ap-southeast-1 ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
+  # deploy-prod-new:
+  #   runs-on: prod
+  #   container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+  #   # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
+  #   # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
+  #   needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+  #   if: |
+  #     (github.ref_name == 'release') &&
+  #     github.event_name != 'workflow_dispatch'
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #   strategy:
+  #     matrix:
+  #       target_region: [ us-east-2, eu-central-1, ap-southeast-1 ]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 0
 
-      - name: Redeploy
-        run: |
-          export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          cd "$(pwd)/.github/ansible"
+  #     - name: Redeploy
+  #       run: |
+  #         export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+  #         cd "$(pwd)/.github/ansible"
 
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            ./get_binaries.sh
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            RELEASE=true ./get_binaries.sh
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
-          fi
+  #         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+  #           ./get_binaries.sh
+  #         elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+  #           RELEASE=true ./get_binaries.sh
+  #         else
+  #           echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+  #           exit 1
+  #         fi
 
-          ansible-galaxy collection install sivel.toiletwater
-          ansible-playbook deploy.yaml -i prod.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{secrets.NEON_PRODUCTION_API_KEY}}
-          rm -f neon_install.tar.gz .neon_current_version
+  #         ansible-galaxy collection install sivel.toiletwater
+  #         ansible-playbook deploy.yaml -i prod.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{secrets.NEON_PRODUCTION_API_KEY}}
+  #         rm -f neon_install.tar.gz .neon_current_version
 
-  deploy-proxy:
-    runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
-    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      matrix:
-        include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
-    env:
-      KUBECONFIG: .kubeconfig
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
+  # deploy-proxy:
+  #   runs-on: dev
+  #   container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+  #   # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+  #   needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+  #   if: |
+  #     (github.ref_name == 'main' || github.ref_name == 'release') &&
+  #     github.event_name != 'workflow_dispatch'
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #   strategy:
+  #     matrix:
+  #       include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+  #   env:
+  #     KUBECONFIG: .kubeconfig
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 0
 
-      - name: Add curl
-        run: apt update && apt install curl -y
+  #     - name: Add curl
+  #       run: apt update && apt install curl -y
 
-      - name: Store kubeconfig file
-        run: |
-          echo "${{ secrets[matrix.kubeconfig_secret] }}" | base64 --decode > ${KUBECONFIG}
-          chmod 0600 ${KUBECONFIG}
+  #     - name: Store kubeconfig file
+  #       run: |
+  #         echo "${{ secrets[matrix.kubeconfig_secret] }}" | base64 --decode > ${KUBECONFIG}
+  #         chmod 0600 ${KUBECONFIG}
 
-      - name: Setup helm v3
-        run: |
-          curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+  #     - name: Setup helm v3
+  #       run: |
+  #         curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  #         helm repo add neondatabase https://neondatabase.github.io/helm-charts
 
-      - name: Re-deploy proxy
-        run: |
-          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
-          helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+  #     - name: Re-deploy proxy
+  #       run: |
+  #         DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+  #         helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+  #         helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
-  deploy-proxy-new:
-    runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-    if: |
-      (github.ref_name == 'main') &&
-      github.event_name != 'workflow_dispatch'
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      matrix:
-        include:
-          - target_region:  us-east-2
-            target_cluster: dev-us-east-2-beta
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
+  # deploy-proxy-new:
+  #   runs-on: dev
+  #   container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+  #   # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+  #   needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+  #   if: |
+  #     (github.ref_name == 'main') &&
+  #     github.event_name != 'workflow_dispatch'
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #   strategy:
+  #     matrix:
+  #       include:
+  #         - target_region:  us-east-2
+  #           target_cluster: dev-us-east-2-beta
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 0
 
-      - name: Configure environment
-        run: |
-          helm repo add neondatabase https://neondatabase.github.io/helm-charts
-          aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
+  #     - name: Configure environment
+  #       run: |
+  #         helm repo add neondatabase https://neondatabase.github.io/helm-charts
+  #         aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
 
-      - name: Re-deploy proxy
-        run: |
-          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+  #     - name: Re-deploy proxy
+  #       run: |
+  #         DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+  #         helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
-  deploy-proxy-prod-new:
-    runs-on: prod
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
-    if: |
-      (github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      matrix:
-        include:
-          - target_region:  us-east-2
-            target_cluster: prod-us-east-2-delta
-          - target_region: eu-central-1
-            target_cluster: prod-eu-central-1-gamma
-          - target_region: ap-southeast-1
-            target_cluster: prod-ap-southeast-1-epsilon
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
+  # deploy-proxy-prod-new:
+  #   runs-on: prod
+  #   container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+  #   # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+  #   needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+  #   if: |
+  #     (github.ref_name == 'release') &&
+  #     github.event_name != 'workflow_dispatch'
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #   strategy:
+  #     matrix:
+  #       include:
+  #         - target_region:  us-east-2
+  #           target_cluster: prod-us-east-2-delta
+  #         - target_region: eu-central-1
+  #           target_cluster: prod-eu-central-1-gamma
+  #         - target_region: ap-southeast-1
+  #           target_cluster: prod-ap-southeast-1-epsilon
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 0
 
-      - name: Configure environment
-        run: |
-          helm repo add neondatabase https://neondatabase.github.io/helm-charts
-          aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
+  #     - name: Configure environment
+  #       run: |
+  #         helm repo add neondatabase https://neondatabase.github.io/helm-charts
+  #         aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
 
-      - name: Re-deploy proxy
-        run: |
-          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+  #     - name: Re-deploy proxy
+  #       run: |
+  #         DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+  #         helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
-  promote-compatibility-test-snapshot:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ deploy, deploy-proxy ]
-    if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
-    steps:
-      - name: Promote compatibility snapshot for the release
-        shell: bash -euxo pipefail {0}
-        env:
-          BUCKET: neon-github-public-dev
-          PREFIX: artifacts/latest
-        run: |
-          for build_type in debug release; do
-            OLD_FILENAME=compatibility-snapshot-${build_type}-pg14-${GITHUB_RUN_ID}.tar.zst
-            NEW_FILENAME=compatibility-snapshot-${build_type}-pg14.tar.zst
+  # promote-compatibility-test-snapshot:
+  #   runs-on: dev
+  #   container:
+  #     image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+  #     options: --init
+  #   needs: [ deploy, deploy-proxy ]
+  #   if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
+  #   steps:
+  #     - name: Promote compatibility snapshot for the release
+  #       shell: bash -euxo pipefail {0}
+  #       env:
+  #         BUCKET: neon-github-public-dev
+  #         PREFIX: artifacts/latest
+  #       run: |
+  #         for build_type in debug release; do
+  #           OLD_FILENAME=compatibility-snapshot-${build_type}-pg14-${GITHUB_RUN_ID}.tar.zst
+  #           NEW_FILENAME=compatibility-snapshot-${build_type}-pg14.tar.zst
 
-            time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
-          done
+  #           time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+  #         done
