@@ -566,6 +566,44 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     )
 }
 
+async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::InternalServerError)?;
+
+    // this can be long operation, it currently is not backed by any request coalescing or similar
+    let inputs = tenant
+        .gather_size_inputs()
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    let size = inputs.calculate().map_err(ApiError::InternalServerError)?;
+
+    /// Private response type with the additional "unstable" `inputs` field.
+    ///
+    /// The type is described with `id` and `size` in the openapi_spec file, but the `inputs` is
+    /// intentionally left out. The type resides in the pageserver not to expose `ModelInputs`.
+    #[serde_with::serde_as]
+    #[derive(serde::Serialize)]
+    struct TenantHistorySize {
+        #[serde_as(as = "serde_with::DisplayFromStr")]
+        id: TenantId,
+        /// Size is a mixture of WAL and logical size, so the unit is bytes.
+        size: u64,
+        inputs: crate::tenant::size::ModelInputs,
+    }
+
+    json_response(
+        StatusCode::OK,
+        TenantHistorySize {
+            id: tenant_id,
+            size,
+            inputs,
+        },
+    )
+}
+
 // Helper function to standardize the error messages we produce on bad durations
 //
 // Intended to be used with anyhow's `with_context`, e.g.:
@@ -893,6 +931,7 @@ pub fn make_router(
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
         .get("/v1/tenant/:tenant_id", tenant_status)
+        .get("/v1/tenant/:tenant_id/size", tenant_size_handler)
         .put("/v1/tenant/config", tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)

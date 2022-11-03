@@ -1047,6 +1047,21 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def tenant_size(self, tenant_id: TenantId) -> int:
+        """
+        Returns the tenant size, together with the model inputs as the second tuple item.
+        """
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/size")
+        self.verbose_error(res)
+        res = res.json()
+        assert isinstance(res, dict)
+        assert TenantId(res["id"]) == tenant_id
+        size = res["size"]
+        assert type(size) == int
+        # there are additional inputs, which are the collected raw information before being fed to the tenant_size_model
+        # there are no tests for those right now.
+        return size
+
     def timeline_list(self, tenant_id: TenantId) -> List[Dict[str, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline")
         self.verbose_error(res)
@@ -2742,12 +2757,12 @@ def wait_for_last_record_lsn(
     tenant: TenantId,
     timeline: TimelineId,
     lsn: Lsn,
-):
-    """waits for pageserver to catch up to a certain lsn"""
+) -> Lsn:
+    """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
     for i in range(10):
         current_lsn = last_record_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
-            return
+            return current_lsn
         log.info(
             "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
                 lsn, current_lsn, i + 1
@@ -2759,10 +2774,12 @@ def wait_for_last_record_lsn(
     )
 
 
-def wait_for_last_flush_lsn(env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId):
-    """Wait for pageserver to catch up the latest flush LSN"""
+def wait_for_last_flush_lsn(
+    env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId
+) -> Lsn:
+    """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
     last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
-    wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
+    return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
 
 
 def fork_at_current_lsn(

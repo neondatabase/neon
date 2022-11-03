@@ -63,6 +63,7 @@ etcd_broker = { path = "../libs/etcd_broker" }
 metrics = { path = "../libs/metrics" }
 utils = { path = "../libs/utils" }
 remote_storage = { path = "../libs/remote_storage" }
+tenant_size_model = { path = "../libs/tenant_size_model" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 close_fds = "0.3.2"
 walkdir = "2.3.2"

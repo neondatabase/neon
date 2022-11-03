@@ -2157,6 +2157,7 @@ dependencies = [
  "svg_fmt",
  "tar",
  "tempfile",
+ "tenant_size_model",
  "thiserror",
  "tokio",
  "tokio-postgres",
@@ -3531,6 +3532,13 @@ dependencies = [
  "redox_syscall",
  "remove_dir_all",
  "winapi",
+]
+
+[[package]]
+name = "tenant_size_model"
+version = "0.1.0"
+dependencies = [
+ "workspace_hack",
 ]
 
 [[package]]
