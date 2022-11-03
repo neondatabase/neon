@@ -1364,6 +1364,11 @@ impl Timeline {
         // to finish, we know when the flush that we initiated has
         // finished, instead of some other flush that was started earlier.
         let mut my_flush_request = 0;
+
+        if !&*self.flush_loop_started.lock().unwrap() {
+            anyhow::bail!("cannot flush frozen layers when flush_loop is not running")
+        }
+
         self.layer_flush_start_tx.send_modify(|counter| {
             my_flush_request = *counter + 1;
             *counter = my_flush_request;
@@ -1377,7 +1382,10 @@ impl Timeline {
                         // We already logged the original error in
                         // flush_loop. We cannot propagate it to the caller
                         // here, because it might not be Cloneable
-                        bail!("could not flush frozen layer");
+                        anyhow::bail!(
+                            "Could not flush frozen layer. Request id: {}",
+                            my_flush_request
+                        );
                     } else {
                         return Ok(());
                     }
