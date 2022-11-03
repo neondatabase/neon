@@ -46,10 +46,7 @@ jobs:
         id: build-tag
 
   build-neon:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
+    runs-on: arm64
     strategy:
       fail-fast: false
       matrix:
@@ -460,22 +457,34 @@ jobs:
             }"
 
   neon-image:
-    runs-on: dev
+    runs-on: arm64
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1 # v3 won't work with kaniko
+        uses: actions/checkout@v3
         with:
           submodules: true
           fetch-depth: 0
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
 
-      - name: Kaniko build neon
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > ~/.docker/config.json
+
+      - name: Build and push
+        uses: docker/build-push-action@v3
+        with:
+          push: true
+          tags: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+          platforms: linux/arm64,linux/amd64
+
+#      - name: Kaniko build neon
+#        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
 
   compute-tools-image:
     runs-on: dev
