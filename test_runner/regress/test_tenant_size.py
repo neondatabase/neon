@@ -1,5 +1,5 @@
 import time
-from typing import Any, List, Tuple
+from typing import List, Tuple
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -185,9 +185,9 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     )
 
     # unsure why this happens, the size difference is more than a page alignment
-    size_after_branch = http_client.tenant_size(tenant_id)
-    assert size_after_branch > size_at_branch
-    assert size_after_branch - size_at_branch == gc_horizon
+    size_after_first_branch = http_client.tenant_size(tenant_id)
+    assert size_after_first_branch > size_at_branch
+    assert size_after_first_branch - size_at_branch == gc_horizon
 
     first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
 
@@ -197,8 +197,8 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         )
 
     wait_for_last_flush_lsn(env, first_branch_pg, tenant_id, first_branch_timeline_id)
-    size_after_growing_branch = http_client.tenant_size(tenant_id)
-    assert size_after_growing_branch > size_after_branch
+    size_after_growing_first_branch = http_client.tenant_size(tenant_id)
+    assert size_after_growing_first_branch > size_after_first_branch
 
     with main_pg.cursor() as cur:
         cur.execute(
@@ -207,13 +207,13 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
 
     wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
     size_after_continuing_on_main = http_client.tenant_size(tenant_id)
-    assert size_after_continuing_on_main > size_after_growing_branch
+    assert size_after_continuing_on_main > size_after_growing_first_branch
 
     second_branch_timeline_id = env.neon_cli.create_branch(
         "second-branch", main_branch_name, tenant_id
     )
-    size_after_branch = http_client.tenant_size(tenant_id)
-    assert size_after_branch > size_after_continuing_on_main
+    size_after_second_branch = http_client.tenant_size(tenant_id)
+    assert size_after_second_branch > size_after_continuing_on_main
 
     second_branch_pg = env.postgres.create_start("second-branch", tenant_id=tenant_id)
 
@@ -223,8 +223,8 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         )
 
     wait_for_last_flush_lsn(env, second_branch_pg, tenant_id, second_branch_timeline_id)
-    size_after_growing_branch = http_client.tenant_size(tenant_id)
-    assert size_after_growing_branch > size_after_branch
+    size_after_growing_second_branch = http_client.tenant_size(tenant_id)
+    assert size_after_growing_second_branch > size_after_second_branch
 
     with second_branch_pg.cursor() as cur:
         cur.execute("DROP TABLE t0")
@@ -234,7 +234,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     wait_for_last_flush_lsn(env, second_branch_pg, tenant_id, second_branch_timeline_id)
     size_after_thinning_branch = http_client.tenant_size(tenant_id)
     assert (
-        size_after_thinning_branch > size_after_growing_branch
+        size_after_thinning_branch > size_after_growing_second_branch
     ), "tenant_size should grow with dropped tables and full vacuum"
 
     first_branch_pg.stop_and_destroy()
