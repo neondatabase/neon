@@ -226,6 +226,7 @@ pub struct TimelineGcRequest {
 }
 
 // Wrapped in libpq CopyData
+#[derive(PartialEq, Eq)]
 pub enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
@@ -242,21 +243,21 @@ pub enum PagestreamBeMessage {
     DbSize(PagestreamDbSizeResponse),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamExistsRequest {
     pub latest: bool,
     pub lsn: Lsn,
     pub rel: RelTag,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamNblocksRequest {
     pub latest: bool,
     pub lsn: Lsn,
     pub rel: RelTag,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamGetPageRequest {
     pub latest: bool,
     pub lsn: Lsn,
@@ -264,7 +265,7 @@ pub struct PagestreamGetPageRequest {
     pub blkno: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamDbSizeRequest {
     pub latest: bool,
     pub lsn: Lsn,
@@ -425,5 +426,60 @@ impl PagestreamBeMessage {
         }
 
         bytes.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Buf;
+
+    use super::*;
+
+    #[test]
+    fn test_pagestream() {
+        // Test serialization/deserialization of PagestreamFeMessage
+        let messages = vec![
+            PagestreamFeMessage::Exists(PagestreamExistsRequest {
+                latest: true,
+                lsn: Lsn(4),
+                rel: RelTag {
+                    forknum: 1,
+                    spcnode: 2,
+                    dbnode: 3,
+                    relnode: 4,
+                },
+            }),
+            PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
+                latest: false,
+                lsn: Lsn(4),
+                rel: RelTag {
+                    forknum: 1,
+                    spcnode: 2,
+                    dbnode: 3,
+                    relnode: 4,
+                },
+            }),
+            PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
+                latest: true,
+                lsn: Lsn(4),
+                rel: RelTag {
+                    forknum: 1,
+                    spcnode: 2,
+                    dbnode: 3,
+                    relnode: 4,
+                },
+                blkno: 7,
+            }),
+            PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
+                latest: true,
+                lsn: Lsn(4),
+                dbnode: 7,
+            }),
+        ];
+        for msg in messages {
+            let bytes = msg.serialize();
+            let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
+            assert!(msg == reconstructed);
+        }
     }
 }
