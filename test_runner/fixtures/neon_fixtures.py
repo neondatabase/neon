@@ -1047,6 +1047,21 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def tenant_size(self, tenant_id: TenantId) -> int:
+        """
+        Returns the tenant size, together with the model inputs as the second tuple item.
+        """
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/size")
+        self.verbose_error(res)
+        res = res.json()
+        assert isinstance(res, dict)
+        assert TenantId(res["id"]) == tenant_id
+        size = res["size"]
+        assert type(size) == int
+        # there are additional inputs, which are the collected raw information before being fed to the tenant_size_model
+        # there are no tests for those right now.
+        return size
+
     def timeline_list(self, tenant_id: TenantId) -> List[Dict[str, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline")
         self.verbose_error(res)

@@ -1,29 +1,28 @@
-import os
 import time
-from pathlib import Path
 from typing import Any, List, Tuple
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PageserverApiException,
-    PageserverHttpClient,
     wait_for_last_flush_lsn,
 )
-from fixtures.types import Lsn, TenantId
+from fixtures.types import Lsn
 
 
 def test_empty_tenant_size(neon_simple_env: NeonEnv):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
     http_client = env.pageserver.http_client()
-    size = get_tenant_size(http_client, tenant_id)[0]
+    size = http_client.tenant_size(tenant_id)
+
     # we should never have zero, because there should be the initdb however
     # this is questionable if we should have anything in this case, as the
     # gc_cutoff is negative
-    assert size == 0
+    assert (
+        size == 0
+    ), "initial implementation returns zero tenant_size before last_record_lsn is past gc_horizon"
 
     with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
         with pg.cursor() as cur:
@@ -31,26 +30,13 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
             row = cur.fetchone()
             assert row is not None
             assert row[0] == 1
-        # running compute should not change the size
-        size = get_tenant_size(http_client, tenant_id)[0]
-        assert size == 0
+        size = http_client.tenant_size(tenant_id)
+        assert size == 0, "starting idle compute should not change the tenant size"
 
-    # after compute has been shut down, the size should be the same, until we
-    # increase the size over the gc_horizon
-    size = get_tenant_size(http_client, tenant_id)[0]
-    assert size == 0
-
-
-def get_tenant_size(http_client: PageserverHttpClient, tenant_id: TenantId) -> Tuple[int, Any]:
-    res = http_client.get(f"http://localhost:{http_client.port}/v1/tenant/{tenant_id}/size")
-    http_client.verbose_error(res)
-    res = res.json()
-    assert isinstance(res, dict)
-    assert TenantId(res["id"]) == tenant_id
-    size = res["size"]
-    assert type(size) == int
-    # there are additional inputs, which are the collected raw information before being fed to the tenant_size_model
-    return (size, res.get("inputs", None))
+    # the size should be the same, until we increase the size over the
+    # gc_horizon
+    size = http_client.tenant_size(tenant_id)
+    assert size == 0, "tenant_size should not be affected by shutdown of compute"
 
 
 def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
@@ -92,7 +78,7 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size, _ = get_tenant_size(http_client, tenant_id)
+            size = http_client.tenant_size(tenant_id)
 
             if len(collected_responses) > 0:
                 last_size = collected_responses[-1][1]
@@ -118,8 +104,9 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size, _ = get_tenant_size(http_client, tenant_id)
-            assert size > collected_responses[-1][1]
+            size = http_client.tenant_size(tenant_id)
+            prev = collected_responses[-1][1]
+            assert size > prev, "tenant_size should grow with updates"
             collected_responses.append((current_lsn, size))
 
         while True:
@@ -132,9 +119,11 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size, _ = get_tenant_size(http_client, tenant_id)
-            # even though rows have been deleted, the size should not decrease
-            assert size > collected_responses[-1][1]
+            size = http_client.tenant_size(tenant_id)
+            prev = collected_responses[-1][1]
+            assert (
+                size > prev
+            ), "even though rows have been deleted, the tenant_size should increase"
             collected_responses.append((current_lsn, size))
 
         with pg.cursor() as cur:
@@ -142,9 +131,9 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
         current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-        size, _ = get_tenant_size(http_client, tenant_id)
-
-        assert size > collected_responses[-1][1]
+        size = http_client.tenant_size(tenant_id)
+        prev = collected_responses[-1][1]
+        assert size > prev, "dropping table grows tenant_size"
         collected_responses.append((current_lsn, size))
 
     for lsn, size in collected_responses:
@@ -153,11 +142,10 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start()
 
-    size_after = get_tenant_size(http_client, tenant_id)[0]
+    size_after = http_client.tenant_size(tenant_id)
+    prev = collected_responses[-1][1]
 
-    assert (
-        size_after == collected_responses[-1][1]
-    ), "size after restarting pageserver should not have changed"
+    assert size_after == prev, "size after restarting pageserver should not have changed"
 
 
 def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
@@ -184,7 +172,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         )
 
     wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
-    size_at_branch = get_tenant_size(http_client, tenant_id)[0]
+    size_at_branch = http_client.tenant_size(tenant_id)
     assert size_at_branch > 0
 
     first_branch_timeline_id = env.neon_cli.create_branch(
@@ -192,7 +180,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     )
 
     # unsure why this happens
-    size_after_branch = get_tenant_size(http_client, tenant_id)[0]
+    size_after_branch = http_client.tenant_size(tenant_id)
     assert size_after_branch > size_at_branch
 
     first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
@@ -203,7 +191,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         )
 
     wait_for_last_flush_lsn(env, first_branch_pg, tenant_id, first_branch_timeline_id)
-    size_after_growing_branch = get_tenant_size(http_client, tenant_id)[0]
+    size_after_growing_branch = http_client.tenant_size(tenant_id)
     assert size_after_growing_branch > size_after_branch
 
     with main_pg.cursor() as cur:
@@ -212,13 +200,13 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         )
 
     wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
-    size_after_continuing_on_main = get_tenant_size(http_client, tenant_id)[0]
+    size_after_continuing_on_main = http_client.tenant_size(tenant_id)
     assert size_after_continuing_on_main > size_after_growing_branch
 
     second_branch_timeline_id = env.neon_cli.create_branch(
         "second-branch", main_branch_name, tenant_id
     )
-    size_after_branch = get_tenant_size(http_client, tenant_id)[0]
+    size_after_branch = http_client.tenant_size(tenant_id)
     assert size_after_branch > size_after_continuing_on_main
 
     second_branch_pg = env.postgres.create_start("second-branch", tenant_id=tenant_id)
@@ -229,7 +217,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         )
 
     wait_for_last_flush_lsn(env, second_branch_pg, tenant_id, second_branch_timeline_id)
-    size_after_growing_branch = get_tenant_size(http_client, tenant_id)[0]
+    size_after_growing_branch = http_client.tenant_size(tenant_id)
     assert size_after_growing_branch > size_after_branch
 
     with second_branch_pg.cursor() as cur:
@@ -238,17 +226,21 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         cur.execute("VACUUM FULL")
 
     wait_for_last_flush_lsn(env, second_branch_pg, tenant_id, second_branch_timeline_id)
-    size_after_thinning_branch = get_tenant_size(http_client, tenant_id)[0]
-    # size doesn't yet go down
-    assert size_after_thinning_branch > size_after_growing_branch
+    size_after_thinning_branch = http_client.tenant_size(tenant_id)
+    assert (
+        size_after_thinning_branch > size_after_growing_branch
+    ), "tenant_size should grow with dropped tables and full vacuum"
 
     first_branch_pg.stop_and_destroy()
     second_branch_pg.stop_and_destroy()
     main_pg.stop()
     env.pageserver.stop()
     env.pageserver.start()
-    size_after = get_tenant_size(http_client, tenant_id)[0]
 
+    # chance of compaction and gc on startup might have an effect on the
+    # tenant_size but so far this has been reliable, even though at least gc
+    # and tenant_size race for the same locks
+    size_after = http_client.tenant_size(tenant_id)
     assert size_after == size_after_thinning_branch
 
     # teardown, delete branches, and the size should be going down
@@ -267,9 +259,9 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
 
     assert deleted
 
-    size_after_deleting_first = get_tenant_size(http_client, tenant_id)[0]
+    size_after_deleting_first = http_client.tenant_size(tenant_id)
     assert size_after_deleting_first < size_after_thinning_branch
 
     http_client.timeline_delete(tenant_id, second_branch_timeline_id)
-    size_after_deleting_second = get_tenant_size(http_client, tenant_id)[0]
+    size_after_deleting_second = http_client.tenant_size(tenant_id)
     assert size_after_deleting_second < size_after_deleting_first
