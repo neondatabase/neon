@@ -41,7 +41,7 @@ pub struct Segment {
     /// FIXME: this could be an Option<usize>
     children_after: Vec<usize>,
 
-    /// Determined by `retention_period` given to [`Storage::price`]
+    /// Determined by `retention_period` given to [`Storage::calculate`]
     pub needed: bool,
 }
 
@@ -69,25 +69,25 @@ pub struct Segment {
 // 2. D+C+a+b
 // 3. D+A+B
 
-/// [`Segment`] which has had it's price calculated.
-pub struct SegmentPrice {
+/// [`Segment`] which has had it's size calculated.
+pub struct SegmentSize {
     pub seg_id: usize,
 
     pub method: SegmentMethod,
 
-    this_price: u64,
+    this_size: u64,
 
-    pub children: Vec<SegmentPrice>,
+    pub children: Vec<SegmentSize>,
 }
 
-impl SegmentPrice {
+impl SegmentSize {
     fn total(&self) -> u64 {
-        self.this_price + self.children.iter().fold(0, |acc, x| acc + x.total())
+        self.this_size + self.children.iter().fold(0, |acc, x| acc + x.total())
     }
 
     pub fn total_children(&self) -> u64 {
         if self.method == SnapshotAfter {
-            self.this_price + self.children.iter().fold(0, |acc, x| acc + x.total())
+            self.this_size + self.children.iter().fold(0, |acc, x| acc + x.total())
         } else {
             self.children.iter().fold(0, |acc, x| acc + x.total())
         }
@@ -197,7 +197,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         self.branches.insert(name, branchseg_id);
     }
 
-    pub fn price(&mut self, retention_period: u64) -> SegmentPrice {
+    pub fn calculate(&mut self, retention_period: u64) -> SegmentSize {
         // Phase 1: Mark all the segments that need to be retained
         for (_branch, &last_seg_id) in self.branches.iter() {
             let last_seg = &self.segments[last_seg_id];
@@ -219,13 +219,13 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
 
         // Phase 2: For each oldest segment in a chain that needs to be retained,
         // calculate if we should store snapshot or WAL
-        self.price_from_snapshot_later(0)
+        self.size_from_snapshot_later(0)
     }
 
-    fn price_from_wal(&self, seg_id: usize) -> SegmentPrice {
+    fn size_from_wal(&self, seg_id: usize) -> SegmentSize {
         let seg = &self.segments[seg_id];
 
-        let this_price = seg.end_lsn - seg.start_lsn;
+        let this_size = seg.end_lsn - seg.start_lsn;
 
         let mut children = Vec::new();
 
@@ -233,10 +233,10 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         for &child_id in seg.children_after.iter() {
             // try each child both ways
             let child = &self.segments[child_id];
-            let p1 = self.price_from_wal(child_id);
+            let p1 = self.size_from_wal(child_id);
 
             let p = if !child.needed {
-                let p2 = self.price_from_snapshot_later(child_id);
+                let p2 = self.size_from_snapshot_later(child_id);
                 if p1.total() < p2.total() {
                     p1
                 } else {
@@ -247,15 +247,15 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             };
             children.push(p);
         }
-        SegmentPrice {
+        SegmentSize {
             seg_id,
             method: if seg.needed { WalNeeded } else { Wal },
-            this_price,
+            this_size,
             children,
         }
     }
 
-    fn price_from_snapshot_later(&self, seg_id: usize) -> SegmentPrice {
+    fn size_from_snapshot_later(&self, seg_id: usize) -> SegmentSize {
         // If this is needed, then it's time to do the snapshot and continue
         // with wal method.
         let seg = &self.segments[seg_id];
@@ -266,10 +266,10 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             for &child_id in seg.children_after.iter() {
                 // try each child both ways
                 let child = &self.segments[child_id];
-                let p1 = self.price_from_wal(child_id);
+                let p1 = self.size_from_wal(child_id);
 
                 let p = if !child.needed {
-                    let p2 = self.price_from_snapshot_later(child_id);
+                    let p2 = self.size_from_snapshot_later(child_id);
                     if p1.total() < p2.total() {
                         p1
                     } else {
@@ -280,10 +280,10 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
                 };
                 children.push(p);
             }
-            SegmentPrice {
+            SegmentSize {
                 seg_id,
                 method: WalNeeded,
-                this_price: seg.start_size,
+                this_size: seg.start_size,
                 children,
             }
         } else {
@@ -300,12 +300,12 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             let method1 = if !children_needed {
                 let mut children = Vec::new();
                 for child in seg.children_after.iter() {
-                    children.push(self.price_from_snapshot_later(*child));
+                    children.push(self.size_from_snapshot_later(*child));
                 }
-                Some(SegmentPrice {
+                Some(SegmentSize {
                     seg_id,
                     method: Skipped,
-                    this_price: 0,
+                    this_size: 0,
                     children,
                 })
             } else {
@@ -316,12 +316,12 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             let method2 = if children_needed || seg.children_after.len() >= 2 {
                 let mut children = Vec::new();
                 for child in seg.children_after.iter() {
-                    children.push(self.price_from_wal(*child));
+                    children.push(self.size_from_wal(*child));
                 }
-                Some(SegmentPrice {
+                Some(SegmentSize {
                     seg_id,
                     method: SnapshotAfter,
-                    this_price: seg.end_size,
+                    this_size: seg.end_size,
                     children,
                 })
             } else {

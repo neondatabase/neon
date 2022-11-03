@@ -295,7 +295,7 @@ impl ModelInputs {
             }
         }
 
-        Ok(storage.price(self.retention_period).total_children())
+        Ok(storage.calculate(self.retention_period).total_children())
     }
 }
 

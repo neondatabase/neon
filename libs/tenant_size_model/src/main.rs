@@ -1,13 +1,13 @@
-//! Pricing model related to kept history size testing ground.
+//! Tenant size model testing ground.
 //!
 //! Has a number of scenarios and a `main` for invoking these by number, calculating the history
-//! size or price proxy, outputs graphviz graph. Makefile in directory shows how to use graphviz to
-//! turn scenarios into pngs.
+//! size, outputs graphviz graph. Makefile in directory shows how to use graphviz to turn scenarios
+//! into pngs.
 
-use tenant_size_model::{Segment, SegmentPrice, Storage};
+use tenant_size_model::{Segment, SegmentSize, Storage};
 
 // Main branch only. Some updates on it.
-fn scenario_1() -> (Vec<Segment>, SegmentPrice) {
+fn scenario_1() -> (Vec<Segment>, SegmentSize) {
     // Create main branch
     let mut storage = Storage::new("main");
 
@@ -19,13 +19,13 @@ fn scenario_1() -> (Vec<Segment>, SegmentPrice) {
         storage.update("main", 1_000);
     }
 
-    let price = storage.price(1000);
+    let size = storage.calculate(1000);
 
-    (storage.into_segments(), price)
+    (storage.into_segments(), size)
 }
 
 // Main branch only. Some updates on it.
-fn scenario_2() -> (Vec<Segment>, SegmentPrice) {
+fn scenario_2() -> (Vec<Segment>, SegmentSize) {
     // Create main branch
     let mut storage = Storage::new("main");
 
@@ -44,13 +44,13 @@ fn scenario_2() -> (Vec<Segment>, SegmentPrice) {
     // More updates on parent
     storage.update("main", 1_000);
 
-    let price = storage.price(1000);
+    let size = storage.calculate(1000);
 
-    (storage.into_segments(), price)
+    (storage.into_segments(), size)
 }
 
 // Like 2, but more updates on main
-fn scenario_3() -> (Vec<Segment>, SegmentPrice) {
+fn scenario_3() -> (Vec<Segment>, SegmentSize) {
     // Create main branch
     let mut storage = Storage::new("main");
 
@@ -71,13 +71,13 @@ fn scenario_3() -> (Vec<Segment>, SegmentPrice) {
         storage.update("main", 1_000);
     }
 
-    let price = storage.price(1000);
+    let size = storage.calculate(1000);
 
-    (storage.into_segments(), price)
+    (storage.into_segments(), size)
 }
 
 // Diverged branches
-fn scenario_4() -> (Vec<Segment>, SegmentPrice) {
+fn scenario_4() -> (Vec<Segment>, SegmentSize) {
     // Create main branch
     let mut storage = Storage::new("main");
 
@@ -98,12 +98,12 @@ fn scenario_4() -> (Vec<Segment>, SegmentPrice) {
         storage.update("main", 1_000);
     }
 
-    let price = storage.price(1000);
+    let size = storage.calculate(1000);
 
-    (storage.into_segments(), price)
+    (storage.into_segments(), size)
 }
 
-fn scenario_5() -> (Vec<Segment>, SegmentPrice) {
+fn scenario_5() -> (Vec<Segment>, SegmentSize) {
     let mut storage = Storage::new("a");
     storage.insert("a", 5000);
     storage.branch("a", "b");
@@ -113,12 +113,12 @@ fn scenario_5() -> (Vec<Segment>, SegmentPrice) {
     storage.insert("c", 4000);
     storage.insert("a", 2000);
 
-    let price = storage.price(5000);
+    let size = storage.calculate(5000);
 
-    (storage.into_segments(), price)
+    (storage.into_segments(), size)
 }
 
-fn scenario_6() -> (Vec<Segment>, SegmentPrice) {
+fn scenario_6() -> (Vec<Segment>, SegmentSize) {
     use std::borrow::Cow;
 
     const NO_OP: Cow<'static, str> = Cow::Borrowed("");
@@ -142,9 +142,9 @@ fn scenario_6() -> (Vec<Segment>, SegmentPrice) {
     storage.modify_branch(&branches[2], NO_OP, 15906192, 8192); // at 299321616
     storage.modify_branch(&branches[0], NO_OP, 18909976, 32768); // at 302325400
 
-    let price = storage.price(100_000);
+    let size = storage.calculate(100_000);
 
-    (storage.into_segments(), price)
+    (storage.into_segments(), size)
 }
 
 fn main() {
@@ -152,7 +152,7 @@ fn main() {
 
     let scenario = if args.len() < 2 { "1" } else { &args[1] };
 
-    let (segments, price) = match scenario {
+    let (segments, size) = match scenario {
         "1" => scenario_1(),
         "2" => scenario_2(),
         "3" => scenario_3(),
@@ -165,10 +165,10 @@ fn main() {
         }
     };
 
-    graphviz_price_tree(&segments, &price);
+    graphviz_tree(&segments, &size);
 }
 
-fn graphviz_price_recurse(segments: &[Segment], node: &SegmentPrice) {
+fn graphviz_recurse(segments: &[Segment], node: &SegmentSize) {
     use tenant_size_model::SegmentMethod::*;
 
     let seg_id = node.seg_id;
@@ -180,18 +180,18 @@ fn graphviz_price_recurse(segments: &[Segment], node: &SegmentPrice) {
     println!("  {{");
     println!("    node [width=0.1 height=0.1 shape=oval]");
 
-    let price = node.total_children();
+    let tenant_size = node.total_children();
 
     let penwidth = if seg.needed { 6 } else { 3 };
     let x = match method {
         SnapshotAfter =>
-            format!("label=\"lsn: {lsn}\\nsize: {size}\\nprice: {price}\" style=filled penwidth={penwidth}"),
+            format!("label=\"lsn: {lsn}\\nsize: {size}\\ntenant_size: {tenant_size}\" style=filled penwidth={penwidth}"),
         Wal =>
-            format!("label=\"lsn: {lsn}\\nsize: {size}\\nprice: {price}\" color=\"black\" penwidth={penwidth}"),
+            format!("label=\"lsn: {lsn}\\nsize: {size}\\ntenant_size: {tenant_size}\" color=\"black\" penwidth={penwidth}"),
         WalNeeded =>
-            format!("label=\"lsn: {lsn}\\nsize: {size}\\nprice: {price}\" color=\"black\" penwidth={penwidth}"),
+            format!("label=\"lsn: {lsn}\\nsize: {size}\\ntenant_size: {tenant_size}\" color=\"black\" penwidth={penwidth}"),
         Skipped =>
-            format!("label=\"lsn: {lsn}\\nsize: {size}\\nprice: {price}\" color=\"gray\" penwidth={penwidth}"),
+            format!("label=\"lsn: {lsn}\\nsize: {size}\\ntenant_size: {tenant_size}\" color=\"gray\" penwidth={penwidth}"),
     };
 
     println!("    \"seg{seg_id}\" [{x}]");
@@ -200,7 +200,7 @@ fn graphviz_price_recurse(segments: &[Segment], node: &SegmentPrice) {
     // Recurse. Much of the data is actually on the edge
     for child in node.children.iter() {
         let child_id = child.seg_id;
-        graphviz_price_recurse(segments, child);
+        graphviz_recurse(segments, child);
 
         let edge_color = match child.method {
             SnapshotAfter => "gray",
@@ -236,7 +236,7 @@ fn graphviz_price_recurse(segments: &[Segment], node: &SegmentPrice) {
     }
 }
 
-fn graphviz_price_tree(segments: &[Segment], tree: &SegmentPrice) {
+fn graphviz_tree(segments: &[Segment], tree: &SegmentSize) {
     println!("digraph G {{");
     println!("  fontname=\"Helvetica,Arial,sans-serif\"");
     println!("  node [fontname=\"Helvetica,Arial,sans-serif\"]");
@@ -244,14 +244,14 @@ fn graphviz_price_tree(segments: &[Segment], tree: &SegmentPrice) {
     println!("  graph [center=1 rankdir=LR]");
     println!("  edge [dir=none]");
 
-    graphviz_price_recurse(segments, tree);
+    graphviz_recurse(segments, tree);
 
     println!("}}");
 }
 
 #[test]
-fn scenarios_return_same_price() {
-    type ScenarioFn = fn() -> (Vec<Segment>, SegmentPrice);
+fn scenarios_return_same_size() {
+    type ScenarioFn = fn() -> (Vec<Segment>, SegmentSize);
     let truths: &[(u32, ScenarioFn, _)] = &[
         (line!(), scenario_1, 8000),
         (line!(), scenario_2, 9000),
@@ -262,7 +262,7 @@ fn scenarios_return_same_price() {
     ];
 
     for (line, scenario, expected) in truths {
-        let (_, price) = scenario();
-        assert_eq!(*expected, price.total_children(), "scenario on line {line}");
+        let (_, size) = scenario();
+        assert_eq!(*expected, size.total_children(), "scenario on line {line}");
     }
 }

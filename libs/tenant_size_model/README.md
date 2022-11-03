@@ -1,6 +1,6 @@
 # Logical size + WAL pricing
 
-This is a simulator to calculate the storage price of different scenarios,
+This is a simulator to calculate the tenant size in different scenarios,
 using the "Logical size + WAL" method. Makefile produces diagrams used in a
 private presentation:
 
