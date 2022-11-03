@@ -1488,6 +1488,10 @@ impl Tenant {
             .concurrent_tenant_size_logical_size_queries
             .inner();
 
+        // TODO: Having a single mutex block concurrent reads is unfortunate, but since the queries
+        // are for testing/experimenting, we tolerate this.
+        //
+        // See more for on the issue #2748 condenced out of the initial PR review.
         let mut shared_cache = self.cached_logical_sizes.lock().await;
 
         size::gather_inputs(self, logical_sizes_at_once, &mut *shared_cache).await
