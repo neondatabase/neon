@@ -1022,8 +1022,9 @@ impl Tenant {
         Ok(totals)
     }
 
-    /// Refreshes the Timeline::gc_info for all timelines or only the given timeline, returning the
-    /// vector of active timelines (or just one, if target_timeline_id was specified).
+    /// Refreshes the Timeline::gc_info for all timelines, returning the
+    /// vector of timelines which have [`Timeline::get_last_record_lsn`] past
+    /// [`Tenant::get_gc_horizon`].
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
     pub fn refresh_gc_info(&self) -> anyhow::Result<Vec<Arc<Timeline>>> {
