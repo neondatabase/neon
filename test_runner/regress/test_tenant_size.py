@@ -58,7 +58,7 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
     http_client = env.pageserver.http_client()
 
-    collected_responses: List[Tuple[Lsn, Any]] = []
+    collected_responses: List[Tuple[Lsn, int]] = []
 
     with env.postgres.create_start(branch_name, tenant_id=tenant_id) as pg:
         with pg.cursor() as cur:
@@ -81,11 +81,11 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
             size = http_client.tenant_size(tenant_id)
 
             if len(collected_responses) > 0:
-                last_size = collected_responses[-1][1]
+                prev = collected_responses[-1][1]
                 if size == 0:
-                    assert last_size == 0
+                    assert prev == 0
                 else:
-                    assert size > last_size
+                    assert size > prev
 
             collected_responses.append((current_lsn, size))
 
@@ -136,6 +136,9 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
         assert size > prev, "dropping table grows tenant_size"
         collected_responses.append((current_lsn, size))
 
+    # this isn't too many lines to forget for a while. observed while
+    # developing these tests that locally the value is a bit more than what we
+    # get in the ci.
     for lsn, size in collected_responses:
         log.info(f"collected: {lsn}, {size}")
 
