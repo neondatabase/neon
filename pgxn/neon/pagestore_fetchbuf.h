@@ -31,7 +31,7 @@ typedef enum PrefetchStatus {
 typedef struct PrefetchRequest {
 	BufferTag	buftag; /* must be first entry in the struct */
 	XLogRecPtr	effective_request_lsn;
-	NeonGetPageResponse *response; /* may be null */
+	NeonResponse *response; /* may be null */
 	PrefetchStatus status;
 	uint64		my_ring_index;
 } PrefetchRequest;
@@ -56,6 +56,7 @@ typedef struct PrefetchRequest {
  */
 typedef struct PrefetchState {
 	MemoryContext bufctx; /* context for prf_buffer[].response allocations */
+	MemoryContext errctx; /* context for prf_buffer[].response allocations */
 	MemoryContext hashctx; /* context for prf_buffer */
 
 	/* buffer indexes */
