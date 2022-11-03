@@ -153,7 +153,9 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     Reported size goes up while branches or rows are being added, goes down after removing branches.
     """
 
-    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={128 * 1024}}}"
+    gc_horizon = 128 * 1024
+
+    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
 
     env = neon_env_builder.init_start()
 
@@ -179,9 +181,10 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         "first-branch", main_branch_name, tenant_id
     )
 
-    # unsure why this happens
+    # unsure why this happens, the size difference is more than a page alignment
     size_after_branch = http_client.tenant_size(tenant_id)
     assert size_after_branch > size_at_branch
+    assert size_after_branch - size_at_branch == gc_horizon
 
     first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
 
