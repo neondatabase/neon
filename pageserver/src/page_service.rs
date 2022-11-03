@@ -10,6 +10,7 @@
 //
 
 use anyhow::{bail, ensure, Context, Result};
+use bytes::Buf;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use pageserver_api::models::{
@@ -299,7 +300,7 @@ impl PageServerHandler {
 
             trace!("query: {copy_data_bytes:?}");
 
-            let neon_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+            let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
