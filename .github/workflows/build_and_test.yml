@@ -445,11 +445,15 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
-    needs: [ build-neon ]
+    needs: [ push-docker-hub, tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
+          # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
+          # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
+          # to place a job run status update later.
           COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+          # For non-PR kinds of runs, the above will produce an empty variable, pick the original sha value for those
           COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
 
           REMOTE_REPO="${{ github.repository_owner }}/cloud"
@@ -475,7 +479,9 @@ jobs:
               \"inputs\": {
                 \"ci_job_name\": \"neon-cloud-e2e\",
                 \"commit_hash\": \"$COMMIT_SHA\",
-                \"remote_repo\": \"${{ github.repository }}\"
+                \"remote_repo\": \"${{ github.repository }}\",
+                \"storage_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\"
               }
             }"
 
