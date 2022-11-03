@@ -226,7 +226,7 @@ pub struct TimelineGcRequest {
 }
 
 // Wrapped in libpq CopyData
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq)]
 pub enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
@@ -243,21 +243,21 @@ pub enum PagestreamBeMessage {
     DbSize(PagestreamDbSizeResponse),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamExistsRequest {
     pub latest: bool,
     pub lsn: Lsn,
     pub rel: RelTag,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamNblocksRequest {
     pub latest: bool,
     pub lsn: Lsn,
     pub rel: RelTag,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamGetPageRequest {
     pub latest: bool,
     pub lsn: Lsn,
@@ -265,7 +265,7 @@ pub struct PagestreamGetPageRequest {
     pub blkno: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamDbSizeRequest {
     pub latest: bool,
     pub lsn: Lsn,
