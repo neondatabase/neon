@@ -1152,18 +1152,34 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (n_prefetch_requests > 0)
 		{
 			/* Combine all prefetch requests with primary request */
-			page_server->send((NeonRequest *) & request);
+			if (request_latest)
+			{
+				/*
+				 * Use maximal LSN of all prefetch requests to minimize probability of rejection of prefetch
+				 * responses. Prefetch response is rejected if Max(prefetch_lsn, PageGetLSN(page)) < request_lsn.
+				 * Assume that there are two pages P1 and P2 with LSNs 100 and 200 and them are swapped out.
+				 * Then we want to load P1 and prefetch P2. If we use LSN 100 for all prefetched pages,
+				 * then pageserver will not wait until it receives WAL till LSN=200 and returns old image of P2.
+				 * So prefetch response for P2 will be rejected.
+				 * prefetch_lsn will not be needed if we have infinite last written lsn cache. But we keep in
+				 * this cache only information about of most recently updated pages. If we do not find page in the cache,
+				 * then use global last written LSN which can be larger than actual LSN of the requested page.
+				 * Remembering LSN which was use to prefetch pages allows to educe probability of rejecting prefetched pages.
+				 */
+				for (i = 0; i < n_prefetch_requests; i++)
+				{
+					XLogRecPtr prefetch_lsn = GetLastWrittenLSN(prefetch_requests[i].rnode, prefetch_requests[i].forkNum, prefetch_requests[i].blockNum);
+					request_lsn = Max(request_lsn, prefetch_lsn);
+				}
+				request.req.lsn = request_lsn;
+			}
 			prefetch_lsn = request_lsn;
+			page_server->send((NeonRequest *) & request);
 			for (i = 0; i < n_prefetch_requests; i++)
 			{
 				request.rnode = prefetch_requests[i].rnode;
 				request.forknum = prefetch_requests[i].forkNum;
 				request.blkno = prefetch_requests[i].blockNum;
-				if (request_latest)
-				{
-					request.req.lsn = GetLastWrittenLSN(request.rnode, request.forknum, request.blkno);
-					prefetch_lsn = Max(prefetch_lsn, request.req.lsn);
-				}
 				prefetch_responses[i] = prefetch_requests[i];
 				page_server->send((NeonRequest *) & request);
 			}
