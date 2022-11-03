@@ -1,7 +1,7 @@
 //! Local mock of Cloud API V2.
 
 use super::{
-    console::{self, AuthInfo, GetAuthInfoError, TransportError, WakeComputeError},
+    console::{self, AuthInfo, GetAuthInfoError, WakeComputeError},
     AuthSuccess,
 };
 use crate::{
@@ -12,7 +12,28 @@ use crate::{
     stream::PqStream,
     url::ApiUrl,
 };
+use futures::TryFutureExt;
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{info, info_span, warn, Instrument};
+
+#[derive(Debug, Error)]
+enum MockApiError {
+    #[error("Failed to read password: {0}")]
+    PasswordNotSet(tokio_postgres::Error),
+}
+
+impl From<MockApiError> for console::ApiError {
+    fn from(e: MockApiError) -> Self {
+        io_error(e).into()
+    }
+}
+
+impl From<tokio_postgres::Error> for console::ApiError {
+    fn from(e: tokio_postgres::Error) -> Self {
+        io_error(e).into()
+    }
+}
 
 #[must_use]
 pub(super) struct Api<'a> {
@@ -20,10 +41,9 @@ pub(super) struct Api<'a> {
     creds: &'a ClientCredentials<'a>,
 }
 
-// Helps eliminate graceless `.map_err` calls without introducing another ctor.
-impl From<tokio_postgres::Error> for TransportError {
-    fn from(e: tokio_postgres::Error) -> Self {
-        io_error(e).into()
+impl<'a> AsRef<ClientCredentials<'a>> for Api<'a> {
+    fn as_ref(&self) -> &ClientCredentials<'a> {
+        self.creds
     }
 }
 
@@ -35,54 +55,55 @@ impl<'a> Api<'a> {
 
     /// Authenticate the existing user or throw an error.
     pub(super) async fn handle_user(
-        self,
+        &'a self,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
     ) -> auth::Result<AuthSuccess<compute::ConnCfg>> {
         // We reuse user handling logic from a production module.
-        console::handle_user(client, &self, Self::get_auth_info, Self::wake_compute).await
+        console::handle_user(client, self, Self::get_auth_info, Self::wake_compute).await
     }
+}
 
+impl Api<'_> {
     /// This implementation fetches the auth info from a local postgres instance.
-    async fn get_auth_info(&self) -> Result<AuthInfo, GetAuthInfoError> {
-        // Perhaps we could persist this connection, but then we'd have to
-        // write more code for reopening it if it got closed, which doesn't
-        // seem worth it.
-        let (client, connection) =
-            tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
+    async fn get_auth_info(&self) -> Result<Option<AuthInfo>, GetAuthInfoError> {
+        async {
+            // Perhaps we could persist this connection, but then we'd have to
+            // write more code for reopening it if it got closed, which doesn't
+            // seem worth it.
+            let (client, connection) =
+                tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
-        tokio::spawn(connection);
-        let query = "select rolpassword from pg_catalog.pg_authid where rolname = $1";
-        let rows = client.query(query, &[&self.creds.user]).await?;
+            tokio::spawn(connection);
+            let query = "select rolpassword from pg_catalog.pg_authid where rolname = $1";
+            let rows = client.query(query, &[&self.creds.user]).await?;
 
-        match &rows[..] {
-            // We can't get a secret if there's no such user.
-            [] => Err(io_error(format!("unknown user '{}'", self.creds.user)).into()),
+            // We can get at most one row, because `rolname` is unique.
+            let row = match rows.get(0) {
+                Some(row) => row,
+                // This means that the user doesn't exist, so there can be no secret.
+                // However, this is still a *valid* outcome which is very similar
+                // to getting `404 Not found` from the Neon console.
+                None => {
+                    warn!("user '{}' does not exist", self.creds.user);
+                    return Ok(None);
+                }
+            };
 
-            // We shouldn't get more than one row anyway.
-            [row, ..] => {
-                let entry = row
-                    .try_get("rolpassword")
-                    .map_err(|e| io_error(format!("failed to read user's password: {e}")))?;
+            let entry = row
+                .try_get("rolpassword")
+                .map_err(MockApiError::PasswordNotSet)?;
 
-                scram::ServerSecret::parse(entry)
-                    .map(AuthInfo::Scram)
-                    .or_else(|| {
-                        // It could be an md5 hash if it's not a SCRAM secret.
-                        let text = entry.strip_prefix("md5")?;
-                        Some(AuthInfo::Md5({
-                            let mut bytes = [0u8; 16];
-                            hex::decode_to_slice(text, &mut bytes).ok()?;
-                            bytes
-                        }))
-                    })
-                    // Putting the secret into this message is a security hazard!
-                    .ok_or(GetAuthInfoError::BadSecret)
-            }
+            info!("got a secret: {entry}"); // safe since it's not a prod scenario
+            let secret = scram::ServerSecret::parse(entry).map(AuthInfo::Scram);
+            Ok(secret.or_else(|| parse_md5(entry).map(AuthInfo::Md5)))
         }
+        .map_err(crate::error::log_error)
+        .instrument(info_span!("get_auth_info", mock = self.endpoint.as_str()))
+        .await
     }
 
     /// We don't need to wake anything locally, so we just return the connection info.
-    pub(super) async fn wake_compute(&self) -> Result<compute::ConnCfg, WakeComputeError> {
+    pub async fn wake_compute(&self) -> Result<compute::ConnCfg, WakeComputeError> {
         let mut config = compute::ConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
@@ -92,4 +113,13 @@ impl<'a> Api<'a> {
 
         Ok(config)
     }
+}
+
+fn parse_md5(input: &str) -> Option<[u8; 16]> {
+    let text = input.strip_prefix("md5")?;
+
+    let mut bytes = [0u8; 16];
+    hex::decode_to_slice(text, &mut bytes).ok()?;
+
+    Some(bytes)
 }
