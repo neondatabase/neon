@@ -271,3 +271,6 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     http_client.timeline_delete(tenant_id, second_branch_timeline_id)
     size_after_deleting_second = http_client.tenant_size(tenant_id)
     assert size_after_deleting_second < size_after_deleting_first
+
+    assert size_after_deleting_second < size_after_continuing_on_main
+    assert size_after_deleting_second > size_after_first_branch
