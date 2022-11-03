@@ -364,7 +364,7 @@ paths:
           format: hex
     get:
       description: |
-        Calculate tenant's size.
+        Calculate tenant's size, which is a mixture of WAL (bytes) and logical_size (bytes).
       responses:
         "200":
           description: OK,
@@ -381,6 +381,8 @@ paths:
                     format: hex
                   size:
                     type: integer
+                    description: |
+                      Size metric in bytes.
         "401":
           description: Unauthorized Error
           content:
