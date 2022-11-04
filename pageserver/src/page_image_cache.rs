@@ -94,6 +94,7 @@ impl PageImageCache {
             VirtualFile::open_with_options(
                 &std::path::PathBuf::from("page.cache"),
                 std::fs::OpenOptions::new()
+                    .read(true)
                     .write(true)
                     .create(true)
                     .truncate(true),
@@ -234,6 +235,7 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
                             let mut buf = [0u8; PAGE_SZ];
                             file.read_exact_at(&mut buf, index as u64 * PAGE_SZ as u64)?;
                             cache = this.lock().unwrap();
+                            assert!(cache.pages[index].access_count > 0);
                             cache.pages[index].access_count -= 1;
                             if cache.pages[index].access_count == 0 {
                                 // Move to the head of LRU list
