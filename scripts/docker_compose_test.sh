@@ -23,7 +23,7 @@ cleanup
 
 for pg_version in 14 15; do
 	echo "start containers (pg_version=$pg_version)."
-	PG_VERSION=$pg_version TAG=latest docker compose -f $COMPOSE_FILE up --build -d
+	PG_VERSION=$pg_version docker compose -f $COMPOSE_FILE up --build -d
 
 	echo "wait until the compute is ready. timeout after 60s. "
 	cnt=0
@@ -43,7 +43,7 @@ for pg_version in 14 15; do
 		if [ $result -eq 1 ]; then
 			echo "OK. The compute is ready to connect."
 			echo "execute simple queries."
-			docker exec --rm $COMPUTE_CONTAINER_NAME /bin/bash -c "psql $PSQL_OPTION"
+			docker exec $COMPUTE_CONTAINER_NAME /bin/bash -c "psql $PSQL_OPTION"
 			cleanup
 			break
 		fi
