@@ -778,7 +778,7 @@ jobs:
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: | 
       github.event.label.name == 'deploy-test-storage' && 
       github.event_name != 'workflow_dispatch'
@@ -811,7 +811,7 @@ jobs:
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: |
       (github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -892,7 +892,7 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: |
       (github.ref_name == 'main') &&
       github.event_name != 'workflow_dispatch'
@@ -925,7 +925,7 @@ jobs:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: |
       (github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
