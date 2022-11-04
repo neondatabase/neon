@@ -1,7 +1,7 @@
 import os
-import pathlib
 import threading
 from contextlib import closing, contextmanager
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import pytest
@@ -14,9 +14,6 @@ from fixtures.neon_fixtures import (
     PortDistributor,
     Postgres,
     assert_no_in_progress_downloads_for_tenant,
-    base_dir,
-    neon_binpath,
-    pg_distrib_dir,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -30,12 +27,13 @@ def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
 
 @contextmanager
 def new_pageserver_service(
-    new_pageserver_dir: pathlib.Path,
-    pageserver_bin: pathlib.Path,
-    remote_storage_mock_path: pathlib.Path,
+    new_pageserver_dir: Path,
+    pageserver_bin: Path,
+    remote_storage_mock_path: Path,
     pg_port: int,
     http_port: int,
     broker: Optional[Etcd],
+    pg_distrib_dir: Path,
 ):
     """
     cannot use NeonPageserver yet because it depends on neon cli
@@ -193,10 +191,10 @@ def switch_pg_to_new_pageserver(
     new_pageserver_port: int,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-) -> pathlib.Path:
+) -> Path:
     pg.stop()
 
-    pg_config_file_path = pathlib.Path(pg.config_file_path())
+    pg_config_file_path = Path(pg.config_file_path())
     pg_config_file_path.open("a").write(
         f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_port}'"
     )
@@ -219,7 +217,7 @@ def switch_pg_to_new_pageserver(
     return timeline_to_detach_local_path
 
 
-def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path: pathlib.Path):
+def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path: Path):
     with pg_cur(pg) as cur:
         # check that data is still there
         cur.execute("SELECT sum(key) FROM t")
@@ -251,7 +249,9 @@ def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path
 def test_tenant_relocation(
     neon_env_builder: NeonEnvBuilder,
     port_distributor: PortDistributor,
-    test_output_dir,
+    test_output_dir: Path,
+    neon_binpath: Path,
+    base_dir: Path,
     method: str,
     with_load: str,
 ):
@@ -350,7 +350,7 @@ def test_tenant_relocation(
     new_pageserver_pg_port = port_distributor.get_port()
     new_pageserver_http_port = port_distributor.get_port()
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
-    pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
+    pageserver_bin = neon_binpath / "pageserver"
 
     new_pageserver_http = PageserverHttpClient(
         port=new_pageserver_http_port,
@@ -365,6 +365,7 @@ def test_tenant_relocation(
         new_pageserver_pg_port,
         new_pageserver_http_port,
         neon_env_builder.broker,
+        neon_env_builder.pg_distrib_dir,
     ):
 
         # Migrate either by attaching from s3 or import/export basebackup
@@ -373,7 +374,7 @@ def test_tenant_relocation(
                 "poetry",
                 "run",
                 "python",
-                os.path.join(base_dir, "scripts/export_import_between_pageservers.py"),
+                str(base_dir / "scripts/export_import_between_pageservers.py"),
                 "--tenant-id",
                 str(tenant_id),
                 "--from-host",
@@ -389,9 +390,9 @@ def test_tenant_relocation(
                 "--to-pg-port",
                 str(new_pageserver_pg_port),
                 "--pg-distrib-dir",
-                pg_distrib_dir,
+                str(neon_env_builder.pg_distrib_dir),
                 "--work-dir",
-                os.path.join(test_output_dir),
+                str(test_output_dir),
                 "--tmp-pg-port",
                 str(port_distributor.get_port()),
             ]

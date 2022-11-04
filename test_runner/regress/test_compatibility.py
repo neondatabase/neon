@@ -80,7 +80,12 @@ class PortReplacer(object):
 
 @pytest.mark.order(after="test_prepare_snapshot")
 def test_backward_compatibility(
-    pg_bin: PgBin, port_distributor: PortDistributor, test_output_dir: Path, request: FixtureRequest
+    pg_bin: PgBin,
+    port_distributor: PortDistributor,
+    test_output_dir: Path,
+    request: FixtureRequest,
+    neon_binpath: Path,
+    pg_distrib_dir: Path,
 ):
     compatibility_snapshot_dir = Path(
         os.environ.get("COMPATIBILITY_SNAPSHOT_DIR", DEFAILT_LOCAL_SNAPSHOT_DIR)
@@ -170,6 +175,8 @@ def test_backward_compatibility(
     config.repo_dir = repo_dir
     config.pg_version = "14"  # Note: `pg_dumpall` (from pg_bin) version is set by DEFAULT_PG_VERSION_DEFAULT and can be overriden by DEFAULT_PG_VERSION env var
     config.initial_tenant = snapshot_config["default_tenant_id"]
+    config.neon_binpath = neon_binpath
+    config.pg_distrib_dir = pg_distrib_dir
 
     # Check that we can start the project
     cli = NeonCli(config)

@@ -15,12 +15,13 @@ from psycopg2.extensions import cursor
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 
-def get_self_dir() -> str:
+def get_self_dir() -> Path:
     """Get the path to the directory where this script lives."""
-    return os.path.dirname(os.path.abspath(__file__))
+    # return os.path.dirname(os.path.abspath(__file__))
+    return Path(__file__).resolve().parent
 
 
-def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
+def subprocess_capture(capture_dir: Path, cmd: List[str], **kwargs: Any) -> str:
     """Run a process and capture its output
 
     Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"

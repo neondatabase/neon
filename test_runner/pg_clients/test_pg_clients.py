@@ -46,9 +46,9 @@ def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres, client: st
         raise RuntimeError("docker is required for running this test")
 
     build_cmd = [docker_bin, "build", "--tag", image_tag, f"{Path(__file__).parent / client}"]
-    subprocess_capture(str(test_output_dir), build_cmd, check=True)
+    subprocess_capture(test_output_dir, build_cmd, check=True)
 
     run_cmd = [docker_bin, "run", "--rm", "--env-file", env_file, image_tag]
-    basepath = subprocess_capture(str(test_output_dir), run_cmd, check=True)
+    basepath = subprocess_capture(test_output_dir, run_cmd, check=True)
 
     assert Path(f"{basepath}.stdout").read_text().strip() == "1"
