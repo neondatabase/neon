@@ -75,7 +75,7 @@ static bool syncSafekeepers = false;
 
 char	   *wal_acceptors_list;
 int			wal_acceptor_reconnect_timeout;
-int			wal_acceptor_connect_timeout;
+int			wal_acceptor_connection_timeout;
 bool		am_wal_proposer;
 
 char	   *neon_timeline_walproposer = NULL;
@@ -266,9 +266,9 @@ nwp_register_gucs(void)
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_connect_timeout",
-							"Timeout after which give up connection attempt to safekeeper.",
+							"Timeout for connection establishement and it's maintenance against safekeeper",
 							NULL,
-							&wal_acceptor_connect_timeout,
+							&wal_acceptor_connection_timeout,
 							5000, 0, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
@@ -417,7 +417,9 @@ WalProposerPoll(void)
 			ResetLatch(MyLatch);
 			break;
 		}
-		if (rc == 0)			/* timeout expired: poll state */
+
+		now = GetCurrentTimestamp();
+		if (rc == 0 || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
 		{
 			TimestampTz now;
 
@@ -439,10 +441,10 @@ WalProposerPoll(void)
 				Safekeeper *sk = &safekeeper[i];
 
 				if (TimestampDifferenceExceeds(sk->latestMsgReceivedAt, now,
-											   wal_acceptor_connect_timeout))
+											   wal_acceptor_connection_timeout))
 				{
-					elog(WARNING, "failed to connect to node '%s:%s': exceeded connection timeout %dms",
-						 sk->host, sk->port, wal_acceptor_connect_timeout);
+					elog(WARNING, "failed to connect to node '%s:%s' in '%s' state: exceeded connection timeout %dms",
+						 sk->host, sk->port, FormatSafekeeperState(sk->state), wal_acceptor_connection_timeout);
 					ShutdownConnection(sk);
 				}
 			}
