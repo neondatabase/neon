@@ -597,7 +597,8 @@ jobs:
 
       - name: Configure ECR login
         run: |
-          mkdir ~/.docker/
+          cat ~/.docker/config.json || 0
+          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
           echo "{\"credsStore\":\"ecr-login\"}" > ~/.docker/config.json
 
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
