@@ -42,6 +42,11 @@ PGconn	   *pageserver_conn = NULL;
 
 char	   *page_server_connstring_raw;
 
+int			n_unflushed_requests = 0;
+int			flush_every_n_requests = 8;
+
+static void pageserver_flush(void);
+
 ps_connect_handle ps_connect_hook = NULL;
 ps_disconnect_handle ps_disconnect_hook = NULL;
 
@@ -207,6 +212,11 @@ pageserver_send(NeonRequest * request)
 	}
 	pfree(req_buff.data);
 
+	n_unflushed_requests++;
+
+	if (flush_every_n_requests > 0 && n_unflushed_requests >= flush_every_n_requests)
+		pageserver_flush();
+
 	if (message_level_is_interesting(PageStoreTrace))
 	{
 		char	   *msg = nm_to_string((NeonMessage *) request);
@@ -271,6 +281,7 @@ pageserver_flush(void)
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to flush page requests: %s", msg);
 	}
+	n_unflushed_requests = 0;
 }
 
 page_server_api api = {
@@ -427,6 +438,14 @@ pg_init_libpagestore(void)
 							PGC_SIGHUP,
 							GUC_UNIT_MB,
 							NULL, NULL, NULL);
+//	DefineCustomIntVariable("neon.flush_output_after",
+//							"Flush the output buffer after every N unflushed requests",
+//							NULL,
+//							&flush_every_n_requests,
+//							8, -1, INT_MAX,
+//							PGC_SIGHUP,
+//							GUC_UNIT,	/* no flags required */
+//							NULL, NULL, NULL);
 
 	relsize_hash_init();
 

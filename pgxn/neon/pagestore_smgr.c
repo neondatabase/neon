@@ -53,7 +53,6 @@
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
 #include "pagestore_client.h"
-#include "pagestore_fetchbuf.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/autovacuum.h"
 #include "replication/walsender.h"
@@ -100,8 +99,6 @@ char	   *neon_timeline;
 char	   *neon_tenant;
 int32		max_cluster_size;
 
-MemoryContext	prefetch_context;
-
 /* unlogged relation build states */
 typedef enum
 {
@@ -114,6 +111,98 @@ typedef enum
 static SMgrRelation unlogged_build_rel = NULL;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
+/*
+ * Prefetch implementation:
+ * 
+ * Prefetch is performed locally by each backend.
+ * 
+ * 
+ * There can be up to MAX_PREFETCH_REQUESTS registered using smgr_prefetch
+ * before smgr_read. All this requests are appended to primary smgr_read request.
+ * It is assumed that pages will be requested in prefetch order.
+ * Reading of prefetch responses is delayed until them are actually needed (smgr_read).
+ * It make it possible to parallelize processing and receiving of prefetched pages.
+ * In case of prefetch miss or any other SMGR request other than smgr_read,
+ * all prefetch responses has to be consumed.
+ */
+
+/* Max amount of tracked buffer reads */
+#define READ_BUFFER_SIZE 128
+
+typedef enum PrefetchStatus {
+	PRFS_UNUSED = 0, /* unused slot */
+	PRFS_REQUESTED, /* request was written to the sendbuffer to PS,
+					 * all fields except response valid */
+	PRFS_RECEIVED, /* all fields valid, response contains data */
+	PRFS_TAG_REMAINS, /* only buftag, *OfRel are still valid */
+} PrefetchStatus;
+
+typedef struct PrefetchRequest {
+	BufferTag	buftag; /* must be first entry in the struct */
+	XLogRecPtr	effective_request_lsn;
+	NeonResponse *response; /* may be null */
+	PrefetchStatus status;
+	uint64		my_ring_index;
+} PrefetchRequest;
+
+/* prefetch buffer lookup hash table */
+
+typedef struct PrfHashEntry {
+	PrefetchRequest *slot;
+	uint32 status;
+	uint32 hash;
+} PrfHashEntry;
+
+#define SH_PREFIX			prfh
+#define SH_ELEMENT_TYPE		PrfHashEntry
+#define SH_KEY_TYPE			PrefetchRequest *
+#define SH_KEY				slot
+#define SH_STORE_HASH
+#define SH_GET_HASH(tb, a)	((a)->hash)
+#define SH_HASH_KEY(tb, key) hash_bytes( \
+	((const unsigned char *) &(key)->buftag), \
+	sizeof(BufferTag) \
+)
+
+#define SH_EQUAL(tb, a, b)	(BUFFERTAGS_EQUAL((a)->buftag, (b)->buftag))
+#define SH_SCOPE			static inline
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+/*
+ * PrefetchState maintains the state of (prefetch) getPage@LSN requests.
+ * It maintains a (ring) buffer of in-flight requests and responses.
+ * 
+ * We maintain several indexes into the ring buffer:
+ * ring_unused >= ring_receive >= ring_last >= 0
+ * 
+ * ring_unused points to the first unused slot of the buffer
+ * ring_receive is the next request that is to be received
+ * ring_last is the oldest received entry in the buffer
+ * 
+ * Apart from being an entry in the ring buffer of prefetch requests, each
+ * PrefetchRequest that is not UNUSED is indexed in prf_hash by buftag.
+ */
+typedef struct PrefetchState {
+	MemoryContext bufctx; /* context for prf_buffer[].response allocations */
+	MemoryContext errctx; /* context for prf_buffer[].response allocations */
+	MemoryContext hashctx; /* context for prf_buffer */
+
+	/* buffer indexes */
+	uint64	ring_unused;		/* first unused slot */
+	uint64	ring_receive;		/* next slot that is to receive a response */
+	uint64	ring_last;			/* min slot with a response value */
+
+	/* metrics / statistics  */
+	int		n_responses_buffered;	/* count of PS responses not yet in buffers */
+	int		n_requests_inflight;	/* count of PS requests considered in flight */
+	int		n_unused;				/* count of buffers < unused, > last, that are also unused */
+
+	/* the buffers */
+	prfh_hash *prf_hash;
+	PrefetchRequest prf_buffer[READ_BUFFER_SIZE]; /* prefetch buffers */
+} PrefetchState;
 
 /*
  * Prefetch implementation:
@@ -133,16 +222,15 @@ int			n_prefetch_hits;
 int			n_prefetch_misses;
 int			n_prefetch_dupes;
 
-XLogRecPtr	prefetch_lsn;
+XLogRecPtr	prefetch_lsn = 0;
 
 static void consume_prefetch_responses(void);
-static uint64 prefetch_register_buffer(BufferTag tag);
-static uint64 prefetch_register_buffer_ext(BufferTag tag, bool *force_latest, XLogRecPtr *force_lsn);
+static uint64 prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_lsn);
 static void prefetch_read(PrefetchRequest *slot);
-static void prefetch_do_request_ext(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force_lsn);
+static void prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force_lsn);
 static void prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup(void);
-static inline void prefetch_set_unused(uint64 ring_index);
+static inline void prefetch_set_unused(uint64 ring_index, bool hash_cleanup);
 
 static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
 									   ForkNumber forknum, BlockNumber blkno);
@@ -150,31 +238,6 @@ static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
 ps_disconnect_handle inner_ps_disconnect_hook = NULL;
 void prefetch_on_ps_disconnect(void);
 
-
-/* prefetch buffer lookup hash table */
-
-typedef struct PrfHashEntry {
-	PrefetchRequest *slot;
-	uint32 status;
-	uint32 hash;
-} PrfHashEntry;
-
-#define SH_PREFIX			prfh 
-#define SH_ELEMENT_TYPE		PrfHashEntry
-#define SH_KEY_TYPE			PrefetchRequest *
-#define SH_KEY				slot
-#define SH_STORE_HASH
-#define SH_GET_HASH(tb, a)	((a)->hash)
-#define SH_HASH_KEY(tb, key) hash_bytes( \
-	((const unsigned char *) &(key)->buftag), \
-	sizeof(BufferTag) \
-)
-
-#define SH_EQUAL(tb, a, b)	(BUFFERTAGS_EQUAL((a)->buftag, (b)->buftag))
-#define SH_SCOPE			static inline
-#define SH_DEFINE
-#define SH_DECLARE
-#include "lib/simplehash.h"
 
 /*
  * Make sure that there are no responses still in the buffer.
@@ -250,7 +313,7 @@ prefetch_read(PrefetchRequest *slot)
 	MemoryContextSwitchTo(old);
 
 	MyPState->n_responses_buffered += 1;
-	MyPState->n_requestes_inflight -= 1;
+	MyPState->n_requests_inflight -= 1;
 
 	slot->status = PRFS_RECEIVED;
 	slot->response = response;
@@ -279,7 +342,8 @@ prefetch_on_ps_disconnect(void)
 
 		/* clean up the request */
 		slot->status = PRFS_TAG_REMAINS;
-		prefetch_set_unused(MyPState->ring_receive);
+		MyPState->n_requests_inflight--;
+		prefetch_set_unused(MyPState->ring_receive, true);
 	}
 }
 
@@ -290,7 +354,7 @@ prefetch_on_ps_disconnect(void)
  * and may not be in the PRFS_REQUESTED state.
  */
 static inline void
-prefetch_set_unused(uint64 ring_index)
+prefetch_set_unused(uint64 ring_index, bool hash_cleanup)
 {
 	PrefetchRequest *slot = &MyPState->prf_buffer[ring_index % READ_BUFFER_SIZE];
 
@@ -314,7 +378,8 @@ prefetch_set_unused(uint64 ring_index)
 		Assert(slot->response == NULL);
 	}
 
-	prfh_delete(MyPState->prf_hash, slot);
+	if (hash_cleanup)
+		prfh_delete(MyPState->prf_hash, slot);
 
 	/* clear all fields */
 	MemSet(slot, 0, sizeof(PrefetchRequest));
@@ -326,7 +391,7 @@ prefetch_set_unused(uint64 ring_index)
 }
 
 static void
-prefetch_do_request_ext(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force_lsn)
+prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force_lsn)
 {
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
@@ -336,24 +401,45 @@ prefetch_do_request_ext(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *f
 		.forknum = slot->buftag.forkNum,
 		.blkno = slot->buftag.blockNum,
 	};
-	slot->effective_request_lsn = prefetch_lsn;
-	
+
 	if (force_lsn && force_latest)
 	{
 		request.req.lsn = *force_lsn;
 		request.req.latest = *force_latest;
+		slot->effective_request_lsn = *force_lsn;
 	}
 	else
 	{
-		request.req.lsn = neon_get_request_lsn(
+		XLogRecPtr lsn = neon_get_request_lsn(
 			&request.req.latest,
 			slot->buftag.rnode,
 			slot->buftag.forkNum,
 			slot->buftag.blockNum
 		);
+		/*
+		 * Note: effective_request_lsn is potentially higher than the requested
+		 * LSN, but still correct:
+		 * 
+		 * We know there are no changes between the actual requested LSN and
+		 * the value of effective_request_lsn: If there were, the page would
+		 * have been in cache and evicted between those LSN values, which
+		 * then would have had to result in a larger request LSN for this page.
+		 * 
+		 * It is possible that a concurrent backend loads the page, modifies it
+		 * and then evicts it again, but the LSN of that eviction cannot be
+		 * smaller than the current redo pointer, which is already larger
+		 * than this prefetch_lsn. So in any case, that would invalidate this
+		 * cache.
+		 * 
+		 * The best LSN to use for effective_request_lsn would be
+		 * XLogCtl->Insert.RedoRecPtr, but that's expensive to access.
+		 */
+		request.req.lsn = lsn;
+		prefetch_lsn = Max(prefetch_lsn, lsn);
+		slot->effective_request_lsn = prefetch_lsn;
 	}
 
-	MyPState->n_requestes_inflight++;
+	MyPState->n_requests_inflight++;
 
 	page_server->send((NeonRequest *) &request);
 	Assert(slot->response == NULL);
@@ -364,15 +450,14 @@ prefetch_do_request_ext(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *f
  * prefetch_register_buffer() - register and prefetch buffer
  *
  * Register that we may want the contents of BufferTag in the near future.
+ * 
+ * If force_latest and force_lsn are not NULL, those values are sent to the
+ * pageserver. If they are NULL, we utilize the lastWrittenLsn -infrastructure
+ * to fill in these values manually.
  */
-static uint64
-prefetch_register_buffer(BufferTag tag)
-{
-	return prefetch_register_buffer_ext(tag, NULL, NULL);
-}
 
 static uint64
-prefetch_register_buffer_ext(BufferTag tag, bool *force_latest, XLogRecPtr *force_lsn)
+prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_lsn)
 {
 	int		index;
 	bool	found;
@@ -395,7 +480,7 @@ prefetch_register_buffer_ext(BufferTag tag, bool *force_latest, XLogRecPtr *forc
 		/* we received a prefetch for a page that was recently read */
 		if (slot->status == PRFS_TAG_REMAINS)
 		{
-			prefetch_set_unused(ring_index);
+			prefetch_set_unused(ring_index, true);
 		}
 		else
 		{
@@ -408,6 +493,19 @@ prefetch_register_buffer_ext(BufferTag tag, bool *force_latest, XLogRecPtr *forc
 	index = (ring_index % READ_BUFFER_SIZE);
 	slot = &MyPState->prf_buffer[index];
 
+	/*
+	 * If we prefetch queue is full, we need to make room by clearing the
+	 * oldest slot. If the oldest slot  holds a buffer that was already
+	 * received, we have to throw it away; we fetched the page unnecessarily
+	 * in that case. If the oldest slot holds a request that we haven't
+	 * received a response for yet, we have to wait for the response to that
+	 * before we can continue. We might not have even flushed the request to
+	 * the pageserver yet, it might be just sitting in the output buffer. In
+	 * that case, we flush it and wait for the response. (We could decide not
+	 * to send it, but it's hard to abort when the request is already in the
+	 * output buffer, and 'not sending' a prefetch request kind of goes
+	 * against the principles of prefetching)
+	 */
 	if (MyPState->ring_last == (MyPState->ring_unused - READ_BUFFER_SIZE))
 	{
 		Assert(slot->status != PRFS_UNUSED);
@@ -420,11 +518,11 @@ prefetch_register_buffer_ext(BufferTag tag, bool *force_latest, XLogRecPtr *forc
 				page_server->flush();
 				prefetch_read(slot);
 				MyPState->ring_receive++;
-				prefetch_set_unused(MyPState->ring_last); /* ring_last is auto-updated */
+				prefetch_set_unused(MyPState->ring_last, true); /* ring_last is auto-updated */
 				break;
 			case PRFS_RECEIVED:
 			case PRFS_TAG_REMAINS:
-				prefetch_set_unused(MyPState->ring_last);
+				prefetch_set_unused(MyPState->ring_last, true);
 				break;
 			default:
 				pg_unreachable();
@@ -440,7 +538,9 @@ prefetch_register_buffer_ext(BufferTag tag, bool *force_latest, XLogRecPtr *forc
 
 	Assert(!found);
 
-	prefetch_do_request_ext(slot, force_latest, force_lsn);
+	prefetch_do_request(slot, force_latest, force_lsn);
+
+	entry->slot = slot;
 
 	Assert(slot->status == PRFS_REQUESTED);
 
@@ -926,8 +1026,8 @@ neon_init(void)
 	if (MyPState != NULL)
 		return;
 
-	MyPState = palloc0(sizeof(PrefetchState));
-	
+	MyPState = MemoryContextAllocZero(TopMemoryContext, sizeof(PrefetchState));
+
 	MyPState->bufctx = SlabContextCreate(TopMemoryContext,
 										 "NeonSMGR/prefetch",
 										 SLAB_DEFAULT_BLOCK_SIZE * 17,
@@ -1359,7 +1459,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 		.blockNum = blocknum
 	};
 
-	prefetch_register_buffer(tag);
+	prefetch_register_buffer(tag, NULL, NULL);
 
 	return false;
 }
@@ -1427,18 +1527,40 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	 */
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
 
+	if (entry != NULL)
+	{
+		if (entry->slot->effective_request_lsn >= prefetch_lsn)
+		{
+			slot = entry->slot;
+			ring_index = slot->my_ring_index;
+			n_prefetch_hits += 1;
+		}
+		else /* the current prefetch LSN is not large enough, so drop the prefetch */
+		{
+			/*
+			 * We can't drop cache for not-yet-received requested items. It is
+			 * unlikely this happens, but it can happen if prefetch distance is
+			 * large enough and a backend didn't consume all prefetch requests.
+			 */
+			if (entry->slot->status == PRFS_REQUESTED)
+			{
+				page_server->flush();
+				prefetch_wait_for(entry->slot->my_ring_index);
+			}
+			/* drop caches */
+			prefetch_set_unused(entry->slot->my_ring_index, true);
+			/* make it look like a prefetch cache miss */
+			entry = NULL;
+		}
+	}
+
 	if (entry == NULL)
 	{
 		n_prefetch_misses += 1;
 
-		ring_index = prefetch_register_buffer_ext(buftag, &request_latest,
-												  &request_lsn);
+		ring_index = prefetch_register_buffer(buftag, &request_latest,
+											  &request_lsn);
 		slot = &MyPState->prf_buffer[ring_index % READ_BUFFER_SIZE];
-	}
-	else
-	{
-		slot = entry->slot;
-		ring_index = slot->my_ring_index;
 	}
 
 	Assert(MyPState->ring_last <= ring_index &&
@@ -1478,7 +1600,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	/* buffer was used, clean up for later reuse */
-	prefetch_set_unused(ring_index);
+	prefetch_set_unused(ring_index, true);
 	prefetch_cleanup();
 }
 
