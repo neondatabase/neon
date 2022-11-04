@@ -549,7 +549,6 @@ jobs:
       - name: Kaniko build compute node with extensions v14
         run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}}
 
-
   compute-node-image-v15:
     runs-on: dev
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
@@ -586,9 +585,57 @@ jobs:
           export MANIFEST=$(aws ecr batch-get-image --repository-name ${{ matrix.name }} --image-ids imageTag=${{needs.tag.outputs.build-tag}} --query 'images[].imageManifest' --output text)
           aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
 
+  test-promoted-images:
+    needs: [ promote-images, tag ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Configure ECR login
+        run: |
+          mkdir ~/.docker/
+          echo "{\"credsStore\":\"ecr-login\"}" > ~/.docker/config.json
+
+      # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
+      # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
+      # Regular pageserver version string looks like
+      #   Neon page server git-env:32d14403bd6ab4f4520a94cbfd81a6acef7a526c failpoints: true, features: []
+      # Bad versions might loop like:
+      #   Neon page server git-env:local failpoints: true, features: ["testing"]
+      # Ensure that we don't have bad versions.
+      - name: Verify image versions
+        shell: bash # ensure no set -e for better error messages
+        run: |
+          pageserver_version=$(docker run --rm 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
+
+          echo "Pageserver version string: $pageserver_version"
+
+          if ! echo "$pageserver_version" | grep -qv 'git-env:local' ; then
+            echo "Pageserver version should not be the default Dockerfile one"
+            exit 1
+          fi
+
+          if ! echo "$pageserver_version" | grep -qv '"testing"' ; then
+            echo "Pageserver version should have no testing feature enabled"
+            exit 1
+          fi
+
+      - name: Verify docker-compose example
+        run: env REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
+
+      - name: Print logs and clean up
+        if: always()
+        run: |
+          docker compose -f ./docker-compose/docker-compose.yml logs || 0
+          docker compose -f ./docker-compose/docker-compose.yml down
+
   push-docker-hub:
     runs-on: dev
-    needs: [ promote-images, tag ]
+    needs: [ test-promoted-images, tag ]
     container: golang:1.19-bullseye
 
     steps:
@@ -666,51 +713,6 @@ jobs:
           crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
-  # TODO odd to test images after pushing, find a better way.
-  # For now it mostly works ok, since we do test this for every PR.
-  test-pushed-images:
-    needs: [ push-docker-hub, tag ]
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-
-    # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
-    # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
-    # Regular pageserver version string looks like
-    #   Neon page server git-env:32d14403bd6ab4f4520a94cbfd81a6acef7a526c failpoints: true, features: []
-    # Bad versions might loop like:
-    #   Neon page server git-env:local failpoints: true, features: ["testing"]
-    # Ensure that we don't have bad versions.
-    - name: Verify image versions
-      shell: bash # ensure no set -e for better error messages
-      run: |
-        pageserver_version=$(docker run --rm neondatabase/neon:${{needs.tag.outputs.build-tag}} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
-
-        echo "Pageserver version string: $pageserver_version"
-
-        if ! echo "$pageserver_version" | grep -qv 'git-env:local' ; then
-          echo "Pageserver version should not be the default Dockerfile one"
-          exit 1
-        fi
-
-        if ! echo "$pageserver_version" | grep -qv '"testing"' ; then
-          echo "Pageserver version should have no testing feature enabled"
-          exit 1
-        fi
-
-    - name: Verify docker-compose example
-      run: env TAG=${{needs.tag.outputs.build-tag}} ./scripts/docker_compose_test.sh
-
-    - name: Print logs and clean up
-      if: always()
-      run: |
-        docker compose -f ./docker-compose/docker-compose.yml logs || 0
-        docker compose -f ./docker-compose/docker-compose.yml down
-
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     if: |
@@ -738,7 +740,7 @@ jobs:
     #container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ test-pushed-images, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -794,7 +796,7 @@ jobs:
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ test-pushed-images, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'main') &&
       github.event_name != 'workflow_dispatch'
@@ -834,7 +836,7 @@ jobs:
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ test-pushed-images, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -873,7 +875,7 @@ jobs:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ test-pushed-images, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -915,7 +917,7 @@ jobs:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ test-pushed-images, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'main') &&
       github.event_name != 'workflow_dispatch'
@@ -948,7 +950,7 @@ jobs:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ test-pushed-images, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
