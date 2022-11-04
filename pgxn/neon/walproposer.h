@@ -30,7 +30,7 @@
 
 extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
-extern int	wal_acceptor_connect_timeout;
+extern int	wal_acceptor_connection_timeout;
 extern bool am_wal_proposer;
 
 struct WalProposerConn;			/* Defined in libpqwalproposer */
