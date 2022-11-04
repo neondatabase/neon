@@ -47,20 +47,15 @@ struct TimelineInputs {
 /// is updated on-demand, during the start of this calculation and separate from the
 /// [`Timeline::latest_gc_cutoff`].
 ///
-/// For branches starting from zero, having no ancestor_timeline:
+/// For timelines in general:
+///
 /// ```ignore
 /// 0-----|---------|----|------------| · · · · · |·> lsn
 ///   initdb_lsn  branchpoints*  next_gc_cutoff  latest
 /// ```
 ///
-/// Until `next_gc_cutoff > initdb_lsn`, tenant's size is 0.
-///
-/// For branched off timelines only such situations are considered:
-///
-/// ```ignore
-///        x----------| · · · · · ·|·> lsn
-/// branchpoint  next_gc_cutoff  latest
-/// ```
+/// Until gc_horizon_cutoff > `Timeline::last_record_lsn` for any of the tenant's timelines, the
+/// tenant size will be zero.
 pub(super) async fn gather_inputs(
     tenant: &Tenant,
     limit: &Arc<Semaphore>,
