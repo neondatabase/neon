@@ -31,6 +31,9 @@ use std::os::unix::prelude::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
@@ -55,7 +58,12 @@ use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
 };
+use postgres_ffi::v14::PG_MAJORVERSION;
 use postgres_ffi::BLCKSZ;
+
+const N_CHANNELS: usize = 16;
+const CHANNEL_SIZE: usize = 1024 * 1024;
+type ChannelId = usize;
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -92,16 +100,25 @@ pub trait WalRedoManager: Send + Sync {
 
 ///
 /// This is the real implementation that uses a Postgres process to
-/// perform WAL replay. Only one thread can use the process at a time,
-/// that is controlled by the Mutex. In the future, we might want to
-/// launch a pool of processes to allow concurrent replay of multiple
-/// records.
+/// perform WAL replay. It multiplexes requests from multiple threads
+/// using `sender` channel and send them to the postgres wal-redo process
+/// pipe by separate thread. Responses are returned through set of `receivers`
+/// channels, used in round robin manner.  Receiver thread is protected by mutex
+/// to prevent it's usage by more than one thread
+/// In the future, we might want to launch a pool of processes to allow concurrent
+/// replay of multiple records.
 ///
 pub struct PostgresRedoManager {
     tenant_id: TenantId,
     conf: &'static PageServerConf,
 
-    process: Mutex<Option<PostgresRedoProcess>>,
+    // mutiplexor pipe: use sync_channel to allow sharing sender by multiple threads
+    // and limit size of buffer
+    sender: SyncSender<(ChannelId, Vec<u8>)>,
+    // set of receiver channels
+    receivers: Vec<Mutex<Receiver<Bytes>>>,
+    // atomicly incremented counter for choosing receiver
+    round_robin: AtomicUsize,
 }
 
 /// Can this request be served by neon redo functions
@@ -166,14 +183,7 @@ impl WalRedoManager for PostgresRedoManager {
                 let result = if batch_neon {
                     self.apply_batch_neon(key, lsn, img, &records[batch_start..i])
                 } else {
-                    self.apply_batch_postgres(
-                        key,
-                        lsn,
-                        img,
-                        &records[batch_start..i],
-                        self.conf.wal_redo_timeout,
-                        pg_version,
-                    )
+                    self.apply_batch_postgres(key, lsn, img, &records[batch_start..i])
                 };
                 img = Some(result?);
 
@@ -185,14 +195,7 @@ impl WalRedoManager for PostgresRedoManager {
         if batch_neon {
             self.apply_batch_neon(key, lsn, img, &records[batch_start..])
         } else {
-            self.apply_batch_postgres(
-                key,
-                lsn,
-                img,
-                &records[batch_start..],
-                self.conf.wal_redo_timeout,
-                pg_version,
-            )
+            self.apply_batch_postgres(key, lsn, img, &records[batch_start..])
         }
     }
 }
@@ -202,84 +205,96 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
-        // The actual process is launched lazily, on first request.
-        PostgresRedoManager {
-            tenant_id,
-            conf,
-            process: Mutex::new(None),
+        let (tx, rx): (
+            SyncSender<(ChannelId, Vec<u8>)>,
+            Receiver<(ChannelId, Vec<u8>)>,
+        ) = mpsc::sync_channel(CHANNEL_SIZE);
+        let mut senders: Vec<Sender<Bytes>> = Vec::with_capacity(N_CHANNELS);
+        let mut receivers: Vec<Mutex<Receiver<Bytes>>> = Vec::with_capacity(N_CHANNELS);
+        for _ in 0..N_CHANNELS {
+            let (tx, rx) = mpsc::channel();
+            senders.push(tx);
+            receivers.push(Mutex::new(rx));
+        }
+        if let Ok(mut proc) = PostgresRedoProcess::launch(conf, &tenant_id) {
+            let _proxy = std::thread::spawn(move || loop {
+                let (id, data) = rx.recv().unwrap();
+                match proc.apply_wal_records(data) {
+                    Ok(page) => senders[id as usize].send(page).unwrap(),
+                    Err(err) => {
+                        info!("wal-redo failed with error {:?}", err);
+                        proc.kill();
+                        break;
+                    }
+                }
+            });
+            PostgresRedoManager {
+                conf,
+                tenant_id,
+                sender: tx,
+                receivers,
+                round_robin: AtomicUsize::new(0),
+            }
+        } else {
+            panic!("Failed to launch wal-redo postgres");
         }
     }
 
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
+    fn apply_wal_records(
+        &self,
+        tag: BufferTag,
+        base_img: Option<Bytes>,
+        records: &[(Lsn, NeonWalRecord)],
+    ) -> Result<Bytes, WalRedoError> {
+        // Serialize all the messages to send the WAL redo process first.
+        //
+        // This could be problematic if there are millions of records to replay,
+        // but in practice the number of records is usually so small that it doesn't
+        // matter, and it's better to keep this code simple.
+        let mut writebuf: Vec<u8> = Vec::new();
+        build_begin_redo_for_block_msg(tag, &mut writebuf);
+        if let Some(img) = base_img {
+            build_push_page_msg(tag, &img, &mut writebuf);
+        }
+        for (lsn, rec) in records.iter() {
+            if let NeonWalRecord::Postgres {
+                will_init: _,
+                rec: postgres_rec,
+            } = rec
+            {
+                build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
+            } else {
+                return Err(WalRedoError::InvalidRecord);
+            }
+        }
+        build_get_page_msg(tag, &mut writebuf);
+        WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
+
+        let id = self.round_robin.fetch_add(1, Ordering::Relaxed) % N_CHANNELS;
+        let rx = self.receivers[id].lock().unwrap();
+        self.sender.send((id, writebuf)).unwrap();
+        Ok(rx.recv().unwrap())
+    }
+
     ///
-    /// Process one request for WAL redo using wal-redo postgres
+    // Apply given WAL records ('records') over an old page image. Returns
+    // new page image.
     ///
     fn apply_batch_postgres(
         &self,
         key: Key,
-        lsn: Lsn,
+        lsn: Lsn[,
         base_img: Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
-        wal_redo_timeout: Duration,
-        pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
 
         let start_time = Instant::now();
-
-        let mut process_guard = self.process.lock().unwrap();
-        let lock_time = Instant::now();
-
-        // launch the WAL redo process on first use
-        if process_guard.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
-            *process_guard = Some(p);
-        }
-        let process = process_guard.as_mut().unwrap();
-
-        WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
-
-        // Relational WAL records are applied using wal-redo-postgres
         let buf_tag = BufferTag { rel, blknum };
-        let result = process
-            .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
-            .map_err(WalRedoError::IoError);
-
+        let result = self.apply_wal_records(buf_tag, base_img, records);
         let end_time = Instant::now();
-        let duration = end_time.duration_since(lock_time);
-
-        let len = records.len();
-        let nbytes = records.iter().fold(0, |acumulator, record| {
-            acumulator
-                + match &record.1 {
-                    NeonWalRecord::Postgres { rec, .. } => rec.len(),
-                    _ => unreachable!("Only PostgreSQL records are accepted in this batch"),
-                }
-        });
-
-        WAL_REDO_TIME.observe(duration.as_secs_f64());
-        WAL_REDO_RECORDS_HISTOGRAM.observe(len as f64);
-        WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
-
-        debug!(
-            "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
-            len,
-            nbytes,
-            duration.as_micros(),
-            lsn
-        );
-
-        // If something went wrong, don't try to reuse the process. Kill it, and
-        // next request will launch a new one.
-        if result.is_err() {
-            error!(
-                "error applying {} WAL records ({} bytes) to reconstruct page image at LSN {}",
-                records.len(),
-                nbytes,
-                lsn
-            );
-            let process = process_guard.take().unwrap();
-            process.kill();
-        }
+        WAL_REDO_TIME.observe(end_time.duration_since(start_time).as_secs_f64());
         result
     }
 
@@ -586,6 +601,7 @@ struct PostgresRedoProcess {
     stdin: ChildStdin,
     stdout: ChildStdout,
     stderr: ChildStderr,
+    wal_redo_timeout: Duration,
 }
 
 impl PostgresRedoProcess {
@@ -593,11 +609,7 @@ impl PostgresRedoProcess {
     // Start postgres binary in special WAL redo mode.
     //
     #[instrument(skip_all,fields(tenant_id=%tenant_id, pg_version=pg_version))]
-    fn launch(
-        conf: &PageServerConf,
-        tenant_id: TenantId,
-        pg_version: u32,
-    ) -> Result<PostgresRedoProcess, Error> {
+    fn launch(conf: &PageServerConf, tenant_id: TenantId) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
@@ -605,7 +617,7 @@ impl PostgresRedoProcess {
             conf.tenant_path(&tenant_id).join("wal-redo-datadir"),
             TEMP_FILE_SUFFIX,
         );
-
+        let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
             info!(
@@ -715,57 +727,15 @@ impl PostgresRedoProcess {
             stdin,
             stdout,
             stderr,
+            wal_redo_timeout: conf.wal_redo_timeout,
         })
     }
 
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
-    fn kill(self) {
-        self.child.kill_and_wait();
-    }
-
     //
-    // Apply given WAL records ('records') over an old page image. Returns
-    // new page image.
+    /// Process one request for WAL redo using wal-redo postgres
     //
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
-    fn apply_wal_records(
-        &mut self,
-        tag: BufferTag,
-        base_img: Option<Bytes>,
-        records: &[(Lsn, NeonWalRecord)],
-        wal_redo_timeout: Duration,
-    ) -> Result<Bytes, std::io::Error> {
-        // Serialize all the messages to send the WAL redo process first.
-        //
-        // This could be problematic if there are millions of records to replay,
-        // but in practice the number of records is usually so small that it doesn't
-        // matter, and it's better to keep this code simple.
-        //
-        // Most requests start with a before-image with BLCKSZ bytes, followed by
-        // by some other WAL records. Start with a buffer that can hold that
-        // comfortably.
-        let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
-        build_begin_redo_for_block_msg(tag, &mut writebuf);
-        if let Some(img) = base_img {
-            build_push_page_msg(tag, &img, &mut writebuf);
-        }
-        for (lsn, rec) in records.iter() {
-            if let NeonWalRecord::Postgres {
-                will_init: _,
-                rec: postgres_rec,
-            } = rec
-            {
-                build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
-            } else {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "tried to pass neon wal record to postgres WAL redo",
-                ));
-            }
-        }
-        build_get_page_msg(tag, &mut writebuf);
-        WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
-
+    fn apply_wal_records(&mut self, writebuf: Vec<u8>) -> Result<Bytes, std::io::Error> {
         // The input is now in 'writebuf'. Do a blind write first, writing as much as
         // we can, before calling poll(). That skips one call to poll() if the stdin is
         // already available for writing, which it almost certainly is because the
@@ -792,7 +762,10 @@ impl PostgresRedoProcess {
             // we have data to read. Otherwise only wake up if there's data to read.
             let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
             let n = loop {
-                match nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32) {
+                match nix::poll::poll(
+                    &mut pollfds[0..nfds],
+                    self.wal_redo_timeout.as_millis() as i32,
+                ) {
                     Err(e) if e == nix::errno::Errno::EINTR => continue,
                     res => break res,
                 }
