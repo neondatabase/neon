@@ -41,6 +41,7 @@ struct CacheEntry {
 
     collision: usize, // L1 hash collision chain
 
+    access_count: u32,
     state: PageImageState,
 }
 
@@ -48,7 +49,7 @@ pub struct PageImageCache {
     free_list: usize, // L1 list of free entries
     pages: Vec<CacheEntry>,
     hash_table: Vec<usize>, // indexes in pages array
-	file: Arc<VirtualFile>,
+    file: Arc<VirtualFile>,
 }
 
 ///
@@ -89,9 +90,16 @@ impl PageImageCache {
     fn new(size: usize) -> Self {
         let mut pages: Vec<CacheEntry> = Vec::with_capacity(size + 1);
         let hash_table = vec![0usize; size];
-		let file = Arc::new(VirtualFile::open_with_options(
-            &std::path::PathBuf::from("page.cache"),
-            std::fs::OpenOptions::new().write(true).create(true).truncate(true)).unwrap());
+        let file = Arc::new(
+            VirtualFile::open_with_options(
+                &std::path::PathBuf::from("page.cache"),
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true),
+            )
+            .unwrap(),
+        );
         // Dummy key
         let dummy_key = MaterializedPageHashKey {
             key: Key::MIN,
@@ -104,6 +112,7 @@ impl PageImageCache {
             key: dummy_key.clone(),
             next: 0,
             prev: 0,
+            access_count: 0,
             collision: 0,
             state: PageImageState::Vacant,
         });
@@ -114,6 +123,7 @@ impl PageImageCache {
                 key: dummy_key.clone(),
                 next: i + 2, // build L1-list of free pages
                 prev: 0,
+                access_count: 0,
                 collision: 0,
                 state: PageImageState::Vacant,
             });
@@ -124,7 +134,7 @@ impl PageImageCache {
             free_list: 1,
             pages,
             hash_table,
-			file,
+            file,
         }
     }
 
@@ -213,20 +223,26 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
                 // cache hit
                 match &cache.pages[index].state {
                     PageImageState::Loaded(success) => {
-						if *success {
-							// Pin page
-							cache.unlink(index);
-							let file = cache.file.clone();
-							drop(cache);
-							let mut buf = [0u8; PAGE_SZ];
-							file.read_exact_at(&mut buf, index as u64 * PAGE_SZ as u64)?;
-							cache = this.lock().unwrap();
-							// Move to the head of LRU list
-							cache.link_after(0, index);
-							return Ok(Bytes::from(buf.to_vec()));
-						} else {
-							return Err(anyhow::anyhow!("page loading failed earlier"));
-						}
+                        if *success {
+                            // Pin page
+                            if cache.pages[index].access_count == 0 {
+                                cache.unlink(index);
+                            }
+                            cache.pages[index].access_count += 1;
+                            let file = cache.file.clone();
+                            drop(cache);
+                            let mut buf = [0u8; PAGE_SZ];
+                            file.read_exact_at(&mut buf, index as u64 * PAGE_SZ as u64)?;
+                            cache = this.lock().unwrap();
+                            cache.pages[index].access_count -= 1;
+                            if cache.pages[index].access_count == 0 {
+                                // Move to the head of LRU list
+                                cache.link_after(0, index);
+                            }
+                            return Ok(Bytes::from(buf.to_vec()));
+                        } else {
+                            return Err(anyhow::anyhow!("page loading failed earlier"));
+                        }
                     }
                     PageImageState::Loading(event) => {
                         // Create event on which to sleep if not yet assigned
@@ -248,13 +264,14 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
             }
             index = cache.pages[index].collision;
         }
-		let file = cache.file.clone();
+        let file = cache.file.clone();
         // Cache miss
         index = cache.free_list;
         if index == 0 {
             // no free items
             let victim = cache.pages[0].prev; // take least recently used element from the tail of LRU list
             assert!(victim != 0);
+            assert!(cache.pages[victim].access_count == 0);
             // Remove victim from hash table
             let h = hash(&cache.pages[victim].key) % cache.hash_table.len();
             index = cache.hash_table[h];
@@ -291,11 +308,11 @@ pub fn lookup(timeline: &Timeline, rel: RelTag, blkno: BlockNumber, lsn: Lsn) ->
 
         // Load page
         let result = timeline.get_rel_page_at_lsn(rel, blkno, lsn, true);
-		let mut success = false;
-		if let Ok(page) = &result {
-			success = true;
-			file.write_all_at(&page, index as u64 * PAGE_SZ as u64)?;
-		}
+        let mut success = false;
+        if let Ok(page) = &result {
+            success = true;
+            file.write_all_at(&page, index as u64 * PAGE_SZ as u64)?;
+        }
         cache = this.lock().unwrap();
         if let PageImageState::Loading(event) = &cache.pages[index].state {
             // Are there some waiting threads?
