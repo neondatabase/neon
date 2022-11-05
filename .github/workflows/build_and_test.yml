@@ -168,6 +168,11 @@ jobs:
           ${cov_prefix} cargo test $CARGO_FLAGS
         shell: bash -euxo pipefail {0}
 
+      - name: Slim binaries
+        run: |
+          scripts/strip-useless-debug.py -j$(nproc) target
+        shell: bash -euxo pipefail {0}
+
       - name: Install rust binaries
         run: |
           # Install target binaries
