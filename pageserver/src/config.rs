@@ -414,6 +414,22 @@ impl PageServerConf {
         )
     }
 
+    pub fn traces_path(&self) -> PathBuf {
+        self.workdir.join("traces")
+    }
+
+    pub fn trace_path(
+        &self,
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
+        connection_id: &TimelineId, // TODO make a new type
+    ) -> PathBuf {
+        self.traces_path()
+            .join(tenant_id.to_string())
+            .join(timeline_id.to_string())
+            .join(connection_id.to_string())
+    }
+
     /// Points to a place in pageserver's local directory,
     /// where certain timeline's metadata file should be located.
     pub fn metadata_path(&self, timeline_id: TimelineId, tenant_id: TenantId) -> PathBuf {

@@ -82,6 +82,7 @@ pub struct TenantConf {
     /// A lagging safekeeper will be changed after `lagging_wal_timeout` time elapses since the last WAL update,
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
+    pub trace_read_requests: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -105,6 +106,7 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     pub lagging_wal_timeout: Option<Duration>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+    pub trace_read_requests: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -138,6 +140,9 @@ impl TenantConfOpt {
                 .lagging_wal_timeout
                 .unwrap_or(global_conf.lagging_wal_timeout),
             max_lsn_wal_lag: self.max_lsn_wal_lag.unwrap_or(global_conf.max_lsn_wal_lag),
+            trace_read_requests: self
+                .trace_read_requests
+                .unwrap_or(global_conf.trace_read_requests),
         }
     }
 
@@ -207,6 +212,7 @@ impl TenantConf {
                 .expect("cannot parse default walreceiver lagging wal timeout"),
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
+            trace_read_requests: false,
         }
     }
 
@@ -232,6 +238,7 @@ impl TenantConf {
             .unwrap(),
             max_lsn_wal_lag: NonZeroU64::new(defaults::DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .unwrap(),
+            trace_read_requests: false,
         }
     }
 }

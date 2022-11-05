@@ -789,6 +789,13 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
+    pub fn get_trace_read_requests(&self) -> bool {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .trace_read_requests
+            .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
+    }
+
     pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().update(&new_tenant_conf);
     }
