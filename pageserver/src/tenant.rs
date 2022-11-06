@@ -3177,6 +3177,35 @@ mod tests {
      */
 
     #[tokio::test]
+    async fn test_get_branchpoints_from_an_inactive_timeline() -> anyhow::Result<()> {
+        let tenant =
+            TenantHarness::create("test_get_branchpoints_from_an_inactive_timeline")?.load();
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
+            .initialize()?;
+        tline.set_state(TimelineState::Paused);
+        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+
+        tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
+        let newtline = tenant
+            .get_timeline(NEW_TIMELINE_ID, true)
+            .expect("Should have a local timeline");
+
+        make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+        tenant.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false).await?;
+    
+        assert_eq!(
+            newtline.get(*TEST_KEY, Lsn(0x50))?,
+            TEST_IMG(&format!("foo at {}", Lsn(0x40))));
+
+        let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
+        assert_eq!(branchpoints.len(), 1);
+        assert_eq!(branchpoints[0], Lsn(0x40));
+        
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_retain_data_in_parent_which_is_needed_for_child() -> anyhow::Result<()> {
         let (tenant, ctx) =
             TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
