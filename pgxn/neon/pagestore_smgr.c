@@ -144,8 +144,10 @@ consume_prefetch_responses(void)
 	for (int i = n_prefetched_buffers; i < n_prefetch_responses; i++)
 	{
 		NeonResponse *resp = page_server->receive();
-
-		pfree(resp);
+		if (resp)
+			pfree(resp);
+		else
+			break;
 	}
 	n_prefetched_buffers = 0;
 	n_prefetch_responses = 0;
@@ -1106,6 +1108,8 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	for (i = n_prefetched_buffers; i < n_prefetch_responses; i++)
 	{
 		resp = page_server->receive();
+		if (resp == NULL)
+			break;
 		if (resp->tag == T_NeonGetPageResponse &&
 			RelFileNodeEquals(prefetch_responses[i].rnode, rnode) &&
 			prefetch_responses[i].forkNum == forkNum &&
@@ -1164,6 +1168,8 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 			n_prefetch_requests = 0;
 			prefetch_lsn = request_lsn;
 			resp = page_server->receive();
+			if (resp == NULL)
+				elog(ERROR, "Connection is broken");
 		}
 		else
 		{

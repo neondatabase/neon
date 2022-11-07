@@ -217,6 +217,9 @@ pageserver_receive(void)
 	StringInfoData resp_buff;
 	NeonResponse *resp;
 
+	if (!connected)
+		return NULL;
+
 	PG_TRY();
 	{
 		/* read response */
@@ -267,9 +270,13 @@ pageserver_flush(void)
 static NeonResponse *
 pageserver_call(NeonRequest * request)
 {
+	NeonResponse * resp;
 	pageserver_send(request);
 	pageserver_flush();
-	return pageserver_receive();
+	resp = pageserver_receive();
+	if (resp == NULL)
+		elog(ERROR, "Connection is broken");
+	retrn resp;
 }
 
 page_server_api api = {
