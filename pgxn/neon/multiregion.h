@@ -16,6 +16,7 @@
 
 extern void set_region_lsn(int region, NeonResponse *msg);
 extern XLogRecPtr get_region_lsn(int region);
+extern XLogRecPtr *get_all_region_lsns(void);
 extern void clear_region_lsns(void);
 
 #endif
