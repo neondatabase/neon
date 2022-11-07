@@ -569,7 +569,11 @@ impl PageServerConf {
         if let Some(gc_period) = item.get("gc_period") {
             t_conf.gc_period = Some(parse_toml_duration("gc_period", gc_period)?);
         }
-
+        if let Some(image_creation_threshold) = item.get("image_creation_threshold") {
+            let threshold =
+                parse_toml_u64("image_creation_threshold", image_creation_threshold)?.try_into()?;
+            t_conf.image_creation_threshold = Some(threshold);
+        }
         if let Some(pitr_interval) = item.get("pitr_interval") {
             t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
         }
