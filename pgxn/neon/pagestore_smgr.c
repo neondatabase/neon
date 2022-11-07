@@ -130,11 +130,12 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 #define READ_BUFFER_SIZE 128
 
 typedef enum PrefetchStatus {
-	PRFS_UNUSED = 0, /* unused slot */
-	PRFS_REQUESTED, /* request was written to the sendbuffer to PS,
-					 * all fields except response valid */
-	PRFS_RECEIVED, /* all fields valid, response contains data */
-	PRFS_TAG_REMAINS, /* only buftag, *OfRel are still valid */
+	PRFS_UNUSED = 0,	/* unused slot */
+	PRFS_REQUESTED,		/* request was written to the sendbuffer to PS, but not
+						 * necessarily flushed.
+						 * all fields except response valid */
+	PRFS_RECEIVED,		/* all fields valid, response contains data */
+	PRFS_TAG_REMAINS,	/* only buftag, *OfRel are still valid */
 } PrefetchStatus;
 
 typedef struct PrefetchRequest {
