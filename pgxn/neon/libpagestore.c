@@ -42,6 +42,11 @@ PGconn	   *pageserver_conn = NULL;
 
 char	   *page_server_connstring_raw;
 
+int			n_unflushed_requests = 0;
+int			flush_every_n_requests = 8;
+
+static void pageserver_flush(void);
+
 static void
 pageserver_connect()
 {
@@ -164,6 +169,8 @@ pageserver_disconnect(void)
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 		connected = false;
+
+		prefetch_on_ps_disconnect();
 	}
 }
 
@@ -174,11 +181,7 @@ pageserver_send(NeonRequest * request)
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
-	{
-		PQfinish(pageserver_conn);
-		pageserver_conn = NULL;
-		connected = false;
-	}
+		pageserver_disconnect();
 
 	if (!connected)
 		pageserver_connect();
@@ -201,6 +204,11 @@ pageserver_send(NeonRequest * request)
 		neon_log(ERROR, "failed to send page request: %s", msg);
 	}
 	pfree(req_buff.data);
+
+	n_unflushed_requests++;
+
+	if (flush_every_n_requests > 0 && n_unflushed_requests >= flush_every_n_requests)
+		pageserver_flush();
 
 	if (message_level_is_interesting(PageStoreTrace))
 	{
@@ -255,25 +263,21 @@ pageserver_receive(void)
 static void
 pageserver_flush(void)
 {
-	if (PQflush(pageserver_conn))
+	if (!connected)
+	{
+		neon_log(WARNING, "Tried to flush while disconnected");
+	}
+	else if (PQflush(pageserver_conn))
 	{
 		char	   *msg = PQerrorMessage(pageserver_conn);
 
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to flush page requests: %s", msg);
 	}
-}
-
-static NeonResponse *
-pageserver_call(NeonRequest * request)
-{
-	pageserver_send(request);
-	pageserver_flush();
-	return pageserver_receive();
+	n_unflushed_requests = 0;
 }
 
 page_server_api api = {
-	.request = pageserver_call,
 	.send = pageserver_send,
 	.flush = pageserver_flush,
 	.receive = pageserver_receive
@@ -426,6 +430,14 @@ pg_init_libpagestore(void)
 							-1, -1, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MB,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("neon.flush_output_after",
+							"Flush the output buffer after every N unflushed requests",
+							NULL,
+							&flush_every_n_requests,
+							8, -1, INT_MAX,
+							PGC_SIGHUP,
+							0,	/* no flags required */
 							NULL, NULL, NULL);
 
 	relsize_hash_init();

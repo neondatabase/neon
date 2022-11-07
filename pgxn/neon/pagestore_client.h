@@ -115,6 +115,8 @@ typedef struct
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 }			NeonGetPageResponse;
 
+#define PS_GETPAGERESPONSE_SIZE (MAXALIGN(offsetof(NeonGetPageResponse, page) + BLCKSZ))
+
 typedef struct
 {
 	NeonMessageTag tag;
@@ -138,15 +140,18 @@ extern char *nm_to_string(NeonMessage * msg);
 
 typedef struct
 {
-	NeonResponse *(*request) (NeonRequest * request);
 	void		(*send) (NeonRequest * request);
 	NeonResponse *(*receive) (void);
 	void		(*flush) (void);
 }			page_server_api;
 
+extern void prefetch_on_ps_disconnect(void);
+
 extern page_server_api * page_server;
 
 extern char *page_server_connstring;
+extern bool seqscan_prefetch_enabled;
+extern int seqscan_prefetch_distance;
 extern char *neon_timeline;
 extern char *neon_tenant;
 extern bool wal_redo;
@@ -167,7 +172,6 @@ extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
 						BlockNumber blocknum, char *buffer, bool skipFsync);
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum);
-extern void neon_reset_prefetch(SMgrRelation reln);
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
 
