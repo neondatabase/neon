@@ -1480,6 +1480,10 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			elog(ERROR, "cannot call smgrextend() on rel with unknown persistence");
 
 		case RELPERSISTENCE_PERMANENT:
+			/*
+			 * Remotexact
+			 * TODO (ctring) Write back temporary writes to remote relations?
+			 */
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -1627,6 +1631,10 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			/*
+			 * Remotexact
+			 * TODO (ctring): Write back temporary writes to remote relations?
+			 */
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -1941,6 +1949,10 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			/*
+			 * Remotexact
+			 * TODO (ctring): Write back temporary writes to remote relations?
+			 */
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -2047,7 +2059,13 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		default:
 			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
-	update_cached_relsize(reln->smgr_rnode.node, forknum, n_blocks);
+
+	/*
+	 * Remotexact
+	 * Do not cache relsize of remote relation because it can be changed by another region
+	 */
+	if (!RegionIsRemote(reln->smgr_region))
+		update_cached_relsize(reln->smgr_rnode.node, forknum, n_blocks);
 
 	elog(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u region %d (request LSN %X/%08X): %u blocks",
 		 reln->smgr_rnode.node.spcNode,

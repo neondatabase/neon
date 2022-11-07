@@ -376,7 +376,7 @@ impl PostgresNode {
             // testing.
             conf.append("synchronous_standby_names", "pageserver");
         }
-        
+
         //
         // Remotexact: multi-region configurations
         //

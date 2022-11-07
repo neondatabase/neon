@@ -191,13 +191,16 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
     let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
     let new_timeline_info = async {
-        match tenant.create_timeline(
-            request_data.new_timeline_id.map(TimelineId::from),
-            request_data.ancestor_timeline_id.map(TimelineId::from),
-            request_data.ancestor_start_lsn,
-            request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
-            request_data.region_id.unwrap_or_default(),
-        ).await {
+        match tenant
+            .create_timeline(
+                request_data.new_timeline_id.map(TimelineId::from),
+                request_data.ancestor_timeline_id.map(TimelineId::from),
+                request_data.ancestor_start_lsn,
+                request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+                request_data.region_id.unwrap_or_default(),
+            )
+            .await
+        {
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
                 let timeline_info = build_timeline_info(state, &new_timeline, false, false)
@@ -214,7 +217,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
                                               lsn=?request_data.ancestor_start_lsn,
                                               pg_version=?request_data.pg_version,
                                               region_id=?request_data.region_id))
-        .await?;
+    .await?;
 
     Ok(match new_timeline_info {
         Some(info) => json_response(StatusCode::CREATED, info)?,
