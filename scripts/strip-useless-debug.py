@@ -54,6 +54,7 @@
 import argparse
 import asyncio
 import os
+import time
 import shutil
 import subprocess
 import tempfile
@@ -156,11 +157,14 @@ async def main():
         while len(paths) > 0:
             path = paths.pop()
 
+            start_time = time.perf_counter_ns()
             (before_size, after_size) = await run_objcopy(path)
+            end_time = time.perf_counter_ns()
             before_total += before_size
             after_total += after_size
 
-            print(f"{path}: {before_size} to {after_size} bytes")
+            duration_ms = round((end_time-start_time) / 1000000)
+            print(f"{path}: {before_size} to {after_size} bytes ({duration_ms} ms)")
 
     active_workers = []
     for i in range(max_parallel_processes):
