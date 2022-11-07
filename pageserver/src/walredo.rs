@@ -10,7 +10,7 @@
 //! process. Then we get the page image back. Communication with the
 //! postgres process happens via stdin/stdout
 //!
-//! See pgxn/neon_walredo/walredoproc.c for the other side of
+//! See src/backend/tcop/zenith_wal_redo.c for the other side of
 //! this communication.
 //!
 //! The Postgres process is assumed to be secure against malicious WAL
@@ -20,7 +20,6 @@
 //!
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
-use nix::poll::*;
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
@@ -40,7 +39,7 @@ use std::time::Instant;
 use std::{fs, io};
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
-use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
+use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn};
 
 use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
@@ -109,9 +108,6 @@ pub trait WalRedoManager: Send + Sync {
 /// replay of multiple records.
 ///
 pub struct PostgresRedoManager {
-    tenant_id: TenantId,
-    conf: &'static PageServerConf,
-
     // mutiplexor pipe: use sync_channel to allow sharing sender by multiple threads
     // and limit size of buffer
     sender: SyncSender<(ChannelId, Vec<u8>)>,
@@ -218,19 +214,21 @@ impl PostgresRedoManager {
         }
         if let Ok(mut proc) = PostgresRedoProcess::launch(conf, &tenant_id) {
             let _proxy = std::thread::spawn(move || loop {
+                let mut requests = Vec::new();
                 let (id, data) = rx.recv().unwrap();
-                match proc.apply_wal_records(data) {
-                    Ok(page) => senders[id as usize].send(page).unwrap(),
-                    Err(err) => {
-                        info!("wal-redo failed with error {:?}", err);
-                        proc.kill();
-                        break;
-                    }
+                proc.stdin.write_all(&data).unwrap();
+                requests.push(id);
+                while let Ok((id, data)) = rx.try_recv() {
+                    proc.stdin.write_all(&data).unwrap();
+                    requests.push(id);
+                }
+                for id in requests {
+                    let mut page = vec![0; BLCKSZ as usize];
+                    proc.stdout.read_exact(&mut page).unwrap();
+                    senders[id as usize].send(Bytes::from(page)).unwrap();
                 }
             });
             PostgresRedoManager {
-                conf,
-                tenant_id,
                 sender: tx,
                 receivers,
                 round_robin: AtomicUsize::new(0),
@@ -284,7 +282,7 @@ impl PostgresRedoManager {
     fn apply_batch_postgres(
         &self,
         key: Key,
-        lsn: Lsn[,
+        _lsn: Lsn,
         base_img: Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
     ) -> Result<Bytes, WalRedoError> {
@@ -660,12 +658,14 @@ impl PostgresRedoProcess {
                 ),
             ));
         } else {
-            // Limit shared cache for wal-redo-postgres
+            // Limit shared cache for wal-redo-postres
             let mut config = OpenOptions::new()
                 .append(true)
                 .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
             config.write_all(b"shared_buffers=128kB\n")?;
             config.write_all(b"fsync=off\n")?;
+            config.write_all(b"shared_preload_libraries=neon\n")?;
+            config.write_all(b"neon.wal_redo=on\n")?;
         }
 
         // Start postgres itself
@@ -678,15 +678,18 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("PGDATA", &datadir)
-            // The redo process is not trusted, and runs in seccomp mode that
-            // doesn't allow it to open any files. We have to also make sure it
-            // doesn't inherit any file descriptors from the pageserver, that
-            // would allow an attacker to read any files that happen to be open
-            // in the pageserver.
+            // The redo process is not trusted, so it runs in seccomp mode
+            // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't
+            // inherit any file descriptors from the pageserver that would allow
+            // an attacker to do bad things.
             //
             // The Rust standard library makes sure to mark any file descriptors with
             // as close-on-exec by default, but that's not enough, since we use
             // libraries that directly call libc open without setting that flag.
+            //
+            // One example is the pidfile of the daemonize library, which doesn't
+            // currently mark file descriptors as close-on-exec. Either way, we
+            // want to be on the safe side and prevent accidental regression.
             .close_fds()
             .spawn_no_leak_child()
             .map_err(|e| {
@@ -729,104 +732,6 @@ impl PostgresRedoProcess {
             stderr,
             wal_redo_timeout: conf.wal_redo_timeout,
         })
-    }
-
-    //
-    /// Process one request for WAL redo using wal-redo postgres
-    //
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
-    fn apply_wal_records(&mut self, writebuf: Vec<u8>) -> Result<Bytes, std::io::Error> {
-        // The input is now in 'writebuf'. Do a blind write first, writing as much as
-        // we can, before calling poll(). That skips one call to poll() if the stdin is
-        // already available for writing, which it almost certainly is because the
-        // process is idle.
-        let mut nwrite = self.stdin.write(&writebuf)?;
-
-        // We expect the WAL redo process to respond with an 8k page image. We read it
-        // into this buffer.
-        let mut resultbuf = vec![0; BLCKSZ.into()];
-        let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
-
-        // Prepare for calling poll()
-        let mut pollfds = [
-            PollFd::new(self.stdout.as_raw_fd(), PollFlags::POLLIN),
-            PollFd::new(self.stderr.as_raw_fd(), PollFlags::POLLIN),
-            PollFd::new(self.stdin.as_raw_fd(), PollFlags::POLLOUT),
-        ];
-
-        // We do three things simultaneously: send the old base image and WAL records to
-        // the child process's stdin, read the result from child's stdout, and forward any logging
-        // information that the child writes to its stderr to the page server's log.
-        while nresult < BLCKSZ.into() {
-            // If we have more data to write, wake up if 'stdin' becomes writeable or
-            // we have data to read. Otherwise only wake up if there's data to read.
-            let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = loop {
-                match nix::poll::poll(
-                    &mut pollfds[0..nfds],
-                    self.wal_redo_timeout.as_millis() as i32,
-                ) {
-                    Err(e) if e == nix::errno::Errno::EINTR => continue,
-                    res => break res,
-                }
-            }?;
-
-            if n == 0 {
-                return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
-            }
-
-            // If we have some messages in stderr, forward them to the log.
-            let err_revents = pollfds[1].revents().unwrap();
-            if err_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
-                let mut errbuf: [u8; 16384] = [0; 16384];
-                let n = self.stderr.read(&mut errbuf)?;
-
-                // The message might not be split correctly into lines here. But this is
-                // good enough, the important thing is to get the message to the log.
-                if n > 0 {
-                    error!(
-                        "wal-redo-postgres: {}",
-                        String::from_utf8_lossy(&errbuf[0..n])
-                    );
-
-                    // To make sure we capture all log from the process if it fails, keep
-                    // reading from the stderr, before checking the stdout.
-                    continue;
-                }
-            } else if err_revents.contains(PollFlags::POLLHUP) {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stderr unexpectedly",
-                ));
-            }
-
-            // If we have more data to write and 'stdin' is writeable, do write.
-            if nwrite < writebuf.len() {
-                let in_revents = pollfds[2].revents().unwrap();
-                if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
-                    nwrite += self.stdin.write(&writebuf[nwrite..])?;
-                } else if in_revents.contains(PollFlags::POLLHUP) {
-                    // We still have more data to write, but the process closed the pipe.
-                    return Err(Error::new(
-                        ErrorKind::BrokenPipe,
-                        "WAL redo process closed its stdin unexpectedly",
-                    ));
-                }
-            }
-
-            // If we have some data in stdout, read it to the result buffer.
-            let out_revents = pollfds[0].revents().unwrap();
-            if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
-                nresult += self.stdout.read(&mut resultbuf[nresult..])?;
-            } else if out_revents.contains(PollFlags::POLLHUP) {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stdout unexpectedly",
-                ));
-            }
-        }
-
-        Ok(Bytes::from(resultbuf))
     }
 }
 
@@ -924,7 +829,7 @@ impl NoLeakChildCommandExt for Command {
 }
 
 // Functions for constructing messages to send to the postgres WAL redo
-// process. See pgxn/neon_walredo/walredoproc.c for
+// process. See vendor/postgres/src/backend/tcop/zenith_wal_redo.c for
 // explanation of the protocol.
 
 fn build_begin_redo_for_block_msg(tag: BufferTag, buf: &mut Vec<u8>) {
