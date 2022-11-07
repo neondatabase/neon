@@ -93,6 +93,8 @@
 
 PG_MODULE_MAGIC;
 
+void wal_redo_command(char cmd, char const* input, int size, char* output);
+
 static int	ReadRedoCommand(StringInfo inBuf);
 static void BeginRedoForBlock(StringInfo input_message);
 static void PushPage(StringInfo input_message);
@@ -282,7 +284,7 @@ WalRedoMain(int argc, char *argv[])
 	if (enable_seccomp)
 		enter_seccomp_mode();
 #endif /* HAVE_LIBSECCOMP */
-
+#if 0
 	/*
 	 * Main processing loop
 	 */
@@ -351,6 +353,7 @@ WalRedoMain(int argc, char *argv[])
 								firstchar)));
 		}
 	}							/* end of input-reading loop */
+#endif
 }
 
 
@@ -733,8 +736,8 @@ redo_block_filter(XLogReaderState *record, uint8 block_id)
  *
  * After applying some records.
  */
-static void
-GetPage(StringInfo input_message)
+static void*
+GetPage(StringInfo input_message, char* dst)
 {
 	RelFileNode rnode;
 	ForkNumber forknum;
@@ -763,8 +766,8 @@ GetPage(StringInfo input_message)
 	buf = NeonRedoReadBuffer(rnode, forknum, blknum, RBM_NORMAL);
 	Assert(buf == wal_redo_buffer);
 	page = BufferGetPage(buf);
-	/* single thread, so don't bother locking the page */
-
+	memcpy(dst, page, BLCKSZ);
+#if 0
 	/* Response: Page content */
 	tot_written = 0;
 	do {
@@ -781,7 +784,7 @@ GetPage(StringInfo input_message)
 		}
 		tot_written += rc;
 	} while (tot_written < BLCKSZ);
-
+#endif
 	ReleaseBuffer(buf);
 	DropRelFileNodeAllLocalBuffers(rnode);
 	wal_redo_buffer = InvalidBuffer;
@@ -845,3 +848,31 @@ buffered_read(void *buf, size_t count)
 
 	return (dst - (char *) buf);
 }
+
+void wal_redo_input(char cmd, char const* input, int size, char* output)
+{
+	StringInfoData input_message;
+	input_message.data = input;
+	input_message.len = input_message.maxlen = size;
+	input_message.cursor = 0;
+
+	switch (cmd)
+	{
+		case 'B':			/* BeginRedoForBlock */
+			BeginRedoForBlock(&input_message);
+			break;
+
+		case 'P':			/* PushPage */
+			PushPage(&input_message);
+			break;
+
+		case 'A':			/* ApplyRecord */
+			ApplyRecord(&input_message);
+			break;
+
+		case 'G':
+			GetPage(&input_message, output);
+			break;
+	}
+}
+
