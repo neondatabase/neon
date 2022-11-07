@@ -47,9 +47,6 @@ int			flush_every_n_requests = 8;
 
 static void pageserver_flush(void);
 
-ps_connect_handle ps_connect_hook = NULL;
-ps_disconnect_handle ps_disconnect_hook = NULL;
-
 static void
 pageserver_connect()
 {
@@ -114,9 +111,6 @@ pageserver_connect()
 	neon_log(LOG, "libpagestore: connected to '%s'", page_server_connstring_raw);
 
 	connected = true;
-
-	if (ps_connect_hook)
-		ps_connect_hook();
 }
 
 /*
@@ -175,9 +169,8 @@ pageserver_disconnect(void)
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 		connected = false;
-		
-		if (ps_disconnect_hook)
-			ps_disconnect_hook();
+
+		prefetch_on_ps_disconnect();
 	}
 }
 
@@ -438,14 +431,14 @@ pg_init_libpagestore(void)
 							PGC_SIGHUP,
 							GUC_UNIT_MB,
 							NULL, NULL, NULL);
-//	DefineCustomIntVariable("neon.flush_output_after",
-//							"Flush the output buffer after every N unflushed requests",
-//							NULL,
-//							&flush_every_n_requests,
-//							8, -1, INT_MAX,
-//							PGC_SIGHUP,
-//							GUC_UNIT,	/* no flags required */
-//							NULL, NULL, NULL);
+	DefineCustomIntVariable("neon.flush_output_after",
+							"Flush the output buffer after every N unflushed requests",
+							NULL,
+							&flush_every_n_requests,
+							8, -1, INT_MAX,
+							PGC_SIGHUP,
+							0,	/* no flags required */
+							NULL, NULL, NULL);
 
 	relsize_hash_init();
 
