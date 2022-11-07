@@ -524,4 +524,5 @@ pg_init_libpagestore(void)
 	slru_page_exists_hook = neon_slru_page_exists;
 
 	get_region_lsn_hook = get_region_lsn;
+	get_all_region_lsns_hook = get_all_region_lsns;
 }

@@ -3,12 +3,15 @@
 #include "access/remotexact.h"
 #include "apply.h"
 #include "fmgr.h"
+#include "funcapi.h"
+#include "miscadmin.h"
 #include "lib/stringinfo.h"
 #include "rwset.h"
 #include "storage/proc.h"
 #include "validate.h"
 
 PG_FUNCTION_INFO_V1(validate_and_apply_xact);
+PG_FUNCTION_INFO_V1(lsn_snapshot);
 
 Datum
 validate_and_apply_xact(PG_FUNCTION_ARGS)
@@ -78,4 +81,68 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 	pg_write_barrier();
 
 	PG_RETURN_VOID();
+}
+
+Datum
+lsn_snapshot(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	MemoryContext oldcontext;
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	AttInMetadata *attinmeta;
+	XLogRecPtr *lsns;
+	HeapTuple	tuple;
+	char	**values;
+	int		i;
+
+	/* check to see if caller supports us returning a tuplestore */
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+	if (!(rsinfo->allowedModes & SFRM_Materialize))
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("materialize mode required, but it is not allowed in this context")));
+
+	/* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
+	oldcontext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+
+	MemoryContextSwitchTo(oldcontext);
+
+	lsns = GetAllRegionLsns();
+	
+	/* Return nothing if the get_all_region_lsns hook is not set */
+	if (lsns == NULL)
+		return (Datum) 0;
+
+	attinmeta = TupleDescGetAttInMetadata(tupdesc);
+
+	values = (char **) palloc(tupdesc->natts * sizeof(char *));
+
+	for (i = 0; i < MAX_REGIONS; i++)
+	{
+		if (lsns[i] == InvalidXLogRecPtr)
+			continue;
+
+		/* region_id */
+		values[0] = psprintf("%d", i);
+		/* lsn */
+		values[1] = psprintf("%X/%X", LSN_FORMAT_ARGS(lsns[i]));
+
+		/* build the tuple */
+		tuple = BuildTupleFromCStrings(attinmeta, values);
+		tuplestore_puttuple(tupstore, tuple);
+	}
+
+	return (Datum) 0;
 }

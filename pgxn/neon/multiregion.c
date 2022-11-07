@@ -95,6 +95,20 @@ get_region_lsn(int region)
 	return region_lsns[region];
 }
 
+/*
+ * Return an array of currently known LSNs of MAX_REGIONS region
+ */
+XLogRecPtr *
+get_all_region_lsns(void)
+{
+	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
+
+	region_lsns[current_region] =
+		GetLastWrittenLSN(dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+
+	return region_lsns;
+}
+
 void
 clear_region_lsns(void)
 {
