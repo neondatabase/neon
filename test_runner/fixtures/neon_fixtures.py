@@ -65,17 +65,8 @@ BASE_PORT = 15000
 WORKER_PORT_NUM = 1000
 
 
-# These are set in pytest_configure()
-base_dir = ""
-neon_binpath = ""
-pg_distrib_dir = ""
-top_output_dir = ""
-default_pg_version = ""
-
-
 def pytest_configure(config):
     """
-    Ensure that no unwanted daemons are running before we start testing.
     Check that we do not overflow available ports range.
     """
 
@@ -85,67 +76,89 @@ def pytest_configure(config):
     ):  # do not use ephemeral ports
         raise Exception("Too many workers configured. Cannot distribute ports for services.")
 
+
+@pytest.fixture(scope="session")
+def base_dir() -> Iterator[Path]:
     # find the base directory (currently this is the git root)
-    global base_dir
-    base_dir = os.path.normpath(os.path.join(get_self_dir(), "../.."))
+    base_dir = get_self_dir().parent.parent
     log.info(f"base_dir is {base_dir}")
 
-    # Compute the top-level directory for all tests.
-    global top_output_dir
-    env_test_output = os.environ.get("TEST_OUTPUT")
-    if env_test_output is not None:
-        top_output_dir = env_test_output
-    else:
-        top_output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
-    Path(top_output_dir).mkdir(exist_ok=True)
+    yield base_dir
 
-    # Find the postgres installation.
-    global default_pg_version
-    log.info(f"default_pg_version is {default_pg_version}")
-    env_default_pg_version = os.environ.get("DEFAULT_PG_VERSION")
-    if env_default_pg_version:
-        default_pg_version = env_default_pg_version
-        log.info(f"default_pg_version is set to {default_pg_version}")
-    else:
-        default_pg_version = DEFAULT_PG_VERSION_DEFAULT
 
-    global pg_distrib_dir
-
-    env_postgres_bin = os.environ.get("POSTGRES_DISTRIB_DIR")
-    if env_postgres_bin:
-        pg_distrib_dir = env_postgres_bin
-    else:
-        pg_distrib_dir = os.path.normpath(os.path.join(base_dir, "pg_install"))
-
-    log.info(f"pg_distrib_dir is {pg_distrib_dir}")
-    psql_bin_path = os.path.join(pg_distrib_dir, "v{}".format(default_pg_version), "bin/psql")
-    postgres_bin_path = os.path.join(
-        pg_distrib_dir, "v{}".format(default_pg_version), "bin/postgres"
-    )
-
-    if os.getenv("REMOTE_ENV"):
-        # When testing against a remote server, we only need the client binary.
-        if not os.path.exists(psql_bin_path):
-            raise Exception('psql not found at "{}"'.format(psql_bin_path))
-    else:
-        if not os.path.exists(postgres_bin_path):
-            raise Exception('postgres not found at "{}"'.format(postgres_bin_path))
-
+@pytest.fixture(scope="session")
+def neon_binpath(base_dir: Path) -> Iterator[Path]:
     if os.getenv("REMOTE_ENV"):
         # we are in remote env and do not have neon binaries locally
         # this is the case for benchmarks run on self-hosted runner
         return
+
     # Find the neon binaries.
-    global neon_binpath
-    env_neon_bin = os.environ.get("NEON_BIN")
-    if env_neon_bin:
-        neon_binpath = env_neon_bin
+    if env_neon_bin := os.environ.get("NEON_BIN"):
+        binpath = Path(env_neon_bin)
     else:
         build_type = os.environ.get("BUILD_TYPE", "debug")
-        neon_binpath = os.path.join(base_dir, "target", build_type)
-    log.info(f"neon_binpath is {neon_binpath}")
-    if not os.path.exists(os.path.join(neon_binpath, "pageserver")):
-        raise Exception('neon binaries not found at "{}"'.format(neon_binpath))
+        binpath = base_dir / "target" / build_type
+    log.info(f"neon_binpath is {binpath}")
+
+    if not (binpath / "pageserver").exists():
+        raise Exception(f"neon binaries not found at '{binpath}'")
+
+    yield binpath
+
+
+@pytest.fixture(scope="session")
+def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
+    if env_postgres_bin := os.environ.get("POSTGRES_DISTRIB_DIR"):
+        distrib_dir = Path(env_postgres_bin).resolve()
+    else:
+        distrib_dir = base_dir / "pg_install"
+
+    log.info(f"pg_distrib_dir is {distrib_dir}")
+    yield distrib_dir
+
+
+@pytest.fixture(scope="session")
+def top_output_dir(base_dir: Path) -> Iterator[Path]:
+    # Compute the top-level directory for all tests.
+    if env_test_output := os.environ.get("TEST_OUTPUT"):
+        output_dir = Path(env_test_output).resolve()
+    else:
+        output_dir = base_dir / DEFAULT_OUTPUT_DIR
+    output_dir.mkdir(exist_ok=True)
+
+    log.info(f"top_output_dir is {output_dir}")
+    yield output_dir
+
+
+@pytest.fixture(scope="session")
+def pg_version() -> Iterator[str]:
+    if env_default_pg_version := os.environ.get("DEFAULT_PG_VERSION"):
+        version = env_default_pg_version
+    else:
+        version = DEFAULT_PG_VERSION_DEFAULT
+
+    log.info(f"pg_version is {version}")
+    yield version
+
+
+@pytest.fixture(scope="session")
+def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: str) -> Iterator[Path]:
+    versioned_dir = pg_distrib_dir / f"v{pg_version}"
+
+    psql_bin_path = versioned_dir / "bin/psql"
+    postgres_bin_path = versioned_dir / "bin/postgres"
+
+    if os.getenv("REMOTE_ENV"):
+        # When testing against a remote server, we only need the client binary.
+        if not psql_bin_path.exists():
+            raise Exception(f"psql not found at '{psql_bin_path}'")
+    else:
+        if not postgres_bin_path.exists:
+            raise Exception(f"postgres not found at '{postgres_bin_path}'")
+
+    log.info(f"versioned_pg_distrib_dir is {versioned_dir}")
+    yield versioned_dir
 
 
 def shareable_scope(fixture_name, config) -> Literal["session", "function"]:
@@ -232,16 +245,18 @@ def port_distributor(worker_base_port):
 
 
 @pytest.fixture(scope="session")
-def default_broker(request: Any, port_distributor: PortDistributor):
+def default_broker(request: Any, port_distributor: PortDistributor, top_output_dir: Path):
     client_port = port_distributor.get_port()
     # multiple pytest sessions could get launched in parallel, get them different datadirs
-    etcd_datadir = os.path.join(get_test_output_dir(request), f"etcd_datadir_{client_port}")
-    Path(etcd_datadir).mkdir(exist_ok=True, parents=True)
+    etcd_datadir = get_test_output_dir(request, top_output_dir) / f"etcd_datadir_{client_port}"
+    etcd_datadir.mkdir(exist_ok=True, parents=True)
 
-    broker = Etcd(datadir=etcd_datadir, port=client_port, peer_port=port_distributor.get_port())
+    broker = Etcd(
+        datadir=str(etcd_datadir), port=client_port, peer_port=port_distributor.get_port()
+    )
     yield broker
     broker.stop()
-    allure_attach_from_dir(Path(etcd_datadir))
+    allure_attach_from_dir(etcd_datadir)
 
 
 @pytest.fixture(scope="session")
@@ -521,6 +536,9 @@ class NeonEnvBuilder:
         broker: Etcd,
         run_id: uuid.UUID,
         mock_s3_server: MockS3Server,
+        neon_binpath: Path,
+        pg_distrib_dir: Path,
+        pg_version: str,
         remote_storage: Optional[RemoteStorage] = None,
         remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
@@ -550,7 +568,9 @@ class NeonEnvBuilder:
         self.env: Optional[NeonEnv] = None
         self.remote_storage_prefix: Optional[str] = None
         self.keep_remote_storage_contents: bool = True
-        self.pg_version = default_pg_version
+        self.neon_binpath = neon_binpath
+        self.pg_distrib_dir = pg_distrib_dir
+        self.pg_version = pg_version
 
     def init(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -766,6 +786,8 @@ class NeonEnv:
         self.remote_storage = config.remote_storage
         self.remote_storage_users = config.remote_storage_users
         self.pg_version = config.pg_version
+        self.neon_binpath = config.neon_binpath
+        self.pg_distrib_dir = config.pg_distrib_dir
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -861,7 +883,7 @@ class NeonEnv:
         return self.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
 
     def get_pageserver_version(self) -> str:
-        bin_pageserver = os.path.join(str(neon_binpath), "pageserver")
+        bin_pageserver = str(self.neon_binpath / "pageserver")
         res = subprocess.run(
             [bin_pageserver, "--version"],
             check=True,
@@ -885,6 +907,10 @@ def _shared_simple_env(
     mock_s3_server: MockS3Server,
     default_broker: Etcd,
     run_id: uuid.UUID,
+    top_output_dir: Path,
+    neon_binpath: Path,
+    pg_distrib_dir: Path,
+    pg_version: str,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -893,17 +919,20 @@ def _shared_simple_env(
 
     if os.environ.get("TEST_SHARED_FIXTURES") is None:
         # Create the environment in the per-test output directory
-        repo_dir = os.path.join(get_test_output_dir(request), "repo")
+        repo_dir = get_test_output_dir(request, top_output_dir) / "repo"
     else:
         # We're running shared fixtures. Share a single directory.
-        repo_dir = os.path.join(str(top_output_dir), "shared_repo")
+        repo_dir = top_output_dir / "shared_repo"
         shutil.rmtree(repo_dir, ignore_errors=True)
 
     with NeonEnvBuilder(
-        repo_dir=Path(repo_dir),
+        repo_dir=repo_dir,
         port_distributor=port_distributor,
         broker=default_broker,
         mock_s3_server=mock_s3_server,
+        neon_binpath=neon_binpath,
+        pg_distrib_dir=pg_distrib_dir,
+        pg_version=pg_version,
         run_id=run_id,
     ) as builder:
         env = builder.init_start()
@@ -934,6 +963,9 @@ def neon_env_builder(
     test_output_dir,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
+    neon_binpath: Path,
+    pg_distrib_dir: Path,
+    pg_version: str,
     default_broker: Etcd,
     run_id: uuid.UUID,
 ) -> Iterator[NeonEnvBuilder]:
@@ -958,6 +990,9 @@ def neon_env_builder(
         repo_dir=Path(repo_dir),
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
+        neon_binpath=neon_binpath,
+        pg_distrib_dir=pg_distrib_dir,
+        pg_version=pg_version,
         broker=default_broker,
         run_id=run_id,
     ) as builder:
@@ -1240,7 +1275,7 @@ class AbstractNeonCli(abc.ABC):
         assert type(arguments) == list
         assert type(self.COMMAND) == str
 
-        bin_neon = os.path.join(str(neon_binpath), self.COMMAND)
+        bin_neon = str(self.env.neon_binpath / self.COMMAND)
 
         args = [bin_neon] + arguments
         log.info('Running command "{}"'.format(" ".join(args)))
@@ -1248,7 +1283,7 @@ class AbstractNeonCli(abc.ABC):
 
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
-        env_vars["POSTGRES_DISTRIB_DIR"] = str(pg_distrib_dir)
+        env_vars["POSTGRES_DISTRIB_DIR"] = str(self.env.pg_distrib_dir)
         if self.env.rust_log_override is not None:
             env_vars["RUST_LOG"] = self.env.rust_log_override
         for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
@@ -1723,17 +1758,17 @@ def append_pageserver_param_overrides(
 class PgBin:
     """A helper class for executing postgres binaries"""
 
-    def __init__(self, log_dir: Path, pg_version: str):
+    def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: str):
         self.log_dir = log_dir
         self.pg_version = pg_version
-        self.pg_bin_path = os.path.join(str(pg_distrib_dir), "v{}".format(pg_version), "bin")
-        self.pg_lib_dir = os.path.join(str(pg_distrib_dir), "v{}".format(pg_version), "lib")
+        self.pg_bin_path = pg_distrib_dir / f"v{pg_version}" / "bin"
+        self.pg_lib_dir = pg_distrib_dir / f"v{pg_version}" / "lib"
         self.env = os.environ.copy()
-        self.env["LD_LIBRARY_PATH"] = self.pg_lib_dir
+        self.env["LD_LIBRARY_PATH"] = str(self.pg_lib_dir)
 
     def _fixpath(self, command: List[str]):
-        if "/" not in command[0]:
-            command[0] = os.path.join(self.pg_bin_path, command[0])
+        if "/" not in str(command[0]):
+            command[0] = str(self.pg_bin_path / command[0])
 
     def _build_env(self, env_add: Optional[Env]) -> Env:
         if env_add is None:
@@ -1757,7 +1792,7 @@ class PgBin:
         """
 
         self._fixpath(command)
-        log.info('Running command "{}"'.format(" ".join(command)))
+        log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
         subprocess.run(command, env=env, cwd=cwd, check=True)
 
@@ -1776,16 +1811,14 @@ class PgBin:
         """
 
         self._fixpath(command)
-        log.info('Running command "{}"'.format(" ".join(command)))
+        log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
-        return subprocess_capture(
-            str(self.log_dir), command, env=env, cwd=cwd, check=True, **kwargs
-        )
+        return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
 
 
 @pytest.fixture(scope="function")
-def pg_bin(test_output_dir: Path, pg_version: str) -> PgBin:
-    return PgBin(test_output_dir, pg_version)
+def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: str) -> PgBin:
+    return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
 class VanillaPostgres(PgProtocol):
@@ -1832,19 +1865,15 @@ class VanillaPostgres(PgProtocol):
             self.stop()
 
 
-@pytest.fixture(scope="session")
-def pg_version() -> str:
-    return default_pg_version
-
-
 @pytest.fixture(scope="function")
 def vanilla_pg(
     test_output_dir: Path,
     port_distributor: PortDistributor,
+    pg_distrib_dir: Path,
     pg_version: str,
 ) -> Iterator[VanillaPostgres]:
     pgdatadir = test_output_dir / "pgdata-vanilla"
-    pg_bin = PgBin(test_output_dir, pg_version)
+    pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
         yield vanilla_pg
@@ -1880,8 +1909,10 @@ class RemotePostgres(PgProtocol):
 
 
 @pytest.fixture(scope="function")
-def remote_pg(test_output_dir: Path, pg_version: str) -> Iterator[RemotePostgres]:
-    pg_bin = PgBin(test_output_dir, pg_version)
+def remote_pg(
+    test_output_dir: Path, pg_distrib_dir: Path, pg_version: str
+) -> Iterator[RemotePostgres]:
+    pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
     connstr = os.getenv("BENCHMARK_CONNSTR")
     if connstr is None:
@@ -1926,10 +1957,18 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
-    def __init__(self, proxy_port: int, http_port: int, auth_endpoint=None, mgmt_port=None):
+    def __init__(
+        self,
+        proxy_port: int,
+        http_port: int,
+        neon_binpath: Path,
+        auth_endpoint=None,
+        mgmt_port=None,
+    ):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = "127.0.0.1"
         self.http_port = http_port
+        self.neon_binpath = neon_binpath
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
         self.auth_endpoint = auth_endpoint
@@ -1945,7 +1984,7 @@ class NeonProxy(PgProtocol):
 
         # Start proxy
         args = [
-            os.path.join(neon_binpath, "proxy"),
+            str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--auth-backend", "postgres"],
@@ -1961,7 +2000,7 @@ class NeonProxy(PgProtocol):
         assert self._popen is None
 
         # Start proxy
-        bin_proxy = os.path.join(str(neon_binpath), "proxy")
+        bin_proxy = str(self.neon_binpath / "proxy")
         args = [bin_proxy]
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.proxy_port}"])
@@ -1993,18 +2032,18 @@ class NeonProxy(PgProtocol):
 
 
 @pytest.fixture(scope="function")
-def link_proxy(port_distributor) -> Iterator[NeonProxy]:
+def link_proxy(port_distributor, neon_binpath: Path) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
     http_port = port_distributor.get_port()
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
-    with NeonProxy(proxy_port, http_port, mgmt_port=mgmt_port) as proxy:
+    with NeonProxy(proxy_port, http_port, neon_binpath=neon_binpath, mgmt_port=mgmt_port) as proxy:
         proxy.start_with_link_auth()
         yield proxy
 
 
 @pytest.fixture(scope="function")
-def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
+def static_proxy(vanilla_pg, port_distributor, neon_binpath: Path) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 
     # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
@@ -2020,7 +2059,10 @@ def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     http_port = port_distributor.get_port()
 
     with NeonProxy(
-        proxy_port=proxy_port, http_port=http_port, auth_endpoint=auth_endpoint
+        proxy_port=proxy_port,
+        http_port=http_port,
+        neon_binpath=neon_binpath,
+        auth_endpoint=auth_endpoint,
     ) as proxy:
         proxy.start()
         yield proxy
@@ -2523,10 +2565,10 @@ class Etcd:
             self.handle.wait()
 
 
-def get_test_output_dir(request: Any) -> Path:
+def get_test_output_dir(request: Any, top_output_dir: Path) -> Path:
     """Compute the working directory for an individual test."""
     test_name = request.node.name
-    test_dir = Path(top_output_dir) / test_name.replace("/", "-")
+    test_dir = top_output_dir / test_name.replace("/", "-")
     log.info(f"get_test_output_dir is {test_dir}")
     # make mypy happy
     assert isinstance(test_dir, Path)
@@ -2543,11 +2585,11 @@ def get_test_output_dir(request: Any) -> Path:
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
 @pytest.fixture(scope="function", autouse=True)
-def test_output_dir(request: Any) -> Iterator[Path]:
+def test_output_dir(request: Any, top_output_dir: Path) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
     # one directory per test
-    test_dir = get_test_output_dir(request)
+    test_dir = get_test_output_dir(request, top_output_dir)
     log.info(f"test_output_dir is {test_dir}")
     shutil.rmtree(test_dir, ignore_errors=True)
     test_dir.mkdir()
@@ -2639,7 +2681,7 @@ def check_restored_datadir_content(
     restored_dir_path = env.repo_dir / f"{pg.node_name}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
 
-    pg_bin = PgBin(test_output_dir, env.pg_version)
+    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
     psql_path = os.path.join(pg_bin.pg_bin_path, "psql")
 
     cmd = rf"""

@@ -1,14 +1,6 @@
-import os
 from pathlib import Path
 
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-    PgBin,
-    PortDistributor,
-    VanillaPostgres,
-    base_dir,
-    pg_distrib_dir,
-)
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PortDistributor, VanillaPostgres
 from fixtures.types import TenantId
 
 
@@ -17,6 +9,8 @@ def test_wal_restore(
     pg_bin: PgBin,
     test_output_dir: Path,
     port_distributor: PortDistributor,
+    base_dir: Path,
+    pg_distrib_dir: Path,
 ):
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("test_wal_restore")
@@ -26,11 +20,13 @@ def test_wal_restore(
     env.neon_cli.pageserver_stop()
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"
-    with VanillaPostgres(data_dir, PgBin(test_output_dir, env.pg_version), port) as restored:
+    with VanillaPostgres(
+        data_dir, PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version), port
+    ) as restored:
         pg_bin.run_capture(
             [
-                os.path.join(base_dir, "libs/utils/scripts/restore_from_wal.sh"),
-                os.path.join(pg_distrib_dir, "v{}".format(env.pg_version), "bin"),
+                str(base_dir / "libs/utils/scripts/restore_from_wal.sh"),
+                str(pg_distrib_dir / f"v{env.pg_version}/bin"),
                 str(test_output_dir / "repo" / "safekeepers" / "sk1" / str(tenant_id) / "*"),
                 str(data_dir),
                 str(port),
