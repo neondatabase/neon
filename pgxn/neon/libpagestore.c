@@ -276,7 +276,7 @@ pageserver_call(NeonRequest * request)
 	resp = pageserver_receive();
 	if (resp == NULL)
 		elog(ERROR, "Connection is broken");
-	retrn resp;
+	return resp;
 }
 
 page_server_api api = {
