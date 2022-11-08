@@ -113,6 +113,7 @@ pub struct TenantConfigRequest {
     pub walreceiver_connect_timeout: Option<String>,
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+    pub trace_read_requests: Option<bool>,
 }
 
 impl TenantConfigRequest {
@@ -131,6 +132,7 @@ impl TenantConfigRequest {
             walreceiver_connect_timeout: None,
             lagging_wal_timeout: None,
             max_lsn_wal_lag: None,
+            trace_read_requests: None,
         }
     }
 }
