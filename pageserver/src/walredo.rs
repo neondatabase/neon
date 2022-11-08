@@ -229,7 +229,7 @@ impl PostgresRedoManager {
 
         // launch the WAL redo process on first use
         if process_guard.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, &self.tenant_id, pg_version)?;
+            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
             *process_guard = Some(p);
         }
         let process = process_guard.as_mut().unwrap();
@@ -579,26 +579,29 @@ impl<C: CommandExt> CloseFileDescriptors for C {
 /// Handle to the Postgres WAL redo process
 ///
 struct PostgresRedoProcess {
+    tenant_id: TenantId,
     child: Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
     stderr: ChildStderr,
+    called_kill: bool,
 }
 
 impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
+    #[instrument(skip_all,fields(tenant_id=%tenant_id, pg_version=pg_version))]
     fn launch(
         conf: &PageServerConf,
-        tenant_id: &TenantId,
+        tenant_id: TenantId,
         pg_version: u32,
     ) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
         let datadir = path_with_suffix_extension(
-            conf.tenant_path(tenant_id).join("wal-redo-datadir"),
+            conf.tenant_path(&tenant_id).join("wal-redo-datadir"),
             TEMP_FILE_SUFFIX,
         );
 
@@ -681,6 +684,7 @@ impl PostgresRedoProcess {
             })?;
 
         info!(
+            pid = child.id(),
             "launched WAL redo postgres process on {}",
             datadir.display()
         );
@@ -689,22 +693,59 @@ impl PostgresRedoProcess {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
 
-        set_nonblock(stdin.as_raw_fd())?;
-        set_nonblock(stdout.as_raw_fd())?;
-        set_nonblock(stderr.as_raw_fd())?;
+        macro_rules! set_nonblock_or_log_err {
+            ($file:ident) => {{
+                let res = set_nonblock($file.as_raw_fd());
+                if let Err(e) = &res {
+                    error!(error = %e, file = stringify!($file), pid = child.id(), "set_nonblock failed");
+                }
+                res
+            }};
+        }
+        set_nonblock_or_log_err!(stdin)?;
+        set_nonblock_or_log_err!(stdout)?;
+        set_nonblock_or_log_err!(stderr)?;
 
         Ok(PostgresRedoProcess {
+            tenant_id,
             child,
             stdin,
             stdout,
             stderr,
+            called_kill: false,
         })
     }
 
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
     fn kill(mut self) {
-        let _ = self.child.kill();
-        if let Ok(exit_status) = self.child.wait() {
-            error!("wal-redo-postgres exited with code {}", exit_status);
+        info!("killing wal-redo-postgres process");
+        self.called_kill = true;
+
+        let res = self.child.kill();
+        if let Err(e) = res {
+            // This branch is very unlikely because:
+            // - We (= pageserver) spawned this process successfully, so, we're allowed to kill it.
+            // - This is the only place that calls .kill()
+            // - We consume `self`, so, .kill() can't be called twice.
+            // - If the process exited by itself or was killed by someone else,
+            //   .kill() will still succeed because we haven't wait()'ed yet.
+            //
+            // So, if we arrive here, we have really no idea what happened,
+            // whether the PID stored in self.child is still valid, etc.
+            // If this function were fallible, we'd return an error, but
+            // since it isn't, all we can do is log an error and proceed
+            // with the wait().
+            error!(error = %e, "failed to SIGKILL wal-redo-postgres; subsequent wait() might fail or wait for wrong process");
+        }
+
+        match self.child.wait() {
+            Ok(exit_status) => {
+                // log at error level since .kill() is something we only do on errors ATM
+                error!(exit_status = %exit_status, "wal-redo-postgres wait successful");
+            }
+            Err(e) => {
+                error!(error = %e, "wal-redo-postgres wait error; might leak the child process; it will show as zombie (defunct)");
+            }
         }
         drop(self);
     }
@@ -713,6 +754,7 @@ impl PostgresRedoProcess {
     // Apply given WAL records ('records') over an old page image. Returns
     // new page image.
     //
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
     fn apply_wal_records(
         &mut self,
         tag: BufferTag,
@@ -835,6 +877,14 @@ impl PostgresRedoProcess {
         }
 
         Ok(Bytes::from(resultbuf))
+    }
+}
+
+impl Drop for PostgresRedoProcess {
+    fn drop(&mut self) {
+        if !self.called_kill {
+            error!(tenant_id=%self.tenant_id, pid = %self.child.id(), "dropping PostgresRedoProcess that wasn't killed, likely causing defunct postgres process");
+        }
     }
 }
 
