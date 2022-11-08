@@ -65,7 +65,7 @@ impl GenericOption {
             let name = match self.name.as_str() {
                 "safekeepers" => "neon.safekeepers",
                 "wal_acceptor_reconnect" => "neon.safekeeper_reconnect_timeout",
-                "wal_acceptor_connect_timeout" => "neon.safekeeper_connect_timeout",
+                "wal_acceptor_connection_timeout" => "neon.safekeeper_connection_timeout",
                 it => it,
             };
 

@@ -4,13 +4,13 @@ use crate::safekeeper::{
     TermSwitchEntry,
 };
 use anyhow::{bail, Result};
+use pq_proto::SystemId;
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::{
     bin_ser::LeSer,
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    pq_proto::SystemId,
 };
 
 /// Persistent consensus state of the acceptor.

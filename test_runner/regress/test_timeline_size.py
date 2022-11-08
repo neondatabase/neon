@@ -338,6 +338,7 @@ def test_timeline_size_metrics(
     neon_simple_env: NeonEnv,
     test_output_dir: Path,
     port_distributor: PortDistributor,
+    pg_distrib_dir: Path,
     pg_version: str,
 ):
     env = neon_simple_env
@@ -382,7 +383,7 @@ def test_timeline_size_metrics(
     tl_logical_size_metric = int(matches.group(1))
 
     pgdatadir = test_output_dir / "pgdata-vanilla"
-    pg_bin = PgBin(test_output_dir, pg_version)
+    pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
         vanilla_pg.configure([f"port={port}"])

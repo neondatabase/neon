@@ -1,10 +1,10 @@
 //! User credentials used in authentication.
 
 use crate::error::UserFacingError;
+use pq_proto::StartupMessageParams;
 use std::borrow::Cow;
 use thiserror::Error;
 use tracing::info;
-use utils::pq_proto::StartupMessageParams;
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
 pub enum ClientCredsParseError {

@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -40,6 +41,21 @@ struct TimelineInputs {
     next_gc_cutoff: Lsn,
 }
 
+/// Gathers the inputs for the tenant sizing model.
+///
+/// Tenant size does not consider the latest state, but only the state until next_gc_cutoff, which
+/// is updated on-demand, during the start of this calculation and separate from the
+/// [`Timeline::latest_gc_cutoff`].
+///
+/// For timelines in general:
+///
+/// ```ignore
+/// 0-----|---------|----|------------| · · · · · |·> lsn
+///   initdb_lsn  branchpoints*  next_gc_cutoff  latest
+/// ```
+///
+/// Until gc_horizon_cutoff > `Timeline::last_record_lsn` for any of the tenant's timelines, the
+/// tenant size will be zero.
 pub(super) async fn gather_inputs(
     tenant: &Tenant,
     limit: &Arc<Semaphore>,
@@ -88,13 +104,18 @@ pub(super) async fn gather_inputs(
             let gc_info = timeline.gc_info.read().unwrap();
 
             // similar to gc, but Timeline::get_latest_gc_cutoff_lsn() will not be updated before a
-            // new gc run, which we have no control over.
-            // maybe this should be moved to gc_info.next_gc_cutoff()?
-            let next_gc_cutoff = std::cmp::min(gc_info.horizon_cutoff, gc_info.pitr_cutoff);
+            // new gc run, which we have no control over. however differently from `Timeline::gc`
+            // we don't consider the `Timeline::disk_consistent_lsn` at all, because we are not
+            // actually removing files.
+            let next_gc_cutoff = cmp::min(gc_info.horizon_cutoff, gc_info.pitr_cutoff);
 
-            let maybe_cutoff = if next_gc_cutoff > timeline.get_ancestor_lsn() {
-                // only include these if they are after branching point; otherwise we would end up
-                // with duplicate updates before the actual branching.
+            // the minimum where we should find the next_gc_cutoff for our calculations.
+            //
+            // next_gc_cutoff in parent branch are not of interest (right now at least), nor do we
+            // want to query any logical size before initdb_lsn.
+            let cutoff_minimum = cmp::max(timeline.get_ancestor_lsn(), timeline.initdb_lsn);
+
+            let maybe_cutoff = if next_gc_cutoff > cutoff_minimum {
                 Some((next_gc_cutoff, LsnKind::GcCutOff))
             } else {
                 None

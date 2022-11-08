@@ -22,11 +22,7 @@ once_cell = "1.13.0"
 parking_lot = "0.12"
 pin-project-lite = "0.2.7"
 rand = "0.8.3"
-reqwest = { version = "0.11", default-features = false, features = [
-    "blocking",
-    "json",
-    "rustls-tls",
-] }
+reqwest = { version = "0.11", default-features = false, features = [ "json", "rustls-tls" ] }
 routerify = "3"
 rustls = "0.20.0"
 rustls-pemfile = "1"
@@ -45,8 +41,9 @@ url = "2.2.2"
 uuid = { version = "1.2", features = ["v4", "serde"] }
 x509-parser = "0.14"
 
-utils = { path = "../libs/utils" }
 metrics = { path = "../libs/metrics" }
+pq_proto = { path = "../libs/pq_proto" }
+utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]

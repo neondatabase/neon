@@ -1,13 +1,8 @@
 import os
+from pathlib import Path
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-    PgBin,
-    PortDistributor,
-    VanillaPostgres,
-    pg_distrib_dir,
-)
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PortDistributor, VanillaPostgres
 from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar, subprocess_capture
 
@@ -16,7 +11,10 @@ num_rows = 1000
 
 # Ensure that regular postgres can start from fullbackup
 def test_fullbackup(
-    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, port_distributor: PortDistributor
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+    port_distributor: PortDistributor,
+    pg_distrib_dir: Path,
 ):
     env = neon_env_builder.init_start()
 
@@ -40,7 +38,7 @@ def test_fullbackup(
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": os.path.join(str(pg_distrib_dir), "lib")}
+    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
 
     # Get and unpack fullbackup from pageserver
     restored_dir_path = env.repo_dir / "restored_datadir"
@@ -49,9 +47,7 @@ def test_fullbackup(
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     tar_output_file = result_basepath + ".stdout"
-    subprocess_capture(
-        str(env.repo_dir), ["tar", "-xf", tar_output_file, "-C", str(restored_dir_path)]
-    )
+    subprocess_capture(env.repo_dir, ["tar", "-xf", tar_output_file, "-C", str(restored_dir_path)])
 
     # HACK
     # fullbackup returns neon specific pg_control and first WAL segment

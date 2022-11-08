@@ -30,7 +30,6 @@ from fixtures.neon_fixtures import (
     SafekeeperHttpClient,
     SafekeeperPort,
     available_remote_storages,
-    neon_binpath,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -797,6 +796,7 @@ class SafekeeperEnv:
         repo_dir: Path,
         port_distributor: PortDistributor,
         pg_bin: PgBin,
+        neon_binpath: Path,
         num_safekeepers: int = 1,
     ):
         self.repo_dir = repo_dir
@@ -808,7 +808,7 @@ class SafekeeperEnv:
         )
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
-        self.bin_safekeeper = os.path.join(str(neon_binpath), "safekeeper")
+        self.bin_safekeeper = str(neon_binpath / "safekeeper")
         self.safekeepers: Optional[List[subprocess.CompletedProcess[Any]]] = None
         self.postgres: Optional[ProposerPostgres] = None
         self.tenant_id: Optional[TenantId] = None
@@ -911,7 +911,10 @@ class SafekeeperEnv:
 
 
 def test_safekeeper_without_pageserver(
-    test_output_dir: str, port_distributor: PortDistributor, pg_bin: PgBin
+    test_output_dir: str,
+    port_distributor: PortDistributor,
+    pg_bin: PgBin,
+    neon_binpath: Path,
 ):
     # Create the environment in the test-specific output dir
     repo_dir = Path(os.path.join(test_output_dir, "repo"))
@@ -920,6 +923,7 @@ def test_safekeeper_without_pageserver(
         repo_dir,
         port_distributor,
         pg_bin,
+        neon_binpath,
     )
 
     with env:

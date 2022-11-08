@@ -1,11 +1,10 @@
 #
 # This file runs pg_regress-based tests.
 #
-import os
 from pathlib import Path
 
 import pytest
-from fixtures.neon_fixtures import NeonEnv, base_dir, check_restored_datadir_content, pg_distrib_dir
+from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -13,7 +12,14 @@ from fixtures.neon_fixtures import NeonEnv, base_dir, check_restored_datadir_con
 # This runs for a long time, especially in debug mode, so use a larger-than-default
 # timeout.
 @pytest.mark.timeout(1800)
-def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, capsys):
+def test_pg_regress(
+    neon_simple_env: NeonEnv,
+    test_output_dir: Path,
+    pg_bin,
+    capsys,
+    base_dir: Path,
+    pg_distrib_dir: Path,
+):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_pg_regress", "empty")
@@ -26,20 +32,20 @@ def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, cap
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
-    build_path = os.path.join(pg_distrib_dir, "build/v{}/src/test/regress").format(env.pg_version)
-    src_path = os.path.join(base_dir, "vendor/postgres-v{}/src/test/regress").format(env.pg_version)
-    bindir = os.path.join(pg_distrib_dir, "v{}".format(env.pg_version), "bin")
-    schedule = os.path.join(src_path, "parallel_schedule")
-    pg_regress = os.path.join(build_path, "pg_regress")
+    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/regress"
+    src_path = base_dir / f"vendor/postgres-v{env.pg_version}/src/test/regress"
+    bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
+    schedule = src_path / "parallel_schedule"
+    pg_regress = build_path / "pg_regress"
 
     pg_regress_command = [
-        pg_regress,
+        str(pg_regress),
         '--bindir=""',
         "--use-existing",
-        "--bindir={}".format(bindir),
-        "--dlpath={}".format(build_path),
-        "--schedule={}".format(schedule),
-        "--inputdir={}".format(src_path),
+        f"--bindir={bindir}",
+        f"--dlpath={build_path}",
+        f"--schedule={schedule}",
+        f"--inputdir={src_path}",
     ]
 
     env_vars = {
@@ -66,7 +72,14 @@ def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, cap
 # This runs for a long time, especially in debug mode, so use a larger-than-default
 # timeout.
 @pytest.mark.timeout(1800)
-def test_isolation(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, capsys):
+def test_isolation(
+    neon_simple_env: NeonEnv,
+    test_output_dir: Path,
+    pg_bin,
+    capsys,
+    base_dir: Path,
+    pg_distrib_dir: Path,
+):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_isolation", "empty")
@@ -80,21 +93,19 @@ def test_isolation(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, caps
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_isolation_regress will need.
-    build_path = os.path.join(pg_distrib_dir, "build/v{}/src/test/isolation".format(env.pg_version))
-    src_path = os.path.join(
-        base_dir, "vendor/postgres-v{}/src/test/isolation".format(env.pg_version)
-    )
-    bindir = os.path.join(pg_distrib_dir, "v{}".format(env.pg_version), "bin")
-    schedule = os.path.join(src_path, "isolation_schedule")
-    pg_isolation_regress = os.path.join(build_path, "pg_isolation_regress")
+    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/isolation"
+    src_path = base_dir / f"vendor/postgres-v{env.pg_version}/src/test/isolation"
+    bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
+    schedule = src_path / "isolation_schedule"
+    pg_isolation_regress = build_path / "pg_isolation_regress"
 
     pg_isolation_regress_command = [
-        pg_isolation_regress,
+        str(pg_isolation_regress),
         "--use-existing",
-        "--bindir={}".format(bindir),
-        "--dlpath={}".format(build_path),
-        "--inputdir={}".format(src_path),
-        "--schedule={}".format(schedule),
+        f"--bindir={bindir}",
+        f"--dlpath={build_path}",
+        f"--inputdir={src_path}",
+        f"--schedule={schedule}",
     ]
 
     env_vars = {
@@ -112,7 +123,14 @@ def test_isolation(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, caps
 
 # Run extra Neon-specific pg_regress-based tests. The tests and their
 # schedule file are in the sql_regress/ directory.
-def test_sql_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, capsys):
+def test_sql_regress(
+    neon_simple_env: NeonEnv,
+    test_output_dir: Path,
+    pg_bin,
+    capsys,
+    base_dir: Path,
+    pg_distrib_dir: Path,
+):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_sql_regress", "empty")
@@ -126,19 +144,19 @@ def test_sql_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, ca
 
     # Compute all the file locations that pg_regress will need.
     # This test runs neon specific tests
-    build_path = os.path.join(pg_distrib_dir, "build/v{}/src/test/regress").format(env.pg_version)
-    src_path = os.path.join(base_dir, "test_runner/sql_regress")
-    bindir = os.path.join(pg_distrib_dir, "v{}".format(env.pg_version), "bin")
-    schedule = os.path.join(src_path, "parallel_schedule")
-    pg_regress = os.path.join(build_path, "pg_regress")
+    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/regress"
+    src_path = base_dir / "test_runner/sql_regress"
+    bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
+    schedule = src_path / "parallel_schedule"
+    pg_regress = build_path / "pg_regress"
 
     pg_regress_command = [
-        pg_regress,
+        str(pg_regress),
         "--use-existing",
-        "--bindir={}".format(bindir),
-        "--dlpath={}".format(build_path),
-        "--schedule={}".format(schedule),
-        "--inputdir={}".format(src_path),
+        f"--bindir={bindir}",
+        f"--dlpath={build_path}",
+        f"--schedule={schedule}",
+        f"--inputdir={src_path}",
     ]
 
     env_vars = {

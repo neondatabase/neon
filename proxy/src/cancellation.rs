@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Context};
 use hashbrown::HashMap;
 use parking_lot::Mutex;
+use pq_proto::CancelKeyData;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio_postgres::{CancelToken, NoTls};
 use tracing::info;
-use utils::pq_proto::CancelKeyData;
 
 /// Enables serving `CancelRequest`s.
 #[derive(Default)]

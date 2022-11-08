@@ -1,5 +1,5 @@
-import pathlib
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 from fixtures.neon_fixtures import (
@@ -7,18 +7,18 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PageserverHttpClient,
-    neon_binpath,
-    pg_distrib_dir,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 
 # test that we cannot override node id after init
-def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
+def test_pageserver_init_node_id(
+    neon_simple_env: NeonEnv, neon_binpath: Path, pg_distrib_dir: Path
+):
     repo_dir = neon_simple_env.repo_dir
     pageserver_config = repo_dir / "pageserver.toml"
-    pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
+    pageserver_bin = neon_binpath / "pageserver"
 
     def run_pageserver(args):
         return subprocess.run(

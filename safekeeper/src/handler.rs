@@ -12,12 +12,12 @@ use anyhow::{bail, Context, Result};
 use postgres_ffi::PG_TLI;
 use regex::Regex;
 
+use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use tracing::info;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
     postgres_backend::{self, PostgresBackend},
-    pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID},
 };
 
 /// Safekeeper handler of postgres commands

@@ -13,7 +13,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     Postgres,
-    pg_distrib_dir,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -128,7 +127,7 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
 
     num_rows = 3000
     lsn = _generate_data(num_rows, pg)
-    _import(num_rows, lsn, env, pg_bin, timeline)
+    _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir)
 
 
 @pytest.mark.timeout(1800)
@@ -156,7 +155,7 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
-    tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline)
+    tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir)
 
     # Check if the backup data contains multiple segment files
     cnt_seg_files = 0
@@ -191,7 +190,12 @@ def _generate_data(num_rows: int, pg: Postgres) -> Lsn:
 
 
 def _import(
-    expected_num_rows: int, lsn: Lsn, env: NeonEnv, pg_bin: PgBin, timeline: TimelineId
+    expected_num_rows: int,
+    lsn: Lsn,
+    env: NeonEnv,
+    pg_bin: PgBin,
+    timeline: TimelineId,
+    pg_distrib_dir: Path,
 ) -> str:
     """Test importing backup data to the pageserver.
 
@@ -205,7 +209,7 @@ def _import(
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": os.path.join(str(pg_distrib_dir), "lib")}
+    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
 
     # Get a fullbackup from pageserver
     query = f"fullbackup { env.initial_tenant} {timeline} {lsn}"
