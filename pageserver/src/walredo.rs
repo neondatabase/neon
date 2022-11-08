@@ -22,10 +22,10 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
 use serde::Serialize;
-use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::CommandExt;
 use std::path::PathBuf;
@@ -34,6 +34,7 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
+use std::{fs, io};
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
@@ -44,6 +45,7 @@ use crate::metrics::{
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
+use crate::task_mgr::BACKGROUND_RUNTIME;
 use crate::walrecord::NeonWalRecord;
 use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -580,11 +582,10 @@ impl<C: CommandExt> CloseFileDescriptors for C {
 ///
 struct PostgresRedoProcess {
     tenant_id: TenantId,
-    child: Child,
+    child: NoLeakChild,
     stdin: ChildStdin,
     stdout: ChildStdout,
     stderr: ChildStderr,
-    called_kill: bool,
 }
 
 impl PostgresRedoProcess {
@@ -656,7 +657,7 @@ impl PostgresRedoProcess {
         }
 
         // Start postgres itself
-        let mut child = Command::new(pg_bin_dir_path.join("postgres"))
+        let child = Command::new(pg_bin_dir_path.join("postgres"))
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -675,7 +676,7 @@ impl PostgresRedoProcess {
             // as close-on-exec by default, but that's not enough, since we use
             // libraries that directly call libc open without setting that flag.
             .close_fds()
-            .spawn()
+            .spawn_no_leak_child()
             .map_err(|e| {
                 Error::new(
                     e.kind(),
@@ -683,11 +684,10 @@ impl PostgresRedoProcess {
                 )
             })?;
 
-        info!(
-            pid = child.id(),
-            "launched WAL redo postgres process on {}",
-            datadir.display()
-        );
+        let mut child = scopeguard::guard(child, |child| {
+            error!("killing wal-redo-postgres process due to a problem during launch");
+            child.kill_and_wait();
+        });
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -706,48 +706,21 @@ impl PostgresRedoProcess {
         set_nonblock_or_log_err!(stdout)?;
         set_nonblock_or_log_err!(stderr)?;
 
+        // all fallible operations post-spawn are complete, so get rid of the guard
+        let child = scopeguard::ScopeGuard::into_inner(child);
+
         Ok(PostgresRedoProcess {
             tenant_id,
             child,
             stdin,
             stdout,
             stderr,
-            called_kill: false,
         })
     }
 
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
-    fn kill(mut self) {
-        info!("killing wal-redo-postgres process");
-        self.called_kill = true;
-
-        let res = self.child.kill();
-        if let Err(e) = res {
-            // This branch is very unlikely because:
-            // - We (= pageserver) spawned this process successfully, so, we're allowed to kill it.
-            // - This is the only place that calls .kill()
-            // - We consume `self`, so, .kill() can't be called twice.
-            // - If the process exited by itself or was killed by someone else,
-            //   .kill() will still succeed because we haven't wait()'ed yet.
-            //
-            // So, if we arrive here, we have really no idea what happened,
-            // whether the PID stored in self.child is still valid, etc.
-            // If this function were fallible, we'd return an error, but
-            // since it isn't, all we can do is log an error and proceed
-            // with the wait().
-            error!(error = %e, "failed to SIGKILL wal-redo-postgres; subsequent wait() might fail or wait for wrong process");
-        }
-
-        match self.child.wait() {
-            Ok(exit_status) => {
-                // log at error level since .kill() is something we only do on errors ATM
-                error!(exit_status = %exit_status, "wal-redo-postgres wait successful");
-            }
-            Err(e) => {
-                error!(error = %e, "wal-redo-postgres wait error; might leak the child process; it will show as zombie (defunct)");
-            }
-        }
-        drop(self);
+    fn kill(self) {
+        self.child.kill_and_wait();
     }
 
     //
@@ -880,11 +853,96 @@ impl PostgresRedoProcess {
     }
 }
 
-impl Drop for PostgresRedoProcess {
-    fn drop(&mut self) {
-        if !self.called_kill {
-            error!(tenant_id=%self.tenant_id, pid = %self.child.id(), "dropping PostgresRedoProcess that wasn't killed, likely causing defunct postgres process");
+/// Wrapper type around `std::process::Child` which guarantees that the child
+/// will be killed and waited-for by this process before being dropped.
+struct NoLeakChild {
+    child: Option<Child>,
+}
+
+impl Deref for NoLeakChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        self.child.as_ref().expect("must not use from drop")
+    }
+}
+
+impl DerefMut for NoLeakChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.child.as_mut().expect("must not use from drop")
+    }
+}
+
+impl NoLeakChild {
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        let child = command.spawn()?;
+        Ok(NoLeakChild { child: Some(child) })
+    }
+
+    fn kill_and_wait(mut self) {
+        let child = match self.child.take() {
+            Some(child) => child,
+            None => return,
+        };
+        Self::kill_and_wait_impl(child);
+    }
+
+    #[instrument(skip_all, fields(pid=child.id()))]
+    fn kill_and_wait_impl(mut child: Child) {
+        let res = child.kill();
+        if let Err(e) = res {
+            // This branch is very unlikely because:
+            // - We (= pageserver) spawned this process successfully, so, we're allowed to kill it.
+            // - This is the only place that calls .kill()
+            // - We consume `self`, so, .kill() can't be called twice.
+            // - If the process exited by itself or was killed by someone else,
+            //   .kill() will still succeed because we haven't wait()'ed yet.
+            //
+            // So, if we arrive here, we have really no idea what happened,
+            // whether the PID stored in self.child is still valid, etc.
+            // If this function were fallible, we'd return an error, but
+            // since it isn't, all we can do is log an error and proceed
+            // with the wait().
+            error!(error = %e, "failed to SIGKILL; subsequent wait() might fail or wait for wrong process");
         }
+
+        match child.wait() {
+            Ok(exit_status) => {
+                // log at error level since .kill() is something we only do on errors ATM
+                error!(exit_status = %exit_status, "wait successful");
+            }
+            Err(e) => {
+                error!(error = %e, "wait error; might leak the child process; it will show as zombie (defunct)");
+            }
+        }
+    }
+}
+
+impl Drop for NoLeakChild {
+    fn drop(&mut self) {
+        let child = match self.child.take() {
+            Some(child) => child,
+            None => return,
+        };
+        // Offload the kill+wait of the child process into the background.
+        // If someone stops the runtime, we'll leak the child process.
+        // We can ignore that case because we only stop the runtime on pageserver exit.
+        BACKGROUND_RUNTIME.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                Self::kill_and_wait_impl(child);
+            })
+            .await
+        });
+    }
+}
+
+trait NoLeakChildCommandExt {
+    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild>;
+}
+
+impl NoLeakChildCommandExt for Command {
+    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild> {
+        NoLeakChild::spawn(self)
     }
 }
 
