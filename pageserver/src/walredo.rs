@@ -697,7 +697,7 @@ impl PostgresRedoProcess {
             ($file:ident) => {{
                 let res = set_nonblock($file.as_raw_fd());
                 if let Err(e) = &res {
-                    error!(error = %e, concat!("set_nonblock failed on ", stringify!($file)));
+                    error!(error = %e, file = stringify!($file), pid = child.id(), "set_nonblock failed");
                 }
                 res
             }};
