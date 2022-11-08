@@ -192,7 +192,7 @@ typedef struct PrfHashEntry {
  * It maintains a (ring) buffer of in-flight requests and responses.
  * 
  * We maintain several indexes into the ring buffer:
- * ring_unused >= ring_receive >= ring_last >= 0
+ * ring_unused >= ring_flush >= ring_receive >= ring_last >= 0
  * 
  * ring_unused points to the first unused slot of the buffer
  * ring_receive is the next request that is to be received
@@ -208,6 +208,7 @@ typedef struct PrefetchState {
 
 	/* buffer indexes */
 	uint64	ring_unused;		/* first unused slot */
+	uint64	ring_flush;			/* next request to flush */
 	uint64	ring_receive;		/* next slot that is to receive a response */
 	uint64	ring_last;			/* min slot with a response value */
 
@@ -577,6 +578,13 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 	prefetch_do_request(slot, force_latest, force_lsn);
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(ring_index < MyPState->ring_unused);
+
+	if (flush_every_n_requests > 0 && MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
+	{
+		page_server->flush();
+		MyPState->ring_flush = MyPState->ring_unused;
+	}
+
 	return ring_index;
 }
 
@@ -585,6 +593,7 @@ page_server_request(void const *req)
 {
 	page_server->send((NeonRequest *) req);
 	page_server->flush();
+	MyPState->ring_flush = MyPState->ring_unused;
 	consume_prefetch_responses();
 	return page_server->receive();
 }
@@ -1581,6 +1590,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 			if (entry->slot->status == PRFS_REQUESTED)
 			{
 				page_server->flush();
+				MyPState->ring_flush = MyPState->ring_unused;
 				prefetch_wait_for(entry->slot->my_ring_index);
 			}
 			/* drop caches */
@@ -1606,7 +1616,11 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	Assert(slot->status != PRFS_UNUSED);
 	Assert(&MyPState->prf_buffer[(ring_index % READ_BUFFER_SIZE)] == slot);
 
-	page_server->flush();
+	if (ring_index >= MyPState->ring_flush)
+	{
+		page_server->flush();
+		MyPState->ring_flush = MyPState->ring_unused;
+	}
 	prefetch_wait_for(ring_index);
 
 	Assert(slot->status == PRFS_RECEIVED);
