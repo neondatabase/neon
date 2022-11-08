@@ -27,6 +27,7 @@ use std::sync::Arc;
 use tokio_util::io::StreamReader;
 use tokio_util::io::SyncIoBridge;
 use tracing::*;
+use utils::id::ConnectionId;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
@@ -272,9 +273,10 @@ impl PageServerHandler {
         // Make request tracer if needed
         let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
         let mut tracer = if tenant.get_trace_read_requests() {
+            let connection_id = ConnectionId::generate();
             let path = tenant
                 .conf
-                .trace_path(&tenant_id, &timeline_id, &TimelineId::generate());
+                .trace_path(&tenant_id, &timeline_id, &connection_id);
             Some(Tracer::new(path))
         } else {
             None

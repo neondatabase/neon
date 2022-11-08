@@ -8,6 +8,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use remote_storage::RemoteStorageConfig;
 use std::env;
 use utils::crashsafe::path_with_suffix_extension;
+use utils::id::ConnectionId;
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -422,7 +423,7 @@ impl PageServerConf {
         &self,
         tenant_id: &TenantId,
         timeline_id: &TimelineId,
-        connection_id: &TimelineId, // TODO make a new type
+        connection_id: &ConnectionId,
     ) -> PathBuf {
         self.traces_path()
             .join(tenant_id.to_string())
