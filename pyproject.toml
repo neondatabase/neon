@@ -29,6 +29,8 @@ pytest-order = "^1.0.1"
 allure-pytest = "^2.10.0"
 pytest-asyncio = "^0.19.0"
 toml = "^0.10.2"
+psutil = "^5.9.4"
+types-psutil = "^5.9.5.4"
 
 [tool.poetry.dev-dependencies]
 flake8 = "^5.0.4"
