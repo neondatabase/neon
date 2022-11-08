@@ -2,7 +2,7 @@ import statistics
 import threading
 import time
 import timeit
-from typing import Callable
+from typing import Any, Callable, List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -197,7 +197,7 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
     if not isinstance(env, NeonCompare):
         return
 
-    lsn_write_lags = []
+    lsn_write_lags: List[Any] = []
     last_received_lsn = Lsn(0)
     last_pg_flush_lsn = Lsn(0)
 
@@ -216,6 +216,7 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
             )
 
             res = cur.fetchone()
+            assert isinstance(res, list)
             lsn_write_lags.append(res[0])
 
             curr_received_lsn = Lsn(res[3])

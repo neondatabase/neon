@@ -129,6 +129,7 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
 
     create_and_send_db_info(vanilla_pg, psql_session_id, link_proxy.mgmt_port)
 
+    assert proc.stdout is not None
     out = (await proc.stdout.read()).decode("utf-8").strip()
     assert out == "42"
 
