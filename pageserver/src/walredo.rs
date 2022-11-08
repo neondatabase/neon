@@ -20,6 +20,7 @@
 //!
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
+use nix::poll::*;
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
@@ -39,11 +40,10 @@ use std::time::Instant;
 use std::{fs, io};
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
-use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn};
+use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
 use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
-    WAL_REDO_WAIT_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
@@ -62,6 +62,7 @@ use postgres_ffi::BLCKSZ;
 
 const N_CHANNELS: usize = 16;
 const CHANNEL_SIZE: usize = 1024 * 1024;
+const ERR_BUF_SIZE: usize = 8192;
 type ChannelId = usize;
 
 ///
@@ -162,7 +163,7 @@ impl WalRedoManager for PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, NeonWalRecord)>,
-        pg_version: u32,
+        _pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         if records.is_empty() {
             error!("invalid WAL redo request with no records");
@@ -212,29 +213,31 @@ impl PostgresRedoManager {
             senders.push(tx);
             receivers.push(Mutex::new(rx));
         }
-        if let Ok(mut proc) = PostgresRedoProcess::launch(conf, &tenant_id) {
-            let _proxy = std::thread::spawn(move || loop {
-                let mut requests = Vec::new();
-                let (id, data) = rx.recv().unwrap();
-                proc.stdin.write_all(&data).unwrap();
-                requests.push(id);
-                while let Ok((id, data)) = rx.try_recv() {
-                    proc.stdin.write_all(&data).unwrap();
-                    requests.push(id);
+        let _proxy = std::thread::spawn(move || {
+            while let Ok(mut proc) = PostgresRedoProcess::launch(conf, &tenant_id) {
+                loop {
+                    let (id, data) = rx.recv().unwrap();
+                    if proc.send(id, data, &senders).is_err() {
+                        break;
+                    }
+                    while let Ok((id, data)) = rx.try_recv() {
+                        if proc.send(id, data, &senders).is_err() {
+                            break;
+                        }
+                    }
+                    if proc.receive(&senders).is_err() {
+                        break;
+                    }
                 }
-                for id in requests {
-                    let mut page = vec![0; BLCKSZ as usize];
-                    proc.stdout.read_exact(&mut page).unwrap();
-                    senders[id as usize].send(Bytes::from(page)).unwrap();
-                }
-            });
-            PostgresRedoManager {
-                sender: tx,
-                receivers,
-                round_robin: AtomicUsize::new(0),
+                proc.kill();
             }
-        } else {
             panic!("Failed to launch wal-redo postgres");
+        });
+
+        PostgresRedoManager {
+            sender: tx,
+            receivers,
+            round_robin: AtomicUsize::new(0),
         }
     }
 
@@ -268,6 +271,9 @@ impl PostgresRedoManager {
         }
         build_get_page_msg(tag, &mut writebuf);
         WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
+
+        WAL_REDO_RECORDS_HISTOGRAM.observe(records.len() as f64);
+        WAL_REDO_BYTES_HISTOGRAM.observe(writebuf.len() as f64);
 
         let id = self.round_robin.fetch_add(1, Ordering::Relaxed) % N_CHANNELS;
         let rx = self.receivers[id].lock().unwrap();
@@ -600,9 +606,161 @@ struct PostgresRedoProcess {
     stdout: ChildStdout,
     stderr: ChildStderr,
     wal_redo_timeout: Duration,
+    // Ring buffer with channel identifiers of buffered redo requests
+    ring_buf: [ChannelId; N_CHANNELS],
+    // Head position in ring buffer
+    ring_buf_pos: usize,
+    // Number of buffered requests
+    n_buffered: usize,
+    // Reconstructed page
+    page: [u8; BLCKSZ as usize],
+    // Position in reconstructed page buufer
+    page_pos: usize,
+    // Pool file descriptors
+    poll_fds: [PollFd; 3],
 }
 
 impl PostgresRedoProcess {
+    fn receive(&mut self, senders: &Vec<Sender<Bytes>>) -> Result<(), Error> {
+        while self.n_buffered != 0 {
+            let n = loop {
+                match nix::poll::poll(
+                    &mut self.poll_fds[0..2],
+                    self.wal_redo_timeout.as_millis() as i32,
+                ) {
+                    Err(e) if e == nix::errno::Errno::EINTR => continue,
+                    res => break res,
+                }
+            }?;
+
+            if n == 0 {
+                return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
+            }
+            // If we have some messages in stderr, forward them to the log.
+            let err_revents = self.poll_fds[1].revents().unwrap();
+            if err_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
+                let mut errbuf: [u8; ERR_BUF_SIZE] = [0; ERR_BUF_SIZE];
+                let n = self.stderr.read(&mut errbuf)?;
+
+                // The message might not be split correctly into lines here. But this is
+                // good enough, the important thing is to get the message to the log.
+                if n > 0 {
+                    panic!(
+                        "wal-redo-postgres: {}",
+                        String::from_utf8_lossy(&errbuf[0..n])
+                    );
+                }
+            } else if err_revents.contains(PollFlags::POLLHUP) {
+                return Err(Error::new(
+                    ErrorKind::BrokenPipe,
+                    "WAL redo process closed its stderr unexpectedly",
+                ));
+            }
+            // If we have some data in stdout, read it to the result buffer.
+            let out_revents = self.poll_fds[0].revents().unwrap();
+            if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
+                self.page_pos += self.stdout.read(&mut self.page[self.page_pos..])?;
+                if self.page_pos == BLCKSZ as usize {
+                    assert!(self.n_buffered != 0);
+                    let id = self.ring_buf[self.ring_buf_pos];
+                    self.n_buffered -= 1;
+                    self.ring_buf_pos = (self.ring_buf_pos + 1) % N_CHANNELS;
+                    self.page_pos = 0;
+                    senders[id]
+                        .send(Bytes::copy_from_slice(&self.page))
+                        .unwrap();
+                }
+            } else if out_revents.contains(PollFlags::POLLHUP) {
+                return Err(Error::new(
+                    ErrorKind::BrokenPipe,
+                    "WAL redo process closed its stdout unexpectedly",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn send(
+        &mut self,
+        id: ChannelId,
+        data: Vec<u8>,
+        senders: &Vec<Sender<Bytes>>,
+    ) -> Result<(), Error> {
+        let mut written = 0usize;
+        let data_len = data.len();
+        assert!(self.n_buffered < N_CHANNELS);
+        self.ring_buf[(self.ring_buf_pos + self.n_buffered) % N_CHANNELS] = id;
+        self.n_buffered += 1;
+        while written < data_len {
+            let n = loop {
+                match nix::poll::poll(
+                    &mut self.poll_fds[0..3],
+                    self.wal_redo_timeout.as_millis() as i32,
+                ) {
+                    Err(e) if e == nix::errno::Errno::EINTR => continue,
+                    res => break res,
+                }
+            }?;
+
+            if n == 0 {
+                return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
+            }
+
+            // If we have some messages in stderr, forward them to the log.
+            let err_revents = self.poll_fds[1].revents().unwrap();
+            if err_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
+                let mut errbuf: [u8; ERR_BUF_SIZE] = [0; ERR_BUF_SIZE];
+                let n = self.stderr.read(&mut errbuf)?;
+
+                // The message might not be split correctly into lines here. But this is
+                // good enough, the important thing is to get the message to the log.
+                if n > 0 {
+                    panic!(
+                        "wal-redo-postgres: {}",
+                        String::from_utf8_lossy(&errbuf[0..n])
+                    );
+                }
+            } else if err_revents.contains(PollFlags::POLLHUP) {
+                return Err(Error::new(
+                    ErrorKind::BrokenPipe,
+                    "WAL redo process closed its stderr unexpectedly",
+                ));
+            }
+
+            let in_revents = self.poll_fds[2].revents().unwrap();
+            if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
+                written += self.stdin.write(&data[written..data_len])?;
+            } else if in_revents.contains(PollFlags::POLLHUP) {
+                // We still have more data to write, but the process closed the pipe.
+                return Err(Error::new(
+                    ErrorKind::BrokenPipe,
+                    "WAL redo process closed its stdin unexpectedly",
+                ));
+            }
+            // If we have some data in stdout, read it to the result buffer.
+            let out_revents = self.poll_fds[0].revents().unwrap();
+            if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
+                self.page_pos += self.stdout.read(&mut self.page[self.page_pos..])?;
+                if self.page_pos == BLCKSZ as usize {
+                    assert!(self.n_buffered != 0);
+                    let id = self.ring_buf[self.ring_buf_pos];
+                    self.n_buffered -= 1;
+                    self.ring_buf_pos = (self.ring_buf_pos + 1) % N_CHANNELS;
+                    self.page_pos = 0;
+                    senders[id]
+                        .send(Bytes::copy_from_slice(&self.page))
+                        .unwrap();
+                }
+            } else if out_revents.contains(PollFlags::POLLHUP) {
+                return Err(Error::new(
+                    ErrorKind::BrokenPipe,
+                    "WAL redo process closed its stdout unexpectedly",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     //
     // Start postgres binary in special WAL redo mode.
     //
@@ -724,6 +882,12 @@ impl PostgresRedoProcess {
         // all fallible operations post-spawn are complete, so get rid of the guard
         let child = scopeguard::ScopeGuard::into_inner(child);
 
+        let poll_fds = [
+            PollFd::new(stdout.as_raw_fd(), PollFlags::POLLIN),
+            PollFd::new(stderr.as_raw_fd(), PollFlags::POLLIN),
+            PollFd::new(stdin.as_raw_fd(), PollFlags::POLLOUT),
+        ];
+
         Ok(PostgresRedoProcess {
             tenant_id,
             child,
@@ -731,6 +895,12 @@ impl PostgresRedoProcess {
             stdout,
             stderr,
             wal_redo_timeout: conf.wal_redo_timeout,
+            ring_buf: [0; N_CHANNELS],
+            ring_buf_pos: 0,
+            n_buffered: 0,
+            page: [0u8; BLCKSZ as usize],
+            page_pos: 0,
+            poll_fds,
         })
     }
 }
