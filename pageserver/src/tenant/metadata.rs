@@ -94,6 +94,7 @@ struct TimelineMetadataBodyV1 {
 }
 
 impl TimelineMetadata {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         disk_consistent_lsn: Lsn,
         prev_record_lsn: Option<Lsn>,

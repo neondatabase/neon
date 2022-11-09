@@ -697,7 +697,7 @@ impl<'a> DatadirModification<'a> {
             slru_dir_to_key(SlruKind::MultiXactOffsets),
             empty_dir.clone(),
         );
-        self.put(slru_dir_to_key(SlruKind::Csn), empty_dir.clone());
+        self.put(slru_dir_to_key(SlruKind::Csn), empty_dir);
 
         Ok(())
     }

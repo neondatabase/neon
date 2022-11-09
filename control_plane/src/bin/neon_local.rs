@@ -1017,7 +1017,7 @@ fn cli() -> Command {
                 .about("Create a new blank timeline")
                 .arg(tenant_id_arg.clone())
                 .arg(branch_name_arg.clone())
-                .arg(region_id_arg.clone())
+                .arg(region_id_arg)
                 .arg(pg_version_arg.clone())
             )
             .subcommand(Command::new("import")

@@ -811,13 +811,13 @@ impl<'a> WalIngest<'a> {
                     if is_commit {
                         NeonWalRecord::CsnLogSetCommitted {
                             xids: csn_page_xids,
-                            region: region,
-                            lsn: lsn,
+                            region,
+                            lsn,
                         }
                     } else {
                         NeonWalRecord::CsnLogSetAborted {
                             xids: csn_page_xids,
-                            region: region,
+                            region,
                         }
                     },
                 )?;
@@ -835,13 +835,13 @@ impl<'a> WalIngest<'a> {
             if is_commit {
                 NeonWalRecord::CsnLogSetCommitted {
                     xids: csn_page_xids,
-                    region: region,
-                    lsn: lsn,
+                    region,
+                    lsn,
                 }
             } else {
                 NeonWalRecord::CsnLogSetAborted {
                     xids: csn_page_xids,
-                    region: region,
+                    region,
                 }
             },
         )?;
