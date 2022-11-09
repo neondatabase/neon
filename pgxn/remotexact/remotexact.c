@@ -36,13 +36,25 @@ typedef struct CollectedRelationKey
 
 typedef struct CollectedRelation
 {
+	/* Key for the collected_relations table */
 	CollectedRelationKey key;
 
+	/* Region this relation belong to */
 	int8		region;
+
+	/* Is this relation an index? */
 	bool		is_index;
+
+	/* If this relation is a table, did we do a table scan? */
+	bool		is_table_scan;
+
+	/* Number of pages if is_index is true, number of tuples otherwise */
 	int			nitems;
 
+	/* List of pages read if this is an index, empty if this is a table */
 	StringInfoData pages;
+
+	/* List of tuples read if this is an index, empty if this is a table */
 	StringInfoData tuples;
 } CollectedRelation;
 
@@ -150,9 +162,11 @@ rx_collect_relation(int region, Oid dbid, Oid relid)
 	CollectedRelation *relation;
 
 	init_rwset_collection_buffer(dbid);
+
 	relation = get_collected_relation(relid, true);
 	relation->region = region;
 	relation->is_index = false;
+	relation->is_table_scan = true;
 
 	rwset_add_region(region);
 }
@@ -377,6 +391,7 @@ rx_execute_remote_xact(void)
 		Oid			relid = relation->key.relid;
 		int8		region = relation->region;
 		SnapshotCSN	csn = InvalidXLogRecPtr;
+		bool		is_table_scan = relation->is_table_scan;
 		int			nitems = relation->nitems;
 		StringInfo	items = NULL;
 		
@@ -389,22 +404,18 @@ rx_execute_remote_xact(void)
 		if (relation->is_index)
 		{
 			pq_sendbyte(&buf, 'I');
-			pq_sendint32(&buf, relid);
-			pq_sendbyte(&buf, region);
-			pq_sendint64(&buf, csn);
-			pq_sendint32(&buf, nitems);
 			items = &relation->pages;
 		}
 		else
 		{
 			pq_sendbyte(&buf, 'T');
-			pq_sendint32(&buf, relid);
-			pq_sendbyte(&buf, region);
-			pq_sendint64(&buf, csn);
-			pq_sendint32(&buf, nitems);
 			items = &relation->tuples;
 		}
-
+		pq_sendint32(&buf, relid);
+		pq_sendbyte(&buf, region);
+		pq_sendint64(&buf, csn);
+		pq_sendbyte(&buf, is_table_scan);
+		pq_sendint32(&buf, nitems);
 		pq_sendbytes(&buf, items->data, items->len);
 
 		read_len += buf.len;
@@ -507,6 +518,7 @@ get_collected_relation(Oid relid, bool create_if_not_found)
 			relation->nitems = 0;
 			relation->region = UNKNOWN_REGION;
 			relation->is_index = false;
+			relation->is_table_scan = false;
 			initStringInfo(&relation->pages);
 			initStringInfo(&relation->tuples);
 

@@ -116,27 +116,21 @@ decode_relation(RWSet *rwset, StringInfo msg)
 	rel->relid = pq_getmsgint(msg, 4);
 	rel->region = pq_getmsgbyte(msg);
 	rel->csn = pq_getmsgint64(msg);
+	rel->is_table_scan = pq_getmsgbyte(msg);
 	nitems = pq_getmsgint(msg, 4);
 
 	if (rel->is_index)
-	{
 		for (i = 0; i < nitems; i++)
 		{
 			RWSetPage  *page = decode_page(rwset, msg);
-
 			dlist_push_tail(&rel->pages, &page->node);
 		}
-	}
 	else
-	{
-
 		for (i = 0; i < nitems; i++)
 		{
 			RWSetTuple *tup = decode_tuple(rwset, msg);
-
 			dlist_push_tail(&rel->tuples, &tup->node);
 		}
-	}
 
 	return rel;
 }
@@ -247,10 +241,10 @@ RWSetToString(RWSet *rwset)
 		first_group = false;
 
 		appendStringInfoString(&s, "\n\t{");
-		appendStringInfo(&s, "\"relid\": %d", rel->relid);
+		appendStringInfo(&s, "\"is_index\": %d", rel->is_index);
+		appendStringInfo(&s, ", \"relid\": %d", rel->relid);
 		appendStringInfo(&s, ", \"region\": %d", rel->region);
 		appendStringInfo(&s, ", \"csn\": %ld", rel->csn);
-		appendStringInfo(&s, ", \"is_index\": %d", rel->is_index);
 
 		/* Pages */
 		if (!dlist_is_empty(&rel->pages))
@@ -372,7 +366,6 @@ RWSetToString(RWSet *rwset)
 	}
 
 	appendStringInfoString(&s, "\n]");
-
 	appendStringInfoString(&s, "}");
 
 	return s.data;
@@ -395,7 +388,6 @@ append_tuple_string(StringInfo s, const LogicalRepTupleData *tuple)
 		appendStringInfo(s, "%d", tuple->colvalues[i].len);
 	}
 	appendStringInfoString(s, "]");
-
 	appendStringInfoString(s, "}");
 }
 

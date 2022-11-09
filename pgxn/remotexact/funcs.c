@@ -58,7 +58,7 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 		if (region != current_region)
 			continue;
 
-		if (!rel->is_index)
+		if (!rel->is_index && rel->is_table_scan)
 			validate_table_scan(relid, read_csn);
 	}
 
