@@ -21,9 +21,9 @@ from pytest import FixtureRequest
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
-# - `test_create_snapshot` a script wrapped in a tests that creates a data snapshot.
+# - `test_create_snapshot` a script wrapped in a test that creates a data snapshot.
 # - `test_backward_compatibility` checks that the current version of Neon can start/read/interract with a data snapshot created by the previous version.
-#   The path to the snapshot is configures by COMPATIBILITY_SNAPSHOT_DIR environment variable.
+#   The path to the snapshot is configured by COMPATIBILITY_SNAPSHOT_DIR environment variable.
 #   If the breakage is intentional, the test can be xfaild with setting ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE=true.
 # - `test_forward_compatibility` checks that a snapshot created by the current version can be started/read/interracted by the previous version of Neon.
 #   Paths to Neon and Postgres are configured by COMPATIBILITY_NEON_BIN and COMPATIBILITY_POSTGRES_DISTRIB_DIR environment variables.
