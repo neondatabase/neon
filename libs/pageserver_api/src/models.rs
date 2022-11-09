@@ -15,8 +15,14 @@ use bytes::{BufMut, Bytes, BytesMut};
 /// A state of a tenant in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TenantState {
+    // This tenant is being loaded from local disk
+    Loading,
+    // This tenant is being downloaded from cloud storage.
+    Attaching,
     /// Tenant is fully operational, its background jobs might be running or not.
-    Active { background_jobs_running: bool },
+    Active {
+        background_jobs_running: bool,
+    },
     /// A tenant is recognized by pageserver, but not yet ready to operate:
     /// e.g. not present locally and being downloaded or being read into memory from the file system.
     Paused,
@@ -144,7 +150,6 @@ pub struct TenantInfo {
     pub id: TenantId,
     pub state: TenantState,
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
-    pub has_in_progress_downloads: Option<bool>,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -168,6 +173,8 @@ pub struct TimelineInfo {
     pub latest_gc_cutoff_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
@@ -179,10 +186,6 @@ pub struct TimelineInfo {
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
     pub pg_version: u32,
-
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub remote_consistent_lsn: Option<Lsn>,
-    pub awaits_download: bool,
 
     pub state: TimelineState,
 
