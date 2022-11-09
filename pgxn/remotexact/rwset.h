@@ -51,10 +51,11 @@ typedef struct RWSetTuple
  */
 typedef struct RWSetRelation
 {
+	bool		is_index;
 	Oid			relid;
 	int8		region;
 	XidCSN		csn;
-	bool		is_index;
+	bool		is_table_scan;
 	dlist_head	pages;
 	dlist_head	tuples;
 
