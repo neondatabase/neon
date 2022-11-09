@@ -214,7 +214,7 @@ impl PostgresRedoManager {
             receivers.push(Mutex::new(rx));
         }
         let _proxy = std::thread::spawn(move || {
-            while let Ok(mut proc) = PostgresRedoProcess::launch(conf, &tenant_id) {
+            while let Ok(mut proc) = PostgresRedoProcess::launch(conf, tenant_id) {
                 loop {
                     let (id, data) = rx.recv().unwrap();
                     if proc.send(id, data, &senders).is_err() {
@@ -229,7 +229,6 @@ impl PostgresRedoManager {
                         break;
                     }
                 }
-                proc.kill();
             }
             panic!("Failed to launch wal-redo postgres");
         });
@@ -241,7 +240,6 @@ impl PostgresRedoManager {
         }
     }
 
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
     fn apply_wal_records(
         &self,
         tag: BufferTag,
@@ -621,6 +619,7 @@ struct PostgresRedoProcess {
 }
 
 impl PostgresRedoProcess {
+    #[instrument(skip_all,fields(tenant_id=%self.tenant_id))]
     fn receive(&mut self, senders: &Vec<Sender<Bytes>>) -> Result<(), Error> {
         while self.n_buffered != 0 {
             let n = loop {
@@ -680,6 +679,7 @@ impl PostgresRedoProcess {
         Ok(())
     }
 
+    #[instrument(skip_all,fields(tenant_id=%self.tenant_id))]
     fn send(
         &mut self,
         id: ChannelId,
@@ -764,7 +764,7 @@ impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    #[instrument(skip_all,fields(tenant_id=%tenant_id, pg_version=pg_version))]
+    #[instrument(skip_all,fields(tenant_id=%tenant_id))]
     fn launch(conf: &PageServerConf, tenant_id: TenantId) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
