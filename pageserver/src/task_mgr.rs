@@ -205,6 +205,9 @@ pub enum TaskKind {
 
     // task that handles attaching a tenant
     Attach,
+
+    // Task that manages tenant drop
+    TenantDrop,
 }
 
 #[derive(Default)]

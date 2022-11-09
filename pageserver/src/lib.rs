@@ -13,6 +13,7 @@ pub mod storage_sync;
 pub mod task_mgr;
 pub mod tenant;
 pub mod tenant_config;
+pub mod tenant_guard;
 pub mod tenant_mgr;
 pub mod tenant_tasks;
 pub mod virtual_file;

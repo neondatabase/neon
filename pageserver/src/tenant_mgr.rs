@@ -4,6 +4,7 @@
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use crate::tenant::{
     ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
 };
 use crate::tenant_config::TenantConfOpt;
+use crate::tenant_guard::{TenantAccessor, TenantRef};
 use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
 
@@ -28,25 +30,24 @@ use utils::crashsafe::{self, path_with_suffix_extension};
 use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
+    use crate::tenant_guard::TenantAccessor;
     use once_cell::sync::Lazy;
     use std::{
         collections::HashMap,
-        sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+        sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     };
     use utils::id::TenantId;
 
-    use crate::tenant::Tenant;
-
-    static TENANTS: Lazy<RwLock<HashMap<TenantId, Arc<Tenant>>>> =
+    static TENANTS: Lazy<RwLock<HashMap<TenantId, TenantAccessor>>> =
         Lazy::new(|| RwLock::new(HashMap::new()));
 
-    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<TenantId, Arc<Tenant>>> {
+    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<TenantId, TenantAccessor>> {
         TENANTS
             .read()
             .expect("Failed to read() tenants lock, it got poisoned")
     }
 
-    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<TenantId, Arc<Tenant>>> {
+    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<TenantId, TenantAccessor>> {
         TENANTS
             .write()
             .expect("Failed to write() tenants lock, it got poisoned")
@@ -144,14 +145,14 @@ pub fn attach_local_tenants(
 
     for (tenant_id, local_timelines) in tenants_to_attach {
         let mut tenants_accessor = tenants_state::write_tenants();
-        let tenant = match tenants_accessor.entry(tenant_id) {
+        let accessor = match tenants_accessor.entry(tenant_id) {
             hash_map::Entry::Occupied(o) => {
                 info!("Tenant {tenant_id} was found in pageserver's memory");
-                Arc::clone(o.get())
+                o.get().clone()
             }
             hash_map::Entry::Vacant(v) => {
                 info!("Tenant {tenant_id} was not found in pageserver's memory, loading it");
-                let tenant = Arc::new(Tenant::new(
+                let accessor = TenantAccessor::new(Tenant::new(
                     conf,
                     TenantConfOpt::default(),
                     Arc::new(PostgresRedoManager::new(conf, tenant_id)),
@@ -159,50 +160,56 @@ pub fn attach_local_tenants(
                     remote_index.clone(),
                     conf.remote_storage_config.is_some(),
                 ));
-                match local_timelines {
-                    TenantAttachData::Broken(_) => {
-                        tenant.set_state(TenantState::Broken);
-                    }
-                    TenantAttachData::Ready(_) => {
-                        match Tenant::load_tenant_config(conf, tenant_id) {
-                            Ok(tenant_conf) => {
-                                tenant.update_tenant_config(tenant_conf);
-                                tenant.activate(false);
-                            }
-                            Err(e) => {
-                                error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
-                                tenant.set_state(TenantState::Broken);
-                            }
-                        };
-                    }
-                }
-                v.insert(Arc::clone(&tenant));
-                tenant
+                accessor.with_upgrade(|tenant| {
+                    match local_timelines {
+                        TenantAttachData::Broken(_) => {
+                            tenant.set_state(TenantState::Broken);
+                        }
+                        TenantAttachData::Ready(_) => {
+                            match Tenant::load_tenant_config(conf, tenant_id) {
+                                Ok(tenant_conf) => {
+                                    tenant.update_tenant_config(tenant_conf);
+                                    tenant.activate(false);
+                                }
+                                Err(e) => {
+                                    error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
+                                    tenant.set_state(TenantState::Broken);
+                                }
+                            };
+                        }
+                    };
+                }).expect("tenant must be alive after creation");
+                v.insert(accessor.clone());
+                accessor
             }
         };
         drop(tenants_accessor);
-        match local_timelines {
-            TenantAttachData::Broken(e) => warn!("{}", e),
-            TenantAttachData::Ready(ref timelines) => {
-                info!("Attaching {} timelines for {tenant_id}", timelines.len());
-                debug!("Timelines to attach: {local_timelines:?}");
-                let has_timelines = !timelines.is_empty();
-                let timelines_to_attach = timelines
-                    .iter()
-                    .map(|(&k, v)| (k, v.metadata().to_owned()))
-                    .collect();
-                match tenant.init_attach_timelines(timelines_to_attach) {
-                    Ok(()) => {
-                        info!("successfully loaded local timelines for tenant {tenant_id}");
-                        tenant.activate(has_timelines);
+        accessor
+            .with_upgrade(|tenant| {
+                match local_timelines {
+                    TenantAttachData::Broken(e) => warn!("{}", e),
+                    TenantAttachData::Ready(ref timelines) => {
+                        info!("Attaching {} timelines for {tenant_id}", timelines.len());
+                        debug!("Timelines to attach: {local_timelines:?}");
+                        let has_timelines = !timelines.is_empty();
+                        let timelines_to_attach = timelines
+                            .iter()
+                            .map(|(&k, v)| (k, v.metadata().to_owned()))
+                            .collect();
+                        match tenant.init_attach_timelines(timelines_to_attach) {
+                            Ok(()) => {
+                                info!("successfully loaded local timelines for tenant {tenant_id}");
+                                tenant.activate(has_timelines);
+                            }
+                            Err(e) => {
+                                error!("Failed to attach tenant timelines: {e:?}");
+                                tenant.set_state(TenantState::Broken);
+                            }
+                        }
                     }
-                    Err(e) => {
-                        error!("Failed to attach tenant timelines: {e:?}");
-                        tenant.set_state(TenantState::Broken);
-                    }
-                }
-            }
-        }
+                };
+            })
+            .expect("tenant must be alive after creation");
     }
 
     info!("Processed {number_of_tenants} local tenants during attach")
@@ -212,39 +219,14 @@ pub fn attach_local_tenants(
 /// Shut down all tenants. This runs as part of pageserver shutdown.
 ///
 pub async fn shutdown_all_tenants() {
-    let tenants_to_shut_down = {
-        let mut m = tenants_state::write_tenants();
-        let mut tenants_to_shut_down = Vec::with_capacity(m.len());
-        for (_, tenant) in m.drain() {
-            if tenant.is_active() {
-                // updates tenant state, forbidding new GC and compaction iterations from starting
-                tenant.set_state(TenantState::Paused);
-                tenants_to_shut_down.push(tenant)
-            }
-        }
-        drop(m);
-        tenants_to_shut_down
-    };
-
-    // Shut down all existing walreceiver connections and stop accepting the new ones.
-    task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
-
-    // Ok, no background tasks running anymore. Flush any remaining data in
-    // memory to disk.
-    //
-    // We assume that any incoming connections that might request pages from
-    // the tenant have already been terminated by the caller, so there
-    // should be no more activity in any of the repositories.
-    //
-    // On error, log it but continue with the shutdown for other tenants.
-    for tenant in tenants_to_shut_down {
-        let tenant_id = tenant.tenant_id();
-        debug!("shutdown tenant {tenant_id}");
-
-        if let Err(err) = tenant.checkpoint().await {
-            error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
-        }
+    let mut m = tenants_state::write_tenants();
+    for (_, accessor) in m.drain() {
+        let _ = accessor.with_upgrade(|tenant| {
+            info!("shutdown tenant {}", tenant.tenant_id());
+            tenant.set_state(TenantState::Stopping);
+        });
     }
+    drop(m);
 }
 
 fn create_tenant_files(
@@ -386,7 +368,7 @@ pub fn create_tenant(
         hash_map::Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
             create_tenant_files(conf, tenant_conf, tenant_id)?;
-            let tenant = Arc::new(Tenant::new(
+            let guard = TenantAccessor::new(Tenant::new(
                 conf,
                 tenant_conf,
                 wal_redo_manager,
@@ -394,8 +376,12 @@ pub fn create_tenant(
                 remote_index,
                 conf.remote_storage_config.is_some(),
             ));
-            tenant.activate(false);
-            v.insert(tenant);
+            guard
+                .with_upgrade(|tenant| {
+                    tenant.activate(false);
+                })
+                .expect("tenant must be alive after creation");
+            v.insert(guard);
             Ok(Some(tenant_id))
         }
     }
@@ -407,23 +393,40 @@ pub fn update_tenant_config(
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
-    get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);
+    with_tenant(tenant_id, |tenant| {
+        tenant.update_tenant_config(tenant_conf);
+    })?;
     Tenant::persist_tenant_config(&conf.tenant_config_path(tenant_id), tenant_conf, false)?;
     Ok(())
 }
 
-/// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
-/// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-pub fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
-    let m = tenants_state::read_tenants();
-    let tenant = m
+/// Gets the alive tenant from the in-memory data, then applies the specified
+/// function. Returns `None` if there is no tenant in memory.
+pub fn with_tenant<F, O>(tenant_id: TenantId, func: F) -> anyhow::Result<O>
+where
+    F: FnOnce(&Tenant) -> O,
+{
+    // Don't hold the lock for too long
+    let accessor = tenants_state::read_tenants()
         .get(&tenant_id)
-        .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
-    if active_only && !tenant.is_active() {
-        anyhow::bail!("Tenant {tenant_id} is not active")
-    } else {
-        Ok(Arc::clone(tenant))
-    }
+        .cloned()
+        .with_context(|| format!("tenant {tenant_id} was not found"))?;
+    accessor.with_upgrade(func)
+}
+
+/// Gets the alive tenant from the in-memory data, then applies the specified
+/// asynchronous function. Returns `None` if there is no tenant in memory.
+pub async fn with_tenant_async<F, T, O>(tenant_id: TenantId, func: F) -> anyhow::Result<O>
+where
+    F: FnOnce(TenantRef) -> T,
+    T: Future<Output = O>,
+{
+    // Don't hold the lock for too long
+    let accessor = tenants_state::read_tenants()
+        .get(&tenant_id)
+        .cloned()
+        .with_context(|| format!("tenant {tenant_id} was not found"))?;
+    accessor.with_upgrade_async(func).await
 }
 
 pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<()> {
@@ -448,34 +451,33 @@ pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> an
     info!("waiting for timeline tasks to shutdown");
     task_mgr::shutdown_tasks(None, Some(tenant_id), Some(timeline_id)).await;
     info!("timeline task shutdown completed");
-    match get_tenant(tenant_id, true) {
-        Ok(tenant) => {
-            tenant.delete_timeline(timeline_id)?;
-            if tenant.list_timelines().is_empty() {
-                tenant.activate(false);
-            }
-        }
-        Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
-    }
 
-    Ok(())
+    with_tenant(tenant_id, |tenant| {
+        tenant.delete_timeline(timeline_id)?;
+        if tenant.list_timelines().is_empty() {
+            tenant.activate(false);
+        }
+        Ok(())
+    }).map_err(|err| anyhow::anyhow!("Cannot access tenant: {err:?}"))?
 }
 
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
-    let tenant = match {
-        let mut tenants_accessor = tenants_state::write_tenants();
-        tenants_accessor.remove(&tenant_id)
-    } {
-        Some(tenant) => tenant,
-        None => anyhow::bail!("Tenant not found for id {tenant_id}"),
-    };
+    let accessor = tenants_state::write_tenants()
+        .remove(&tenant_id)
+        .with_context(|| format!("Tenant not found for id {tenant_id}"))?;
 
-    tenant.set_state(TenantState::Paused);
-    // shutdown all tenant and timeline tasks: gc, compaction, page service)
-    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
+    // Stop the tenant
+    accessor.with_upgrade(|tenant| {
+        tenant.set_state(TenantState::Stopping);
+    })?;
+
+    // wait for tenant guard to drop and schedule tenant drop
+    if let Some(mut watcher) = accessor.subscribe_for_tenant_shutdown() {
+        let _ = watcher.changed().await;
+    }
 
     // If removal fails there will be no way to successfully retry detach,
     // because the tenant no longer exists in the in-memory map. And it needs to be removed from it

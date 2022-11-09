@@ -19,7 +19,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     invalid_tenant_id = TenantId.generate()
     with pytest.raises(
         PageserverApiException,
-        match=f"Tenant {invalid_tenant_id} not found in the local state",
+        match=f"Cannot access tenant: tenant {invalid_tenant_id} was not found",
     ):
         ps_http.timeline_delete(tenant_id=invalid_tenant_id, timeline_id=invalid_timeline_id)
 
@@ -66,7 +66,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     # check 404
     with pytest.raises(
         PageserverApiException,
-        match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
+        match=f"NotFound: Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
     ):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 

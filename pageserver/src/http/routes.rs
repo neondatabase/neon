@@ -189,27 +189,32 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
     let state = get_state(&request);
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
-    let new_timeline_info = async {
-        match tenant.create_timeline(
-            request_data.new_timeline_id.map(TimelineId::from),
-            request_data.ancestor_timeline_id.map(TimelineId::from),
-            request_data.ancestor_start_lsn,
-            request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION)
-        ).await {
+    let new_timeline_info =
+        match tenant_mgr::with_tenant_async(tenant_id, move |tenant| async move {
+            tenant
+                .create_timeline(
+                    request_data.new_timeline_id.map(TimelineId::from),
+                    request_data.ancestor_timeline_id.map(TimelineId::from),
+                    request_data.ancestor_start_lsn,
+                    request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+                )
+                .await
+        })
+        .await
+        .map_err(ApiError::NotFound)?
+        {
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
                 let timeline_info = build_timeline_info(state, &new_timeline, false, false)
                     .await
                     .map_err(ApiError::InternalServerError)?;
-                Ok(Some(timeline_info))
+                Some(timeline_info)
             }
-            Ok(None) => Ok(None), // timeline already exists
-            Err(err) => Err(ApiError::InternalServerError(err)),
-        }
-    }
-    .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
-        .await?;
+            Ok(None) => None, // timeline already exists
+            Err(err) => {
+                return Err(ApiError::InternalServerError(err));
+            }
+        };
 
     Ok(match new_timeline_info {
         Some(info) => json_response(StatusCode::CREATED, info)?,
@@ -228,8 +233,8 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     let state = get_state(&request);
 
     let timelines = info_span!("timeline_list", tenant = %tenant_id).in_scope(|| {
-        let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
-        Ok(tenant.list_timelines())
+        tenant_mgr::with_tenant(tenant_id, |tenant| Ok(tenant.list_timelines()))
+            .map_err(ApiError::NotFound)?
     })?;
 
     let mut response_data = Vec::with_capacity(timelines.len());
@@ -293,12 +298,11 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 
     let timeline_info = async {
         let timeline = tokio::task::spawn_blocking(move || {
-            tenant_mgr::get_tenant(tenant_id, true)?.get_timeline(timeline_id, false)
+            tenant_mgr::with_tenant(tenant_id, |tenant| tenant.get_timeline(timeline_id, false))?
         })
         .await
-        .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
-
-        let timeline = timeline.map_err(ApiError::NotFound)?;
+        .map_err(|err| ApiError::InternalServerError(err.into()))?
+        .map_err(|err| ApiError::NotFound(err.into()))?;
 
         let timeline_info = build_timeline_info(
             state,
@@ -329,9 +333,10 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
-    let timeline = tenant_mgr::get_tenant(tenant_id, true)
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
-        .map_err(ApiError::NotFound)?;
+    let timeline =
+        tenant_mgr::with_tenant(tenant_id, |tenant| tenant.get_timeline(timeline_id, true))
+            .map_err(ApiError::NotFound)?
+            .map_err(ApiError::NotFound)?; // What should we return if there's no timeline?
     let result = match timeline
         .find_lsn_for_timestamp(timestamp_pg)
         .map_err(ApiError::InternalServerError)?
@@ -351,8 +356,8 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
 
     info!("Handling tenant attach {tenant_id}");
 
-    tokio::task::spawn_blocking(move || match tenant_mgr::get_tenant(tenant_id, false) {
-        Ok(tenant) => {
+    tokio::task::spawn_blocking(move || {
+        tenant_mgr::with_tenant(tenant_id, |tenant| {
             if tenant.list_timelines().is_empty() {
                 info!("Attaching to tenant {tenant_id} with zero timelines");
                 Ok(())
@@ -361,8 +366,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
                     "Tenant is already present locally".to_owned(),
                 ))
             }
-        }
-        Err(_) => Ok(()),
+        }).unwrap_or(Ok(()))
     })
     .await
     .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
@@ -519,9 +523,6 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    // if tenant is in progress of downloading it can be absent in global tenant map
-    let tenant = tenant_mgr::get_tenant(tenant_id, false);
-
     let state = get_state(&request);
     let remote_index = &state.remote_index;
 
@@ -534,26 +535,23 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
             false
         });
 
-    let (tenant_state, current_physical_size) = match tenant {
-        Ok(tenant) => {
-            let timelines = tenant.list_timelines();
-            // Calculate total physical size of all timelines
-            let mut current_physical_size = 0;
-            for timeline in timelines {
-                current_physical_size += timeline.get_physical_size();
-            }
-
-            (tenant.current_state(), Some(current_physical_size))
+    let (tenant_state, current_physical_size) = tenant_mgr::with_tenant(tenant_id, |tenant| {
+        let timelines = tenant.list_timelines();
+        // Calculate total physical size of all timelines
+        let mut current_physical_size = 0;
+        for timeline in timelines {
+            current_physical_size += timeline.get_physical_size();
         }
-        Err(e) => {
-            error!("Failed to get local tenant state: {e:#}");
-            if has_in_progress_downloads {
-                (TenantState::Paused, None)
-            } else {
-                (TenantState::Broken, None)
-            }
+        (tenant.current_state(), Some(current_physical_size))
+    })
+    .unwrap_or_else(|err| {
+        error!("Failed to get local tenant state: {err:#}");
+        if has_in_progress_downloads {
+            (TenantState::Paused, None)
+        } else {
+            (TenantState::Stopped, None)
         }
-    };
+    });
 
     json_response(
         StatusCode::OK,
@@ -570,13 +568,16 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::InternalServerError)?;
+    let inputs = tenant_mgr::with_tenant_async(tenant_id, move |tenant| async move {
+        tenant
+            .gather_size_inputs()
+            .await
+            .map_err(ApiError::InternalServerError)
+    })
+    .await
+    .map_err(ApiError::NotFound)??;
 
     // this can be long operation, it currently is not backed by any request coalescing or similar
-    let inputs = tenant
-        .gather_size_inputs()
-        .await
-        .map_err(ApiError::InternalServerError)?;
 
     let size = inputs.calculate().map_err(ApiError::InternalServerError)?;
 
@@ -822,20 +823,24 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     // FIXME: currently this will return a 500 error on bad tenant id; it should be 4XX
-    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::NotFound)?;
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
-    let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
+    let result = tenant_mgr::with_tenant_async(tenant_id, move |tenant| async move {
+        let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
 
-    // Use tenant's pitr setting
-    let pitr = tenant.get_pitr_interval();
-    let result = tenant
-        .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
-        .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
-        .await
-        // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
-        // better once the types support it.
-        .map_err(ApiError::InternalServerError)?;
+        // Use tenant's pitr setting
+        let pitr = tenant.get_pitr_interval();
+        tenant
+            .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
+            .await
+            // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
+            // better once the types support it.
+            .map_err(ApiError::InternalServerError)
+    })
+    .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
+    .await
+    .map_err(ApiError::NotFound)??;
+
     json_response(StatusCode::OK, result)
 }
 
@@ -846,11 +851,13 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
-    timeline.compact().map_err(ApiError::InternalServerError)?;
+    tenant_mgr::with_tenant(tenant_id, |tenant| {
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(ApiError::NotFound)?;
+        timeline.compact().map_err(ApiError::InternalServerError)
+    })
+    .map_err(ApiError::NotFound)??;
 
     json_response(StatusCode::OK, ())
 }
@@ -862,14 +869,15 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
-    timeline
-        .checkpoint(CheckpointConfig::Forced)
-        .await
-        .map_err(ApiError::InternalServerError)?;
+    tenant_mgr::with_tenant(tenant_id, |tenant| {
+        tenant
+            .get_timeline(timeline_id, true)
+            .map_err(ApiError::NotFound)
+    })
+    .map_err(ApiError::NotFound)??
+    .checkpoint(CheckpointConfig::Forced)
+    .await
+    .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }

@@ -250,7 +250,7 @@ def test_pageserver_with_empty_tenants(
         broken_tenant
     ), f"A broken tenant {tenant_without_timelines_dir} should exists in the tenant list"
     assert (
-        broken_tenant["state"] == "Broken"
+        broken_tenant["state"] == "Stopped"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]

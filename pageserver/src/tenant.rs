@@ -382,7 +382,7 @@ impl Tenant {
     }
 
     /// Lists timelines the tenant contains.
-    /// Up to tenant's implementation to omit certain timelines that ar not considered ready for use.
+    /// Up to tenant's implementation to omit certain timelines that are not considered ready for use.
     pub fn list_timelines(&self) -> Vec<Arc<Timeline>> {
         self.timelines
             .lock()
@@ -659,8 +659,14 @@ impl Tenant {
             (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
                 debug!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
             }
+            (_, TenantState::Stopped) => {
+                error!("Ignoring state update TenantState::Stopped for tenant");
+            }
             (TenantState::Broken, _) => {
                 error!("Ignoring state update {new_state:?} for broken tenant");
+            }
+            (TenantState::Stopping, _) => {
+                error!("Ignoring state update {new_state:?} for stopping tenant");
             }
             (_, new_state) => {
                 self.state.send_replace(new_state);
@@ -683,11 +689,12 @@ impl Tenant {
                             timeline.set_state(TimelineState::Active);
                         }
                     }
-                    TenantState::Paused | TenantState::Broken => {
+                    TenantState::Paused | TenantState::Broken | TenantState::Stopping => {
                         for timeline in not_broken_timelines {
                             timeline.set_state(TimelineState::Suspended);
                         }
                     }
+                    TenantState::Stopped => unreachable!(),
                 }
             }
         }
@@ -845,6 +852,7 @@ impl Tenant {
         remote_index: RemoteIndex,
         upload_layers: bool,
     ) -> Tenant {
+        info!("bootstrapping tenant {tenant_id}");
         let (state, _) = watch::channel(TenantState::Paused);
         Tenant {
             tenant_id,

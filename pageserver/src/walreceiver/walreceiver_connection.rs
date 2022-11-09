@@ -141,214 +141,213 @@ pub async fn handle_walreceiver_connection(
 
     let tenant_id = timeline.tenant_id;
     let timeline_id = timeline.timeline_id;
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+    tenant_mgr::with_tenant_async(tenant_id, move |tenant| async move {
+        // Start streaming the WAL, from where we left off previously.
+        //
+        // If we had previously received WAL up to some point in the middle of a WAL record, we
+        // better start from the end of last full WAL record, not in the middle of one.
+        let mut last_rec_lsn = timeline.get_last_record_lsn();
+        let mut startpoint = last_rec_lsn;
 
-    //
-    // Start streaming the WAL, from where we left off previously.
-    //
-    // If we had previously received WAL up to some point in the middle of a WAL record, we
-    // better start from the end of last full WAL record, not in the middle of one.
-    let mut last_rec_lsn = timeline.get_last_record_lsn();
-    let mut startpoint = last_rec_lsn;
-
-    if startpoint == Lsn(0) {
-        bail!("No previous WAL position");
-    }
-
-    // There might be some padding after the last full record, skip it.
-    startpoint += startpoint.calc_padding(8u32);
-
-    // If the starting point is at a WAL page boundary, skip past the page header. We don't need the page headers
-    // for anything, and in some corner cases, the compute node might have never generated the WAL for page headers
-    //. That happens if you create a branch at page boundary: the start point of the branch is at the page boundary,
-    // but when the compute node first starts on the branch, we normalize the first REDO position to just after the page
-    // header (see generate_pg_control()), so the WAL for the page header is never streamed from the compute node
-    //  to the safekeepers.
-    startpoint = normalize_lsn(startpoint, WAL_SEGMENT_SIZE);
-
-    info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
-
-    let query = format!("START_REPLICATION PHYSICAL {startpoint}");
-
-    let copy_stream = replication_client.copy_both_simple(&query).await?;
-    let physical_stream = ReplicationStream::new(copy_stream);
-    pin!(physical_stream);
-
-    let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
-
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint)?;
-
-    while let Some(replication_message) = {
-        select! {
-            _ = cancellation.changed() => {
-                info!("walreceiver interrupted");
-                None
-            }
-            replication_message = physical_stream.next() => replication_message,
-        }
-    } {
-        let replication_message = replication_message?;
-        let now = Utc::now().naive_utc();
-        let last_rec_lsn_before_msg = last_rec_lsn;
-
-        // Update the connection status before processing the message. If the message processing
-        // fails (e.g. in walingest), we still want to know latests LSNs from the safekeeper.
-        match &replication_message {
-            ReplicationMessage::XLogData(xlog_data) => {
-                connection_status.latest_connection_update = now;
-                connection_status.commit_lsn = Some(Lsn::from(xlog_data.wal_end()));
-                connection_status.streaming_lsn = Some(Lsn::from(
-                    xlog_data.wal_start() + xlog_data.data().len() as u64,
-                ));
-                if !xlog_data.data().is_empty() {
-                    connection_status.latest_wal_update = now;
-                }
-            }
-            ReplicationMessage::PrimaryKeepAlive(keepalive) => {
-                connection_status.latest_connection_update = now;
-                connection_status.commit_lsn = Some(Lsn::from(keepalive.wal_end()));
-            }
-            &_ => {}
-        };
-        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
-            warn!("Wal connection event listener dropped, aborting the connection: {e}");
-            return Ok(());
+        if startpoint == Lsn(0) {
+            bail!("No previous WAL position");
         }
 
-        let status_update = match replication_message {
-            ReplicationMessage::XLogData(xlog_data) => {
-                // Pass the WAL data to the decoder, and see if we can decode
-                // more records as a result.
-                let data = xlog_data.data();
-                let startlsn = Lsn::from(xlog_data.wal_start());
-                let endlsn = startlsn + data.len() as u64;
+        // There might be some padding after the last full record, skip it.
+        startpoint += startpoint.calc_padding(8u32);
 
-                trace!("received XLogData between {startlsn} and {endlsn}");
+        // If the starting point is at a WAL page boundary, skip past the page header. We don't need the page headers
+        // for anything, and in some corner cases, the compute node might have never generated the WAL for page headers
+        //. That happens if you create a branch at page boundary: the start point of the branch is at the page boundary,
+        // but when the compute node first starts on the branch, we normalize the first REDO position to just after the page
+        // header (see generate_pg_control()), so the WAL for the page header is never streamed from the compute node
+        //  to the safekeepers.
+        startpoint = normalize_lsn(startpoint, WAL_SEGMENT_SIZE);
 
-                waldecoder.feed_bytes(data);
+        info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
 
-                {
-                    let mut decoded = DecodedWALRecord::default();
-                    let mut modification = timeline.begin_modification(endlsn);
-                    while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                        // let _enter = info_span!("processing record", lsn = %lsn).entered();
+        let query = format!("START_REPLICATION PHYSICAL {startpoint}");
 
-                        // It is important to deal with the aligned records as lsn in getPage@LSN is
-                        // aligned and can be several bytes bigger. Without this alignment we are
-                        // at risk of hitting a deadlock.
-                        ensure!(lsn.is_aligned());
+        let copy_stream = replication_client.copy_both_simple(&query).await?;
+        let physical_stream = ReplicationStream::new(copy_stream);
+        pin!(physical_stream);
 
-                        walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded)
-                            .context("could not ingest record at {lsn}")?;
+        let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-                        fail_point!("walreceiver-after-ingest");
+        let mut walingest = WalIngest::new(timeline.as_ref(), startpoint)?;
 
-                        last_rec_lsn = lsn;
-                    }
-                }
-
-                if !caught_up && endlsn >= end_of_wal {
-                    info!("caught up at LSN {endlsn}");
-                    caught_up = true;
-                }
-
-                Some(endlsn)
-            }
-
-            ReplicationMessage::PrimaryKeepAlive(keepalive) => {
-                let wal_end = keepalive.wal_end();
-                let timestamp = keepalive.timestamp();
-                let reply_requested = keepalive.reply() != 0;
-
-                trace!("received PrimaryKeepAlive(wal_end: {wal_end}, timestamp: {timestamp:?} reply: {reply_requested})");
-
-                if reply_requested {
-                    Some(last_rec_lsn)
-                } else {
+        while let Some(replication_message) = {
+            select! {
+                _ = cancellation.changed() => {
+                    info!("walreceiver interrupted");
                     None
                 }
+                replication_message = physical_stream.next() => replication_message,
             }
+        } {
+            let replication_message = replication_message?;
+            let now = Utc::now().naive_utc();
+            let last_rec_lsn_before_msg = last_rec_lsn;
 
-            _ => None,
-        };
-
-        if !connection_status.has_processed_wal && last_rec_lsn > last_rec_lsn_before_msg {
-            // We have successfully processed at least one WAL record.
-            connection_status.has_processed_wal = true;
-            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone()))
-            {
+            // Update the connection status before processing the message. If the message processing
+            // fails (e.g. in walingest), we still want to know latests LSNs from the safekeeper.
+            match &replication_message {
+                ReplicationMessage::XLogData(xlog_data) => {
+                    connection_status.latest_connection_update = now;
+                    connection_status.commit_lsn = Some(Lsn::from(xlog_data.wal_end()));
+                    connection_status.streaming_lsn = Some(Lsn::from(
+                        xlog_data.wal_start() + xlog_data.data().len() as u64,
+                    ));
+                    if !xlog_data.data().is_empty() {
+                        connection_status.latest_wal_update = now;
+                    }
+                }
+                ReplicationMessage::PrimaryKeepAlive(keepalive) => {
+                    connection_status.latest_connection_update = now;
+                    connection_status.commit_lsn = Some(Lsn::from(keepalive.wal_end()));
+                }
+                &_ => {}
+            };
+            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
                 warn!("Wal connection event listener dropped, aborting the connection: {e}");
                 return Ok(());
             }
+
+            let status_update = match replication_message {
+                ReplicationMessage::XLogData(xlog_data) => {
+                    // Pass the WAL data to the decoder, and see if we can decode
+                    // more records as a result.
+                    let data = xlog_data.data();
+                    let startlsn = Lsn::from(xlog_data.wal_start());
+                    let endlsn = startlsn + data.len() as u64;
+
+                    trace!("received XLogData between {startlsn} and {endlsn}");
+
+                    waldecoder.feed_bytes(data);
+
+                    {
+                        let mut decoded = DecodedWALRecord::default();
+                        let mut modification = timeline.begin_modification(endlsn);
+                        while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                            // let _enter = info_span!("processing record", lsn = %lsn).entered();
+
+                            // It is important to deal with the aligned records as lsn in getPage@LSN is
+                            // aligned and can be several bytes bigger. Without this alignment we are
+                            // at risk of hitting a deadlock.
+                            ensure!(lsn.is_aligned());
+
+                            walingest
+                                .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                                .context("could not ingest record at {lsn}")?;
+
+                            fail_point!("walreceiver-after-ingest");
+
+                            last_rec_lsn = lsn;
+                        }
+                    }
+
+                    if !caught_up && endlsn >= end_of_wal {
+                        info!("caught up at LSN {endlsn}");
+                        caught_up = true;
+                    }
+
+                    Some(endlsn)
+                }
+
+                ReplicationMessage::PrimaryKeepAlive(keepalive) => {
+                    let wal_end = keepalive.wal_end();
+                    let timestamp = keepalive.timestamp();
+                    let reply_requested = keepalive.reply() != 0;
+
+                    trace!("received PrimaryKeepAlive(wal_end: {wal_end}, timestamp: {timestamp:?} reply: {reply_requested})");
+
+                    if reply_requested {
+                        Some(last_rec_lsn)
+                    } else {
+                        None
+                    }
+                }
+
+                _ => None,
+            };
+
+            if !connection_status.has_processed_wal && last_rec_lsn > last_rec_lsn_before_msg {
+                // We have successfully processed at least one WAL record.
+                connection_status.has_processed_wal = true;
+                if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone()))
+                {
+                    warn!("Wal connection event listener dropped, aborting the connection: {e}");
+                    return Ok(());
+                }
+            }
+
+            timeline.check_checkpoint_distance().with_context(|| {
+                format!(
+                    "Failed to check checkpoint distance for timeline {}",
+                    timeline.timeline_id
+                )
+            })?;
+
+            if let Some(last_lsn) = status_update {
+                let remote_index = tenant.get_remote_index();
+                let timeline_remote_consistent_lsn = remote_index
+                    .read()
+                    .await
+                    // here we either do not have this timeline in remote index
+                    // or there were no checkpoints for it yet
+                    .timeline_entry(&TenantTimelineId {
+                        tenant_id,
+                        timeline_id,
+                    })
+                    .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
+                    // no checkpoint was uploaded
+                    .unwrap_or(Lsn(0));
+
+                // The last LSN we processed. It is not guaranteed to survive pageserver crash.
+                let write_lsn = u64::from(last_lsn);
+                // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
+                let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
+                // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
+                // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
+                let apply_lsn = u64::from(timeline_remote_consistent_lsn);
+                let ts = SystemTime::now();
+
+                // Update the status about what we just received. This is shown in the mgmt API.
+                let last_received_wal = WalReceiverInfo {
+                    wal_source_connstr: wal_source_connstr.to_owned(),
+                    last_received_msg_lsn: last_lsn,
+                    last_received_msg_ts: ts
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .expect("Received message time should be before UNIX EPOCH!")
+                        .as_micros(),
+                };
+                *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
+
+                // Send the replication feedback message.
+                // Regular standby_status_update fields are put into this message.
+                let status_update = ReplicationFeedback {
+                    current_timeline_size: timeline
+                        .get_current_logical_size()
+                        .context("Status update creation failed to get current logical size")?,
+                    ps_writelsn: write_lsn,
+                    ps_flushlsn: flush_lsn,
+                    ps_applylsn: apply_lsn,
+                    ps_replytime: ts,
+                };
+
+                debug!("neon_status_update {status_update:?}");
+
+                let mut data = BytesMut::new();
+                status_update.serialize(&mut data)?;
+                physical_stream
+                    .as_mut()
+                    .zenith_status_update(data.len() as u64, &data)
+                    .await?;
+            }
         }
 
-        timeline.check_checkpoint_distance().with_context(|| {
-            format!(
-                "Failed to check checkpoint distance for timeline {}",
-                timeline.timeline_id
-            )
-        })?;
-
-        if let Some(last_lsn) = status_update {
-            let remote_index = tenant.get_remote_index();
-            let timeline_remote_consistent_lsn = remote_index
-                .read()
-                .await
-                // here we either do not have this timeline in remote index
-                // or there were no checkpoints for it yet
-                .timeline_entry(&TenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                })
-                .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
-                // no checkpoint was uploaded
-                .unwrap_or(Lsn(0));
-
-            // The last LSN we processed. It is not guaranteed to survive pageserver crash.
-            let write_lsn = u64::from(last_lsn);
-            // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
-            // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
-            // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
-            let apply_lsn = u64::from(timeline_remote_consistent_lsn);
-            let ts = SystemTime::now();
-
-            // Update the status about what we just received. This is shown in the mgmt API.
-            let last_received_wal = WalReceiverInfo {
-                wal_source_connstr: wal_source_connstr.to_owned(),
-                last_received_msg_lsn: last_lsn,
-                last_received_msg_ts: ts
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .expect("Received message time should be before UNIX EPOCH!")
-                    .as_micros(),
-            };
-            *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
-
-            // Send the replication feedback message.
-            // Regular standby_status_update fields are put into this message.
-            let status_update = ReplicationFeedback {
-                current_timeline_size: timeline
-                    .get_current_logical_size()
-                    .context("Status update creation failed to get current logical size")?,
-                ps_writelsn: write_lsn,
-                ps_flushlsn: flush_lsn,
-                ps_applylsn: apply_lsn,
-                ps_replytime: ts,
-            };
-
-            debug!("neon_status_update {status_update:?}");
-
-            let mut data = BytesMut::new();
-            status_update.serialize(&mut data)?;
-            physical_stream
-                .as_mut()
-                .zenith_status_update(data.len() as u64, &data)
-                .await?;
-        }
-    }
-
-    Ok(())
+        Ok(())
+    }).await?
 }
 
 /// Data returned from the postgres `IDENTIFY_SYSTEM` command

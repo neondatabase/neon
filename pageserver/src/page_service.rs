@@ -350,23 +350,23 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
+        tenant_mgr::with_tenant_async(tenant_id, move |tenant| async move {
+            let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
 
-        // TODO mark timeline as not ready until it reaches end_lsn.
-        // We might have some wal to import as well, and we should prevent compute
-        // from connecting before that and writing conflicting wal.
-        //
-        // This is not relevant for pageserver->pageserver migrations, since there's
-        // no wal to import. But should be fixed if we want to import from postgres.
+            // TODO mark timeline as not ready until it reaches end_lsn.
+            // We might have some wal to import as well, and we should prevent compute
+            // from connecting before that and writing conflicting wal.
+            //
+            // This is not relevant for pageserver->pageserver migrations, since there's
+            // no wal to import. But should be fixed if we want to import from postgres.
 
-        // TODO leave clean state on error. For now you can use detach to clean
-        // up broken state from a failed import.
+            // TODO leave clean state on error. For now you can use detach to clean
+            // up broken state from a failed import.
 
-        // Import basebackup provided via CopyData
-        info!("importing basebackup");
-        pgb.write_message(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
+            // Import basebackup provided via CopyData
+            info!("importing basebackup");
+            pgb.write_message(&BeMessage::CopyInResponse)?;
+            pgb.flush().await?;
 
         let copyin_stream = copyin_stream(pgb);
         pin!(copyin_stream);
@@ -375,23 +375,25 @@ impl PageServerHandler {
             .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
             .await?;
 
-        // Drain the rest of the Copy data
-        let mut bytes_after_tar = 0;
-        while let Some(bytes) = copyin_stream.next().await {
-            bytes_after_tar += bytes?.len();
-        }
-        if bytes_after_tar > 0 {
-            warn!("ignored {bytes_after_tar} unexpected bytes after the tar archive");
-        }
+            // Drain the rest of the Copy data
+            let mut bytes_after_tar = 0;
+            while let Some(bytes) = copyin_stream.next().await {
+                bytes_after_tar += bytes?.len();
+            }
+            if bytes_after_tar > 0 {
+                warn!("ignored {bytes_after_tar} unexpected bytes after the tar archive");
+            }
 
-        // TODO check checksum
-        // Meanwhile you can verify client-side by taking fullbackup
-        // and checking that it matches in size with what was imported.
-        // It wouldn't work if base came from vanilla postgres though,
-        // since we discard some log files.
+            // TODO check checksum
+            // Meanwhile you can verify client-side by taking fullbackup
+            // and checking that it matches in size with what was imported.
+            // It wouldn't work if base came from vanilla postgres though,
+            // since we discard some log files.
 
-        info!("done");
-        Ok(())
+            info!("done");
+            Ok(())
+        })
+        .await?
     }
 
     #[instrument(skip(self, pgb))]
@@ -863,42 +865,43 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
-            pgb.write_message(&BeMessage::RowDescription(&[
-                RowDescriptor::int8_col(b"checkpoint_distance"),
-                RowDescriptor::int8_col(b"checkpoint_timeout"),
-                RowDescriptor::int8_col(b"compaction_target_size"),
-                RowDescriptor::int8_col(b"compaction_period"),
-                RowDescriptor::int8_col(b"compaction_threshold"),
-                RowDescriptor::int8_col(b"gc_horizon"),
-                RowDescriptor::int8_col(b"gc_period"),
-                RowDescriptor::int8_col(b"image_creation_threshold"),
-                RowDescriptor::int8_col(b"pitr_interval"),
-            ]))?
-            .write_message(&BeMessage::DataRow(&[
-                Some(tenant.get_checkpoint_distance().to_string().as_bytes()),
-                Some(
-                    tenant
-                        .get_checkpoint_timeout()
-                        .as_secs()
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(tenant.get_compaction_target_size().to_string().as_bytes()),
-                Some(
-                    tenant
-                        .get_compaction_period()
-                        .as_secs()
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(tenant.get_compaction_threshold().to_string().as_bytes()),
-                Some(tenant.get_gc_horizon().to_string().as_bytes()),
-                Some(tenant.get_gc_period().as_secs().to_string().as_bytes()),
-                Some(tenant.get_image_creation_threshold().to_string().as_bytes()),
-                Some(tenant.get_pitr_interval().as_secs().to_string().as_bytes()),
-            ]))?
-            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            tenant_mgr::with_tenant(tenant_id, |tenant| {
+                pgb.write_message(&BeMessage::RowDescription(&[
+                    RowDescriptor::int8_col(b"checkpoint_distance"),
+                    RowDescriptor::int8_col(b"checkpoint_timeout"),
+                    RowDescriptor::int8_col(b"compaction_target_size"),
+                    RowDescriptor::int8_col(b"compaction_period"),
+                    RowDescriptor::int8_col(b"compaction_threshold"),
+                    RowDescriptor::int8_col(b"gc_horizon"),
+                    RowDescriptor::int8_col(b"gc_period"),
+                    RowDescriptor::int8_col(b"image_creation_threshold"),
+                    RowDescriptor::int8_col(b"pitr_interval"),
+                ]))?
+                .write_message(&BeMessage::DataRow(&[
+                    Some(tenant.get_checkpoint_distance().to_string().as_bytes()),
+                    Some(
+                        tenant
+                            .get_checkpoint_timeout()
+                            .as_secs()
+                            .to_string()
+                            .as_bytes(),
+                    ),
+                    Some(tenant.get_compaction_target_size().to_string().as_bytes()),
+                    Some(
+                        tenant
+                            .get_compaction_period()
+                            .as_secs()
+                            .to_string()
+                            .as_bytes(),
+                    ),
+                    Some(tenant.get_compaction_threshold().to_string().as_bytes()),
+                    Some(tenant.get_gc_horizon().to_string().as_bytes()),
+                    Some(tenant.get_gc_period().as_secs().to_string().as_bytes()),
+                    Some(tenant.get_image_creation_threshold().to_string().as_bytes()),
+                    Some(tenant.get_pitr_interval().as_secs().to_string().as_bytes()),
+                ]))?
+                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))
+            })??;
         } else {
             bail!("unknown command");
         }
@@ -908,8 +911,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 }
 
 fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
-    tenant_mgr::get_tenant(tenant_id, true)
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
+    tenant_mgr::with_tenant(tenant_id, |tenant| tenant.get_timeline(timeline_id, true))?
 }
 
 ///

@@ -22,6 +22,10 @@ pub enum TenantState {
     Paused,
     /// A tenant is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
     Broken,
+    /// A tenant is being stopped. This is the termination state.
+    Stopping,
+    /// A tenant is already dropped. It's only possible to get when trying to get status of Tenant from TenantGuard.
+    Stopped,
 }
 
 /// A state of a timeline in pageserver's memory.
