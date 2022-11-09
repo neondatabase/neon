@@ -202,7 +202,7 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
-        #[allow(clippy::type_xscomplexity)]
+        #[allow(clippy::type_complexity)]
         let (tx, rx): (
             SyncSender<(ChannelId, Vec<u8>)>,
             Receiver<(ChannelId, Vec<u8>)>,
