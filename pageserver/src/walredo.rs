@@ -202,6 +202,7 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
+        #[allow(clippy::type_xscomplexity)]
         let (tx, rx): (
             SyncSender<(ChannelId, Vec<u8>)>,
             Receiver<(ChannelId, Vec<u8>)>,
@@ -620,7 +621,7 @@ struct PostgresRedoProcess {
 
 impl PostgresRedoProcess {
     #[instrument(skip_all,fields(tenant_id=%self.tenant_id))]
-    fn receive(&mut self, senders: &Vec<Sender<Bytes>>) -> Result<(), Error> {
+    fn receive(&mut self, senders: &[Sender<Bytes>]) -> Result<(), Error> {
         while self.n_buffered != 0 {
             let n = loop {
                 match nix::poll::poll(
@@ -684,7 +685,7 @@ impl PostgresRedoProcess {
         &mut self,
         id: ChannelId,
         data: Vec<u8>,
-        senders: &Vec<Sender<Bytes>>,
+        senders: &[Sender<Bytes>],
     ) -> Result<(), Error> {
         let mut written = 0usize;
         let data_len = data.len();
