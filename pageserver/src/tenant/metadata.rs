@@ -264,6 +264,26 @@ pub fn save_metadata(
     Ok(())
 }
 
+pub fn load_metadata(
+    conf: &'static PageServerConf,
+    timeline_id: TimelineId,
+    tenant_id: TenantId,
+) -> anyhow::Result<TimelineMetadata> {
+    let metadata_path = conf.metadata_path(timeline_id, tenant_id);
+    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
+        format!(
+            "Failed to read metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })?;
+    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
+        format!(
+            "Failed to parse metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
