@@ -18,8 +18,8 @@ env:
 
 jobs:
   tag:
-    runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    runs-on: [ self-hosted, dev, x64 ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
@@ -46,7 +46,10 @@ jobs:
         id: build-tag
 
   build-neon:
-    runs-on: arm64
+    runs-on: [ self-hosted, dev, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     strategy:
       fail-fast: false
       matrix:
@@ -233,7 +236,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -266,7 +269,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -297,12 +300,12 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   merge-allure-report:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ regress-tests, benchmarks ]
-    if: success() || failure()
+    if: always()
     strategy:
       fail-fast: false
       matrix:
@@ -335,7 +338,7 @@ jobs:
           DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
 
   coverage-report:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -412,7 +415,7 @@ jobs:
         shell: bash -euxo pipefail {0}
 
   trigger-e2e-tests:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -457,37 +460,26 @@ jobs:
             }"
 
   neon-image:
-    runs-on: arm64
+    runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag ]
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v1 # v3 won't work with kaniko
         with:
           submodules: true
           fetch-depth: 0
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
       - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > ~/.docker/config.json
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
-      - name: Build and push
-        uses: docker/build-push-action@v3
-        with:
-          push: true
-          tags: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
-          platforms: linux/arm64,linux/amd64
+      - name: Kaniko build neon
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
 
-#      - name: Kaniko build neon
-#        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
 
   compute-tools-image:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
@@ -501,8 +493,28 @@ jobs:
       - name: Kaniko build compute tools
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
+  compute-node-image:
+    runs-on: [ self-hosted, dev, x64 ]
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    needs: [ tag ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+        # compute-node uses postgres 14, which is default now
+        # cloud repo depends on this image name, thus duplicating it
+        # remove compute-node when cloud repo is updated
+      - name: Kaniko build compute node with extensions v14 (compatibility)
+        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:${{needs.tag.outputs.build-tag}}
+
   compute-node-image-v14:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
     steps:
@@ -518,8 +530,9 @@ jobs:
       - name: Kaniko build compute node with extensions v14
         run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}}
 
+
   compute-node-image-v15:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
     steps:
@@ -535,58 +548,18 @@ jobs:
       - name: Kaniko build compute node with extensions v15
         run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v15 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}}
 
-  test-images:
-    needs: [ tag, neon-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
-    runs-on: dev
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
-      # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
-      # Regular pageserver version string looks like
-      #   Neon page server git-env:32d14403bd6ab4f4520a94cbfd81a6acef7a526c failpoints: true, features: []
-      # Bad versions might loop like:
-      #   Neon page server git-env:local failpoints: true, features: ["testing"]
-      # Ensure that we don't have bad versions.
-      - name: Verify image versions
-        shell: bash # ensure no set -e for better error messages
-        run: |
-          pageserver_version=$(docker run --rm 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
-
-          echo "Pageserver version string: $pageserver_version"
-
-          if ! echo "$pageserver_version" | grep -qv 'git-env:local' ; then
-            echo "Pageserver version should not be the default Dockerfile one"
-            exit 1
-          fi
-
-          if ! echo "$pageserver_version" | grep -qv '"testing"' ; then
-            echo "Pageserver version should have no testing feature enabled"
-            exit 1
-          fi
-
-      - name: Verify docker-compose example
-        run: env REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
-
-      - name: Print logs and clean up
-        if: always()
-        run: |
-          docker compose -f ./docker-compose/docker-compose.yml logs || 0
-          docker compose -f ./docker-compose/docker-compose.yml down
-
   promote-images:
-    runs-on: dev
-    needs: [ tag, test-images ]
+    runs-on: [ self-hosted, dev, x64 ]
+    needs: [ tag, neon-image, compute-node-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
       fail-fast: false
       matrix:
-        name: [ neon, compute-node-v14, compute-node-v15, compute-tools ]
+        # compute-node uses postgres 14, which is default now
+        # cloud repo depends on this image name, thus duplicating it
+        # remove compute-node when cloud repo is updated
+        name: [ neon, compute-node, compute-node-v14, compute-node-v15, compute-tools ]
 
     steps:
       - name: Promote image to latest
@@ -595,7 +568,7 @@ jobs:
           aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
 
   push-docker-hub:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     needs: [ promote-images, tag ]
     container: golang:1.19-bullseye
 
@@ -616,6 +589,9 @@ jobs:
       - name: Pull compute tools image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} compute-tools
 
+      - name: Pull compute node image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:${{needs.tag.outputs.build-tag}} compute-node
+
       - name: Pull compute node v14 image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} compute-node-v14
 
@@ -632,6 +608,7 @@ jobs:
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
 
@@ -646,6 +623,9 @@ jobs:
 
       - name: Push compute tools image to Docker Hub
         run: crane push compute-tools neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
+
+      - name: Push compute node image to Docker Hub
+        run: crane push compute-node neondatabase/compute-node:${{needs.tag.outputs.build-tag}}
 
       - name: Push compute node v14 image to Docker Hub
         run: crane push compute-node-v14 neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
@@ -663,6 +643,7 @@ jobs:
         run: |
           crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
@@ -745,7 +726,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-new:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -825,7 +806,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -867,7 +848,7 @@ jobs:
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   deploy-proxy-new:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -937,7 +918,7 @@ jobs:
           helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   promote-compatibility-data:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
