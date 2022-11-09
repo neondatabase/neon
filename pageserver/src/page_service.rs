@@ -344,43 +344,44 @@ impl PageServerHandler {
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
-                    self.handle_get_rel_exists_request(
-                        &*get_timeline_by_region_id(&timelines, req.region)?,
-                        &req,
-                    )
-                    .await
+                    match get_timeline_by_region_id(&timelines, req.region) {
+                        Ok(timeline) => {
+                            self.handle_get_rel_exists_request(timeline.as_ref(), &req)
+                                .await
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.get_rel_size.start_timer();
-                    self.handle_get_nblocks_request(
-                        &*get_timeline_by_region_id(&timelines, req.region)?,
-                        &req,
-                    )
-                    .await
+                    match get_timeline_by_region_id(&timelines, req.region) {
+                        Ok(timeline) => self.handle_get_nblocks_request(&*timeline, &req).await,
+                        Err(e) => Err(e),
+                    }
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
-                    self.handle_get_page_at_lsn_request(
-                        &*get_timeline_by_region_id(&timelines, req.region)?,
-                        &req,
-                    )
-                    .await
+                    match get_timeline_by_region_id(&timelines, req.region) {
+                        Ok(timeline) => self.handle_get_page_at_lsn_request(&*timeline, &req).await,
+                        Err(e) => Err(e),
+                    }
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
-                    self.handle_db_size_request(
-                        &*get_timeline_by_region_id(&timelines, RegionId::default())?,
-                        &req,
-                    )
-                    .await
+                    match get_timeline_by_region_id(&timelines, RegionId::default()) {
+                        Ok(timeline) => self.handle_db_size_request(&*timeline, &req).await,
+                        Err(e) => Err(e),
+                    }
                 }
                 PagestreamFeMessage::GetSlruPage(req) => {
                     let _timer = metrics.get_slru_page.start_timer();
-                    self.handle_get_slru_page_at_lsn_request(
-                        &*get_timeline_by_region_id(&timelines, req.region)?,
-                        &req,
-                    )
-                    .await
+                    match get_timeline_by_region_id(&timelines, req.region) {
+                        Ok(timeline) => {
+                            self.handle_get_slru_page_at_lsn_request(&*timeline, &req)
+                                .await
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
             };
 
@@ -1057,7 +1058,7 @@ fn get_timeline_by_region_id(
     index
         .get(&region_id)
         .map(Arc::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("Region id {} does not exists", region_id))
+        .ok_or_else(|| anyhow::anyhow!("Region {} does not exists", region_id))
 }
 
 ///

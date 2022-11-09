@@ -257,15 +257,11 @@ impl fmt::Display for NodeId {
     }
 }
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Eq, Default, Ord, PartialEq, PartialOrd, Hash, Debug, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct RegionId(pub u8);
-
-impl Default for RegionId {
-    fn default() -> Self {
-        RegionId(0)
-    }
-}
 
 impl FromStr for RegionId {
     type Err = <u8 as ::core::str::FromStr>::Err;

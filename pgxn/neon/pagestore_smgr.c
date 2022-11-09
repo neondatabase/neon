@@ -2092,7 +2092,7 @@ neon_dbsize(Oid dbNode)
 	bool		latest;
 	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
 
-	request_lsn = neon_get_request_lsn(&latest, GLOBAL_REGION, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest, current_region, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		NeonDbSizeRequest request = {
 			.req.tag = T_NeonDbSizeRequest,
