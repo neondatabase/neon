@@ -17,7 +17,6 @@ Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 def get_self_dir() -> Path:
     """Get the path to the directory where this script lives."""
-    # return os.path.dirname(os.path.abspath(__file__))
     return Path(__file__).resolve().parent
 
 

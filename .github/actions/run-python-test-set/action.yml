@@ -55,6 +55,22 @@ runs:
         name: neon-${{ runner.os }}-${{ inputs.build_type }}-artifact
         path: /tmp/neon
 
+    - name: Download Neon binaries for the previous release
+      if: inputs.build_type != 'remote'
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-${{ inputs.build_type }}-artifact
+        path: /tmp/neon-previous
+        prefix: latest
+
+    - name: Download compatibility snapshot for Postgres 14
+      if: inputs.build_type != 'remote'
+      uses: ./.github/actions/download
+      with:
+        name: compatibility-snapshot-${{ inputs.build_type }}-pg14
+        path: /tmp/compatibility_snapshot_pg14
+        prefix: latest
+
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
       uses: actions/checkout@v3
@@ -73,23 +89,18 @@ runs:
       shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
-    - name: Download compatibility snapshot for Postgres 14
-      if: inputs.build_type != 'remote'
-      uses: ./.github/actions/download
-      with:
-        name: compatibility-snapshot-${{ inputs.build_type }}-pg14
-        path: /tmp/compatibility_snapshot_pg14
-        prefix: latest
-
     - name: Run pytest
       env:
         NEON_BIN: /tmp/neon/bin
+        COMPATIBILITY_NEON_BIN: /tmp/neon-previous/bin
+        COMPATIBILITY_POSTGRES_DISTRIB_DIR: /tmp/neon-previous/pg_install
         TEST_OUTPUT: /tmp/test_output
         BUILD_TYPE: ${{ inputs.build_type }}
         AWS_ACCESS_KEY_ID: ${{ inputs.real_s3_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.real_s3_secret_access_key }}
         COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg14
-        ALLOW_BREAKING_CHANGES: contains(github.event.pull_request.labels.*.name, 'breaking changes')
+        ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
+        ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
       shell: bash -euxo pipefail {0}
       run: |
         # PLATFORM will be embedded in the perf test report
@@ -150,12 +161,16 @@ runs:
         # -n4 uses four processes to run tests via pytest-xdist
         # -s is not used to prevent pytest from capturing output, because tests are running
         # in parallel and logs are mixed between different tests
+        # --dist=loadgroup points tests marked with @pytest.mark.xdist_group to the same worker,
+        # to make @pytest.mark.order work with xdist
+        #
         mkdir -p $TEST_OUTPUT/allure/results
         "${cov_prefix[@]}" ./scripts/pytest \
           --junitxml=$TEST_OUTPUT/junit.xml \
           --alluredir=$TEST_OUTPUT/allure/results \
           --tb=short \
           --verbose \
+          --dist=loadgroup \
           -rA $TEST_SELECTION $EXTRA_PARAMS
 
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
@@ -169,8 +184,8 @@ runs:
       uses: ./.github/actions/upload
       with:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg14-${{ github.run_id }}
-        # The path includes a test name (test_prepare_snapshot) and directory that the test creates (compatibility_snapshot_pg14), keep the path in sync with the test
-        path: /tmp/test_output/test_prepare_snapshot/compatibility_snapshot_pg14/
+        # The path includes a test name (test_create_snapshot) and directory that the test creates (compatibility_snapshot_pg14), keep the path in sync with the test
+        path: /tmp/test_output/test_create_snapshot/compatibility_snapshot_pg14/
         prefix: latest
 
     - name: Create Allure report

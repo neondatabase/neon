@@ -268,32 +268,6 @@ jobs:
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
 
-  upload-latest-artifacts:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ regress-tests ]
-    if: github.ref_name == 'main'
-    steps:
-      - name: Copy Neon artifact to the latest directory
-        shell: bash -euxo pipefail {0}
-        env:
-          BUCKET: neon-github-public-dev
-          PREFIX: artifacts/${{ github.run_id }}
-        run: |
-          for build_type in debug release; do
-            FILENAME=neon-${{ runner.os }}-${build_type}-artifact.tar.zst
-
-            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
-            if [ -z "${S3_KEY}" ]; then
-              echo 2>&1 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
-              exit 1
-            fi
-
-            time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/artifacts/latest/${FILENAME}
-          done
-
   benchmarks:
     runs-on: dev
     container:
@@ -942,7 +916,7 @@ jobs:
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
-  promote-compatibility-test-snapshot:
+  promote-compatibility-data:
     runs-on: dev
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -956,9 +930,24 @@ jobs:
           BUCKET: neon-github-public-dev
           PREFIX: artifacts/latest
         run: |
+          # Update compatibility snapshot for the release
           for build_type in debug release; do
             OLD_FILENAME=compatibility-snapshot-${build_type}-pg14-${GITHUB_RUN_ID}.tar.zst
             NEW_FILENAME=compatibility-snapshot-${build_type}-pg14.tar.zst
 
             time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+          done
+
+          # Update Neon artifact for the release (reuse already uploaded artifact)
+          for build_type in debug release; do
+            OLD_PREFIX=artifacts/${GITHUB_RUN_ID}
+            FILENAME=neon-${{ runner.os }}-${build_type}-artifact.tar.zst
+
+            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
+            if [ -z "${S3_KEY}" ]; then
+              echo 2>&1 "Neither s3://${BUCKET}/${OLD_PREFIX}/${FILENAME} nor its version from previous attempts exist"
+              exit 1
+            fi
+
+            time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/${PREFIX}/${FILENAME}
           done
