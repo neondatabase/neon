@@ -216,7 +216,7 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
             )
 
             res = cur.fetchone()
-            assert isinstance(res, list)
+            assert isinstance(res, tuple)
             lsn_write_lags.append(res[0])
 
             curr_received_lsn = Lsn(res[3])
