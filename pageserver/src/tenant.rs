@@ -806,6 +806,13 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
+    pub fn get_trace_read_requests(&self) -> bool {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .trace_read_requests
+            .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
+    }
+
     pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().update(&new_tenant_conf);
     }
@@ -1666,6 +1673,7 @@ pub mod harness {
                 walreceiver_connect_timeout: Some(tenant_conf.walreceiver_connect_timeout),
                 lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
                 max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
+                trace_read_requests: Some(tenant_conf.trace_read_requests),
             }
         }
     }

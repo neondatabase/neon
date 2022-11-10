@@ -8,6 +8,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use remote_storage::RemoteStorageConfig;
 use std::env;
 use utils::crashsafe::path_with_suffix_extension;
+use utils::id::ConnectionId;
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -412,6 +413,22 @@ impl PageServerConf {
             self.timeline_path(&timeline_id, &tenant_id),
             TIMELINE_UNINIT_MARK_SUFFIX,
         )
+    }
+
+    pub fn traces_path(&self) -> PathBuf {
+        self.workdir.join("traces")
+    }
+
+    pub fn trace_path(
+        &self,
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
+        connection_id: &ConnectionId,
+    ) -> PathBuf {
+        self.traces_path()
+            .join(tenant_id.to_string())
+            .join(timeline_id.to_string())
+            .join(connection_id.to_string())
     }
 
     /// Points to a place in pageserver's local directory,

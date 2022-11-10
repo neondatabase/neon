@@ -618,6 +618,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
+    println!("tenant create: {:?}", request_data.trace_read_requests);
     let remote_index = get_state(&request).remote_index.clone();
 
     let mut tenant_conf = TenantConfOpt::default();
@@ -658,6 +659,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
         tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
+    }
+    if let Some(trace_read_requests) = request_data.trace_read_requests {
+        tenant_conf.trace_read_requests = Some(trace_read_requests);
     }
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
@@ -745,6 +749,9 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
         tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
+    }
+    if let Some(trace_read_requests) = request_data.trace_read_requests {
+        tenant_conf.trace_read_requests = Some(trace_read_requests);
     }
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;

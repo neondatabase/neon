@@ -362,6 +362,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<NonZeroU64>())
                 .transpose()
                 .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
+            trace_read_requests: settings
+                .remove("trace_read_requests")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'trace_read_requests' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -424,6 +429,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
+                trace_read_requests: settings
+                    .get("trace_read_requests")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'trace_read_requests' as bool")?,
             })
             .send()?
             .error_from_body()?;

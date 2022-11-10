@@ -29,6 +29,7 @@ use tokio::pin;
 use tokio_util::io::StreamReader;
 use tokio_util::io::SyncIoBridge;
 use tracing::*;
+use utils::id::ConnectionId;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
@@ -47,6 +48,7 @@ use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
 use crate::tenant_mgr;
+use crate::trace::Tracer;
 use crate::CheckpointConfig;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -269,6 +271,18 @@ impl PageServerHandler {
         //       so there is no need to reset the association
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
+        // Make request tracer if needed
+        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+        let mut tracer = if tenant.get_trace_read_requests() {
+            let connection_id = ConnectionId::generate();
+            let path = tenant
+                .conf
+                .trace_path(&tenant_id, &timeline_id, &connection_id);
+            Some(Tracer::new(path))
+        } else {
+            None
+        };
+
         // Check that the timeline exists
         let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
@@ -300,6 +314,11 @@ impl PageServerHandler {
             };
 
             trace!("query: {copy_data_bytes:?}");
+
+            // Trace request if needed
+            if let Some(t) = tracer.as_mut() {
+                t.trace(&copy_data_bytes)
+            }
 
             let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
