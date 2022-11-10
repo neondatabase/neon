@@ -538,9 +538,7 @@ impl Tenant {
         // We're ready for business.
         // Change to active state under the hood spawns background loops
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.set_state(TenantState::Active {
-            background_jobs_running: true,
-        });
+        self.activate(true);
 
         info!("Done");
 
@@ -777,9 +775,7 @@ impl Tenant {
         // We're ready for business.
         // Change to active state under the hood spawns background loops
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.set_state(TenantState::Active {
-            background_jobs_running: true,
-        });
+        self.activate(true);
 
         info!("Done");
 
