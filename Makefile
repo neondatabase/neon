@@ -113,6 +113,8 @@ postgres-v14: postgres-v14-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14 MAKELEVEL=0 install
 	+@echo "Compiling libpq v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/src/interfaces/libpq install
+	+@echo "Compiling pg_prewarm v14"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_prewarm install
 	+@echo "Compiling pg_buffercache v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect v14"
@@ -125,6 +127,8 @@ postgres-v15: postgres-v15-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15 MAKELEVEL=0 install
 	+@echo "Compiling libpq v15"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/src/interfaces/libpq install
+	+@echo "Compiling pg_prewarm v15"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pg_prewarm install
 	+@echo "Compiling pg_buffercache v15"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect v15"
