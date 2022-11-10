@@ -1,3 +1,22 @@
+# Running locally
+
+First make a release build. The profiling flag is optional, used only for tests that
+generate flame graphs. The `-s` flag just silences a lot of output, and makes it
+easier to see if you have compile errors without scrolling up.
+`BUILD_TYPE=release CARGO_BUILD_FLAGS="--features=testing,profiling" make -s -j8`
+
+NOTE: the `profiling` flag only works on linux because we use linux-specific
+libc APIs like `libc::timer_t`.
+
+Then run the tests
+`NEON_BIN=./target/release poetry run pytest test_runner/performance"`
+
+Some handy pytest flags for local development:
+- `-x` tells pytest to stop on first error
+- `-s` shows test output
+- `-k` selects a test to run
+- `--timeout=0` disables our default timeout of 300s (see `setup.cfg`)
+
 # What performance tests do we have and how we run them
 
 Performance tests are built using the same infrastructure as our usual python integration tests. There are some extra fixtures that help to collect performance metrics, and to run tests against both vanilla PostgreSQL and Neon for comparison.

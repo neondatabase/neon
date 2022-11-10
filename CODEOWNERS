@@ -1,0 +1,10 @@
+/compute_tools/ @neondatabase/control-plane
+/control_plane/ @neondatabase/compute @neondatabase/storage
+/libs/pageserver_api/ @neondatabase/compute @neondatabase/storage
+/libs/postgres_ffi/ @neondatabase/compute 
+/libs/remote_storage/ @neondatabase/storage 
+/libs/safekeeper_api/ @neondatabase/safekeepers  
+/pageserver/ @neondatabase/compute @neondatabase/storage 
+/pgxn/ @neondatabase/compute
+/proxy/ @neondatabase/control-plane 
+/safekeeper/ @neondatabase/safekeepers

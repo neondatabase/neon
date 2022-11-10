@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
@@ -23,13 +23,13 @@ class Metrics:
                 pass
         return res
 
-    def query_one(self, name: str, filter: Dict[str, str] = {}) -> Sample:
-        res = self.query_all(name, filter)
+    def query_one(self, name: str, filter: Optional[Dict[str, str]] = None) -> Sample:
+        res = self.query_all(name, filter or {})
         assert len(res) == 1, f"expected single sample for {name} {filter}, found {res}"
         return res[0]
 
 
-def parse_metrics(text: str, name: str = ""):
+def parse_metrics(text: str, name: str = "") -> Metrics:
     metrics = Metrics(name)
     gen = text_string_to_metric_families(text)
     for family in gen:
@@ -39,7 +39,7 @@ def parse_metrics(text: str, name: str = ""):
     return metrics
 
 
-PAGESERVER_PER_TENANT_METRICS = [
+PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_current_logical_size",
     "pageserver_current_physical_size",
     "pageserver_getpage_reconstruct_seconds_bucket",
@@ -62,4 +62,4 @@ PAGESERVER_PER_TENANT_METRICS = [
     "pageserver_wait_lsn_seconds_sum",
     "pageserver_created_persistent_files_total",
     "pageserver_written_persistent_bytes_total",
-]
+)

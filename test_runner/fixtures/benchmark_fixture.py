@@ -11,39 +11,37 @@ from datetime import datetime
 from pathlib import Path
 
 # Type-related stuff
-from typing import Iterator, Optional
+from typing import Callable, ClassVar, Iterator, Optional
 
 import pytest
 from _pytest.config import Config
+from _pytest.config.argparsing import Parser
 from _pytest.terminal import TerminalReporter
+from fixtures.neon_fixtures import NeonPageserver
 from fixtures.types import TenantId, TimelineId
 
 """
 This file contains fixtures for micro-benchmarks.
 
-To use, declare the 'zenbenchmark' fixture in the test function. Run the
-bencmark, and then record the result by calling zenbenchmark.record. For example:
+To use, declare the `zenbenchmark` fixture in the test function. Run the
+bencmark, and then record the result by calling `zenbenchmark.record`. For example:
 
-import timeit
-from fixtures.neon_fixtures import NeonEnv
-
-def test_mybench(neon_simple_env: env, zenbenchmark):
-
-    # Initialize the test
-    ...
-
-    # Run the test, timing how long it takes
-    with zenbenchmark.record_duration('test_query'):
-        cur.execute('SELECT test_query(...)')
-
-    # Record another measurement
-    zenbenchmark.record('speed_of_light', 300000, 'km/s')
+>>> import timeit
+>>> from fixtures.neon_fixtures import NeonEnv
+>>> def test_mybench(neon_simple_env: NeonEnv, zenbenchmark):
+...     # Initialize the test
+...     ...
+...     # Run the test, timing how long it takes
+...     with zenbenchmark.record_duration('test_query'):
+...         cur.execute('SELECT test_query(...)')
+...     # Record another measurement
+...     zenbenchmark.record('speed_of_light', 300000, 'km/s')
 
 There's no need to import this file to use it. It should be declared as a plugin
-inside conftest.py, and that makes it available to all tests.
+inside `conftest.py`, and that makes it available to all tests.
 
 You can measure multiple things in one test, and record each one with a separate
-call to zenbenchmark. For example, you could time the bulk loading that happens
+call to `zenbenchmark`. For example, you could time the bulk loading that happens
 in the test initialization, or measure disk usage after the test query.
 
 """
@@ -117,7 +115,7 @@ class PgBenchRunResult:
             # tps = 309.281539 (without initial connection time)
             if line.startswith("tps = ") and (
                 "(excluding connections establishing)" in line
-                or "(without initial connection time)"
+                or "(without initial connection time)" in line
             ):
                 tps = float(line.split()[2])
 
@@ -137,6 +135,17 @@ class PgBenchRunResult:
 
 @dataclasses.dataclass
 class PgBenchInitResult:
+    REGEX: ClassVar[re.Pattern] = re.compile(  # type: ignore[type-arg]
+        r"done in (\d+\.\d+) s "
+        r"\("
+        r"(?:drop tables (\d+\.\d+) s)?(?:, )?"
+        r"(?:create tables (\d+\.\d+) s)?(?:, )?"
+        r"(?:client-side generate (\d+\.\d+) s)?(?:, )?"
+        r"(?:vacuum (\d+\.\d+) s)?(?:, )?"
+        r"(?:primary keys (\d+\.\d+) s)?(?:, )?"
+        r"\)\."
+    )
+
     total: float
     drop_tables: Optional[float]
     create_tables: Optional[float]
@@ -160,18 +169,7 @@ class PgBenchInitResult:
 
         last_line = stderr.splitlines()[-1]
 
-        regex = re.compile(
-            r"done in (\d+\.\d+) s "
-            r"\("
-            r"(?:drop tables (\d+\.\d+) s)?(?:, )?"
-            r"(?:create tables (\d+\.\d+) s)?(?:, )?"
-            r"(?:client-side generate (\d+\.\d+) s)?(?:, )?"
-            r"(?:vacuum (\d+\.\d+) s)?(?:, )?"
-            r"(?:primary keys (\d+\.\d+) s)?(?:, )?"
-            r"\)\."
-        )
-
-        if (m := regex.match(last_line)) is not None:
+        if (m := cls.REGEX.match(last_line)) is not None:
             total, drop_tables, create_tables, client_side_generate, vacuum, primary_keys = [
                 float(v) for v in m.groups() if v is not None
             ]
@@ -208,7 +206,7 @@ class NeonBenchmarker:
     function by the zenbenchmark fixture
     """
 
-    def __init__(self, property_recorder):
+    def __init__(self, property_recorder: Callable[[str, object], None]):
         # property recorder here is a pytest fixture provided by junitxml module
         # https://docs.pytest.org/en/6.2.x/reference.html#pytest.junitxml.record_property
         self.property_recorder = property_recorder
@@ -236,7 +234,7 @@ class NeonBenchmarker:
         )
 
     @contextmanager
-    def record_duration(self, metric_name: str):
+    def record_duration(self, metric_name: str) -> Iterator[None]:
         """
         Record a duration. Usage:
 
@@ -337,21 +335,21 @@ class NeonBenchmarker:
                     f"{prefix}.{metric}", value, unit="s", report=MetricReport.LOWER_IS_BETTER
                 )
 
-    def get_io_writes(self, pageserver) -> int:
+    def get_io_writes(self, pageserver: NeonPageserver) -> int:
         """
         Fetch the "cumulative # of bytes written" metric from the pageserver
         """
         metric_name = r'libmetrics_disk_io_bytes_total{io_operation="write"}'
         return self.get_int_counter_value(pageserver, metric_name)
 
-    def get_peak_mem(self, pageserver) -> int:
+    def get_peak_mem(self, pageserver: NeonPageserver) -> int:
         """
         Fetch the "maxrss" metric from the pageserver
         """
         metric_name = r"libmetrics_maxrss_kb"
         return self.get_int_counter_value(pageserver, metric_name)
 
-    def get_int_counter_value(self, pageserver, metric_name) -> int:
+    def get_int_counter_value(self, pageserver: NeonPageserver, metric_name: str) -> int:
         """Fetch the value of given int counter from pageserver metrics."""
         # TODO: If we start to collect more of the prometheus metrics in the
         # performance test suite like this, we should refactor this to load and
@@ -365,7 +363,9 @@ class NeonBenchmarker:
         assert matches, f"metric {metric_name} not found"
         return int(round(float(matches.group(1))))
 
-    def get_timeline_size(self, repo_dir: Path, tenant_id: TenantId, timeline_id: TimelineId):
+    def get_timeline_size(
+        self, repo_dir: Path, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> int:
         """
         Calculate the on-disk size of a timeline
         """
@@ -379,7 +379,9 @@ class NeonBenchmarker:
         return totalbytes
 
     @contextmanager
-    def record_pageserver_writes(self, pageserver, metric_name):
+    def record_pageserver_writes(
+        self, pageserver: NeonPageserver, metric_name: str
+    ) -> Iterator[None]:
         """
         Record bytes written by the pageserver during a test.
         """
@@ -396,7 +398,7 @@ class NeonBenchmarker:
 
 
 @pytest.fixture(scope="function")
-def zenbenchmark(record_property) -> Iterator[NeonBenchmarker]:
+def zenbenchmark(record_property: Callable[[str, object], None]) -> Iterator[NeonBenchmarker]:
     """
     This is a python decorator for benchmark fixtures. It contains functions for
     recording measurements, and prints them out at the end.
@@ -405,7 +407,7 @@ def zenbenchmark(record_property) -> Iterator[NeonBenchmarker]:
     yield benchmarker
 
 
-def pytest_addoption(parser):
+def pytest_addoption(parser: Parser):
     parser.addoption(
         "--out-dir",
         dest="out_dir",
@@ -429,7 +431,9 @@ def get_out_path(target_dir: Path, revision: str) -> Path:
 
 # Hook to print the results at the end
 @pytest.hookimpl(hookwrapper=True)
-def pytest_terminal_summary(terminalreporter: TerminalReporter, exitstatus: int, config: Config):
+def pytest_terminal_summary(
+    terminalreporter: TerminalReporter, exitstatus: int, config: Config
+) -> Iterator[None]:
     yield
     revision = os.getenv("GITHUB_SHA", "local")
     platform = os.getenv("PLATFORM", "local")
