@@ -36,6 +36,9 @@ enum Command {
     /// Print stats and anomalies about the traces
     Analyze,
 
+    /// Draw the traces in svg format
+    Draw,
+
     /// Send the read requests to a pageserver
     Replay,
 }
@@ -154,6 +157,7 @@ fn main() -> anyhow::Result<()> {
                 analyze_trace(reader);
             }
         },
+        Command::Draw => todo!(),
         Command::Replay => todo!(),
     }
 
