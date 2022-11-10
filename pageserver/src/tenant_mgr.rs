@@ -307,10 +307,11 @@ pub fn create_tenant(
         hash_map::Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
             create_tenant_files(conf, tenant_conf, tenant_id)?;
-            // TODO review, created in active state immediately, is it correctly?
+            // create tenant in Active state so it is possible to issue create_timeline
+            // request. Which on timeline activation will trigger tenant activation
             let tenant = Arc::new(Tenant::new(
                 TenantState::Active {
-                    background_jobs_running: true,
+                    background_jobs_running: false,
                 },
                 conf,
                 tenant_conf,
