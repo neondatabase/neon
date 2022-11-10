@@ -150,6 +150,8 @@ extern void prefetch_on_ps_disconnect(void);
 extern page_server_api * page_server;
 
 extern char *page_server_connstring;
+extern int flush_every_n_requests;
+extern int readahead_buffer_size;
 extern bool seqscan_prefetch_enabled;
 extern int seqscan_prefetch_distance;
 extern char *neon_timeline;

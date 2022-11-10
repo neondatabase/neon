@@ -52,6 +52,7 @@ char	   *page_server_connstring_raw;
 
 int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
+int			readahead_buffer_size = 128;
 
 static void pageserver_flush(void);
 
@@ -449,7 +450,20 @@ pg_init_libpagestore(void)
 							NULL,
 							&flush_every_n_requests,
 							8, -1, INT_MAX,
-							PGC_SIGHUP,
+							PGC_USERSET,
+							0,	/* no flags required */
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("neon.readahead_buffer_size",
+							"Keep a readahead buffer of this many buffers",
+							"This buffer is used to store prefetched data; so "
+							"it is important that this buffer is at least as "
+							"large as the configured value of all tablespaces' "
+							"effective_io_concurrency and maintenance_io_concurrency, "
+							"your sessions' values of these, and the value for "
+							"seqscan_prefetch_buffers.",
+							&readahead_buffer_size,
+							128, 16, 1024,
+							PGC_BACKEND,
 							0,	/* no flags required */
 							NULL, NULL, NULL);
 
