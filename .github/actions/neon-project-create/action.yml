@@ -6,7 +6,7 @@ inputs:
     desctiption: 'Neon API key'
     required: true
   environment:
-    desctiption: 'dev (aka captest) or stage'
+    desctiption: 'dev (aka captest) or staging'
     required: true
   region_id:
     desctiption: 'Region ID, if not set the project will be created in the default region'
@@ -53,7 +53,7 @@ runs:
       shell: bash -euo pipefail {0}
       run: |
         project=$(curl \
-          "https://${API_HOST}/api/v1/projects" \
+          "https://${API_HOST}/api/v2/projects" \
           --fail \
           --header "Accept: application/json" \
           --header "Content-Type: application/json" \
@@ -70,11 +70,11 @@ runs:
         # Mask password
         echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
 
-        dsn=$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .dsn')/main
+        dsn=$(echo $project | jq --raw-output '.connection_uris[0].connection_uri')
         echo "::add-mask::${dsn}"
         echo "dsn=${dsn}" >> $GITHUB_OUTPUT
 
-        project_id=$(echo $project | jq --raw-output '.id')
+        project_id=$(echo $project | jq --raw-output '.project.id')
         echo "project_id=${project_id}" >> $GITHUB_OUTPUT
       env:
         API_KEY: ${{ inputs.api_key }}
