@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use tokio::task::spawn_blocking;
 use tracing::*;
 
+use std::borrow::Cow;
 use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1155,29 +1156,24 @@ impl Timeline {
         // FIXME One way around it would be not considering timeline as initialized before upload finishes.
         // So if there is no index file on the remote we consider all locally existing files as local only
         // and schedule their upload
-        // FIXME looks messy, needs cleanup
-        let (local_only_filenames, up_to_date_metadata) = if let Some(index_part) = index_part {
-            let local_only_filenames = self
-                .download_missing(index_part, remote_client, local_filenames, first_save)
-                .await?;
-            remote_client.init_upload_queue(index_part)?;
-            local_only_filenames
-        } else {
-            match remote_client.download_index_file().await {
-                Ok(index_part) => {
-                    let (local_only_filenames, up_to_date_metadata) = self
-                        .download_missing(&index_part, remote_client, local_filenames, first_save)
-                        .await?;
-                    remote_client.init_upload_queue(&index_part)?;
-                    (local_only_filenames, up_to_date_metadata)
-                }
-                Err(DownloadError::NotFound) => {
-                    info!("no index file was found on the remote");
-                    remote_client.init_upload_queue_empty(&local_metadata)?;
-                    (local_filenames, local_metadata)
-                }
-                Err(e) => return Err(anyhow::anyhow!(e)),
+        let index_part: Result<Cow<'_, IndexPart>, DownloadError> = match index_part {
+            Some(ip) => Ok(Cow::Borrowed(ip)),
+            None => remote_client.download_index_file().await.map(Cow::Owned),
+        };
+        let (local_only_filenames, up_to_date_metadata) = match index_part {
+            Ok(index_part) => {
+                let (local_only_filenames, up_to_date_metadata) = self
+                    .download_missing(&index_part, remote_client, local_filenames, first_save)
+                    .await?;
+                remote_client.init_upload_queue(&index_part)?;
+                (local_only_filenames, up_to_date_metadata)
             }
+            Err(DownloadError::NotFound) => {
+                info!("no index file was found on the remote");
+                remote_client.init_upload_queue_empty(&local_metadata)?;
+                (local_filenames, local_metadata)
+            }
+            Err(e) => return Err(anyhow::anyhow!(e)),
         };
 
         // TODO what to do with physical size?
