@@ -1,3 +1,4 @@
+import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 
 
@@ -35,10 +36,9 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
 
-    for i in range(5):
-        try:
+    for _ in range(5):
+        with pytest.raises(Exception):
             pg_bin.run_capture(["pgbench", "-N", "-c5", "-T100", "-Mprepared", connstr])
-        except Exception:
-            env.pageserver.stop()
-            env.pageserver.start()
-            pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
+        env.pageserver.stop()
+        env.pageserver.start()
+        pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
