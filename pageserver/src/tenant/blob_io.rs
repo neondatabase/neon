@@ -74,6 +74,7 @@ where
         };
 
         dstbuf.clear();
+        dstbuf.reserve(len);
 
         // Read the payload
         let mut remain = len;
