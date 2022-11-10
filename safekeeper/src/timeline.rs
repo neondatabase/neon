@@ -556,10 +556,6 @@ impl Timeline {
                 .pageserver_feedback
                 .map(|f| Lsn(f.ps_applylsn))
                 .unwrap_or(Lsn::INVALID);
-            info!(
-                "checking should ws stop ttid {} lsn {} rcl {}",
-                self.ttid, reported_remote_consistent_lsn, shared_state.sk.inmem.commit_lsn
-            );
             let stop = shared_state.sk.inmem.commit_lsn == Lsn(0) || // no data at all yet
             (reported_remote_consistent_lsn!= Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
             reported_remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn);
