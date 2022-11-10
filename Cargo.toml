@@ -17,6 +17,7 @@ members = [
     "proxy",
     "safekeeper",
     "workspace_hack",
+    "trace",
     "libs/*",
 ]
 

@@ -91,10 +91,21 @@ class NeonCompare(PgCompare):
         self._pg_bin = pg_bin
         self.pageserver_http_client = self.env.pageserver.http_client()
 
+        # HACK
+        self.tenant, _ = self.env.neon_cli.create_tenant(
+            conf={
+                "trace_read_requests": "true",
+            }
+        )
+
         # We only use one branch and one timeline
-        self.env.neon_cli.create_branch(branch_name, "empty")
-        self._pg = self.env.postgres.create_start(branch_name)
-        self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
+        # self.env.neon_cli.create_branch(branch_name, "empty")
+        # self._pg = self.env.postgres.create_start(branch_name)
+        # self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
+
+        self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
+        self._pg = self.env.postgres.create_start(
+            branch_name, "main", self.tenant, config_lines=["shared_buffers=2GB"])
 
     @property
     def pg(self):
@@ -109,10 +120,10 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
-        self.pageserver_http_client.timeline_gc(self.env.initial_tenant, self.timeline, 0)
+        self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 
     def compact(self):
-        self.pageserver_http_client.timeline_compact(self.env.initial_tenant, self.timeline)
+        self.pageserver_http_client.timeline_compact(self.tenant, self.timeline)
 
     def report_peak_memory_use(self) -> None:
         self.zenbenchmark.record(
@@ -124,13 +135,13 @@ class NeonCompare(PgCompare):
 
     def report_size(self) -> None:
         timeline_size = self.zenbenchmark.get_timeline_size(
-            self.env.repo_dir, self.env.initial_tenant, self.timeline
+            self.env.repo_dir, self.tenant, self.timeline
         )
         self.zenbenchmark.record(
             "size", timeline_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
 
-        params = f'{{tenant_id="{self.env.initial_tenant}",timeline_id="{self.timeline}"}}'
+        params = f'{{tenant_id="{self.tenant}",timeline_id="{self.timeline}"}}'
         total_files = self.zenbenchmark.get_int_counter_value(
             self.env.pageserver, "pageserver_created_persistent_files_total" + params
         )
