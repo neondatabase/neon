@@ -123,7 +123,12 @@ runs:
           exit 1
         fi
         if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
+          # -n4 uses four processes to run tests via pytest-xdist
           EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
+
+          # --dist=loadgroup points tests marked with @pytest.mark.xdist_group
+          # to the same worker to make @pytest.mark.order work with xdist
+          EXTRA_PARAMS="--dist=loadgroup $EXTRA_PARAMS"
         fi
 
         if [[ "${{ inputs.run_with_real_s3 }}" == "true" ]]; then
@@ -158,11 +163,8 @@ runs:
         # --verbose prints name of each test (helpful when there are
         # multiple tests in one file)
         # -rA prints summary in the end
-        # -n4 uses four processes to run tests via pytest-xdist
         # -s is not used to prevent pytest from capturing output, because tests are running
         # in parallel and logs are mixed between different tests
-        # --dist=loadgroup points tests marked with @pytest.mark.xdist_group to the same worker,
-        # to make @pytest.mark.order work with xdist
         #
         mkdir -p $TEST_OUTPUT/allure/results
         "${cov_prefix[@]}" ./scripts/pytest \
@@ -170,7 +172,6 @@ runs:
           --alluredir=$TEST_OUTPUT/allure/results \
           --tb=short \
           --verbose \
-          --dist=loadgroup \
           -rA $TEST_SELECTION $EXTRA_PARAMS
 
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
