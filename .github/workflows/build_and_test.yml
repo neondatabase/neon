@@ -492,26 +492,6 @@ jobs:
       - name: Kaniko build compute tools
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
-  compute-node-image:
-    runs-on: dev
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
-    needs: [ tag ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v1 # v3 won't work with kaniko
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
-
-        # compute-node uses postgres 14, which is default now
-        # cloud repo depends on this image name, thus duplicating it
-        # remove compute-node when cloud repo is updated
-      - name: Kaniko build compute node with extensions v14 (compatibility)
-        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:${{needs.tag.outputs.build-tag}}
-
   compute-node-image-v14:
     runs-on: dev
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
@@ -547,7 +527,7 @@ jobs:
         run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v15 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}}
 
   test-images:
-    needs: [ tag, neon-image, compute-node-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
+    needs: [ tag, neon-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
     runs-on: dev
 
     steps:
@@ -597,10 +577,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # compute-node uses postgres 14, which is default now
-        # cloud repo depends on this image name, thus duplicating it
-        # remove compute-node when cloud repo is updated
-        name: [ neon, compute-node, compute-node-v14, compute-node-v15, compute-tools ]
+        name: [ neon, compute-node-v14, compute-node-v15, compute-tools ]
 
     steps:
       - name: Promote image to latest
@@ -630,9 +607,6 @@ jobs:
       - name: Pull compute tools image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} compute-tools
 
-      - name: Pull compute node image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:${{needs.tag.outputs.build-tag}} compute-node
-
       - name: Pull compute node v14 image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} compute-node-v14
 
@@ -649,7 +623,6 @@ jobs:
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
 
@@ -664,9 +637,6 @@ jobs:
 
       - name: Push compute tools image to Docker Hub
         run: crane push compute-tools neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
-
-      - name: Push compute node image to Docker Hub
-        run: crane push compute-node neondatabase/compute-node:${{needs.tag.outputs.build-tag}}
 
       - name: Push compute node v14 image to Docker Hub
         run: crane push compute-node-v14 neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
@@ -684,7 +654,6 @@ jobs:
         run: |
           crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
