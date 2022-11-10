@@ -740,7 +740,11 @@ impl PostgresRedoProcess {
         // This could be problematic if there are millions of records to replay,
         // but in practice the number of records is usually so small that it doesn't
         // matter, and it's better to keep this code simple.
-        let mut writebuf: Vec<u8> = Vec::new();
+        //
+        // Most requests start with a before-image with BLCKSZ bytes, followed by
+        // by some other WAL records. Start with a buffer that can hold that
+        // comfortably.
+        let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
         build_begin_redo_for_block_msg(tag, &mut writebuf);
         if let Some(img) = base_img {
             build_push_page_msg(tag, &img, &mut writebuf);
