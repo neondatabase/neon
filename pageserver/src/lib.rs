@@ -1,5 +1,6 @@
 pub mod basebackup;
 pub mod config;
+mod connection_string;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;

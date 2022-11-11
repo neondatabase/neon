@@ -31,6 +31,7 @@ use pageserver_api::models::TimelineState;
 use tokio::{select, sync::watch};
 use tracing::*;
 
+use crate::connection_string::ConnectionString;
 use crate::{
     exponential_backoff, walreceiver::get_etcd_client, DEFAULT_BASE_BACKOFF_SECONDS,
     DEFAULT_MAX_BACKOFF_SECONDS,
@@ -425,7 +426,11 @@ impl WalreceiverState {
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
-    async fn change_connection(&mut self, new_sk_id: NodeId, new_wal_source_connstr: String) {
+    async fn change_connection(
+        &mut self,
+        new_sk_id: NodeId,
+        new_wal_source_connstr: ConnectionString,
+    ) {
         self.drop_old_connection(true).await;
 
         let id = self.id;
@@ -726,7 +731,7 @@ impl WalreceiverState {
     fn select_connection_candidate(
         &self,
         node_to_omit: Option<NodeId>,
-    ) -> Option<(NodeId, &SkTimelineInfo, String)> {
+    ) -> Option<(NodeId, &SkTimelineInfo, ConnectionString)> {
         self.applicable_connection_candidates()
             .filter(|&(sk_id, _, _)| Some(sk_id) != node_to_omit)
             .max_by_key(|(_, info, _)| info.commit_lsn)
@@ -736,7 +741,7 @@ impl WalreceiverState {
     /// Some safekeepers are filtered by the retry cooldown.
     fn applicable_connection_candidates(
         &self,
-    ) -> impl Iterator<Item = (NodeId, &SkTimelineInfo, String)> {
+    ) -> impl Iterator<Item = (NodeId, &SkTimelineInfo, ConnectionString)> {
         let now = Utc::now().naive_utc();
 
         self.wal_stream_candidates
@@ -797,10 +802,12 @@ impl WalreceiverState {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct NewWalConnectionCandidate {
     safekeeper_id: NodeId,
-    wal_source_connstr: String,
+    wal_source_connstr: ConnectionString,
+    // This field is used in `derive(Debug)` only.
+    #[allow(dead_code)]
     reason: ReconnectReason,
 }
 
@@ -834,7 +841,7 @@ fn wal_stream_connection_string(
         timeline_id,
     }: TenantTimelineId,
     listen_pg_addr_str: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ConnectionString> {
     let sk_connstr = format!("postgresql://no_user@{listen_pg_addr_str}/no_db");
     sk_connstr
         .parse()
@@ -843,11 +850,15 @@ fn wal_stream_connection_string(
             let host = url.host_str().context("host is missing")?;
             let port = url.port().unwrap_or(5432); // default PG port
 
-            Ok(format!(
+            let no_secrets = format!(
                 "host={host} \
                  port={port} \
                  options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
-            ))
+            );
+            Ok(ConnectionString {
+                no_secrets: no_secrets.clone(),
+                with_secrets: no_secrets,
+            })
         })
         .with_context(|| format!("Failed to parse pageserver connection URL '{sk_connstr}'"))
 }
@@ -1082,6 +1093,7 @@ mod tests {
         );
         assert!(only_candidate
             .wal_source_connstr
+            .with_secrets
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         let selected_lsn = 100_000;
@@ -1153,6 +1165,7 @@ mod tests {
         );
         assert!(biggest_wal_candidate
             .wal_source_connstr
+            .with_secrets
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -1312,6 +1325,7 @@ mod tests {
         );
         assert!(over_threshcurrent_candidate
             .wal_source_connstr
+            .with_secrets
             .contains("advanced_by_lsn_safekeeper"));
 
         Ok(())
@@ -1386,6 +1400,7 @@ mod tests {
         }
         assert!(over_threshcurrent_candidate
             .wal_source_connstr
+            .with_secrets
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -1465,6 +1480,7 @@ mod tests {
         }
         assert!(over_threshcurrent_candidate
             .wal_source_connstr
+            .with_secrets
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())

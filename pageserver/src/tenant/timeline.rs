@@ -48,6 +48,7 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
+use crate::connection_string::ConnectionString;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr;
@@ -288,7 +289,7 @@ impl LogicalSize {
 }
 
 pub struct WalReceiverInfo {
-    pub wal_source_connstr: String,
+    pub wal_source_connstr: ConnectionString,
     pub last_received_msg_lsn: Lsn,
     pub last_received_msg_ts: u128,
 }
