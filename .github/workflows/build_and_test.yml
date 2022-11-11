@@ -529,7 +529,6 @@ jobs:
       - name: Kaniko build compute node with extensions v14
         run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}}
 
-
   compute-node-image-v15:
     runs-on: dev
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
@@ -547,9 +546,52 @@ jobs:
       - name: Kaniko build compute node with extensions v15
         run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v15 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}}
 
+  test-images:
+    needs: [ tag, neon-image, compute-node-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
+    runs-on: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
+      # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
+      # Regular pageserver version string looks like
+      #   Neon page server git-env:32d14403bd6ab4f4520a94cbfd81a6acef7a526c failpoints: true, features: []
+      # Bad versions might loop like:
+      #   Neon page server git-env:local failpoints: true, features: ["testing"]
+      # Ensure that we don't have bad versions.
+      - name: Verify image versions
+        shell: bash # ensure no set -e for better error messages
+        run: |
+          pageserver_version=$(docker run --rm 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
+
+          echo "Pageserver version string: $pageserver_version"
+
+          if ! echo "$pageserver_version" | grep -qv 'git-env:local' ; then
+            echo "Pageserver version should not be the default Dockerfile one"
+            exit 1
+          fi
+
+          if ! echo "$pageserver_version" | grep -qv '"testing"' ; then
+            echo "Pageserver version should have no testing feature enabled"
+            exit 1
+          fi
+
+      - name: Verify docker-compose example
+        run: env REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
+
+      - name: Print logs and clean up
+        if: always()
+        run: |
+          docker compose -f ./docker-compose/docker-compose.yml logs || 0
+          docker compose -f ./docker-compose/docker-compose.yml down
+
   promote-images:
     runs-on: dev
-    needs: [ tag, neon-image, compute-node-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
+    needs: [ tag, test-images ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
