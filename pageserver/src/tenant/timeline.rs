@@ -1130,7 +1130,7 @@ impl Timeline {
     /// The caller can provide IndexPart if it has it already. If it's None,
     /// this function will download it.
     ///
-    #[instrument(skip(self, index_part), fields(timeline_id = %self.timeline_id))]
+    #[instrument(skip(self, index_part, local_metadata, first_save))]
     pub async fn reconcile_with_remote(
         &self,
         local_metadata: TimelineMetadata,
@@ -1183,10 +1183,15 @@ impl Timeline {
         // TODO what to do with physical size?
 
         // Are there local files that don't exist remotely? Schedule uploads for them
+        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for fname in &local_only_filenames {
-            let sz = fname.metadata()?.len();
+            let absolute = timeline_path.join(fname);
+            let sz = absolute
+                .metadata()
+                .with_context(|| format!("failed to get file {} metadata", fname.display()))?
+                .len();
             info!("scheduling {} for upload", fname.display());
-            remote_client.schedule_layer_file_upload(fname, &LayerFileMetadata::new(sz))?;
+            remote_client.schedule_layer_file_upload(&absolute, &LayerFileMetadata::new(sz))?;
         }
         if !local_only_filenames.is_empty() {
             // FIXME this we should merge local and remote metadata, at least remote_consistent_lsn
