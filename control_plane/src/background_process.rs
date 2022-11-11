@@ -49,11 +49,16 @@ pub enum InitialPidFile<'t> {
 }
 
 /// Start a background child process using the parameters given.
-pub fn start_process<F, S: AsRef<OsStr>>(
+pub fn start_process<
+    F,
+    S: AsRef<OsStr>,
+    EI: IntoIterator<Item = (String, String)>, // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
+>(
     process_name: &str,
     datadir: &Path,
     command: &Path,
     args: &[S],
+    envs: EI,
     initial_pid_file: InitialPidFile,
     process_status_check: F,
 ) -> anyhow::Result<Child>
@@ -79,6 +84,7 @@ where
         .stderr(same_file_for_stderr)
         .args(args);
     let filled_cmd = fill_aws_secrets_vars(fill_rust_env_vars(background_command));
+    filled_cmd.envs(envs);
 
     let mut spawned_process = filled_cmd.spawn().with_context(|| {
         format!("Could not spawn {process_name}, see console output and log files for details.")

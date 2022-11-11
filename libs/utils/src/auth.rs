@@ -21,8 +21,16 @@ const JWT_ALGORITHM: Algorithm = Algorithm::RS256;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
+    // Provides access to all data for a specific tenant (specified in `struct Claims` below)
+    // TODO: join these two?
     Tenant,
+    // Provides blanket access to all tenants on the pageserver plus pageserver-wide APIs.
+    // Should only be used e.g. for status check/tenant creation/list.
     PageServerApi,
+    // Provides blanket access to all data on the safekeeper plus safekeeper-wide APIs.
+    // Should only be used e.g. for status check.
+    // Currently also used for connection from any pageserver to any safekeeper.
+    SafekeeperData,
 }
 
 #[serde_as]

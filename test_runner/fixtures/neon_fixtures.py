@@ -435,6 +435,9 @@ class AuthKeys:
     def generate_pageserver_token(self) -> str:
         return self.generate_token(scope="pageserverapi")
 
+    def generate_safekeeper_token(self) -> str:
+        return self.generate_token(scope="safekeeperdata")
+
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
         return self.generate_token(scope="tenant", tenant_id=str(tenant_id))
 
@@ -2497,7 +2500,8 @@ class Safekeeper:
 
         # "replication=0" hacks psycopg not to send additional queries
         # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
+        token = self.env.auth_keys.generate_tenant_token(tenant_id)
+        connstr = f"host=localhost port={self.port.pg} password={token} replication=0 options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
 
         with closing(psycopg2.connect(connstr)) as conn:
             # server doesn't support transactions

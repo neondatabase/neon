@@ -1,7 +1,7 @@
 from contextlib import closing
 
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException
+from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException, PgProtocol
 from fixtures.types import TenantId
 
 
@@ -73,3 +73,73 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
             cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
             cur.execute("SELECT sum(key) FROM t")
             assert cur.fetchone() == (5000050000,)
+
+
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
+    neon_env_builder.auth_enabled = auth_enabled
+    env = neon_env_builder.init_start()
+
+    branch = f"test_auth_failures_auth_enabled_{auth_enabled}"
+    timeline_id = env.neon_cli.create_branch(branch)
+    env.postgres.create_start(branch)
+
+    tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant)
+    invalid_tenant_token = env.auth_keys.generate_tenant_token(TenantId.generate())
+    pageserver_token = env.auth_keys.generate_pageserver_token()
+    safekeeper_token = env.auth_keys.generate_safekeeper_token()
+
+    def check_connection(
+        pg_protocol: PgProtocol, command: str, expect_success: bool, **conn_kwargs
+    ):
+        def op():
+            with closing(pg_protocol.connect(**conn_kwargs)) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(command)
+
+        if expect_success:
+            op()
+        else:
+            with pytest.raises(Exception):
+                op()
+
+    def check_pageserver(expect_success: bool, **conn_kwargs):
+        check_connection(
+            env.pageserver,
+            f"get_last_record_rlsn {env.initial_tenant} {timeline_id}",
+            expect_success,
+            **conn_kwargs,
+        )
+
+    check_pageserver(not auth_enabled)
+    if auth_enabled:
+        check_pageserver(True, password=tenant_token)
+
+        env.pageserver.allowed_errors.append(".*Tenant id mismatch. Permission denied.*")
+        check_pageserver(False, password=invalid_tenant_token)
+
+        check_pageserver(True, password=pageserver_token)
+
+        env.pageserver.allowed_errors.append(
+            ".*SafekeeperData scope makes no sense for Pageserver.*"
+        )
+        check_pageserver(False, password=safekeeper_token)
+
+    def check_safekeeper(expect_success: bool, **conn_kwargs):
+        check_connection(
+            PgProtocol(
+                host="localhost",
+                port=env.safekeepers[0].port.pg,
+                options=f"ztenantid={env.initial_tenant} ztimelineid={timeline_id}",
+            ),
+            "IDENTIFY_SYSTEM",
+            expect_success,
+            **conn_kwargs,
+        )
+
+    check_safekeeper(not auth_enabled)
+    if auth_enabled:
+        check_safekeeper(True, password=tenant_token)
+        check_safekeeper(False, password=invalid_tenant_token)
+        check_safekeeper(False, password=pageserver_token)
+        check_safekeeper(True, password=safekeeper_token)

@@ -208,11 +208,12 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
     GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
 
     let conf_ = conf.clone();
+    let auth_ = auth.clone();
     threads.push(
         thread::Builder::new()
             .name("http_endpoint_thread".into())
             .spawn(|| {
-                let router = http::make_router(conf_, auth);
+                let router = http::make_router(conf_, auth_);
                 endpoint::serve_thread_main(
                     router,
                     http_listener,
@@ -226,8 +227,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
     let safekeeper_thread = thread::Builder::new()
         .name("Safekeeper thread".into())
         .spawn(|| {
-            // TODO: add auth
-            if let Err(e) = wal_service::thread_main(conf_cloned, pg_listener) {
+            if let Err(e) = wal_service::thread_main(conf_cloned, pg_listener, auth) {
                 info!("safekeeper thread terminated: {e}");
             }
         })
@@ -254,7 +254,6 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
         thread::Builder::new()
             .name("WAL removal thread".into())
             .spawn(|| {
-                // TODO: add auth?
                 remove_wal::thread_main(conf_);
             })?,
     );
@@ -264,7 +263,6 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
         thread::Builder::new()
             .name("wal backup launcher thread".into())
             .spawn(move || {
-                // TODO: add auth?
                 wal_backup::wal_backup_launcher_thread_main(conf_, wal_backup_launcher_rx);
             })?,
     );

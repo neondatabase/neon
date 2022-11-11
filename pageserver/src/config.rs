@@ -10,9 +10,11 @@ use std::env;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
 
+use once_cell::sync::OnceCell;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
@@ -140,6 +142,15 @@ pub struct PageServerConf {
     /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
 }
+
+/// We do not want to store this in a PageServerConf because the latter may be logged
+/// and/or serialized at a whim, while the token is secret. Currently this token is the
+/// same for accessing all tenants/timelines, but may become per-tenant/per-timeline in
+/// the future, more tokens and auth may arrive for etcd and/or its rewrite (see
+/// https://github.com/neondatabase/neon/issues/2394), completely changing the logic.
+/// Hence, we resort to a global variable for now instead of passing the token from the
+/// startup code to the connection code through a dozen layers.
+pub static SAFEKEEPER_AUTH_TOKEN: OnceCell<Arc<String>> = OnceCell::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfilingConfig {
