@@ -1,19 +1,23 @@
 //! Part of Safekeeper pretending to be Postgres, i.e. handling Postgres
 //! protocol commands.
 
+use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 use crate::receive_wal::ReceiveWalConn;
 
 use crate::send_wal::ReplicationConn;
 
 use crate::{GlobalTimelines, SafeKeeperConf};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 
 use postgres_ffi::PG_TLI;
 use regex::Regex;
 
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
+use std::str;
+use std::sync::Arc;
 use tracing::info;
+use utils::auth::{Claims, JwtAuth, Scope};
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -28,6 +32,8 @@ pub struct SafekeeperPostgresHandler {
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
     pub ttid: TenantTimelineId,
+    auth: Option<Arc<JwtAuth>>,
+    claims: Option<Claims>,
 }
 
 /// Parsed Postgres command.
@@ -93,7 +99,44 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         }
     }
 
+    fn check_auth_jwt(
+        &mut self,
+        _pgb: &mut PostgresBackend,
+        jwt_response: &[u8],
+    ) -> anyhow::Result<()> {
+        // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
+        // which requires auth to be present
+        let data = self
+            .auth
+            .as_ref()
+            .unwrap()
+            .decode(str::from_utf8(jwt_response)?)?;
+
+        if matches!(data.claims.scope, Scope::Tenant) {
+            ensure!(
+                data.claims.tenant_id.is_some(),
+                "jwt token scope is Tenant, but tenant id is missing"
+            )
+        }
+
+        info!(
+            "jwt auth succeeded for scope: {:#?} by tenant id: {:?}",
+            data.claims.scope, data.claims.tenant_id,
+        );
+
+        self.claims = Some(data.claims);
+        Ok(())
+    }
+
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()> {
+        if query_string
+            .to_ascii_lowercase()
+            .starts_with("set datestyle to ")
+        {
+            // important for debug because psycopg2 executes "SET datestyle TO 'ISO'" on connect
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            return Ok(());
+        }
         let cmd = parse_cmd(query_string)?;
 
         info!(
@@ -103,6 +146,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
         let tenant_id = self.tenant_id.context("tenantid is required")?;
         let timeline_id = self.timeline_id.context("timelineid is required")?;
+        self.check_permission(Some(tenant_id))?;
         self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
 
         match cmd {
@@ -122,14 +166,33 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf) -> Self {
+    pub fn new(conf: SafeKeeperConf, auth: Option<Arc<JwtAuth>>) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
             tenant_id: None,
             timeline_id: None,
             ttid: TenantTimelineId::empty(),
+            auth,
+            claims: None,
         }
+    }
+
+    // when accessing management api supply None as an argument
+    // when using to authorize tenant pass corresponding tenant id
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<()> {
+        if self.auth.is_none() {
+            // auth is set to Trust, nothing to check so just return ok
+            return Ok(());
+        }
+        // auth is some, just checked above, when auth is some
+        // then claims are always present because of checks during connection init
+        // so this expect won't trigger
+        let claims = self
+            .claims
+            .as_ref()
+            .expect("claims presence already checked");
+        check_permission(claims, tenant_id)
     }
 
     ///

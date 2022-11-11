@@ -50,6 +50,7 @@ pub fn spawn_connection_manager_task(
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
+    auth_token: Option<Arc<String>>,
 ) {
     let mut etcd_client = get_etcd_client().clone();
 
@@ -70,6 +71,7 @@ pub fn spawn_connection_manager_task(
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
+                auth_token,
             );
             loop {
                 select! {
@@ -360,6 +362,7 @@ struct WalreceiverState {
     wal_connection_retries: HashMap<NodeId, RetryInfo>,
     /// Data about all timelines, available for connection, fetched from etcd, grouped by their corresponding safekeeper node id.
     wal_stream_candidates: HashMap<NodeId, EtcdSkTimeline>,
+    auth_token: Option<Arc<String>>,
 }
 
 /// Current connection data.
@@ -408,6 +411,7 @@ impl WalreceiverState {
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
+        auth_token: Option<Arc<String>>,
     ) -> Self {
         let id = TenantTimelineId {
             tenant_id: timeline.tenant_id,
@@ -422,6 +426,7 @@ impl WalreceiverState {
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),
             wal_connection_retries: HashMap::new(),
+            auth_token,
         }
     }
 
@@ -762,6 +767,10 @@ impl WalreceiverState {
                 match wal_stream_connection_config(
                     self.id,
                     info.safekeeper_connstr.as_deref()?,
+                    match &self.auth_token {
+                        None => None,
+                        Some(x) => Some(x),
+                    },
                 ) {
                     Ok(connstr) => Some((*sk_id, info, connstr)),
                     Err(e) => {
@@ -841,17 +850,18 @@ fn wal_stream_connection_config(
         timeline_id,
     }: TenantTimelineId,
     listen_pg_addr_str: &str,
+    auth_token: Option<&str>,
 ) -> anyhow::Result<PgConnectionConfig> {
     let (host, port) =
         parse_host_port(&listen_pg_addr_str).context("Unable to parse listen_pg_addr_str")?;
     let port = port.unwrap_or(5432);
-    Ok(
-        PgConnectionConfig::new_host_port(host, port).extend_options([
+    Ok(PgConnectionConfig::new_host_port(host, port)
+        .extend_options([
             "-c".to_owned(),
             format!("timeline_id={}", timeline_id),
             format!("tenant_id={}", tenant_id),
-        ]),
-    )
+        ])
+        .set_password(auth_token.map(|s| s.to_owned())))
 }
 
 #[cfg(test)]
@@ -1498,6 +1508,7 @@ mod tests {
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),
             wal_connection_retries: HashMap::new(),
+            auth_token: None,
         }
     }
 }

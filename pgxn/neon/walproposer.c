@@ -80,6 +80,7 @@ bool		am_wal_proposer;
 
 char	   *neon_timeline_walproposer = NULL;
 char	   *neon_tenant_walproposer = NULL;
+char	   *neon_safekeeper_token_walproposer = NULL;
 
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
@@ -513,19 +514,17 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 			Safekeeper *sk = &safekeeper[n_safekeepers];
 			int written = 0;
 
-			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-							   sk->host, sk->port, neon_timeline_walproposer, neon_tenant_walproposer);
+			if (neon_safekeeper_token_walproposer != NULL) {
+				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
+								   "host=%s port=%s password=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+								   sk->host, sk->port, neon_safekeeper_token_walproposer, neon_timeline_walproposer,
+								   neon_tenant_walproposer);
+			} else {
+				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
+								   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+								   sk->host, sk->port, neon_timeline_walproposer, neon_tenant_walproposer);
+			}
 
-			/*
-			 * currently connection string is not that long, but once we pass
-			 * something like jwt we might overflow the buffer,
-			 */
-
-			/*
-			 * so it is better to be defensive and check that everything aligns
-			 * well
-			 */
 			if (written > MAXCONNINFO || written < 0)
 				elog(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
@@ -721,12 +720,13 @@ ResetConnection(Safekeeper *sk)
 		 * According to libpq docs:
 		 *   "If the result is CONNECTION_BAD, the connection attempt has already failed,
 		 *    typically because of invalid connection parameters."
-		 * We should report this failure.
+		 * We should report this failure. Do not print the exact `conninfo` as it may
+		 * contain e.g. password. The error message should already provide enough information.
 		 *
 		 * https://www.postgresql.org/docs/devel/libpq-connect.html#LIBPQ-PQCONNECTSTARTPARAMS
 		 */
-		elog(WARNING, "Immediate failure to connect with node:\n\t%s\n\terror: %s",
-			 sk->conninfo, walprop_error_message(sk->conn));
+		elog(WARNING, "Immediate failure to connect with node '%s:%s':\n\terror: %s",
+			 sk->host, sk->port, walprop_error_message(sk->conn));
 
 		/*
 		 * Even though the connection failed, we still need to clean up the

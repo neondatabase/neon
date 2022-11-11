@@ -14,6 +14,7 @@ use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
+use utils::auth::{Claims, Scope};
 use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
@@ -253,11 +254,21 @@ impl PageServerNode {
             args.extend(["-c", config_override]);
         }
 
+        let envs = if self.env.pageserver.auth_type != AuthType::Trust {
+            // Generate a token to connect from the pageserver to a safekeeper
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+            vec![("ZENITH_AUTH_TOKEN".to_owned(), token)]
+        } else {
+            vec![]
+        };
         background_process::start_process(
             "pageserver",
             datadir,
             &self.env.pageserver_bin(),
             &args,
+            envs,
             background_process::InitialPidFile::Expect(&self.pid_file()),
             || match self.check_status() {
                 Ok(()) => Ok(true),

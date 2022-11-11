@@ -876,6 +876,7 @@ impl Timeline {
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
+            crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
         );
     }
 

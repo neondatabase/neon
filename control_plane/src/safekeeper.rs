@@ -166,6 +166,7 @@ impl SafekeeperNode {
             &datadir,
             &self.env.safekeeper_bin(),
             &args,
+            [],
             background_process::InitialPidFile::Expect(&self.pid_file()),
             || match self.check_status() {
                 Ok(()) => Ok(true),
