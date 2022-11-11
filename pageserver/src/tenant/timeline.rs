@@ -1192,7 +1192,7 @@ impl Timeline {
         if !local_only_filenames.is_empty() {
             // FIXME this we should merge local and remote metadata, at least remote_consistent_lsn
             //    see comment in download_missing
-            remote_client.schedule_index_upload(Some(&up_to_date_metadata))?;
+            remote_client.schedule_index_upload(&up_to_date_metadata)?;
         }
 
         info!("Done");
@@ -1765,7 +1765,7 @@ impl Timeline {
             for (path, layer_metadata) in layer_paths_to_upload {
                 remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
             }
-            remote_client.schedule_index_upload(Some(&metadata))?;
+            remote_client.schedule_index_upload(&metadata)?;
         }
 
         Ok(())

@@ -398,7 +398,7 @@ impl RemoteTimelineClient {
     /// exist in remote storage, they really do.
     pub fn schedule_index_upload(
         self: &Arc<Self>,
-        metadata: Option<&TimelineMetadata>,
+        metadata: &TimelineMetadata,
     ) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         ensure!(
@@ -406,9 +406,7 @@ impl RemoteTimelineClient {
             "upload queue not initialized"
         );
 
-        if let Some(new_metadata) = metadata {
-            upload_queue.latest_metadata = Some(new_metadata.clone());
-        }
+        upload_queue.latest_metadata = Some(metadata.clone());
 
         let disk_consistent_lsn = upload_queue
             .latest_metadata
@@ -903,7 +901,7 @@ mod tests {
 
         // Schedule upload of index. Check that it is queued
         let metadata = dummy_metadata(Lsn(0x20));
-        client.schedule_index_upload(Some(&metadata))?;
+        client.schedule_index_upload(&metadata)?;
         {
             let upload_queue = client.upload_queue.lock().unwrap();
             assert!(upload_queue.queued_operations.len() == 1);
