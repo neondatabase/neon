@@ -545,6 +545,7 @@ impl Tenant {
         Ok(())
     }
 
+    #[instrument(skip(self, index_part, remote_storage), fields(timeline_id=%timeline_id))]
     async fn load_remote_timeline(
         &self,
         timeline_id: TimelineId,
@@ -785,7 +786,7 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, metadata), fields(tenant_id=%self.tenant_id, timeline_id=%timeline_id))]
+    #[instrument(skip(self, metadata), fields(timeline_id=%timeline_id))]
     async fn load_local_timeline(
         &self,
         timeline_id: TimelineId,
