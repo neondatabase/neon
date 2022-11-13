@@ -84,7 +84,9 @@ network or from disk.
 
 It is acceptable to use functions that might panic, like `unwrap()`, if
 it is obvious that it cannot panic. For example, if you have just
-checked that a variable is not None, it is OK to call `unwrap()` on it.
+checked that a variable is not None, it is OK to call `unwrap()` on it,
+but it is still preferable to use `expect("reason")` instead to explain
+why the function cannot fail.
 
 `assert!` and `panic!` are reserved for checking clear invariants and
 very obvious "can't happen" cases. When in doubt, use anyhow `ensure!`
