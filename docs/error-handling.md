@@ -4,7 +4,7 @@
 
 The principle is that errors are logged when they are handled. If you
 just propagate an error to the caller in a function, you don't need to
-log it; the caller will. But if you "swallow" an error in a function,
+log it; the caller will. But if you consume an error in a function,
 you *must* log it (if it needs to be logged at all).
 
 For example:
@@ -23,7 +23,8 @@ the error here. The function merely propagates the error to the
 caller, and it is up to the caller to log the error or propagate it
 further, if the failure is not expected. But if, for example, it is
 normal that the "/etc/motd" file doesn't exist, the caller can choose
-to silently ignore the error, or log it in INFO or DEBUG level:
+to silently ignore the error, or log it as an INFO or DEBUG level
+message:
 
 ```rust
 fn get_message_of_the_day() -> String {
@@ -54,8 +55,8 @@ A downside of `anyhow::Error` is that the caller cannot distinguish
 between different error cases. Most errors are propagated all the way
 to the mgmt API handler function, or the main loop that handles a
 connection with the compute node, and they are all handled the same
-way: the error is logged and returned the error to the client as
-an HTTP or libpq error.
+way: the error is logged and returned to the client as an HTTP or
+libpq error.
 
 But in some cases, we need to distinguish between errors and handle
 them differently. For example, attaching a tenant to the pageserver
@@ -70,7 +71,7 @@ responds with the HTTP 403 Already Exists error in that case, rather
 than a generic HTTP 500 Internal Server Error.
 
 If you need to distinguish between different kinds of errors, create a
-new `Error` type. The `thiserror` create is useful for that. But in
+new `Error` type. The `thiserror` crate is useful for that. But in
 most cases `anyhow::Error` is good enough.
 
 ## Panics
@@ -108,8 +109,8 @@ an LSN that has already been garbage collected away.
 
 These should *not* happen during normal operations. "Normal
 operations" is not a very precise concept. But for example, disk
-errors is not expected to happen when the system is working, so that
-counts as an Error. However, if a TCP connection to a compute node is
+errors are not expected to happen when the system is working, so those
+count as Errors. However, if a TCP connection to a compute node is
 lost, that is not considered an Error, because it doesn't affect the
 pageserver's or safekeeper's operation in any way, and happens fairly
 frequently when compute nodes are shut down, or are killed abruptly
@@ -120,14 +121,14 @@ the cause.**
 
 Whether something should be logged at ERROR, WARNING or INFO level can
 depend on the callers and clients. For example, it might be unexpected
-and a sign of a serious issue, if the console calls the
+and a sign of a serious issue if the console calls the
 "timeline_detail" mgmt API for a timeline that doesn't exist. ERROR
 would be appropriate in that case. But if the console routinely calls
 the API after deleting a timeline, to check if the deletion has
-completed, then it would be totally normal and INFO or DEBUG level
-would be more appropriate. If a message is logged as an ERROR, but it
-in fact happens frequently in production and never requires any
-action, it should probably be demoted to INFO level.
+completed, then it would be totally normal and an INFO or DEBUG level
+message would be more appropriate. If a message is logged as an ERROR,
+but it in fact happens frequently in production and never requires any
+action, it should probably be demoted to an INFO level message.
 
 ### Warn
 
@@ -162,10 +163,10 @@ Examples:
 
 ### Debug & Trace
 
-Debug and Trace level messages are not Debug-level messages are not
-printed to the log in our normal production configuration, but could
-be enabled for a specific server or tenant, to aid debugging.
-(Although we don't actually have that capability as of this writing).
+Debug and Trace level messages are not printed to the log in our normal
+production configuration, but could be enabled for a specific server or
+tenant, to aid debugging. (Although we don't actually have that
+capability as of this writing).
 
 ## Context
 
@@ -173,10 +174,10 @@ We use logging "spans" to hold context information about the current
 operation. Almost every operation happens on a particular tenant and
 timeline, so we enter a span with the "tenant_id" and "timeline_id"
 very early when processing an incoming API request, for example. All
-background operations should also run in a span contain at least those
-two fields, and any other parameters or information that might be
-useful when debugging an error that might happen when performing the
-operation.
+background operations should also run in a span containing at least
+those two fields, and any other parameters or information that might
+be useful when debugging an error that might happen when performing
+the operation.
 
 ## Error message style
 
