@@ -181,6 +181,11 @@ those two fields, and any other parameters or information that might
 be useful when debugging an error that might happen when performing
 the operation.
 
+TODO: Spans are not captured in the Error when it is created, but when
+the error is logged. It would be more useful to capture them at Error
+creation. We should consider using `tracing_error::SpanTrace` to do
+that.
+
 ## Error message style
 
 PostgreSQL has a style guide for writing error messages:
