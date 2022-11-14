@@ -183,12 +183,19 @@ pub(super) async fn gather_inputs(
             }
         }
 
-        // all timelines also have an end point
-        updates.push(Update {
-            lsn: last_record_lsn,
-            command: Command::EndOfBranch,
-            timeline_id: timeline.timeline_id,
-        });
+        // all timelines also have an end point if they have made any progress
+        if last_record_lsn > timeline.get_ancestor_lsn()
+            && interesting_lsns
+                .iter()
+                .position(|(lsn, _)| lsn == &last_record_lsn)
+                .is_none()
+        {
+            updates.push(Update {
+                lsn: last_record_lsn,
+                command: Command::EndOfBranch,
+                timeline_id: timeline.timeline_id,
+            });
+        }
 
         timeline_inputs.insert(
             timeline.timeline_id,
