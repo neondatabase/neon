@@ -15,7 +15,6 @@ use aws_config::{
 use aws_sdk_s3::{
     config::Config,
     error::{GetObjectError, GetObjectErrorKind},
-    model::{ChecksumAlgorithm, ChecksumMode},
     types::{ByteStream, SdkError},
     Client, Endpoint, Region,
 };
@@ -163,7 +162,6 @@ impl S3Bucket {
             );
             config_builder.set_endpoint_resolver(Some(Arc::new(endpoint)));
         }
-
         let client = Client::from_conf(config_builder.build());
 
         let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
@@ -187,6 +185,7 @@ impl S3Bucket {
             concurrency_limiter: Semaphore::new(aws_config.concurrency_limit.get()),
         })
     }
+
     async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
         let _guard = self
             .concurrency_limiter
@@ -202,10 +201,10 @@ impl S3Bucket {
             .get_object()
             .bucket(request.bucket)
             .key(request.key)
-            .checksum_mode(ChecksumMode::Enabled)
             .set_range(request.range)
             .send()
             .await;
+
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
@@ -333,7 +332,7 @@ impl RemoteStorage for S3Bucket {
                 .bucket(self.bucket_name.clone())
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
-                .set_delimiter(Some(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()))
+                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
                 .send()
                 .await
                 .map_err(|e| {
@@ -381,7 +380,6 @@ impl RemoteStorage for S3Bucket {
             .bucket(self.bucket_name.clone())
             .key(to.0.to_owned())
             .set_metadata(metadata.map(|m| m.0))
-            .checksum_algorithm(ChecksumAlgorithm::Sha256)
             .content_length(from_size_bytes.try_into()?)
             .body(bytes_stream)
             .send()
