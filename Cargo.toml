@@ -25,7 +25,7 @@ members = [
 # Besides, debug info should not affect the performance.
 debug = true
 
-# disable debug symbols for all packages except this one
+# disable debug symbols for all packages except this one to decrease binaries size
 [profile.release.package."*"]
 debug = false
 
