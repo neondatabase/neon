@@ -23,7 +23,7 @@ use utils::{
     postgres_backend::AuthType,
 };
 
-use crate::tenant::TIMELINES_SEGMENT_NAME;
+use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 /// The name of the metadata file pageserver creates per timeline.
@@ -388,6 +388,11 @@ impl PageServerConf {
 
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenants_path().join(tenant_id.to_string())
+    }
+
+    pub fn tenant_attaching_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenant_path(&tenant_id)
+            .join(TENANT_ATTACHING_MARKER_FILENAME)
     }
 
     /// Points to a place in pageserver's local directory,

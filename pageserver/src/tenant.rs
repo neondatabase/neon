@@ -104,6 +104,8 @@ pub use crate::tenant::timeline::WalReceiverInfo;
 /// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
+pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
+
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
@@ -498,6 +500,27 @@ impl Tenant {
     ///
     #[instrument(skip(self), fields(tenant_id=%self.tenant_id))]
     async fn attach(self: &Arc<Tenant>) -> anyhow::Result<()> {
+        // Create directory with marker file to indicate attaching state.
+        // The load_local_tenants() function in tenant_mgr relies on the marker file
+        // to determine whether a tenant has finished attaching.
+        let tenant_dir = self.conf.tenant_path(&self.tenant_id);
+        let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
+        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
+        if tenant_dir.exists() {
+            if !marker_file.is_file() {
+                anyhow::bail!(
+                    "calling Tenant::attach with a tenant directory that doesn't have the attaching marker file:\ntenant_dir: {}\nmarker_file: {}",
+                    tenant_dir.display(), marker_file.display());
+            }
+        } else {
+            crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
+            fs::File::create(&marker_file).context("create tenant attaching marker file")?;
+            crashsafe::fsync_file_and_parent(&marker_file)
+                .context("fsync tenant attaching marker file and parent")?;
+        }
+        debug_assert!(tenant_dir.is_dir());
+        debug_assert!(marker_file.is_file());
+
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
@@ -517,19 +540,18 @@ impl Tenant {
         for (timeline_id, index_part) in remote_timelines.iter() {
             let remote_metadata = index_part.parse_metadata().with_context(|| {
                 format!(
-                    "Failed to parse metadata file from remote storage for tenant {}",
-                    self.tenant_id
+                    "Failed to parse metadata file from remote storage for tenant {} timeline {}",
+                    self.tenant_id, timeline_id
                 )
             })?;
             timeline_ancestors.insert(*timeline_id, remote_metadata);
             index_parts.insert(*timeline_id, index_part);
         }
 
-        let sorted_timelines = tree_sort_timelines(timeline_ancestors)?;
-
         // For every timeline, download the metadata file, scan the local directory,
         // and build a layer map that contains an entry for each remote and local
         // layer file.
+        let sorted_timelines = tree_sort_timelines(timeline_ancestors)?;
         for (timeline_id, _metadata) in sorted_timelines {
             // TODO again handle early failure
             self.load_remote_timeline(
@@ -537,8 +559,19 @@ impl Tenant {
                 index_parts[&timeline_id],
                 remote_storage.clone(),
             )
-            .await?
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load remote timeline {} for tenant {}",
+                    timeline_id, self.tenant_id
+                )
+            })?;
         }
+
+        std::fs::remove_file(&marker_file)
+            .with_context(|| format!("unlink attach marker file {}", marker_file.display()))?;
+        crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
+            .context("fsync tenant directory after unlinking attach marker file")?;
 
         // FIXME: Check if the state has changed to Stopping while we were downloading stuff
         // We're ready for business.

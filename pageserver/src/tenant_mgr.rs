@@ -20,6 +20,7 @@ use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
 
 use utils::crashsafe::{self, path_with_suffix_extension};
+use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
 mod tenants_state {
@@ -79,16 +80,25 @@ pub fn init_tenant_mgr(
                         );
                     }
                 } else {
-                    number_of_tenants += 1;
-                    if let Err(e) =
-                        load_local_tenant(conf, &tenant_dir_path, remote_storage.clone())
-                    {
-                        error!(
+                    match load_local_tenant(conf, &tenant_dir_path, remote_storage.clone()) {
+                        Ok(Some(_)) => number_of_tenants += 1,
+                        Ok(None) => {
+                            // This case happens if we crash during attach before creating the attach marker file
+                            if let Err(e) = std::fs::remove_dir(&tenant_dir_path) {
+                                error!(
+                                    "Failed to remove empty tenant directory '{}': {e:#}",
+                                    tenant_dir_path.display()
+                                )
+                            }
+                        }
+                        Err(e) => {
+                            error!(
                             "Failed to collect tenant files from dir '{}' for entry {:?}, reason: {:#}",
                             tenants_dir.display(),
                             dir_entry,
                             e
                         );
+                        }
                     }
                 }
             }
@@ -114,7 +124,19 @@ fn load_local_tenant(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     remote_storage: Option<GenericRemoteStorage>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<()>> {
+    if !tenant_path.is_dir() {
+        anyhow::bail!("tenant_path is not a directory: {tenant_path:?}")
+    }
+
+    let is_empty = tenant_path
+        .is_empty_dir()
+        .context("check whether tenant_path is an empty dir")?;
+    if is_empty {
+        info!("skipping empty tenant directory {tenant_path:?}");
+        return Ok(None);
+    }
+
     let tenant_id = tenant_path
         .file_name()
         .and_then(OsStr::to_str)
@@ -122,11 +144,33 @@ fn load_local_tenant(
         .parse::<TenantId>()
         .context("Could not parse tenant id out of the tenant dir name")?;
 
-    // Start loading the tenant into memory. It will initially be in Loading
-    // state.
-    let tenant = Tenant::spawn_load(conf, tenant_id, remote_storage)?;
+    let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
+        info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
+        if let Some(remote_storage) = remote_storage {
+            Tenant::spawn_attach(conf, tenant_id, &remote_storage)?
+        } else {
+            warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
+            // XXX there should be a constructor to make a broken tenant
+            // TODO should we use Tenant::load_tenant_config() here?
+            let tenant_conf = TenantConfOpt::default();
+            let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
+            let tenant = Tenant::new(
+                TenantState::Broken,
+                conf,
+                tenant_conf,
+                wal_redo_manager,
+                tenant_id,
+                remote_storage,
+            );
+            Arc::new(tenant)
+        }
+    } else {
+        info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
+        // Start loading the tenant into memory. It will initially be in Loading state.
+        Tenant::spawn_load(conf, tenant_id, remote_storage)?
+    };
     tenants_state::write_tenants().insert(tenant_id, tenant);
-    Ok(())
+    return Ok(Some(()));
 }
 
 ///
