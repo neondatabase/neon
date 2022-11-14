@@ -185,10 +185,8 @@ pub(super) async fn gather_inputs(
 
         // all timelines also have an end point if they have made any progress
         if last_record_lsn > timeline.get_ancestor_lsn()
-            && interesting_lsns
-                .iter()
-                .position(|(lsn, _)| lsn == &last_record_lsn)
-                .is_none()
+            && !interesting_lsns
+                .iter().any(|(lsn, _)| lsn == &last_record_lsn)
         {
             updates.push(Update {
                 lsn: last_record_lsn,
