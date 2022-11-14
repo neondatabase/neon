@@ -263,6 +263,12 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_broker", "main")
+
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+
     pg = env.postgres.create_start("test_broker")
     pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
@@ -305,6 +311,11 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.enable_local_fs_remote_storage()
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
+
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
 
     env.neon_cli.create_branch("test_safekeepers_wal_removal")
     pg = env.postgres.create_start("test_safekeepers_wal_removal")
@@ -1080,6 +1091,14 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
 def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
+
+    # FIXME: are these expected?
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Failed to process query for timeline .*: Timeline .* was not found in global map.*",
+            ".*end streaming to Some.*",
+        ]
+    )
 
     # Create two tenants: one will be deleted, other should be preserved.
     tenant_id = env.initial_tenant

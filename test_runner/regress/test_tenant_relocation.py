@@ -259,6 +259,11 @@ def test_tenant_relocation(
 
     env = neon_env_builder.init_start()
 
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / "local_fs_remote_storage"
 

@@ -17,6 +17,8 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     pgmain = env.postgres.create_start("test_readonly_node")
     log.info("postgres is running on 'test_readonly_node' branch")
 
+    env.pageserver.allowed_errors.append(".*basebackup .* failed: invalid basebackup lsn.*")
+
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
 

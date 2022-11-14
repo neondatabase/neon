@@ -22,6 +22,8 @@ def assert_child_processes(pageserver_pid, wal_redo_present=False, defunct_prese
 # as a zombie process.
 def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
+    # We intentionally test for a non-existent tenant.
+    env.pageserver.allowed_errors.append(".*Tenant not found.*")
     pageserver_http = env.pageserver.http_client()
 
     pagserver_pid = int((env.repo_dir / "pageserver.pid").read_text())
