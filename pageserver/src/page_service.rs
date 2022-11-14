@@ -76,6 +76,12 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::CopyData(bytes) => bytes,
                         FeMessage::CopyDone => { break },
                         FeMessage::Sync => continue,
+                        FeMessage::Terminate => {
+                            let msg = format!("client terminated connection with Terminate message during COPY");
+                            pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
+                            Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                            break;
+                        }
                         m => {
                             let msg = format!("unexpected message {:?}", m);
                             pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
@@ -87,10 +93,10 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                     yield copy_data_bytes;
                 }
                 Ok(None) => {
-                    let msg = "client closed connection";
+                    let msg = "client closed connection during COPY";
                     pgb.write_message(&BeMessage::ErrorResponse(msg))?;
                     pgb.flush().await?;
-                    Err(io::Error::new(io::ErrorKind::Other, msg))?;
+                    Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                 }
                 Err(e) => {
                     Err(io::Error::new(io::ErrorKind::Other, e))?;
