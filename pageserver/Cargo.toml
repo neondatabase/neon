@@ -76,3 +76,7 @@ tempfile = "3.2"
 [[bench]]
 name = "bench_layer_map"
 harness = false
+
+[[bench]]
+name = "bench_walredo"
+harness = false
