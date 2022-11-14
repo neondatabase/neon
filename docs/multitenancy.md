@@ -24,7 +24,7 @@ neon_local pg create main --tenant_id=ee6016ec31116c1b7c33dfdfca38892f
 neon_local branch --tenant_id=ee6016ec31116c1b7c33dfdfca38892f
 ```
 
-### Data layout
+### Data layout 
 
 On the page server tenants introduce one level of indirection, so data directory structured the following way:
 ```
