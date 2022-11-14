@@ -48,6 +48,8 @@ pub mod nonblock;
 // Default signal handling
 pub mod signals;
 
+pub mod fs_ext;
+
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
 /// we have several cases:

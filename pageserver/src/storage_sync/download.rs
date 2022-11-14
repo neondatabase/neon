@@ -1,5 +1,6 @@
 //! Helper functions to download files from remote storage with a RemoteStorage
 use std::collections::HashSet;
+use std::path::Path;
 
 use anyhow::{bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -36,6 +37,21 @@ pub async fn download_layer_file<'a>(
     download_layer_file_guts(conf, storage, tenant_id, timeline_id, path, layer_metadata).await
 }
 
+const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
+
+pub fn is_temp_download_file(path: &Path) -> bool {
+    let extension = path.extension().map(|pname| {
+        pname
+            .to_str()
+            .expect("paths passed to this function must be valid Rust strings")
+    });
+    match extension {
+        Some(TEMP_DOWNLOAD_EXTENSION) => true,
+        Some(_) => false,
+        None => false,
+    }
+}
+
 async fn download_layer_file_guts<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
@@ -44,8 +60,6 @@ async fn download_layer_file_guts<'a>(
     path: &'a RelativePath,
     layer_metadata: &'a LayerFileMetadata,
 ) -> anyhow::Result<u64> {
-    const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
-
     let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
 
     let local_path = path.to_local_path(&timeline_path);
