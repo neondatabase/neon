@@ -454,7 +454,7 @@ pg_init_libpagestore(void)
 							0,	/* no flags required */
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.readahead_buffer_size",
-							"Keep a readahead buffer of this many buffers",
+							"number of prefetches to buffer",
 							"This buffer is used to store prefetched data; so "
 							"it is important that this buffer is at least as "
 							"large as the configured value of all tablespaces' "
@@ -463,9 +463,9 @@ pg_init_libpagestore(void)
 							"seqscan_prefetch_buffers.",
 							&readahead_buffer_size,
 							128, 16, 1024,
-							PGC_BACKEND,
+							PGC_USERSET,
 							0,	/* no flags required */
-							NULL, NULL, NULL);
+							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
 
 	relsize_hash_init();
 

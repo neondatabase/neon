@@ -161,6 +161,7 @@ extern int32 max_cluster_size;
 
 extern const f_smgr *smgr_neon(BackendId backend, RelFileNode rnode);
 extern void smgr_init_neon(void);
+extern void readahead_buffer_resize(int newsize, void *extra);
 
 /* Neon storage manager functionality */
 
