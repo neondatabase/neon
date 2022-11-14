@@ -179,7 +179,16 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # run compute_ctl and wait for 10s
     try:
         ctl.raw_cli(
-            ["--connstr", ps_connstr, "--pgdata", pgdata, "--spec", spec, "--pgbin", pg_bin_path],
+            [
+                "--connstr",
+                "postgres://invalid/",
+                "--pgdata",
+                pgdata,
+                "--spec",
+                spec,
+                "--pgbin",
+                pg_bin_path,
+            ],
             timeout=10,
         )
     except TimeoutExpired as exc:
