@@ -66,6 +66,11 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
 
     env = neon_env_builder.init_start()
 
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+
     tenants_pgs: List[Tuple[TenantId, Postgres]] = []
 
     for _ in range(1, 5):
@@ -117,6 +122,13 @@ def test_tenants_attached_after_download(
 
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
+
+    # FIXME: Are these expected?
+    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
+    env.pageserver.allowed_errors.append(
+        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
 
@@ -209,6 +221,16 @@ def test_tenant_upgrades_index_json_from_v0(
     # launch pageserver, populate the default tenants timeline, wait for it to be uploaded,
     # then go ahead and modify the "remote" version as if it was downgraded, needing upgrade
     env = neon_env_builder.init_start()
+
+    # FIXME: Are these expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
+    env.pageserver.allowed_errors.append(
+        ".*Failed to get local tenant state: Tenant .* not found in the local state.*"
+    )
+
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
 
@@ -315,6 +337,20 @@ def test_tenant_redownloads_truncated_file_on_startup(
     )
 
     env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.append(
+        ".*Redownloading locally existing .* due to size mismatch.*"
+    )
+    env.pageserver.allowed_errors.append(
+        ".*Downloaded layer exists already but layer file metadata mismatches.*"
+    )
+
+    # FIXME: Are these expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
+
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
 

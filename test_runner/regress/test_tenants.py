@@ -25,6 +25,13 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     )
     initial_tenant_dirs = [d for d in tenants_dir.iterdir()]
 
+    neon_simple_env.pageserver.allowed_errors.extend(
+        [
+            ".*Failed to create directory structure for tenant .*, cleaning tmp data.*",
+            ".*Failed to fsync removed temporary tenant directory .*",
+        ]
+    )
+
     pageserver_http = neon_simple_env.pageserver.http_client()
     pageserver_http.configure_failpoints(("tenant-creation-before-tmp-rename", "return"))
     with pytest.raises(Exception, match="tenant-creation-before-tmp-rename"):
@@ -206,6 +213,13 @@ def test_pageserver_with_empty_tenants(
     )
 
     env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.append(
+        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+    env.pageserver.allowed_errors.append(".*Tenant .* has no timelines directory.*")
+    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
+
     client = env.pageserver.http_client()
 
     tenant_without_timelines_dir = env.initial_tenant

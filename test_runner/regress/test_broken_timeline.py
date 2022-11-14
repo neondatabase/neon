@@ -11,9 +11,16 @@ from fixtures.types import TenantId, TimelineId
 # Test restarting page server, while safekeeper and compute node keep
 # running.
 def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
-    # One safekeeper is enough for this test.
-    neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*No timelines to attach received.*",
+            ".*Failed to process timeline dir contents.*",
+            ".*Failed to load delta layer.*",
+            ".*Timeline .* was not found.*",
+        ]
+    )
 
     tenant_timelines: List[Tuple[TenantId, TimelineId, Postgres]] = []
 
@@ -110,6 +117,13 @@ def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
 def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
+
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Failed to process timeline dir contents.*Timeline has no ancestor and no layer files.*",
+            ".*Timeline got dropped without initializing, cleaning its files.*",
+        ]
+    )
 
     tenant_id, _ = env.neon_cli.create_tenant()
 

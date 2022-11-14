@@ -784,6 +784,8 @@ class NeonEnvBuilder:
 
             self.cleanup_remote_storage()
 
+            self.env.pageserver.assert_no_errors()
+
 
 class NeonEnv:
     """
@@ -1723,6 +1725,43 @@ class NeonPageserver(PgProtocol):
         self.config_override = config_override
         self.version = env.get_pageserver_version()
 
+        # After a test finishes, we will scrape the log to see if there are any
+        # unexpected error messages. If your test expects an error, add it to
+        # 'allowed_errors' in the test with something like:
+        #
+        # env.pageserver.allowed_errors.append(".*could not open garage door.*")
+        #
+        # The entries in the list are regular experessions.
+        self.allowed_errors = [
+            # All tests print these, when starting up or shutting down
+            ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
+            ".*Shutdown task error: walreceiver connection handling failure.*",
+            ".*Etcd client error: grpc request error: status: Unavailable.*",
+            ".*query handler for .* failed: Connection reset by peer.*",
+            ".*serving compute connection task.*exited with error: Broken pipe.*",
+            ".*Connection aborted: error communicating with the server: Broken pipe.*",
+            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
+            ".*Connection aborted: error communicating with the server: Connection reset by peer.*",
+            ".*kill_and_wait_impl.*: wait successful.*",
+            ".*end streaming to Some.*",
+            # safekeeper connection can fail with this, in the window between timeline creation
+            # and streaming start
+            ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
+            # Tests related to authentication and authorization print these
+            ".*Error processing HTTP request: Forbidden",
+            # intentional failpoints
+            ".*failpoint ",
+            # FIXME: there is a race condition between GC and detach, see
+            # https://github.com/neondatabase/neon/issues/2442
+            ".*could not remove ephemeral file.*No such file or directory.*",
+            # FIXME: These need investigation
+            ".*gc_loop.*Failed to get a tenant .* Tenant .* not found in the local state.*",
+            ".*compaction_loop.*Failed to get a tenant .* Tenant .* not found in the local state.*",
+            ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
+            ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
+            ".*Removing intermediate uninit mark file.*",
+        ]
+
     def start(self, overrides: Tuple[str, ...] = ()) -> "NeonPageserver":
         """
         Start the page server.
@@ -1770,6 +1809,26 @@ class NeonPageserver(PgProtocol):
             auth_token=auth_token,
             is_testing_enabled_or_skip=self.is_testing_enabled_or_skip,
         )
+
+    def assert_no_errors(self):
+        logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
+
+        error_or_warn = re.compile("ERROR|WARN")
+        errors = []
+        while True:
+            line = logfile.readline()
+            if not line:
+                break
+
+            if error_or_warn.search(line):
+                # It's an ERROR or WARN. Is it in the allow-list?
+                for a in self.allowed_errors:
+                    if re.match(a, line):
+                        break
+                else:
+                    errors.append(line)
+
+        assert not errors
 
 
 def append_pageserver_param_overrides(

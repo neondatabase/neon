@@ -67,6 +67,10 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
+    # These warnings are expected, when the pageserver is restarted abruptly
+    env.pageserver.allowed_errors.append(".*found future image layer.*")
+    env.pageserver.allowed_errors.append(".*found future delta layer.*")
+
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.
     tenant, _ = env.neon_cli.create_tenant(

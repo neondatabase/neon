@@ -76,6 +76,26 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     env = neon_env_builder.init_start()
     env.pageserver.http_client().tenant_create(tenant)
 
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*error importing base backup .*",
+            ".*Timeline got dropped without initializing, cleaning its files.*",
+            ".*Removing intermediate uninit mark file.*",
+            ".*InternalServerError.*timeline not found.*",
+            ".*InternalServerError.*Tenant .* not found.*",
+            ".*InternalServerError.*Timeline .* not found.*",
+            ".*InternalServerError.*Cannot delete timeline which has child timelines.*",
+        ]
+    )
+
+    # FIXME: we should clean up pageserver to not print this
+    env.pageserver.allowed_errors.append(".*exited with error: unexpected message type: CopyData.*")
+
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+
     def import_tar(base, wal):
         env.neon_cli.raw_cli(
             [
@@ -121,6 +141,11 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
+
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
 
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_small")
     pg = env.postgres.create_start("test_import_from_pageserver_small")

@@ -9,6 +9,11 @@ from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 # test anyway, so it doesn't need any special attention here.
 def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
+
+    # These warnings are expected, when the pageserver is restarted abruptly
+    env.pageserver.allowed_errors.append(".*found future image layer.*")
+    env.pageserver.allowed_errors.append(".*found future delta layer.*")
+
     pageserver_http = env.pageserver.http_client()
 
     # Use aggressive GC and checkpoint settings, so that we also exercise GC during the test
