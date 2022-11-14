@@ -530,7 +530,6 @@ impl Tenant {
                 index_parts[&timeline_id],
                 remote_storage.clone(),
             )
-            .instrument(info_span!("load_remote_timeline", timeline = %timeline_id))
             .await?
         }
 
