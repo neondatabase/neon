@@ -1014,7 +1014,7 @@ impl Timeline {
         });
 
         // Are we missing some files that are present in remote storage?
-        // Create RemoteLayers to represent them, and add to the layer map
+        // Download them now.
         // TODO Downloading many files this way is not efficient.
         //     Better to use FuturesUnordered. Maybe keep as is because:
         //    a) inplace download is a throw-away code, on-demand patch doesnt need that
@@ -1041,14 +1041,9 @@ impl Timeline {
                 }
 
                 remote_client
-                    .download_layer_file(
-                        &RelativePath::from_local_path(
-                            &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-                            path,
-                        )?,
-                        &layer_metadata,
-                    )
-                    .await?;
+                    .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
+                    .await
+                    .context("download image layer")?;
 
                 let image_layer =
                     ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
@@ -1072,6 +1067,11 @@ impl Timeline {
                     );
                     continue;
                 }
+
+                remote_client
+                    .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
+                    .await
+                    .context("download delta layer")?;
 
                 let delta_layer =
                     DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
