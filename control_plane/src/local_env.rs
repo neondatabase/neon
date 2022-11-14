@@ -20,7 +20,7 @@ use utils::{
 
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 14;
+pub const DEFAULT_PG_VERSION: u32 = 15;
 
 //
 // This data structures represents neon_local CLI config

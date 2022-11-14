@@ -63,7 +63,7 @@ jobs:
       run: |
         # Test framework expects we have psql binary;
         # but since we don't really need it in this test, let's mock it
-        mkdir -p "$POSTGRES_DISTRIB_DIR/v14/bin" && touch "$POSTGRES_DISTRIB_DIR/v14/bin/psql";
+        mkdir -p "$POSTGRES_DISTRIB_DIR/v15/bin" && touch "$POSTGRES_DISTRIB_DIR/v15/bin/psql";
         ./scripts/pytest \
           --junitxml=$TEST_OUTPUT/junit.xml \
           --tb=short \

@@ -59,7 +59,7 @@
         creates: "/storage/pageserver/data/tenants"
       environment:
         NEON_REPO_DIR: "/storage/pageserver/data"
-        LD_LIBRARY_PATH: "/usr/local/v14/lib"
+        LD_LIBRARY_PATH: "/usr/local/v15/lib"
       become: true
       tags:
       - pageserver
@@ -147,7 +147,7 @@
         creates: "/storage/safekeeper/data/safekeeper.id"
       environment:
         NEON_REPO_DIR: "/storage/safekeeper/data"
-        LD_LIBRARY_PATH: "/usr/local/v14/lib"
+        LD_LIBRARY_PATH: "/usr/local/v15/lib"
       become: true
       tags:
       - safekeeper

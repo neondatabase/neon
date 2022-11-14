@@ -943,8 +943,8 @@ jobs:
         run: |
           # Update compatibility snapshot for the release
           for build_type in debug release; do
-            OLD_FILENAME=compatibility-snapshot-${build_type}-pg14-${GITHUB_RUN_ID}.tar.zst
-            NEW_FILENAME=compatibility-snapshot-${build_type}-pg14.tar.zst
+            OLD_FILENAME=compatibility-snapshot-${build_type}-pg15-${GITHUB_RUN_ID}.tar.zst
+            NEW_FILENAME=compatibility-snapshot-${build_type}-pg15.tar.zst
 
             time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
           done

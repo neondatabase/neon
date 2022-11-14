@@ -62,7 +62,7 @@ Env = Dict[str, str]
 
 DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
-DEFAULT_PG_VERSION_DEFAULT: str = "14"
+DEFAULT_PG_VERSION_DEFAULT: str = "15"
 
 BASE_PORT: int = 15000
 WORKER_PORT_NUM: int = 1000
