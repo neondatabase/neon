@@ -40,17 +40,36 @@ impl UserFacingError for ConnectionError {
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
 pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 
-pub type ComputeConnCfg = tokio_postgres::Config;
+/// A config for establishing a connection to compute node.
+/// Eventually, `tokio_postgres` will be replaced with something better.
+/// Newtype allows us to implement methods on top of it.
+#[repr(transparent)]
+pub struct ConnCfg(pub tokio_postgres::Config);
 
-/// Various compute node info for establishing connection etc.
-pub struct NodeInfo {
-    /// Did we send [`pq_proto::BeMessage::AuthenticationOk`]?
-    pub reported_auth_ok: bool,
-    /// Compute node connection params.
-    pub config: tokio_postgres::Config,
+impl ConnCfg {
+    /// Construct a new connection config.
+    pub fn new() -> Self {
+        Self(tokio_postgres::Config::new())
+    }
 }
 
-impl NodeInfo {
+impl std::ops::Deref for ConnCfg {
+    type Target = tokio_postgres::Config;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// For now, let's make it easier to setup the config.
+impl std::ops::DerefMut for ConnCfg {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl ConnCfg {
+    /// Establish a raw TCP connection to the compute node.
     async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream)> {
         use tokio_postgres::config::Host;
 
@@ -68,8 +87,8 @@ impl NodeInfo {
         // because it has no means for extracting the underlying socket which we
         // require for our business.
         let mut connection_error = None;
-        let ports = self.config.get_ports();
-        let hosts = self.config.get_hosts();
+        let ports = self.0.get_ports();
+        let hosts = self.0.get_hosts();
         // the ports array is supposed to have 0 entries, 1 entry, or as many entries as in the hosts array
         if ports.len() > 1 && ports.len() != hosts.len() {
             return Err(io::Error::new(
@@ -77,7 +96,7 @@ impl NodeInfo {
                 format!(
                     "couldn't connect: bad compute config, \
                         ports and hosts entries' count does not match: {:?}",
-                    self.config
+                    self.0
                 ),
             ));
         }
@@ -103,7 +122,7 @@ impl NodeInfo {
         Err(connection_error.unwrap_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Other,
-                format!("couldn't connect: bad compute config: {:?}", self.config),
+                format!("couldn't connect: bad compute config: {:?}", self.0),
             )
         }))
     }
@@ -116,7 +135,7 @@ pub struct PostgresConnection {
     pub version: String,
 }
 
-impl NodeInfo {
+impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub async fn connect(
         mut self,
@@ -130,21 +149,21 @@ impl NodeInfo {
                 .intersperse(" ") // TODO: use impl from std once it's stabilized
                 .collect();
 
-            self.config.options(&options);
+            self.0.options(&options);
         }
 
         if let Some(app_name) = params.get("application_name") {
-            self.config.application_name(app_name);
+            self.0.application_name(app_name);
         }
 
         if let Some(replication) = params.get("replication") {
             use tokio_postgres::config::ReplicationMode;
             match replication {
                 "true" | "on" | "yes" | "1" => {
-                    self.config.replication_mode(ReplicationMode::Physical);
+                    self.0.replication_mode(ReplicationMode::Physical);
                 }
                 "database" => {
-                    self.config.replication_mode(ReplicationMode::Logical);
+                    self.0.replication_mode(ReplicationMode::Logical);
                 }
                 _other => {}
             }
@@ -160,7 +179,7 @@ impl NodeInfo {
             .map_err(|_| ConnectionError::FailedToConnectToCompute)?;
 
         // TODO: establish a secure connection to the DB
-        let (client, conn) = self.config.connect_raw(&mut stream, NoTls).await?;
+        let (client, conn) = self.0.connect_raw(&mut stream, NoTls).await?;
         let version = conn
             .parameter("server_version")
             .ok_or(ConnectionError::FailedToFetchPgVersion)?

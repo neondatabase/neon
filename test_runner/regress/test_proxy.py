@@ -1,5 +1,4 @@
 import json
-import subprocess
 from urllib.parse import urlparse
 
 import psycopg2
@@ -29,108 +28,65 @@ def test_password_hack(static_proxy: NeonProxy):
         static_proxy.safe_psql("select 1", sslsni=0, user=user, password=magic)
 
 
-def get_session_id_from_uri_line(uri_prefix, uri_line):
+def get_session_id(uri_prefix, uri_line):
     assert uri_prefix in uri_line
 
     url_parts = urlparse(uri_line)
     psql_session_id = url_parts.path[1:]
-    assert psql_session_id.isalnum(), "session_id should only contain alphanumeric chars."
-    link_auth_uri_prefix = uri_line[: -len(url_parts.path)]
-    # invariant: the prefix must match the uri_prefix.
-    assert (
-        link_auth_uri_prefix == uri_prefix
-    ), f"Line='{uri_line}' should contain a http auth link of form '{uri_prefix}/<psql_session_id>'."
-    # invariant: the entire link_auth_uri should be on its own line, module spaces.
-    assert " ".join(uri_line.split(" ")) == f"{uri_prefix}/{psql_session_id}"
+    assert psql_session_id.isalnum(), "session_id should only contain alphanumeric chars"
 
     return psql_session_id
 
 
-def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
-    pg_user = "proxy"
-    pg_password = "password"
-
-    local_vanilla_pg.start()
-    query = f"create user {pg_user} with login superuser password '{pg_password}'"
-    local_vanilla_pg.safe_psql(query)
-
-    port = local_vanilla_pg.default_options["port"]
-    host = local_vanilla_pg.default_options["host"]
-    dbname = local_vanilla_pg.default_options["dbname"]
-
-    db_info_dict = {
-        "session_id": psql_session_id,
-        "result": {
-            "Success": {
-                "host": host,
-                "port": port,
-                "dbname": dbname,
-                "user": pg_user,
-                "password": pg_password,
-            }
-        },
-    }
-    db_info_str = json.dumps(db_info_dict)
-    cmd_args = [
-        "psql",
-        "-h",
-        "127.0.0.1",  # localhost
-        "-p",
-        f"{mgmt_port}",
-        "-c",
-        db_info_str,
-    ]
-
-    log.info(f"Sending to proxy the user and db info: {' '.join(cmd_args)}")
-    p = subprocess.Popen(cmd_args, stdout=subprocess.PIPE)
-    out, err = p.communicate()
-    assert "ok" in str(out)
-
-
-async def get_uri_line_from_process_welcome_notice(link_auth_uri_prefix, proc):
-    """
-    Returns the line from the welcome notice from proc containing link_auth_uri_prefix.
-    :param link_auth_uri_prefix: the uri prefix used to indicate the line of interest
-    :param proc: the process to read the welcome message from.
-    :return: a line containing the full link authentication uri.
-    """
-    max_num_lines_of_welcome_message = 15
-    for attempt in range(max_num_lines_of_welcome_message):
-        raw_line = await proc.stderr.readline()
-        line = raw_line.decode("utf-8").strip()
+async def find_auth_link(link_auth_uri_prefix, proc):
+    for _ in range(100):
+        line = (await proc.stderr.readline()).decode("utf-8").strip()
+        log.info(f"psql line: {line}")
         if link_auth_uri_prefix in line:
+            log.info(f"SUCCESS, found auth url: {line}")
             return line
-    assert False, f"did not find line containing '{link_auth_uri_prefix}'"
+
+
+async def activate_link_auth(local_vanilla_pg, link_proxy, psql_session_id):
+    pg_user = "proxy"
+
+    log.info("creating a new user for link auth test")
+    local_vanilla_pg.start()
+    local_vanilla_pg.safe_psql(f"create user {pg_user} with login superuser")
+
+    db_info = json.dumps(
+        {
+            "session_id": psql_session_id,
+            "result": {
+                "Success": {
+                    "host": local_vanilla_pg.default_options["host"],
+                    "port": local_vanilla_pg.default_options["port"],
+                    "dbname": local_vanilla_pg.default_options["dbname"],
+                    "user": pg_user,
+                    "project": "irrelevant",
+                }
+            },
+        }
+    )
+
+    log.info("sending session activation message")
+    psql = await PSQL(host=link_proxy.host, port=link_proxy.mgmt_port).run(db_info)
+    out = (await psql.stdout.read()).decode("utf-8").strip()
+    assert out == "ok"
 
 
 @pytest.mark.asyncio
 async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProxy):
-    """
-    Test copied and modified from: test_project_psql_link_auth test from cloud/tests_e2e/tests/test_project.py
-     Step 1. establish connection to the proxy
-     Step 2. retrieve session_id:
-        Step 2.1: read welcome message
-        Step 2.2: parse session_id
-     Step 3. create a vanilla_pg and send user and db info via command line (using Popen) a psql query via mgmt port to proxy.
-     Step 4. assert that select 1 has been executed correctly.
-    """
-
-    psql = PSQL(
-        host=link_proxy.host,
-        port=link_proxy.proxy_port,
-    )
-    proc = await psql.run("select 42")
+    psql = await PSQL(host=link_proxy.host, port=link_proxy.proxy_port).run("select 42")
 
     uri_prefix = link_proxy.link_auth_uri_prefix
-    line_str = await get_uri_line_from_process_welcome_notice(uri_prefix, proc)
+    link = await find_auth_link(uri_prefix, psql)
 
-    psql_session_id = get_session_id_from_uri_line(uri_prefix, line_str)
-    log.info(f"Parsed psql_session_id='{psql_session_id}' from Neon welcome message.")
+    psql_session_id = get_session_id(uri_prefix, link)
+    await activate_link_auth(vanilla_pg, link_proxy, psql_session_id)
 
-    create_and_send_db_info(vanilla_pg, psql_session_id, link_proxy.mgmt_port)
-
-    assert proc.stdout is not None
-    out = (await proc.stdout.read()).decode("utf-8").strip()
+    assert psql.stdout is not None
+    out = (await psql.stdout.read()).decode("utf-8").strip()
     assert out == "42"
 
 

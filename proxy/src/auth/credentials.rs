@@ -36,8 +36,20 @@ pub struct ClientCredentials<'a> {
 }
 
 impl ClientCredentials<'_> {
+    #[inline]
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
+    }
+}
+
+impl<'a> ClientCredentials<'a> {
+    #[inline]
+    pub fn as_ref(&'a self) -> ClientCredentials<'a> {
+        Self {
+            user: self.user,
+            dbname: self.dbname,
+            project: self.project().map(Cow::Borrowed),
+        }
     }
 }
 

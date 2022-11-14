@@ -4,7 +4,7 @@ use crate::config::{ProxyConfig, TlsConfig};
 use crate::stream::{MeasuredStream, PqStream, Stream};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
-use metrics::{register_int_counter, IntCounter};
+use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, *};
 use std::sync::Arc;
@@ -30,10 +30,16 @@ static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "proxy_io_bytes_total",
-        "Number of bytes sent/received between any client and backend."
+static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_io_bytes_per_client",
+        "Number of bytes sent/received between client and backend.",
+        &[
+            // Received (rx) / sent (tx).
+            "direction",
+            // Proxy can keep calling it `project` internally.
+            "endpoint_id"
+        ]
     )
     .unwrap()
 });
@@ -230,16 +236,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             application_name: params.get("application_name"),
         };
 
-        // Authenticate and connect to a compute node.
-        let auth = creds
-            .authenticate(&extra, &mut stream)
-            .instrument(info_span!("auth"))
-            .await;
+        let auth_result = async {
+            // `&mut stream` doesn't let us merge those 2 lines.
+            let res = creds.authenticate(&extra, &mut stream).await;
+            async { res }.or_else(|e| stream.throw_error(e)).await
+        }
+        .instrument(info_span!("auth"))
+        .await?;
 
-        let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
-        let reported_auth_ok = node.reported_auth_ok;
-
+        let node = auth_result.value;
         let (db, cancel_closure) = node
+            .config
             .connect(params)
             .or_else(|e| stream.throw_error(e))
             .await?;
@@ -247,7 +254,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         let cancel_key_data = session.enable_query_cancellation(cancel_closure);
 
         // Report authentication success if we haven't done this already.
-        if !reported_auth_ok {
+        // Note that we do this only (for the most part) after we've connected
+        // to a compute (see above) which performs its own authentication.
+        if !auth_result.reported_auth_ok {
             stream
                 .write_message_noflush(&Be::AuthenticationOk)?
                 .write_message_noflush(&BeParameterStatusMessage::encoding())?;
@@ -261,17 +270,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             .write_message(&BeMessage::ReadyForQuery)
             .await?;
 
-        /// This function will be called for writes to either direction.
-        fn inc_proxied(cnt: usize) {
-            // Consider inventing something more sophisticated
-            // if this ever becomes a bottleneck (cacheline bouncing).
-            NUM_BYTES_PROXIED_COUNTER.inc_by(cnt as u64);
-        }
+        // TODO: add more identifiers.
+        let metric_id = node.project;
+
+        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx", &metric_id]);
+        let mut client = MeasuredStream::new(stream.into_inner(), |cnt| {
+            // Number of bytes we sent to the client (outbound).
+            m_sent.inc_by(cnt as u64);
+        });
+
+        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx", &metric_id]);
+        let mut db = MeasuredStream::new(db.stream, |cnt| {
+            // Number of bytes the client sent to the compute node (inbound).
+            m_recv.inc_by(cnt as u64);
+        });
 
         // Starting from here we only proxy the client's traffic.
         info!("performing the proxy pass...");
-        let mut db = MeasuredStream::new(db.stream, inc_proxied);
-        let mut client = MeasuredStream::new(stream.into_inner(), inc_proxied);
         let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
 
         Ok(())

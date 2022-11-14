@@ -2096,7 +2096,8 @@ class NeonProxy(PgProtocol):
 
     def start(self):
         """
-        Starts a proxy with option '--auth-backend postgres' and a postgres instance already provided though '--auth-endpoint <postgress-instance>'."
+        Starts a proxy with option '--auth-backend postgres' and a postgres instance
+        already provided though '--auth-endpoint <postgress-instance>'."
         """
         assert self._popen is None
         assert self.auth_endpoint is not None

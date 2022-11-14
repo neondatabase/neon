@@ -1,7 +1,7 @@
 //! Client authentication mechanisms.
 
 pub mod backend;
-pub use backend::{BackendType, ConsoleReqExtra, DatabaseInfo};
+pub use backend::{BackendType, ConsoleReqExtra};
 
 mod credentials;
 pub use credentials::ClientCredentials;
