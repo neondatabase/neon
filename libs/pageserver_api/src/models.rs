@@ -150,6 +150,7 @@ pub struct TenantInfo {
     pub id: TenantId,
     pub state: TenantState,
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
+    pub has_in_progress_downloads: Option<bool>,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -186,6 +187,8 @@ pub struct TimelineInfo {
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
     pub pg_version: u32,
+
+    pub awaits_download: bool,
 
     pub state: TimelineState,
 
