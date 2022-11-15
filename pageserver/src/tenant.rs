@@ -430,7 +430,8 @@ impl Tenant {
             // in remote storage.
             timeline
                 .reconcile_with_remote(metadata, index_part, first_save)
-                .await?
+                .await
+                .context("failed to reconcile with remote")?
         }
 
         // Finally launch walreceiver
@@ -677,7 +678,9 @@ impl Tenant {
                 self.tenant_id
             )
         })? {
-            let entry = entry?;
+            let entry = entry.with_context(|| {
+                format!("cannot read timeline dir entry for {}", self.tenant_id)
+            })?;
             let timeline_dir = entry.path();
 
             if crate::is_temporary(&timeline_dir) {
