@@ -1752,6 +1752,7 @@ pub mod harness {
             );
             // populate tenant with locally available timelines
             let mut timelines_to_load = HashMap::new();
+            let mut pg_version = 0u32;
             for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
                 .expect("should be able to read timelines dir")
             {
@@ -1764,13 +1765,14 @@ pub mod harness {
                     .parse()?;
 
                 let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
+                pg_version = timeline_metadata.pg_version();
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
             tenant
                 .walredo_mgrs
                 .lock()
                 .unwrap()
-                .insert(timeline.pg_version, Arc::new(TestRedoManager));
+                .insert(pg_version, Arc::new(TestRedoManager));
             tenant.init_attach_timelines(timelines_to_load)?;
             tenant.set_state(TenantState::Active {
                 background_jobs_running: false,
