@@ -50,7 +50,7 @@ use crate::storage_sync::index::RemoteIndex;
 use crate::task_mgr;
 use crate::tenant_config::TenantConfOpt;
 use crate::virtual_file::VirtualFile;
-use crate::walredo::WalRedoManager;
+use crate::walredo::{PostgresRedoManager, WalRedoManager};
 use crate::{CheckpointConfig, TEMP_FILE_SUFFIX};
 pub use pageserver_api::models::TenantState;
 
@@ -119,7 +119,7 @@ pub struct Tenant {
     // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
     // timeout...
     gc_cs: Mutex<()>,
-    walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+    walredo_mgrs: Mutex<HashMap<u32, Arc<dyn WalRedoManager + Send + Sync>>>,
 
     // provides access to timeline data sitting in the remote storage
     // supposed to be used for retrieval of remote consistent lsn in walreceiver
@@ -831,6 +831,19 @@ impl Tenant {
         }
 
         let pg_version = new_metadata.pg_version();
+        let walredo_mgr = self
+            .walredo_mgrs
+            .lock()
+            .unwrap()
+            .entry(pg_version)
+            .or_insert_with(|| {
+                Arc::new(PostgresRedoManager::new(
+                    self.conf,
+                    self.tenant_id,
+                    pg_version,
+                ))
+            })
+            .clone();
         Ok(Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
@@ -838,7 +851,7 @@ impl Tenant {
             ancestor,
             new_timeline_id,
             self.tenant_id,
-            Arc::clone(&self.walredo_mgr),
+            walredo_mgr,
             self.upload_layers,
             pg_version,
         ))
@@ -847,7 +860,6 @@ impl Tenant {
     pub(super) fn new(
         conf: &'static PageServerConf,
         tenant_conf: TenantConfOpt,
-        walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenant_id: TenantId,
         remote_index: RemoteIndex,
         upload_layers: bool,
@@ -857,9 +869,9 @@ impl Tenant {
             tenant_id,
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
+            walredo_mgrs: Mutex::new(HashMap::new()),
             timelines: Mutex::new(HashMap::new()),
             gc_cs: Mutex::new(()),
-            walredo_mgr,
             remote_index,
             upload_layers,
             state,
@@ -1731,12 +1743,9 @@ pub mod harness {
         }
 
         pub fn try_load(&self) -> anyhow::Result<Tenant> {
-            let walredo_mgr = Arc::new(TestRedoManager);
-
             let tenant = Tenant::new(
                 self.conf,
                 TenantConfOpt::from(self.tenant_conf),
-                walredo_mgr,
                 self.tenant_id,
                 RemoteIndex::default(),
                 false,
@@ -1757,6 +1766,11 @@ pub mod harness {
                 let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
+            tenant
+                .walredo_mgrs
+                .lock()
+                .unwrap()
+                .insert(timeline.pg_version, Arc::new(TestRedoManager));
             tenant.init_attach_timelines(timelines_to_load)?;
             tenant.set_state(TenantState::Active {
                 background_jobs_running: false,

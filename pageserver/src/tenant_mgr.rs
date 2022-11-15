@@ -21,7 +21,6 @@ use crate::tenant::{
     ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
 };
 use crate::tenant_config::TenantConfOpt;
-use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
 
 use utils::crashsafe::{self, path_with_suffix_extension};
@@ -154,7 +153,6 @@ pub fn attach_local_tenants(
                 let tenant = Arc::new(Tenant::new(
                     conf,
                     TenantConfOpt::default(),
-                    Arc::new(PostgresRedoManager::new(conf, tenant_id)),
                     tenant_id,
                     remote_index.clone(),
                     conf.remote_storage_config.is_some(),
@@ -384,12 +382,10 @@ pub fn create_tenant(
             Ok(None)
         }
         hash_map::Entry::Vacant(v) => {
-            let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
             create_tenant_files(conf, tenant_conf, tenant_id)?;
             let tenant = Arc::new(Tenant::new(
                 conf,
                 tenant_conf,
-                wal_redo_manager,
                 tenant_id,
                 remote_index,
                 conf.remote_storage_config.is_some(),

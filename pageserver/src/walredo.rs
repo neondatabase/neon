@@ -56,7 +56,6 @@ use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
 };
-use postgres_ffi::v14::PG_MAJORVERSION;
 use postgres_ffi::BLCKSZ;
 
 const N_CHANNELS: usize = 16;
@@ -195,18 +194,31 @@ impl PostgresRedoManager {
     ///
     /// Create a new PostgresRedoManager.
     ///
-    pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
+    pub fn new(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        pg_version: u32,
+    ) -> PostgresRedoManager {
         #[allow(clippy::type_complexity)]
         let (tx, rx): (
             SyncSender<(Sender<Bytes>, Vec<u8>)>,
             Receiver<(Sender<Bytes>, Vec<u8>)>,
         ) = mpsc::sync_channel(CHANNEL_SIZE);
         let _proxy = std::thread::spawn(move || {
-            while let Ok(mut proc) = PostgresRedoProcess::launch(conf, tenant_id) {
+            // This dirty hack is used for lazy spawning if walredo process.
+            // Otherwise  initdb called in bootstrap will conflict with initdb called by main pageserver process
+            let mut input = Some(rx.recv().unwrap());
+            while let Ok(mut proc) = PostgresRedoProcess::launch(conf, tenant_id, pg_version) {
                 loop {
-                    let (sender, data) = rx.recv().unwrap();
-                    if proc.send(sender, data).is_err() {
-                        break;
+                    if let Some((sender, data)) = input.take() {
+                        if proc.send(sender, data).is_err() {
+                            break;
+                        }
+                    } else {
+                        let (sender, data) = rx.recv().unwrap();
+                        if proc.send(sender, data).is_err() {
+                            break;
+                        }
                     }
                     while let Ok((sender, data)) = rx.try_recv() {
                         if proc.send(sender, data).is_err() {
@@ -738,7 +750,11 @@ impl PostgresRedoProcess {
     // Start postgres binary in special WAL redo mode.
     //
     #[instrument(skip_all,fields(tenant_id=%tenant_id))]
-    fn launch(conf: &PageServerConf, tenant_id: TenantId) -> Result<PostgresRedoProcess, Error> {
+    fn launch(
+        conf: &PageServerConf,
+        tenant_id: TenantId,
+        pg_version: u32,
+    ) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
@@ -746,7 +762,6 @@ impl PostgresRedoProcess {
             conf.tenant_path(&tenant_id).join("wal-redo-datadir"),
             TEMP_FILE_SUFFIX,
         );
-        let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
             info!(
@@ -768,9 +783,14 @@ impl PostgresRedoProcess {
             )
         })?;
 
-        info!("running initdb in {}", datadir.display());
+        info!(
+            "running initdb in {} for pg_verson={}",
+            datadir.display(),
+            pg_version
+        );
         let initdb = Command::new(pg_bin_dir_path.join("initdb"))
             .args(&["-D", &datadir.to_string_lossy()])
+            .arg("-n")
             .arg("-N")
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
