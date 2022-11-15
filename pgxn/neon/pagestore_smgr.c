@@ -1731,7 +1731,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (entry != NULL)
 	{
 		slot = entry->slot;
-		if (slot->effective_request_lsn >= prefetch_lsn)
+		if (slot->effective_request_lsn >= request_lsn)
 		{
 			ring_index = slot->my_ring_index;
 			n_prefetch_hits += 1;
