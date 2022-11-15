@@ -967,6 +967,7 @@ impl Timeline {
         index_part: &IndexPart,
         remote_client: &RemoteTimelineClient,
         mut local_filenames: HashSet<PathBuf>,
+        local_metadata: TimelineMetadata,
         first_save: bool,
     ) -> anyhow::Result<(HashSet<PathBuf>, TimelineMetadata)> {
         let remote_metadata = index_part.parse_metadata().with_context(|| {
@@ -985,6 +986,7 @@ impl Timeline {
 
         // Are there any local files that exist, with a size that doesn't match
         // with the size stored in the remote index file?
+        // If so, rename_to_backup those files so that we re-download them later.
         local_filenames.retain(|path| {
             let layer_metadata = index_part
                 .layer_metadata
@@ -1102,31 +1104,47 @@ impl Timeline {
         // Save the metadata file to local disk.
         // Do this last, so that if we crash in-between, we won't think that the
         // local state is valid.
-        // TODO we should not blindly overwrite local metadata with remote one
-        //    consider the case when checkpoint came, we updated local metadata and started upload task
-        //    but then pageserver crashes, then on start we'll load new metadata, and then reset it to the state of
-        //    remote one. But current layermap will have layers from the old metadata which is inconsistent.
-        //    if we treat remote as source of truth we need to completely syc with it, i e delete local files which are
-        //    missing on the remote which will add extra work, wal for these layers needs to be reingested
         //
-        //    In other words we update local metadata only when remote one has greater disk_consistent_lsn
+        // We should not blindly overwrite local metadata with remote one
+        // consider the case when checkpoint came, we updated local metadata and started upload task
+        // but then pageserver crashes, then on start we'll load new metadata, and then reset it to the state of
+        // remote one. But current layermap will have layers from the old metadata which is inconsistent.
+        // And with current logic it wont disgard them during load because during layermap load it sees local
+        // disk consistent lsn which is ahead of layer lsns.
+        // If we treat remote as source of truth we need to completely syc with it, i e delete local files which are
+        // missing on the remote. This will add extra work, wal for these layers needs to be reingested for example
+        //
+        // So the solution is to update local metadata only when remote one has greater disk_consistent_lsn
 
-        // FIXME we should at least keep highest disk_consistent_lsn. Something else we need to merge?
-
-        save_metadata(
-            self.conf,
-            self.timeline_id,
-            self.tenant_id,
-            &remote_metadata,
-            first_save,
-        )?;
+        // We should merge local metadata with remote one
+        //     1) take metadata with highest disk_consistent_lsn.
+        //     2) Update disk_consistent_lsn inside timeline itself
+        //  FIXME Something else we need to merge?
+        let up_to_date_metadata =
+            if local_metadata.disk_consistent_lsn() < remote_metadata.disk_consistent_lsn() {
+                save_metadata(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_id,
+                    &remote_metadata,
+                    first_save,
+                )?;
+                // NOTE: walreceiver strictly shouldnt be running at this point.
+                //     because it will intersect with this update
+                //     it will start replication from wrong point
+                self.disk_consistent_lsn
+                    .store(remote_metadata.disk_consistent_lsn());
+                remote_metadata
+            } else {
+                local_metadata
+            };
 
         // now these are local only filenames
         let local_only_filenames = local_filenames
             .difference(&remote_filenames)
             .cloned()
             .collect();
-        Ok((local_only_filenames, remote_metadata))
+        Ok((local_only_filenames, up_to_date_metadata))
     }
 
     ///
@@ -1176,7 +1194,13 @@ impl Timeline {
         let (local_only_filenames, up_to_date_metadata) = match index_part {
             Ok(index_part) => {
                 let (local_only_filenames, up_to_date_metadata) = self
-                    .download_missing(&index_part, remote_client, local_filenames, first_save)
+                    .download_missing(
+                        &index_part,
+                        remote_client,
+                        local_filenames,
+                        local_metadata,
+                        first_save,
+                    )
                     .await?;
                 remote_client.init_upload_queue(&index_part)?;
                 (local_only_filenames, up_to_date_metadata)
