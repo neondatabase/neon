@@ -165,13 +165,14 @@ impl UninitializedTimeline<'_> {
     /// Ensures timeline data is valid, loads it into pageserver's memory and removes uninit mark file on success.
     pub fn initialize(self) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(&mut timelines, true)
+        self.initialize_with_lock(&mut timelines, true, true)
     }
 
     fn initialize_with_lock(
         mut self,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
         load_layer_map: bool,
+        launch_wal_receiver: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
@@ -209,7 +210,9 @@ impl UninitializedTimeline<'_> {
 
                 new_timeline.maybe_spawn_flush_loop();
 
-                new_timeline.launch_wal_receiver();
+                if launch_wal_receiver {
+                    new_timeline.launch_wal_receiver();
+                }
             }
         }
 
@@ -392,10 +395,10 @@ impl Tenant {
                 timeline_id,
                 raw_timeline: Some((Arc::new(dummy_timeline), TimelineUninitMark::dummy())),
             };
-
-            // FIXME reminder, it will start walreceiver which may be undesirable if
-            //     initialization of other timelines fail, may be fine if we go to broken state
-            match timeline.initialize_with_lock(&mut timelines_accessor, true) {
+            // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
+            // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
+            // will ingest data which may require looking at the layers which are not yet available locally
+            match timeline.initialize_with_lock(&mut timelines_accessor, true, false) {
                 Ok(initialized_timeline) => {
                     timelines_accessor.insert(timeline_id, initialized_timeline.clone());
                     Ok(initialized_timeline)
@@ -429,6 +432,9 @@ impl Tenant {
                 .reconcile_with_remote(metadata, index_part, first_save)
                 .await?
         }
+
+        // Finally launch walreceiver
+        timeline.launch_wal_receiver();
 
         Ok(())
     }
@@ -738,6 +744,7 @@ impl Tenant {
                 }
 
                 // TODO There was also remove if dir is empty logic
+                // TODO if attach failed we can be missing metadata here
 
                 let file_name = entry.file_name();
                 if let Ok(timeline_id) =
@@ -1694,7 +1701,7 @@ impl Tenant {
                 false,
                 Some(src_timeline),
             )?
-            .initialize_with_lock(&mut timelines, true)?;
+            .initialize_with_lock(&mut timelines, true, true)?;
         drop(timelines);
         info!("branched timeline {dst} from {src} at {start_lsn}");
 
@@ -1788,7 +1795,7 @@ impl Tenant {
 
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
-            raw_timeline.initialize_with_lock(&mut timelines, false)?
+            raw_timeline.initialize_with_lock(&mut timelines, false, true)?
         };
 
         info!(
