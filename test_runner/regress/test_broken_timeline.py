@@ -15,10 +15,10 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*No timelines to attach received.*",
-            ".*Failed to process timeline dir contents.*",
             ".*Failed to load delta layer.*",
-            ".*Timeline .* was not found.*",
+            ".*could not find data for key.*",
+            ".*is not active. Current state: Broken.*",
+            ".*failed to load metadata.*",
         ]
     )
 
