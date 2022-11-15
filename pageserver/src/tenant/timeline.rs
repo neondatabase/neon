@@ -1040,10 +1040,12 @@ impl Timeline {
                     continue;
                 }
 
+                trace!("downloading image file: {}", file = path.display());
                 remote_client
                     .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
                     .await
                     .context("download image layer")?;
+                trace!("done");
 
                 let image_layer =
                     ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
@@ -1068,10 +1070,12 @@ impl Timeline {
                     continue;
                 }
 
+                trace!("downloading image file: {}", file = path.display());
                 remote_client
                     .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
                     .await
                     .context("download delta layer")?;
+                trace!("done");
 
                 let delta_layer =
                     DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
