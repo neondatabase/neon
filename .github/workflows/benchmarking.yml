@@ -148,8 +148,8 @@ jobs:
         platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch ]
         db_size: [ 10gb ]
         include:
-          - platform: neon-captest-new
-            db_size: 50gb
+          - platform: neon-captest-prefetch
+            db_size: 100gb
           - platform: neon-captest-prefetch
             db_size: 50gb
           - platform: rds-aurora
