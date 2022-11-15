@@ -54,12 +54,12 @@ use utils::{
 
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
-use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::walreceiver::{is_etcd_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::ZERO_PAGE;
+use crate::{is_temporary, task_mgr};
 use crate::{page_cache, storage_sync::index::LayerFileMetadata};
 
 pub struct Timeline {
@@ -881,6 +881,7 @@ impl Timeline {
 
         for direntry in fs::read_dir(timeline_path)? {
             let direntry = direntry?;
+            let direntry_path = direntry.path();
             let fname = direntry.file_name();
             let fname = fname.to_string_lossy();
 
@@ -892,7 +893,7 @@ impl Timeline {
                         imgfilename, self.timeline_id, disk_consistent_lsn
                     );
 
-                    rename_to_backup(&direntry.path())?;
+                    rename_to_backup(&direntry_path)?;
                     continue;
                 }
 
@@ -916,7 +917,7 @@ impl Timeline {
                         deltafilename, self.timeline_id, disk_consistent_lsn
                     );
 
-                    rename_to_backup(&direntry.path())?;
+                    rename_to_backup(&direntry_path)?;
                     continue;
                 }
 
@@ -932,7 +933,15 @@ impl Timeline {
             } else if is_ephemeral_file(&fname) {
                 // Delete any old ephemeral files
                 trace!("deleting old ephemeral file in timeline dir: {}", fname);
-                fs::remove_file(direntry.path())?;
+                fs::remove_file(&direntry_path)?;
+            } else if is_temporary(&direntry_path) {
+                info!("removing temp timeline file at {}", direntry_path.display());
+                fs::remove_file(&direntry_path).with_context(|| {
+                    format!(
+                        "failed to remove temp download file at {}",
+                        direntry_path.display()
+                    )
+                })?;
             } else {
                 warn!("unrecognized filename in timeline dir: {}", fname);
             }
