@@ -17,7 +17,7 @@ ahash = { version = "0.7", features = ["std"] }
 anyhow = { version = "1", features = ["backtrace", "std"] }
 bytes = { version = "1", features = ["serde", "std"] }
 chrono = { version = "0.4", features = ["clock", "iana-time-zone", "js-sys", "oldtime", "serde", "std", "time", "wasm-bindgen", "wasmbind", "winapi"] }
-clap = { version = "4", features = ["color", "error-context", "help", "std", "string", "suggestions", "usage"] }
+clap = { version = "4", features = ["color", "derive", "error-context", "help", "std", "string", "suggestions", "usage"] }
 crossbeam-utils = { version = "0.8", features = ["once_cell", "std"] }
 either = { version = "1", features = ["use_std"] }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
