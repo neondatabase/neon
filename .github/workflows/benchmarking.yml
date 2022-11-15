@@ -78,6 +78,7 @@ jobs:
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
+        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         environment: ${{ github.event.inputs.environment || 'staging' }}
         api_key: ${{ ( github.event.inputs.environment || 'staging' ) == 'staging' && secrets.NEON_STAGING_API_KEY  || secrets.NEON_CAPTEST_API_KEY }}
 
@@ -191,6 +192,7 @@ jobs:
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
+        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         environment: ${{ github.event.inputs.environment || 'dev' }}
         api_key: ${{ ( github.event.inputs.environment || 'dev' ) == 'staging' && secrets.NEON_STAGING_API_KEY  || secrets.NEON_CAPTEST_API_KEY }}
 

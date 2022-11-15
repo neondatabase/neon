@@ -11,6 +11,9 @@ inputs:
   region_id:
     desctiption: 'Region ID, if not set the project will be created in the default region'
     required: false
+  postgres_version:
+    desctiption: 'Postgres version; default is 15'
+    required: false
 outputs:
   dsn:
     description: 'Created Project DSN (for main database)'
@@ -41,11 +44,15 @@ runs:
             ;;
         esac
 
+        POSTGRES_VERSION=${POSTGRES_VERSION:-15}
+
         echo "api_host=${API_HOST}" >> $GITHUB_OUTPUT
         echo "region_id=${REGION_ID}" >> $GITHUB_OUTPUT
+        echo "postgres_version=${POSTGRES_VERSION}" >> $GITHUB_OUTPUT
       env:
         ENVIRONMENT: ${{ inputs.environment }}
         REGION_ID: ${{ inputs.region_id }}
+        POSTGRES_VERSION: ${{ inputs.postgres_version }}
 
     - name: Create Neon Project
       id: create-neon-project
@@ -61,6 +68,7 @@ runs:
           --data "{
             \"project\": {
               \"name\": \"Created by actions/neon-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
+              \"pg_version\": ${POSTGRES_VERSION},
               \"platform_id\": \"aws\",
               \"region_id\": \"${REGION_ID}\",
               \"settings\": { }
@@ -80,3 +88,4 @@ runs:
         API_KEY: ${{ inputs.api_key }}
         API_HOST: ${{ steps.parse-input.outputs.api_host }}
         REGION_ID: ${{ steps.parse-input.outputs.region_id }}
+        POSTGRES_VERSION: ${{ steps.parse-input.outputs.postgres_version }}
