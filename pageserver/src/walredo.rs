@@ -623,7 +623,7 @@ impl PostgresRedoProcess {
                 // The message might not be split correctly into lines here. But this is
                 // good enough, the important thing is to get the message to the log.
                 if n > 0 {
-                    panic!(
+                    error!(
                         "wal-redo-postgres: {}",
                         String::from_utf8_lossy(&errbuf[0..n])
                     );
