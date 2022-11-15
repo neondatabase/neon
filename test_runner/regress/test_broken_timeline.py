@@ -81,7 +81,9 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         Exception, match=f"Tenant {tenant1} is not active. Current state: Broken"
     ) as err:
         pg1.start()
-    log.info(f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}")
+    log.info(
+        f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}"
+    )
 
     # Second timeline has no ancestors, only the metadata file and no layer files
     # This will fail with an error like "extracting base backup failed" and cause
@@ -97,6 +99,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     log.info(
         f"As expected, compute startup failed for timeline {tenant3}/{timeline3} with corrupt layers: {err}"
     )
+
 
 def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
     env = neon_simple_env
