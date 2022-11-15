@@ -170,8 +170,8 @@ def get_scales_matrix(default: int = 10) -> List[int]:
 @pytest.mark.parametrize("duration", get_durations_matrix())
 def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
-    # run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
-    # run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
 # Run the pgbench tests, and generate a flamegraph from it

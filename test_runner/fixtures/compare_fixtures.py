@@ -97,21 +97,19 @@ class NeonCompare(PgCompare):
         self._pg_bin = pg_bin
         self.pageserver_http_client = self.env.pageserver.http_client()
 
-        # HACK
-        self.tenant, _ = self.env.neon_cli.create_tenant(
-            conf={
-                "trace_read_requests": "true",
-            }
-        )
+        # Create tenant
+        tenant_conf: Dict[str, str] = {}
+        if False:  # TODO add pytest setting for this
+            tenant_conf["trace_read_requests"] = "true"
+        self.tenant, _ = self.env.neon_cli.create_tenant(conf=tenant_conf)
 
-        # We only use one branch and one timeline
-        # self.env.neon_cli.create_branch(branch_name, "empty")
-        # self._pg = self.env.postgres.create_start(branch_name)
-        # self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
-
+        # Create timeline
         self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
+
+        # Start pg
         self._pg = self.env.postgres.create_start(
-            branch_name, "main", self.tenant, config_lines=["shared_buffers=2GB"])
+            branch_name, "main", self.tenant, config_lines=["shared_buffers=2GB"]
+        )
 
     @property
     def pg(self) -> PgProtocol:
