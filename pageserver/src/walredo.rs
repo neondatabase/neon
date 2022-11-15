@@ -23,7 +23,6 @@ use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
@@ -582,7 +581,7 @@ impl<C: CommandExt> CloseFileDescriptors for C {
 ///
 struct PostgresRedoProcess {
     tenant_id: TenantId,
-    child: NoLeakChild,
+    _child: NoLeakChild,
     stdin: ChildStdin,
     stdout: ChildStdout,
     stderr: ChildStderr,
@@ -859,7 +858,7 @@ impl PostgresRedoProcess {
 
         Ok(PostgresRedoProcess {
             tenant_id,
-            child,
+            _child: child,
             stdin,
             stdout,
             stderr,
