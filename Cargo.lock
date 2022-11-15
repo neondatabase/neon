@@ -4466,7 +4466,6 @@ dependencies = [
  "ahash",
  "anyhow",
  "bytes",
- "chrono",
  "clap 4.0.15",
  "crossbeam-utils",
  "either",
@@ -4495,6 +4494,7 @@ dependencies = [
  "time 0.3.15",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-core",
 ]
