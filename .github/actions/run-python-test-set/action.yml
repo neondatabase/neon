@@ -89,6 +89,12 @@ runs:
       shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
+    ########################################
+    - name: DO NOT MERGE! Delete Postgres 14 to ensure we don't use it by accident
+      shell: bash -euxo pipefail {0}
+      run: rm -rf /tmp/neon/pg_install/v14
+    ########################################
+
     - name: Run pytest
       env:
         NEON_BIN: /tmp/neon/bin
