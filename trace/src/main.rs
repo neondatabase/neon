@@ -7,7 +7,7 @@ use std::{
     io::BufReader,
 };
 
-use pageserver_api::models::PagestreamFeMessage;
+use pageserver_api::models::{PagestreamFeMessage, PagestreamGetPageRequest};
 use utils::id::{ConnectionId, TenantId, TimelineId};
 
 use clap::{Parser, Subcommand};
@@ -50,9 +50,10 @@ enum Command {
 //      - see how sequential a workload is by seeing how often the delta is 1
 //      - detect any prefetching anomalies by looking for negative deltas during seqscan
 fn analyze_trace<R: std::io::Read>(mut reader: R) {
-    let mut total = 0;
-    let mut deltas = HashMap::<i32, u32>::new();
-    let mut prev = 0;
+    let mut total = 0; // Total requests traced
+    let mut cross_rel = 0; // Requests that ask for different rel than previous request
+    let mut deltas = HashMap::<i32, u32>::new(); // Consecutive blkno differences
+    let mut prev: Option<PagestreamGetPageRequest> = None;
 
     // Compute stats
     while let Ok(msg) = PagestreamFeMessage::parse(&mut reader) {
@@ -62,10 +63,15 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
             PagestreamFeMessage::GetPage(req) => {
                 total += 1;
 
-                let delta = (req.blkno as i32) - (prev as i32);
-                prev = req.blkno;
-
-                deltas.entry(delta).and_modify(|c| *c += 1).or_insert(1);
+                if let Some(prev) = prev {
+                    if prev.rel == req.rel {
+                        let delta = (req.blkno as i32) - (prev.blkno as i32);
+                        deltas.entry(delta).and_modify(|c| *c += 1).or_insert(1);
+                    } else {
+                        cross_rel += 1;
+                    }
+                }
+                prev = Some(req);
             }
             PagestreamFeMessage::DbSize(_) => {}
         };
@@ -76,6 +82,7 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
     deltas.retain(|_, count| *count > 300);
     other -= deltas.len();
     dbg!(total);
+    dbg!(cross_rel);
     dbg!(other);
     dbg!(deltas);
 }
