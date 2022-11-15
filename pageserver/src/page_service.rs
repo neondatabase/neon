@@ -282,9 +282,11 @@ impl PageServerHandler {
         let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
-            let path = tenant
-                .conf
-                .trace_path(&tenant_id, &timeline_id, &connection_id);
+            let path = tenant.conf.trace_path(
+                &tenant_id,
+                &timeline_id.unwrap_or_else(|| TimelineId::from([0u8; 16])),
+                &connection_id,
+            );
             Some(Tracer::new(path))
         } else {
             None
