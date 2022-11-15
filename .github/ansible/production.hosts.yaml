@@ -24,6 +24,8 @@ storage:
           console_region_id: aws-us-west-2
         zenith-1-ps-4:
           console_region_id: aws-us-west-2
+        zenith-1-ps-5:
+          console_region_id: aws-us-west-2
 
     safekeepers:
       hosts:
