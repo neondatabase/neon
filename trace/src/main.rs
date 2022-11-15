@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::{
     fs::{read_dir, File},
     io::BufReader,
 };
-use std::str::FromStr;
 
 use pageserver_api::models::PagestreamFeMessage;
-use utils::id::{TenantId, TimelineId, ConnectionId};
+use utils::id::{ConnectionId, TenantId, TimelineId};
 
 use clap::{Parser, Subcommand};
-
 
 /// Utils for working with pageserver read traces
 #[derive(Parser, Debug)]
@@ -64,11 +63,8 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
                 let delta = (req.blkno as i32) - (prev as i32);
                 prev = req.blkno;
 
-                match deltas.get_mut(&delta) {
-                    Some(c) => {*c += 1;},
-                    None => {deltas.insert(delta, 1);},
-                };
-            },
+                deltas.entry(delta).and_modify(|c| *c += 1).or_insert(1);
+            }
             PagestreamFeMessage::DbSize(_) => {}
         };
     }
@@ -118,7 +114,8 @@ fn get_trace_files(traces_dir: &PathBuf) -> anyhow::Result<Vec<TraceFile>> {
             for trace_dir in read_dir(path)? {
                 let entry = trace_dir?;
                 let path = entry.path();
-                let connection_id = ConnectionId::from_str(path.file_name().unwrap().to_str().unwrap())?;
+                let connection_id =
+                    ConnectionId::from_str(path.file_name().unwrap().to_str().unwrap())?;
 
                 trace_files.push(TraceFile {
                     tenant_id,
@@ -156,7 +153,7 @@ fn main() -> anyhow::Result<()> {
                 let reader = BufReader::new(file);
                 analyze_trace(reader);
             }
-        },
+        }
         Command::Draw => todo!(),
         Command::Replay => todo!(),
     }
