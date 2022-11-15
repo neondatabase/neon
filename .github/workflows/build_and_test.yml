@@ -305,7 +305,7 @@ jobs:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ regress-tests, benchmarks ]
-    if: always()
+    if: success() || failure()
     strategy:
       fail-fast: false
       matrix:
