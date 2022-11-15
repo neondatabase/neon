@@ -86,11 +86,11 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     )
 
     # Second timeline has no ancestors, only the metadata file and no layer files
-    # We don't have the remote storage enabled, which means timeline is in an incorrect state,
-    # it's not loaded at all
-    with pytest.raises(Exception, match=".*extracting base backup failed") as err:
+    # This will fail with an error like "extracting base backup failed" and cause
+    # "could not find data for key"
+    with pytest.raises(Exception, match=".*could not find data for key.*") as err:
         pg2.start()
-    log.info(f"As expected, compute startup failed for timeline with missing layers: {err}")
+    log.info(f"As expected, compute startup failed eagerly for timeline with missing layers: {err}")
 
     # Third timeline will also fail during basebackup, because the layer file is corrupt.
     # (We don't check layer file contents on startup, when loading the timeline)
