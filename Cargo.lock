@@ -3945,6 +3945,7 @@ dependencies = [
  "clap 4.0.15",
  "pageserver_api",
  "utils",
+ "workspace_hack",
 ]
 
 [[package]]
