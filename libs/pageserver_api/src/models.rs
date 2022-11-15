@@ -339,34 +339,34 @@ impl PagestreamFeMessage {
                 bytes.put_u8(0);
                 bytes.put_u8(if req.latest { 1 } else { 0 });
                 bytes.put_u64(req.lsn.0);
+                bytes.put_u8(req.region.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
                 bytes.put_u8(req.rel.forknum);
-                bytes.put_u8(req.region.0);
             }
 
             Self::Nblocks(req) => {
                 bytes.put_u8(1);
                 bytes.put_u8(if req.latest { 1 } else { 0 });
                 bytes.put_u64(req.lsn.0);
+                bytes.put_u8(req.region.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
                 bytes.put_u8(req.rel.forknum);
-                bytes.put_u8(req.region.0);
             }
 
             Self::GetPage(req) => {
                 bytes.put_u8(2);
                 bytes.put_u8(if req.latest { 1 } else { 0 });
                 bytes.put_u64(req.lsn.0);
+                bytes.put_u8(req.region.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
                 bytes.put_u8(req.rel.forknum);
                 bytes.put_u32(req.blkno);
-                bytes.put_u8(req.region.0);
             }
 
             Self::DbSize(req) => {
@@ -380,11 +380,11 @@ impl PagestreamFeMessage {
                 bytes.put_u8(4); /* tag from pagestore_client.h */
                 bytes.put_u8(if req.latest { 1 } else { 0 });
                 bytes.put_u64(req.lsn.0);
+                bytes.put_u8(req.region.0);
                 bytes.put_u8(req.kind.into());
                 bytes.put_u32(req.segno);
                 bytes.put_u32(req.blkno);
                 bytes.put_u8(if req.check_exists_only { 1 } else { 0 });
-                bytes.put_u8(req.region.0);
             }
         }
 
