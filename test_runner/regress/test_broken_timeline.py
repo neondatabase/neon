@@ -81,24 +81,22 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         Exception, match=f"Tenant {tenant1} is not active. Current state: Broken"
     ) as err:
         pg1.start()
-    log.info(f"compute startup failed eagerly for timeline with corrupt metadata: {err}")
+    log.info(f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}")
 
     # Second timeline has no ancestors, only the metadata file and no layer files
-    # We don't have the remote storage enabled, which means timeline is in an incorrect state,
-    # it's not loaded at all
-    with pytest.raises(Exception, match=".*extracting base backup failed") as err:
+    # This will fail with an error like "extracting base backup failed" and cause
+    # "could not find data for key"
+    with pytest.raises(Exception, match=".*could not find data for key.*") as err:
         pg2.start()
-    log.info(f"compute startup failed eagerly for timeline with corrupt metadata: {err}")
+    log.info(f"As expected, compute startup failed eagerly for timeline with missing layers: {err}")
 
-    # Yet other timelines will fail when their layers will be queried during basebackup: we don't check layer file contents on startup, when loading the timeline
-    for n in range(3, 4):
-        (bad_tenant, bad_timeline, pg) = tenant_timelines[n]
-        with pytest.raises(Exception, match="extracting base backup failed") as err:
-            pg.start()
-        log.info(
-            f"compute startup failed lazily for timeline {bad_tenant}/{bad_timeline} with corrupt layers, during basebackup preparation: {err}"
-        )
-
+    # Third timeline will also fail during basebackup, because the layer file is corrupt.
+    # (We don't check layer file contents on startup, when loading the timeline)
+    with pytest.raises(Exception, match="Failed to load delta layer") as err:
+        pg3.start()
+    log.info(
+        f"As expected, compute startup failed for timeline {tenant3}/{timeline3} with corrupt layers: {err}"
+    )
 
 def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
     env = neon_simple_env
