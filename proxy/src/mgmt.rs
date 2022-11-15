@@ -1,14 +1,15 @@
-use crate::{compute::DatabaseInfo, cplane_api};
+use crate::auth;
 use anyhow::Context;
+use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use serde::Deserialize;
 use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
-use zenith_utils::{
-    postgres_backend::{self, AuthType, PostgresBackend},
-    pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
-};
+use tracing::{error, info};
+use utils::postgres_backend::{self, AuthType, PostgresBackend};
+
+/// TODO: move all of that to auth-backend/link.rs when we ditch legacy-console backend
 
 ///
 /// Main proxy listener loop.
@@ -17,7 +18,7 @@ use zenith_utils::{
 ///
 pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
     scopeguard::defer! {
-        println!("mgmt has shut down");
+        info!("mgmt has shut down");
     }
 
     listener
@@ -25,14 +26,14 @@ pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
         .context("failed to set listener to blocking")?;
     loop {
         let (socket, peer_addr) = listener.accept().context("failed to accept a new client")?;
-        println!("accepted connection from {}", peer_addr);
+        info!("accepted connection from {peer_addr}");
         socket
             .set_nodelay(true)
             .context("failed to set client socket option")?;
 
         thread::spawn(move || {
             if let Err(err) = handle_connection(socket) {
-                println!("error: {}", err);
+                error!("{err}");
             }
         });
     }
@@ -75,8 +76,20 @@ struct PsqlSessionResponse {
 
 #[derive(Deserialize)]
 enum PsqlSessionResult {
-    Success(DatabaseInfo),
+    Success(auth::DatabaseInfo),
     Failure(String),
+}
+
+/// A message received by `mgmt` when a compute node is ready.
+pub type ComputeReady = Result<auth::DatabaseInfo, String>;
+
+impl PsqlSessionResult {
+    fn into_compute_ready(self) -> ComputeReady {
+        match self {
+            Self::Success(db_info) => Ok(db_info),
+            Self::Failure(message) => Err(message),
+        }
+    }
 }
 
 impl postgres_backend::Handler for MgmtHandler {
@@ -88,24 +101,18 @@ impl postgres_backend::Handler for MgmtHandler {
         let res = try_process_query(pgb, query_string);
         // intercept and log error message
         if res.is_err() {
-            println!("Mgmt query failed: #{:?}", res);
+            error!("mgmt query failed: {res:?}");
         }
         res
     }
 }
 
 fn try_process_query(pgb: &mut PostgresBackend, query_string: &str) -> anyhow::Result<()> {
-    println!("Got mgmt query: '{}'", query_string);
+    info!("got mgmt query [redacted]"); // Content contains password, don't print it
 
     let resp: PsqlSessionResponse = serde_json::from_str(query_string)?;
 
-    use PsqlSessionResult::*;
-    let msg = match resp.result {
-        Success(db_info) => Ok(db_info),
-        Failure(message) => Err(message),
-    };
-
-    match cplane_api::notify(&resp.session_id, msg) {
+    match auth::backend::notify(&resp.session_id, resp.result.into_compute_ready()) {
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?

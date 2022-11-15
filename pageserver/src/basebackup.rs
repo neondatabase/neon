@@ -10,45 +10,63 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
-use log::*;
+use fail::fail_point;
+use itertools::Itertools;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
+use tracing::*;
 
-use crate::relish::*;
-use crate::repository::Timeline;
-use postgres_ffi::xlog_utils::*;
-use postgres_ffi::*;
-use zenith_utils::lsn::Lsn;
+use crate::tenant::Timeline;
+use pageserver_api::reltag::{RelTag, SlruKind};
+
+use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
+use postgres_ffi::TransactionId;
+use postgres_ffi::XLogFileName;
+use postgres_ffi::PG_TLI;
+use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
+use utils::lsn::Lsn;
 
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a> {
-    ar: Builder<&'a mut dyn Write>,
-    timeline: &'a Arc<dyn Timeline>,
+pub struct Basebackup<'a, W>
+where
+    W: Write,
+{
+    ar: Builder<AbortableWrite<W>>,
+    timeline: &'a Arc<Timeline>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
+    full_backup: bool,
+    finished: bool,
 }
 
-// Create basebackup with non-rel data in it. Omit relational data.
+// Create basebackup with non-rel data in it.
+// Only include relational data if 'full_backup' is true.
 //
 // Currently we use empty lsn in two cases:
 //  * During the basebackup right after timeline creation
 //  * When working without safekeepers. In this situation it is important to match the lsn
 //    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 //    to start the replication.
-impl<'a> Basebackup<'a> {
+impl<'a, W> Basebackup<'a, W>
+where
+    W: Write,
+{
     pub fn new(
-        write: &'a mut dyn Write,
-        timeline: &'a Arc<dyn Timeline>,
+        write: W,
+        timeline: &'a Arc<Timeline>,
         req_lsn: Option<Lsn>,
-    ) -> Result<Basebackup<'a>> {
+        prev_lsn: Option<Lsn>,
+        full_backup: bool,
+    ) -> Result<Basebackup<'a, W>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
         // previous record (xl_prev). We include prev_record_lsn in the
@@ -63,8 +81,8 @@ impl<'a> Basebackup<'a> {
         // an old LSN and it doesn't have any WAL of its own yet. We will set
         // prev_lsn to Lsn(0) if we cannot provide the correct value.
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
-            // Backup was requested at a particular LSN. Wait for it to arrive.
-            timeline.wait_lsn(req_lsn)?;
+            // Backup was requested at a particular LSN. The caller should've
+            // already checked that it's a valid LSN.
 
             // If the requested point is the end of the timeline, we can
             // provide prev_lsn. (get_last_record_rlsn() might return it as
@@ -82,30 +100,44 @@ impl<'a> Basebackup<'a> {
             (end_of_timeline.prev, end_of_timeline.last)
         };
 
+        // Consolidate the derived and the provided prev_lsn values
+        let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
+            if backup_prev != Lsn(0) {
+                ensure!(backup_prev == provided_prev_lsn)
+            }
+            provided_prev_lsn
+        } else {
+            backup_prev
+        };
+
         info!(
-            "taking basebackup lsn={}, prev_lsn={}",
-            backup_lsn, backup_prev
+            "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
+            backup_lsn, prev_lsn, full_backup
         );
 
         Ok(Basebackup {
-            ar: Builder::new(write),
+            ar: Builder::new(AbortableWrite::new(write)),
             timeline,
             lsn: backup_lsn,
-            prev_record_lsn: backup_prev,
+            prev_record_lsn: prev_lsn,
+            full_backup,
+            finished: false,
         })
     }
 
-    pub fn send_tarball(&mut self) -> anyhow::Result<()> {
+    pub fn send_tarball(mut self) -> anyhow::Result<()> {
+        // TODO include checksum
+
         // Create pgdata subdirs structure
-        for dir in pg_constants::PGDATA_SUBDIRS.iter() {
+        for dir in PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(*dir)?;
             self.ar.append(&header, &mut io::empty())?;
         }
 
         // Send empty config files.
-        for filepath in pg_constants::PGDATA_SPECIAL_FILES.iter() {
+        for filepath in PGDATA_SPECIAL_FILES.iter() {
             if *filepath == "pg_hba.conf" {
-                let data = pg_constants::PG_HBA.as_bytes();
+                let data = PG_HBA.as_bytes();
                 let header = new_tar_header(filepath, data.len() as u64)?;
                 self.ar.append(&header, data)?;
             } else {
@@ -115,25 +147,74 @@ impl<'a> Basebackup<'a> {
         }
 
         // Gather non-relational files from object storage pages.
-        for obj in self.timeline.list_nonrels(self.lsn)? {
-            match obj {
-                RelishTag::Slru { slru, segno } => {
-                    self.add_slru_segment(slru, segno)?;
-                }
-                RelishTag::FileNodeMap { spcnode, dbnode } => {
-                    self.add_relmap_file(spcnode, dbnode)?;
-                }
-                RelishTag::TwoPhase { xid } => {
-                    self.add_twophase_file(xid)?;
-                }
-                _ => {}
+        for kind in [
+            SlruKind::Clog,
+            SlruKind::MultiXactOffsets,
+            SlruKind::MultiXactMembers,
+        ] {
+            for segno in self.timeline.list_slru_segments(kind, self.lsn)? {
+                self.add_slru_segment(kind, segno)?;
             }
         }
+
+        // Create tablespace directories
+        for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn)? {
+            self.add_dbdir(spcnode, dbnode, has_relmap_file)?;
+
+            // Gather and send relational files in each database if full backup is requested.
+            if self.full_backup {
+                for rel in self.timeline.list_rels(spcnode, dbnode, self.lsn)? {
+                    self.add_rel(rel)?;
+                }
+            }
+        }
+        for xid in self.timeline.list_twophase_files(self.lsn)? {
+            self.add_twophase_file(xid)?;
+        }
+
+        fail_point!("basebackup-before-control-file", |_| {
+            bail!("failpoint basebackup-before-control-file")
+        });
 
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file()?;
         self.ar.finish()?;
+        self.finished = true;
         debug!("all tarred up!");
+        Ok(())
+    }
+
+    fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
+        let nblocks = self.timeline.get_rel_size(tag, self.lsn, false)?;
+
+        // Function that adds relation segment data to archive
+        let mut add_file = |segment_index, data: &Vec<u8>| -> anyhow::Result<()> {
+            let file_name = tag.to_segfile_name(segment_index as u32);
+            let header = new_tar_header(&file_name, data.len() as u64)?;
+            self.ar.append(&header, data.as_slice())?;
+            Ok(())
+        };
+
+        // If the relation is empty, create an empty file
+        if nblocks == 0 {
+            add_file(0, &vec![])?;
+            return Ok(());
+        }
+
+        // Add a file for each chunk of blocks (aka segment)
+        let chunks = (0..nblocks).chunks(RELSEG_SIZE as usize);
+        for (seg, blocks) in chunks.into_iter().enumerate() {
+            let mut segment_data: Vec<u8> = vec![];
+            for blknum in blocks {
+                let img = self
+                    .timeline
+                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)?;
+                segment_data.extend_from_slice(&img[..]);
+            }
+
+            add_file(seg, &segment_data)?;
+        }
+
         Ok(())
     }
 
@@ -141,30 +222,21 @@ impl<'a> Basebackup<'a> {
     // Generate SLRU segment files from repository.
     //
     fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let seg_size = self
-            .timeline
-            .get_relish_size(RelishTag::Slru { slru, segno }, self.lsn)?;
+        let nblocks = self.timeline.get_slru_segment_size(slru, segno, self.lsn)?;
 
-        if seg_size == None {
-            trace!(
-                "SLRU segment {}/{:>04X} was truncated",
-                slru.to_str(),
-                segno
-            );
-            return Ok(());
-        }
-
-        let nblocks = seg_size.unwrap();
-
-        let mut slru_buf: Vec<u8> =
-            Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
+        let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
         for blknum in 0..nblocks {
-            let img =
-                self.timeline
-                    .get_page_at_lsn(RelishTag::Slru { slru, segno }, blknum, self.lsn)?;
-            assert!(img.len() == pg_constants::BLCKSZ as usize);
+            let img = self
+                .timeline
+                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
 
-            slru_buf.extend_from_slice(&img);
+            if slru == SlruKind::Clog {
+                ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
+            } else {
+                ensure!(img.len() == BLCKSZ as usize);
+            }
+
+            slru_buf.extend_from_slice(&img[..BLCKSZ as usize]);
         }
 
         let segname = format!("{}/{:>04X}", slru.to_str(), segno);
@@ -176,43 +248,78 @@ impl<'a> Basebackup<'a> {
     }
 
     //
-    // Extract pg_filenode.map files from repository
-    // Along with them also send PG_VERSION for each database.
+    // Include database/tablespace directories.
     //
-    fn add_relmap_file(&mut self, spcnode: u32, dbnode: u32) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn(
-            RelishTag::FileNodeMap { spcnode, dbnode },
-            0,
-            self.lsn,
-        )?;
-        let path = if spcnode == pg_constants::GLOBALTABLESPACE_OID {
-            let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
-            let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
-            self.ar.append(&header, version_bytes)?;
-
-            let header = new_tar_header("global/PG_VERSION", version_bytes.len() as u64)?;
-            self.ar.append(&header, version_bytes)?;
-
-            String::from("global/pg_filenode.map") // filenode map for global tablespace
+    // Each directory contains a PG_VERSION file, and the default database
+    // directories also contain pg_filenode.map files.
+    //
+    fn add_dbdir(
+        &mut self,
+        spcnode: u32,
+        dbnode: u32,
+        has_relmap_file: bool,
+    ) -> anyhow::Result<()> {
+        let relmap_img = if has_relmap_file {
+            let img = self.timeline.get_relmap_file(spcnode, dbnode, self.lsn)?;
+            ensure!(img.len() == 512);
+            Some(img)
         } else {
+            None
+        };
+
+        if spcnode == GLOBALTABLESPACE_OID {
+            let pg_version_str = self.timeline.pg_version.to_string();
+            let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
+            self.ar.append(&header, pg_version_str.as_bytes())?;
+
+            info!("timeline.pg_version {}", self.timeline.pg_version);
+
+            if let Some(img) = relmap_img {
+                // filenode map for global tablespace
+                let header = new_tar_header("global/pg_filenode.map", img.len() as u64)?;
+                self.ar.append(&header, &img[..])?;
+            } else {
+                warn!("global/pg_filenode.map is missing");
+            }
+        } else {
+            // User defined tablespaces are not supported. However, as
+            // a special case, if a tablespace/db directory is
+            // completely empty, we can leave it out altogether. This
+            // makes taking a base backup after the 'tablespace'
+            // regression test pass, because the test drops the
+            // created tablespaces after the tests.
+            //
+            // FIXME: this wouldn't be necessary, if we handled
+            // XLOG_TBLSPC_DROP records. But we probably should just
+            // throw an error on CREATE TABLESPACE in the first place.
+            if !has_relmap_file
+                && self
+                    .timeline
+                    .list_rels(spcnode, dbnode, self.lsn)?
+                    .is_empty()
+            {
+                return Ok(());
+            }
             // User defined tablespaces are not supported
-            assert!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
+            ensure!(spcnode == DEFAULTTABLESPACE_OID);
 
             // Append dir path for each database
             let path = format!("base/{}", dbnode);
             let header = new_tar_header_dir(&path)?;
             self.ar.append(&header, &mut io::empty())?;
 
-            let dst_path = format!("base/{}/PG_VERSION", dbnode);
-            let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
-            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, version_bytes)?;
+            if let Some(img) = relmap_img {
+                let dst_path = format!("base/{}/PG_VERSION", dbnode);
 
-            format!("base/{}/pg_filenode.map", dbnode)
+                let pg_version_str = self.timeline.pg_version.to_string();
+                let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
+                self.ar.append(&header, pg_version_str.as_bytes())?;
+
+                let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
+                let header = new_tar_header(&relmap_path, img.len() as u64)?;
+                self.ar.append(&header, &img[..])?;
+            }
         };
-        assert!(img.len() == 512);
-        let header = new_tar_header(&path, img.len() as u64)?;
-        self.ar.append(&header, &img[..])?;
         Ok(())
     }
 
@@ -220,9 +327,7 @@ impl<'a> Basebackup<'a> {
     // Extract twophase state files
     //
     fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
-        let img = self
-            .timeline
-            .get_page_at_lsn(RelishTag::TwoPhase { xid }, 0, self.lsn)?;
+        let img = self.timeline.get_twophase_file(xid, self.lsn)?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -240,30 +345,6 @@ impl<'a> Basebackup<'a> {
     // Also send zenith.signal file with extra bootstrap data.
     //
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
-        let checkpoint_bytes = self
-            .timeline
-            .get_page_at_lsn(RelishTag::Checkpoint, 0, self.lsn)
-            .context("failed to get checkpoint bytes")?;
-        let pg_control_bytes = self
-            .timeline
-            .get_page_at_lsn(RelishTag::ControlFile, 0, self.lsn)
-            .context("failed get control bytes")?;
-        let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
-        let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
-
-        // Generate new pg_control needed for bootstrap
-        checkpoint.redo = normalize_lsn(self.lsn, pg_constants::WAL_SEGMENT_SIZE).0;
-
-        //reset some fields we don't want to preserve
-        //TODO Check this.
-        //We may need to determine the value from twophase data.
-        checkpoint.oldestActiveXid = 0;
-
-        //save new values in pg_control
-        pg_control.checkPoint = 0;
-        pg_control.checkPointCopy = checkpoint;
-        pg_control.state = pg_constants::DB_SHUTDOWNED;
-
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
@@ -280,20 +361,51 @@ impl<'a> Basebackup<'a> {
             zenith_signal.as_bytes(),
         )?;
 
+        let checkpoint_bytes = self
+            .timeline
+            .get_checkpoint(self.lsn)
+            .context("failed to get checkpoint bytes")?;
+        let pg_control_bytes = self
+            .timeline
+            .get_control_file(self.lsn)
+            .context("failed get control bytes")?;
+
+        let (pg_control_bytes, system_identifier) = postgres_ffi::generate_pg_control(
+            &pg_control_bytes,
+            &checkpoint_bytes,
+            self.lsn,
+            self.timeline.pg_version,
+        )?;
+
         //send pg_control
-        let pg_control_bytes = pg_control.encode();
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
         self.ar.append(&header, &pg_control_bytes[..])?;
 
         //send wal segment
-        let segno = self.lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-        let wal_file_name = XLogFileName(PG_TLI, segno, pg_constants::WAL_SEGMENT_SIZE);
+        let segno = self.lsn.segment_number(WAL_SEGMENT_SIZE);
+        let wal_file_name = XLogFileName(PG_TLI, segno, WAL_SEGMENT_SIZE);
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
-        let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
-        let wal_seg = generate_wal_segment(segno, pg_control.system_identifier);
-        assert!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
+        let header = new_tar_header(&wal_file_path, WAL_SEGMENT_SIZE as u64)?;
+
+        let wal_seg =
+            postgres_ffi::generate_wal_segment(segno, system_identifier, self.timeline.pg_version)
+                .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
+        ensure!(wal_seg.len() == WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())
+    }
+}
+
+impl<'a, W> Drop for Basebackup<'a, W>
+where
+    W: Write,
+{
+    /// If the basebackup was not finished, prevent the Archive::drop() from
+    /// writing the end-of-archive marker.
+    fn drop(&mut self) {
+        if !self.finished {
+            self.ar.get_mut().abort();
+        }
     }
 }
 
@@ -331,4 +443,50 @@ fn new_tar_header_dir(path: &str) -> anyhow::Result<Header> {
     );
     header.set_cksum();
     Ok(header)
+}
+
+/// A wrapper that passes through all data to the underlying Write,
+/// until abort() is called.
+///
+/// tar::Builder has an annoying habit of finishing the archive with
+/// a valid tar end-of-archive marker (two 512-byte sectors of zeros),
+/// even if an error occurs and we don't finish building the archive.
+/// We'd rather abort writing the tarball immediately than construct
+/// a seemingly valid but incomplete archive. This wrapper allows us
+/// to swallow the end-of-archive marker that Builder::drop() emits,
+/// without writing it to the underlying sink.
+///
+struct AbortableWrite<W> {
+    w: W,
+    aborted: bool,
+}
+
+impl<W> AbortableWrite<W> {
+    pub fn new(w: W) -> Self {
+        AbortableWrite { w, aborted: false }
+    }
+
+    pub fn abort(&mut self) {
+        self.aborted = true;
+    }
+}
+
+impl<W> Write for AbortableWrite<W>
+where
+    W: Write,
+{
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.aborted {
+            Ok(data.len())
+        } else {
+            self.w.write(data)
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        if self.aborted {
+            Ok(())
+        } else {
+            self.w.flush()
+        }
+    }
 }

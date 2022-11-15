@@ -1,0 +1,59 @@
+name: "Download an artifact"
+description: "Custom download action"
+inputs:
+  name:
+    description: "Artifact name"
+    required: true
+  path:
+    description: "A directory to put artifact into"
+    default: "."
+    required: false
+  skip-if-does-not-exist:
+    description: "Allow to skip if file doesn't exist, fail otherwise"
+    default: false
+    required: false
+  prefix:
+    description: "S3 prefix. Default is '${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Download artifact
+      id: download-artifact
+      shell: bash -euxo pipefail {0}
+      env:
+        TARGET: ${{ inputs.path }}
+        ARCHIVE: /tmp/downloads/${{ inputs.name }}.tar.zst
+        SKIP_IF_DOES_NOT_EXIST: ${{ inputs.skip-if-does-not-exist }}
+        PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}', github.run_id, github.run_attempt) }}
+      run: |
+        BUCKET=neon-github-public-dev
+        FILENAME=$(basename $ARCHIVE)
+
+        S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX%$GITHUB_RUN_ATTEMPT} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
+        if [ -z "${S3_KEY}" ]; then
+          if [ "${SKIP_IF_DOES_NOT_EXIST}" = "true" ]; then
+            echo 'SKIPPED=true' >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo 2>&1 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
+            exit 1
+          fi
+        fi
+
+        echo 'SKIPPED=false' >> $GITHUB_OUTPUT
+
+        mkdir -p $(dirname $ARCHIVE)
+        time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} ${ARCHIVE}
+
+    - name: Extract artifact
+      if: ${{ steps.download-artifact.outputs.SKIPPED == 'false' }}
+      shell: bash -euxo pipefail {0}
+      env:
+        TARGET: ${{ inputs.path }}
+        ARCHIVE: /tmp/downloads/${{ inputs.name }}.tar.zst
+      run: |
+        mkdir -p ${TARGET}
+        time tar -xf ${ARCHIVE} -C ${TARGET}
+        rm -f ${ARCHIVE}

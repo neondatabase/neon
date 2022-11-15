@@ -1,0 +1,16 @@
+[package]
+name = "pq_proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.0.1"
+pin-project-lite = "0.2.7"
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+rand = "0.8.3"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.17", features = ["macros"] }
+tracing = "0.1"
+
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }

@@ -2,26 +2,26 @@
 
 ### Overview
 
-Zenith supports multitenancy. One pageserver can serve multiple tenants at once. Tenants can be managed via zenith CLI. During page server setup tenant can be created using ```zenith init --create-tenant``` Also tenants can be added into the system on the fly without pageserver restart. This can be done using the following cli command: ```zenith tenant create``` Tenants use random identifiers which can be represented as a 32 symbols hexadecimal string. So zenith tenant create accepts desired tenant id as an optional argument. The concept of timelines/branches is working independently per tenant.
+Neon supports multitenancy. One pageserver can serve multiple tenants at once. Tenants can be managed via neon_local CLI. During page server setup tenant can be created using ```neon_local init --create-tenant``` Also tenants can be added into the system on the fly without pageserver restart. This can be done using the following cli command: ```neon_local tenant create``` Tenants use random identifiers which can be represented as a 32 symbols hexadecimal string. So neon_local tenant create accepts desired tenant id as an optional argument. The concept of timelines/branches is working independently per tenant.
 
 ### Tenants in other commands
 
-By default during `zenith init` new tenant is created on the pageserver. Newly created tenant's id is saved to cli config, so other commands can use it automatically if no direct arugment `--tenantid=<tenantid>` is provided. So generally tenantid more frequently appears in internal pageserver interface. Its commands take tenantid argument to distinguish to which tenant operation should be applied. CLI support creation of new tenants.
+By default during `neon_local init` new tenant is created on the pageserver. Newly created tenant's id is saved to cli config, so other commands can use it automatically if no direct argument `--tenant_id=<tenant_id>` is provided. So generally tenant_id more frequently appears in internal pageserver interface. Its commands take tenant_id argument to distinguish to which tenant operation should be applied. CLI support creation of new tenants.
 
 Examples for cli:
 
 ```sh
-zenith tenant list
+neon_local tenant list
 
-zenith tenant create // generates new id
+neon_local tenant create // generates new id
 
-zenith tenant create ee6016ec31116c1b7c33dfdfca38892f
+neon_local tenant create ee6016ec31116c1b7c33dfdfca38892f
 
-zenith pg create main // default tenant from zenith init
+neon_local pg create main // default tenant from neon init
 
-zenith pg create main --tenantid=ee6016ec31116c1b7c33dfdfca38892f
+neon_local pg create main --tenant_id=ee6016ec31116c1b7c33dfdfca38892f
 
-zenith branch --tenantid=ee6016ec31116c1b7c33dfdfca38892f
+neon_local branch --tenant_id=ee6016ec31116c1b7c33dfdfca38892f
 ```
 
 ### Data layout
@@ -56,4 +56,4 @@ Tenant id is passed to postgres via GUC the same way as the timeline. Tenant id 
 
 ### Safety
 
-For now particular tenant can only appear on a particular pageserver. Set of safekeepers are also pinned to particular (tenantid, timeline) pair so there can only be one writer for particular (tenantid, timeline).
+For now particular tenant can only appear on a particular pageserver. Set of safekeepers are also pinned to particular (tenant_id, timeline_id) pair so there can only be one writer for particular (tenant_id, timeline_id).

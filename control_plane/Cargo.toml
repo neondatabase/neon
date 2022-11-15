@@ -4,18 +4,25 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tar = "0.4.33"
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
-serde = { version = "1.0", features = ["derive"] }
-toml = "0.5"
-lazy_static = "1.4"
-regex = "1"
 anyhow = "1.0"
-thiserror = "1"
-nix = "0.23"
-url = "2.2.2"
+clap = "4.0"
+comfy-table = "6.1"
+git-version = "0.3.5"
+nix = "0.25"
+once_cell = "1.13.0"
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+regex = "1"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_with = "2.0"
+tar = "0.4.38"
+thiserror = "1"
+toml = "0.5"
+url = "2.2.2"
 
-pageserver = { path = "../pageserver" }
-zenith_utils = { path = "../zenith_utils" }
-workspace_hack = { path = "../workspace_hack" }
+# Note: Do not directly depend on pageserver or safekeeper; use pageserver_api or safekeeper_api
+# instead, so that recompile times are better.
+pageserver_api = { path = "../libs/pageserver_api" }
+safekeeper_api = { path = "../libs/safekeeper_api" }
+utils = { path = "../libs/utils" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }

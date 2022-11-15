@@ -1,18 +1,21 @@
-**/.git/
-**/__pycache__
-**/.pytest_cache
+*
 
-.git
-target
-tmp_check
-tmp_install
-tmp_check_cli
-test_output
-.vscode
-.zenith
-integration_tests/.zenith
-.mypy_cache
+!rust-toolchain.toml
+!Cargo.toml
+!Cargo.lock
+!Makefile
 
-Dockerfile
-.dockerignore
-
+!.cargo/
+!.config/
+!control_plane/
+!compute_tools/
+!libs/
+!pageserver/
+!pgxn/
+!proxy/
+!safekeeper/
+!vendor/postgres-v14/
+!vendor/postgres-v15/
+!workspace_hack/
+!neon_local/
+!scripts/ninstall.sh

@@ -1,13 +1,20 @@
+/pg_install
 /target
 /tmp_check
-/tmp_install
 /tmp_check_cli
 __pycache__/
 test_output/
 .vscode
-/.zenith
-/integration_tests/.zenith
+.idea
+/.neon
+/integration_tests/.neon
 
 # Coverage
 *.profraw
 *.profdata
+
+*.key
+*.crt
+*.o
+*.so
+*.Po

@@ -1,0 +1,158 @@
+openapi: "3.0.2"
+info:
+  title: Compute node control API
+  version: "1.0"
+
+servers:
+  - url: "http://localhost:3080"
+
+paths:
+  /status:
+    get:
+      tags:
+      - "info"
+      summary: Get compute node internal status
+      description: ""
+      operationId: getComputeStatus
+      responses:
+        "200":
+          description: ComputeState
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComputeState"
+
+  /metrics.json:
+    get:
+      tags:
+      - "info"
+      summary: Get compute node startup metrics in JSON format
+      description: ""
+      operationId: getComputeMetricsJSON
+      responses:
+        "200":
+          description: ComputeMetrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComputeMetrics"
+
+  /ready:
+    get:
+      deprecated: true
+      tags:
+      - "info"
+      summary: Check whether compute startup process finished successfully
+      description: ""
+      operationId: computeIsReady
+      responses:
+        "200":
+          description: Compute is ready ('true') or not ('false')
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "true"
+
+  /last_activity:
+    get:
+      deprecated: true
+      tags:
+      - "info"
+      summary: Get timestamp of the last compute activity
+      description: ""
+      operationId: getLastComputeActivityTS
+      responses:
+        "200":
+          description: Timestamp of the last compute activity
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "2022-10-12T07:20:50.52Z"
+
+  /check_writability:
+    get:
+      deprecated: true
+      tags:
+      - "check"
+      summary: Check that we can write new data on this compute
+      description: ""
+      operationId: checkComputeWritabilityDeprecated
+      responses:
+        "200":
+          description: Check result
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Error text or 'true' if check passed
+                example: "true"
+
+    post:
+      tags:
+      - "check"
+      summary: Check that we can write new data on this compute
+      description: ""
+      operationId: checkComputeWritability
+      responses:
+        "200":
+          description: Check result
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Error text or 'true' if check passed
+                example: "true"
+
+components:
+  securitySchemes:
+    JWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ComputeMetrics:
+      type: object
+      description: Compute startup metrics
+      required:
+        - sync_safekeepers_ms
+        - basebackup_ms
+        - config_ms
+        - total_startup_ms
+      properties:
+        sync_safekeepers_ms:
+          type: integer
+        basebackup_ms:
+          type: integer
+        config_ms:
+          type: integer
+        total_startup_ms:
+          type: integer
+
+    ComputeState:
+      type: object
+      required:
+        - status
+        - last_active
+      properties:
+        status:
+          $ref: '#/components/schemas/ComputeStatus'
+        last_active:
+          type: string
+          description: The last detected compute activity timestamp in UTC and RFC3339 format
+          example: "2022-10-12T07:20:50.52Z"
+        error:
+          type: string
+          description: Text of the error during compute startup, if any
+
+    ComputeStatus:
+      type: string
+      enum:
+        - init
+        - failed
+        - running
+
+security:
+  - JWT: []

@@ -20,7 +20,7 @@
 //! assign a buffer for a page, you must hold the mapping lock and the lock on
 //! the slot at the same time.
 //!
-//! Whenever you need to hold both locks simultenously, the slot lock must be
+//! Whenever you need to hold both locks simultaneously, the slot lock must be
 //! acquired first. This consistent ordering avoids deadlocks. To look up a page
 //! in the cache, you would first look up the mapping, while holding the mapping
 //! lock, and then lock the slot. You must release the mapping lock in between,
@@ -41,31 +41,29 @@ use std::{
     convert::TryInto,
     sync::{
         atomic::{AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard,
+        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
     },
 };
 
+use anyhow::Context;
 use once_cell::sync::OnceCell;
 use tracing::error;
-use zenith_utils::{
+use utils::{
+    id::{TenantId, TimelineId},
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::layered_repository::writeback_ephemeral_file;
-use crate::{config::PageServerConf, relish::RelTag};
+use crate::repository::Key;
+use crate::tenant::writeback_ephemeral_file;
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
-const TEST_PAGE_CACHE_SIZE: usize = 10;
+const TEST_PAGE_CACHE_SIZE: usize = 50;
 
 ///
 /// Initialize the page cache. This must be called once at page server startup.
 ///
-pub fn init(conf: &'static PageServerConf) {
-    if PAGE_CACHE
-        .set(PageCache::new(conf.page_cache_size))
-        .is_err()
-    {
+pub fn init(size: usize) {
+    if PAGE_CACHE.set(PageCache::new(size)).is_err() {
         panic!("page cache already initialized");
     }
 }
@@ -86,13 +84,14 @@ pub fn get() -> &'static PageCache {
     }
 }
 
-pub const PAGE_SZ: usize = postgres_ffi::pg_constants::BLCKSZ as usize;
+pub const PAGE_SZ: usize = postgres_ffi::BLCKSZ as usize;
 const MAX_USAGE_COUNT: u8 = 5;
 
 ///
 /// CacheKey uniquely identifies a "thing" to cache in the page cache.
 ///
 #[derive(Debug, PartialEq, Eq, Clone)]
+#[allow(clippy::enum_variant_names)]
 enum CacheKey {
     MaterializedPage {
         hash_key: MaterializedPageHashKey,
@@ -102,14 +101,17 @@ enum CacheKey {
         file_id: u64,
         blkno: u32,
     },
+    ImmutableFilePage {
+        file_id: u64,
+        blkno: u32,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct MaterializedPageHashKey {
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-    rel_tag: RelTag,
-    blknum: u32,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    key: Key,
 }
 
 #[derive(Clone)]
@@ -177,6 +179,8 @@ pub struct PageCache {
 
     ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
 
+    immutable_page_map: RwLock<HashMap<(u64, u32), usize>>,
+
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
 
@@ -195,6 +199,12 @@ impl std::ops::Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
+        self.0.buf
+    }
+}
+
+impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
+    fn as_ref(&self) -> &[u8; PAGE_SZ] {
         self.0.buf
     }
 }
@@ -226,6 +236,12 @@ impl std::ops::Deref for PageWriteGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
+        self.inner.buf
+    }
+}
+
+impl AsMut<[u8; PAGE_SZ]> for PageWriteGuard<'_> {
+    fn as_mut(&mut self) -> &mut [u8; PAGE_SZ] {
         self.inner.buf
     }
 }
@@ -292,18 +308,16 @@ impl PageCache {
     /// returned page.
     pub fn lookup_materialized_page(
         &self,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
-        rel_tag: RelTag,
-        blknum: u32,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
-                rel_tag,
-                blknum,
+                key: *key,
             },
             lsn,
         };
@@ -324,24 +338,22 @@ impl PageCache {
     ///
     pub fn memorize_materialized_page(
         &self,
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
-        rel_tag: RelTag,
-        blknum: u32,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        key: Key,
         lsn: Lsn,
         img: &[u8],
-    ) {
+    ) -> anyhow::Result<()> {
         let cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
-                rel_tag,
-                blknum,
+                key,
             },
             lsn,
         };
 
-        match self.lock_for_write(&cache_key) {
+        match self.lock_for_write(&cache_key)? {
             WriteBufResult::Found(write_guard) => {
                 // We already had it in cache. Another thread must've put it there
                 // concurrently. Check that it had the same contents that we
@@ -353,17 +365,19 @@ impl PageCache {
                 write_guard.mark_valid();
             }
         }
+
+        Ok(())
     }
 
     // Section 1.2: Public interface functions for working with Ephemeral pages.
 
-    pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
+    pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<ReadBufResult> {
         let mut cache_key = CacheKey::EphemeralPage { file_id, blkno };
 
         self.lock_for_read(&mut cache_key)
     }
 
-    pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> WriteBufResult {
+    pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<WriteBufResult> {
         let cache_key = CacheKey::EphemeralPage { file_id, blkno };
 
         self.lock_for_write(&cache_key)
@@ -378,6 +392,36 @@ impl PageCache {
             if let Some(key) = &inner.key {
                 match key {
                     CacheKey::EphemeralPage { file_id, blkno: _ } if *file_id == drop_file_id => {
+                        // remove mapping for old buffer
+                        self.remove_mapping(key);
+                        inner.key = None;
+                        inner.dirty = false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Section 1.3: Public interface functions for working with immutable file pages.
+
+    pub fn read_immutable_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<ReadBufResult> {
+        let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
+
+        self.lock_for_read(&mut cache_key)
+    }
+
+    /// Immediately drop all buffers belonging to given file, without writeback
+    pub fn drop_buffers_for_immutable(&self, drop_file_id: u64) {
+        for slot_idx in 0..self.slots.len() {
+            let slot = &self.slots[slot_idx];
+
+            let mut inner = slot.inner.write().unwrap();
+            if let Some(key) = &inner.key {
+                match key {
+                    CacheKey::ImmutableFilePage { file_id, blkno: _ }
+                        if *file_id == drop_file_id =>
+                    {
                         // remove mapping for old buffer
                         self.remove_mapping(key);
                         inner.key = None;
@@ -454,15 +498,16 @@ impl PageCache {
     /// }
     /// ```
     ///
-    fn lock_for_read(&self, cache_key: &mut CacheKey) -> ReadBufResult {
+    fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
         loop {
             // First check if the key already exists in the cache.
             if let Some(read_guard) = self.try_lock_for_read(cache_key) {
-                return ReadBufResult::Found(read_guard);
+                return Ok(ReadBufResult::Found(read_guard));
             }
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) = self.find_victim();
+            let (slot_idx, mut inner) =
+                self.find_victim().context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
@@ -485,10 +530,10 @@ impl PageCache {
             inner.dirty = false;
             slot.usage_count.store(1, Ordering::Relaxed);
 
-            return ReadBufResult::NotFound(PageWriteGuard {
+            return Ok(ReadBufResult::NotFound(PageWriteGuard {
                 inner,
                 valid: false,
-            });
+            }));
         }
     }
 
@@ -515,15 +560,16 @@ impl PageCache {
     ///
     /// Similar to lock_for_read(), but the returned buffer is write-locked and
     /// may be modified by the caller even if it's already found in the cache.
-    fn lock_for_write(&self, cache_key: &CacheKey) -> WriteBufResult {
+    fn lock_for_write(&self, cache_key: &CacheKey) -> anyhow::Result<WriteBufResult> {
         loop {
             // First check if the key already exists in the cache.
             if let Some(write_guard) = self.try_lock_for_write(cache_key) {
-                return WriteBufResult::Found(write_guard);
+                return Ok(WriteBufResult::Found(write_guard));
             }
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) = self.find_victim();
+            let (slot_idx, mut inner) =
+                self.find_victim().context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
@@ -546,10 +592,10 @@ impl PageCache {
             inner.dirty = false;
             slot.usage_count.store(1, Ordering::Relaxed);
 
-            return WriteBufResult::NotFound(PageWriteGuard {
+            return Ok(WriteBufResult::NotFound(PageWriteGuard {
                 inner,
                 valid: false,
-            });
+            }));
         }
     }
 
@@ -586,6 +632,10 @@ impl PageCache {
                 let map = self.ephemeral_page_map.read().unwrap();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let map = self.immutable_page_map.read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
+            }
         }
     }
 
@@ -607,6 +657,10 @@ impl PageCache {
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
                 let map = self.ephemeral_page_map.read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
+            }
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let map = self.immutable_page_map.read().unwrap();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -637,6 +691,11 @@ impl PageCache {
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
                 let mut map = self.ephemeral_page_map.write().unwrap();
+                map.remove(&(*file_id, *blkno))
+                    .expect("could not find old key in mapping");
+            }
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let mut map = self.immutable_page_map.write().unwrap();
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
@@ -680,6 +739,16 @@ impl PageCache {
                     }
                 }
             }
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let mut map = self.immutable_page_map.write().unwrap();
+                match map.entry((*file_id, *blkno)) {
+                    Entry::Occupied(entry) => Some(*entry.get()),
+                    Entry::Vacant(entry) => {
+                        entry.insert(slot_idx);
+                        None
+                    }
+                }
+            }
         }
     }
 
@@ -690,17 +759,34 @@ impl PageCache {
     /// Find a slot to evict.
     ///
     /// On return, the slot is empty and write-locked.
-    fn find_victim(&self) -> (usize, RwLockWriteGuard<SlotInner>) {
-        let iter_limit = self.slots.len() * 2;
+    fn find_victim(&self) -> anyhow::Result<(usize, RwLockWriteGuard<SlotInner>)> {
+        let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
+            iters += 1;
             let slot_idx = self.next_evict_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len();
 
             let slot = &self.slots[slot_idx];
 
-            if slot.dec_usage_count() == 0 || iters >= iter_limit {
-                let mut inner = slot.inner.write().unwrap();
-
+            if slot.dec_usage_count() == 0 {
+                let mut inner = match slot.inner.try_write() {
+                    Ok(inner) => inner,
+                    Err(TryLockError::Poisoned(err)) => {
+                        anyhow::bail!("buffer lock was poisoned: {err:?}")
+                    }
+                    Err(TryLockError::WouldBlock) => {
+                        // If we have looped through the whole buffer pool 10 times
+                        // and still haven't found a victim buffer, something's wrong.
+                        // Maybe all the buffers were in locked. That could happen in
+                        // theory, if you have more threads holding buffers locked than
+                        // there are buffers in the pool. In practice, with a reasonably
+                        // large buffer pool it really shouldn't happen.
+                        if iters > iter_limit {
+                            anyhow::bail!("exceeded evict iter limit");
+                        }
+                        continue;
+                    }
+                };
                 if let Some(old_key) = &inner.key {
                     if inner.dirty {
                         if let Err(err) = Self::writeback(old_key, inner.buf) {
@@ -723,10 +809,8 @@ impl PageCache {
                     inner.dirty = false;
                     inner.key = None;
                 }
-                return (slot_idx, inner);
+                return Ok((slot_idx, inner));
             }
-
-            iters += 1;
         }
     }
 
@@ -735,12 +819,20 @@ impl PageCache {
             CacheKey::MaterializedPage {
                 hash_key: _,
                 lsn: _,
-            } => {
-                panic!("unexpected dirty materialized page");
-            }
+            } => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unexpected dirty materialized page",
+            )),
             CacheKey::EphemeralPage { file_id, blkno } => {
                 writeback_ephemeral_file(*file_id, *blkno, buf)
             }
+            CacheKey::ImmutableFilePage {
+                file_id: _,
+                blkno: _,
+            } => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unexpected dirty immutable page",
+            )),
         }
     }
 
@@ -771,6 +863,7 @@ impl PageCache {
         Self {
             materialized_page_map: Default::default(),
             ephemeral_page_map: Default::default(),
+            immutable_page_map: Default::default(),
             slots,
             next_evict_slot: AtomicUsize::new(0),
         }

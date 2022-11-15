@@ -1,288 +1,870 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use crate::branches;
-use crate::config::PageServerConf;
-use crate::layered_repository::LayeredRepository;
-use crate::repository::{Repository, Timeline, TimelineSyncState};
-use crate::thread_mgr;
-use crate::thread_mgr::ThreadKind;
-use crate::walredo::PostgresRedoManager;
-use crate::CheckpointConfig;
-use anyhow::{bail, Context, Result};
-use lazy_static::lazy_static;
-use log::*;
-use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap};
-use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-lazy_static! {
-    static ref TENANTS: Mutex<HashMap<ZTenantId, Tenant>> = Mutex::new(HashMap::new());
-}
+use anyhow::Context;
+use tracing::*;
 
-struct Tenant {
-    state: TenantState,
-    repo: Arc<dyn Repository>,
-}
+use remote_storage::GenericRemoteStorage;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-pub enum TenantState {
-    // All data for this tenant is complete on local disk, but we haven't loaded the Repository,
-    // Timeline and Layer structs into memory yet, so it cannot be accessed yet.
-    //Ready,
-    // This tenant exists on local disk, and the layer map has been loaded into memory.
-    // The local disk might have some newer files that don't exist in cloud storage yet.
-    Active,
-    // Tenant is active, but there is no walreceiver connection.
-    Idle,
-    // This tenant exists on local disk, and the layer map has been loaded into memory.
-    // The local disk might have some newer files that don't exist in cloud storage yet.
-    // The tenant cannot be accessed anymore for any reason, but graceful shutdown.
-    Stopping,
-}
+use crate::config::{PageServerConf, METADATA_FILE_NAME, TIMELINE_UNINIT_MARK_SUFFIX};
+use crate::http::models::TenantInfo;
+use crate::storage_sync::index::{LayerFileMetadata, RemoteIndex, RemoteTimelineIndex};
+use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData, TimelineLocalFiles};
+use crate::task_mgr::{self, TaskKind};
+use crate::tenant::{
+    ephemeral_file::is_ephemeral_file, metadata::TimelineMetadata, Tenant, TenantState,
+};
+use crate::tenant_config::TenantConfOpt;
+use crate::walredo::PostgresRedoManager;
+use crate::TEMP_FILE_SUFFIX;
 
-impl fmt::Display for TenantState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TenantState::Active => f.write_str("Active"),
-            TenantState::Idle => f.write_str("Idle"),
-            TenantState::Stopping => f.write_str("Stopping"),
-        }
+use utils::crashsafe::{self, path_with_suffix_extension};
+use utils::id::{TenantId, TimelineId};
+
+mod tenants_state {
+    use once_cell::sync::Lazy;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    };
+    use utils::id::TenantId;
+
+    use crate::tenant::Tenant;
+
+    static TENANTS: Lazy<RwLock<HashMap<TenantId, Arc<Tenant>>>> =
+        Lazy::new(|| RwLock::new(HashMap::new()));
+
+    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<TenantId, Arc<Tenant>>> {
+        TENANTS
+            .read()
+            .expect("Failed to read() tenants lock, it got poisoned")
+    }
+
+    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<TenantId, Arc<Tenant>>> {
+        TENANTS
+            .write()
+            .expect("Failed to write() tenants lock, it got poisoned")
     }
 }
 
-fn access_tenants() -> MutexGuard<'static, HashMap<ZTenantId, Tenant>> {
-    TENANTS.lock().unwrap()
-}
-
-/// Updates tenants' repositories, changing their timelines state in memory.
-pub fn set_timeline_states(
+/// Initialize repositories with locally available timelines.
+/// Timelines that are only partially available locally (remote storage has more data than this pageserver)
+/// are scheduled for download and added to the tenant once download is completed.
+pub fn init_tenant_mgr(
     conf: &'static PageServerConf,
-    timeline_states: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>>,
-) {
-    if timeline_states.is_empty() {
-        debug!("no timeline state updates to perform");
-        return;
-    }
+    remote_storage: Option<GenericRemoteStorage>,
+) -> anyhow::Result<RemoteIndex> {
+    let _entered = info_span!("init_tenant_mgr").entered();
 
-    info!("Updating states for {} timelines", timeline_states.len());
-    trace!("States: {:?}", timeline_states);
+    let local_tenant_files = local_tenant_timeline_files(conf)
+        .context("Failed to collect local tenant timeline files")?;
 
-    let mut m = access_tenants();
-    for (tenant_id, timeline_states) in timeline_states {
-        let tenant = m.entry(tenant_id).or_insert_with(|| {
-            // TODO (rodionov) reuse one of the initialisation routines
-            // Set up a WAL redo manager, for applying WAL records.
-            let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
-
-            // Set up an object repository, for actual data storage.
-            let repo: Arc<dyn Repository> = Arc::new(LayeredRepository::new(
-                conf,
-                Arc::new(walredo_mgr),
-                tenant_id,
-                conf.remote_storage_config.is_some(),
-            ));
-            Tenant {
-                state: TenantState::Idle,
-                repo,
+    let (remote_index, tenants_to_attach) = if let Some(storage) = remote_storage {
+        let storage_config = conf
+            .remote_storage_config
+            .as_ref()
+            .expect("remote storage without config");
+        let mut broken_tenants = HashMap::new();
+        let mut ready_tenants = HashMap::new();
+        for (tenant_id, tenant_attach_data) in local_tenant_files.into_iter() {
+            match tenant_attach_data {
+                TenantAttachData::Ready(t) => {
+                    ready_tenants.insert(tenant_id, t);
+                }
+                TenantAttachData::Broken(e) => {
+                    broken_tenants.insert(tenant_id, TenantAttachData::Broken(e));
+                }
             }
-        });
-        if let Err(e) = put_timelines_into_tenant(tenant, tenant_id, timeline_states) {
-            error!(
-                "Failed to update timeline states for tenant {}: {:?}",
-                tenant_id, e
-            );
         }
-    }
+        let SyncStartupData {
+            remote_index,
+            local_timeline_init_statuses,
+        } = storage_sync::spawn_storage_sync_task(
+            conf,
+            ready_tenants,
+            storage,
+            storage_config.max_concurrent_syncs,
+            storage_config.max_sync_errors,
+        )
+        .context("Failed to spawn the storage sync thread")?;
+
+        let n = local_timeline_init_statuses.0.len();
+        let mut synced_timelines = local_timeline_init_statuses.0.into_iter().fold(
+            HashMap::<TenantId, TenantAttachData>::with_capacity(n),
+            |mut new_values, (tenant_id, old_values)| {
+                let new_timeline_values = new_values
+                    .entry(tenant_id)
+                    .or_insert_with(|| TenantAttachData::Ready(HashMap::new()));
+                if let TenantAttachData::Ready(t) = new_timeline_values {
+                    for (timeline_id, old_value) in old_values {
+                        if let LocalTimelineInitStatus::LocallyComplete(metadata) = old_value {
+                            t.insert(timeline_id, TimelineLocalFiles::ready(metadata));
+                        }
+                    }
+                }
+                new_values
+            },
+        );
+        synced_timelines.extend(broken_tenants);
+
+        (remote_index, synced_timelines)
+    } else {
+        info!("No remote storage configured, skipping storage sync, considering all local timelines with correct metadata files enabled");
+        (RemoteIndex::default(), local_tenant_files)
+    };
+    attach_local_tenants(conf, &remote_index, tenants_to_attach);
+
+    Ok(remote_index)
 }
 
-fn put_timelines_into_tenant(
-    tenant: &mut Tenant,
-    tenant_id: ZTenantId,
-    timeline_states: HashMap<ZTimelineId, TimelineSyncState>,
-) -> anyhow::Result<()> {
-    for (timeline_id, timeline_state) in timeline_states {
-        // If the timeline is being put into any other state than Ready,
-        // stop any threads operating on it.
-        //
-        // FIXME: This is racy. A page service thread could just get
-        // handle on the Timeline, before we call set_timeline_state()
-        if !matches!(timeline_state, TimelineSyncState::Ready(_)) {
-            thread_mgr::shutdown_threads(None, Some(tenant_id), Some(timeline_id));
+/// Reads local files to load tenants and their timelines given into pageserver's memory.
+/// Ignores other timelines that might be present for tenant, but were not passed as a parameter.
+/// Attempts to load as many entites as possible: if a certain timeline fails during the load, the tenant is marked as "Broken",
+/// and the load continues.
+///
+/// For successful tenant attach, it first has to have a `timelines/` subdirectory and a tenant config file that's loaded into memory successfully.
+/// If either of the conditions fails, the tenant will be added to memory with [`TenantState::Broken`] state, otherwise we start to load its timelines.
+/// Alternatively, tenant is considered loaded successfully, if it's already in pageserver's memory (i.e. was loaded already before).
+///
+/// Attach happens on startup and sucessful timeline downloads
+/// (some subset of timeline files, always including its metadata, after which the new one needs to be registered).
+pub fn attach_local_tenants(
+    conf: &'static PageServerConf,
+    remote_index: &RemoteIndex,
+    tenants_to_attach: HashMap<TenantId, TenantAttachData>,
+) {
+    let _entered = info_span!("attach_local_tenants").entered();
+    let number_of_tenants = tenants_to_attach.len();
 
-            // Should we run a final checkpoint to flush all the data to
-            // disk? Doesn't seem necessary; all of the states other than
-            // Ready imply that the data on local disk is corrupt or incomplete,
-            // and we don't want to flush that to disk.
+    for (tenant_id, local_timelines) in tenants_to_attach {
+        let mut tenants_accessor = tenants_state::write_tenants();
+        let tenant = match tenants_accessor.entry(tenant_id) {
+            hash_map::Entry::Occupied(o) => {
+                info!("Tenant {tenant_id} was found in pageserver's memory");
+                Arc::clone(o.get())
+            }
+            hash_map::Entry::Vacant(v) => {
+                info!("Tenant {tenant_id} was not found in pageserver's memory, loading it");
+                let tenant = Arc::new(Tenant::new(
+                    conf,
+                    TenantConfOpt::default(),
+                    Arc::new(PostgresRedoManager::new(conf, tenant_id)),
+                    tenant_id,
+                    remote_index.clone(),
+                    conf.remote_storage_config.is_some(),
+                ));
+                match local_timelines {
+                    TenantAttachData::Broken(_) => {
+                        tenant.set_state(TenantState::Broken);
+                    }
+                    TenantAttachData::Ready(_) => {
+                        match Tenant::load_tenant_config(conf, tenant_id) {
+                            Ok(tenant_conf) => {
+                                tenant.update_tenant_config(tenant_conf);
+                                tenant.activate(false);
+                            }
+                            Err(e) => {
+                                error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
+                                tenant.set_state(TenantState::Broken);
+                            }
+                        };
+                    }
+                }
+                v.insert(Arc::clone(&tenant));
+                tenant
+            }
+        };
+        drop(tenants_accessor);
+        match local_timelines {
+            TenantAttachData::Broken(e) => warn!("{}", e),
+            TenantAttachData::Ready(ref timelines) => {
+                info!("Attaching {} timelines for {tenant_id}", timelines.len());
+                debug!("Timelines to attach: {local_timelines:?}");
+                let has_timelines = !timelines.is_empty();
+                let timelines_to_attach = timelines
+                    .iter()
+                    .map(|(&k, v)| (k, v.metadata().to_owned()))
+                    .collect();
+                match tenant.init_attach_timelines(timelines_to_attach) {
+                    Ok(()) => {
+                        info!("successfully loaded local timelines for tenant {tenant_id}");
+                        tenant.activate(has_timelines);
+                    }
+                    Err(e) => {
+                        error!("Failed to attach tenant timelines: {e:?}");
+                        tenant.set_state(TenantState::Broken);
+                    }
+                }
+            }
         }
-
-        tenant
-            .repo
-            .set_timeline_state(timeline_id, timeline_state)
-            .with_context(|| {
-                format!(
-                    "Failed to update timeline {} state to {:?}",
-                    timeline_id, timeline_state
-                )
-            })?;
     }
 
-    Ok(())
+    info!("Processed {number_of_tenants} local tenants during attach")
 }
 
 ///
 /// Shut down all tenants. This runs as part of pageserver shutdown.
 ///
-pub fn shutdown_all_tenants() {
-    let mut m = access_tenants();
-    let mut tenantids = Vec::new();
-    for (tenantid, tenant) in m.iter_mut() {
-        tenant.state = TenantState::Stopping;
-        tenantids.push(*tenantid)
-    }
-    drop(m);
+pub async fn shutdown_all_tenants() {
+    let tenants_to_shut_down = {
+        let mut m = tenants_state::write_tenants();
+        let mut tenants_to_shut_down = Vec::with_capacity(m.len());
+        for (_, tenant) in m.drain() {
+            if tenant.is_active() {
+                // updates tenant state, forbidding new GC and compaction iterations from starting
+                tenant.set_state(TenantState::Paused);
+                tenants_to_shut_down.push(tenant)
+            }
+        }
+        drop(m);
+        tenants_to_shut_down
+    };
 
-    thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::Checkpointer), None, None);
+    // Shut down all existing walreceiver connections and stop accepting the new ones.
+    task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
 
-    // Ok, no background threads running anymore. Flush any remaining data in
+    // Ok, no background tasks running anymore. Flush any remaining data in
     // memory to disk.
     //
     // We assume that any incoming connections that might request pages from
-    // the repository have already been terminated by the caller, so there
+    // the tenant have already been terminated by the caller, so there
     // should be no more activity in any of the repositories.
     //
     // On error, log it but continue with the shutdown for other tenants.
-    for tenantid in tenantids {
-        debug!("shutdown tenant {}", tenantid);
-        match get_repository_for_tenant(tenantid) {
-            Ok(repo) => {
-                if let Err(err) = repo.checkpoint_iteration(CheckpointConfig::Flush) {
-                    error!(
-                        "Could not checkpoint tenant {} during shutdown: {:?}",
-                        tenantid, err
-                    );
-                }
-            }
-            Err(err) => {
-                error!(
-                    "Could not get repository for tenant {} during shutdown: {:?}",
-                    tenantid, err
-                );
-            }
+    for tenant in tenants_to_shut_down {
+        let tenant_id = tenant.tenant_id();
+        debug!("shutdown tenant {tenant_id}");
+
+        if let Err(err) = tenant.checkpoint().await {
+            error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
         }
     }
 }
 
-pub fn create_repository_for_tenant(
+fn create_tenant_files(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
-) -> Result<()> {
-    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
-    let repo = branches::create_repo(conf, tenantid, wal_redo_manager)?;
+    tenant_conf: TenantConfOpt,
+    tenant_id: TenantId,
+) -> anyhow::Result<()> {
+    let target_tenant_directory = conf.tenant_path(&tenant_id);
+    anyhow::ensure!(
+        !target_tenant_directory.exists(),
+        "cannot create new tenant repo: '{tenant_id}' directory already exists",
+    );
 
-    match access_tenants().entry(tenantid) {
-        hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", tenantid),
+    let temporary_tenant_dir =
+        path_with_suffix_extension(&target_tenant_directory, TEMP_FILE_SUFFIX);
+    debug!(
+        "Creating temporary directory structure in {}",
+        temporary_tenant_dir.display()
+    );
+
+    // top-level dir may exist if we are creating it through CLI
+    crashsafe::create_dir_all(&temporary_tenant_dir).with_context(|| {
+        format!(
+            "could not create temporary tenant directory {}",
+            temporary_tenant_dir.display()
+        )
+    })?;
+
+    let creation_result = try_create_target_tenant_dir(
+        conf,
+        tenant_conf,
+        tenant_id,
+        &temporary_tenant_dir,
+        &target_tenant_directory,
+    );
+
+    if creation_result.is_err() {
+        error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
+        if let Err(e) = fs::remove_dir_all(&temporary_tenant_dir) {
+            error!("Failed to remove temporary tenant directory {temporary_tenant_dir:?}: {e}")
+        } else if let Err(e) = crashsafe::fsync(&temporary_tenant_dir) {
+            error!(
+                "Failed to fsync removed temporary tenant directory {temporary_tenant_dir:?}: {e}"
+            )
+        }
+    }
+
+    creation_result
+}
+
+fn try_create_target_tenant_dir(
+    conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
+    tenant_id: TenantId,
+    temporary_tenant_dir: &Path,
+    target_tenant_directory: &Path,
+) -> Result<(), anyhow::Error> {
+    let temporary_tenant_timelines_dir = rebase_directory(
+        &conf.timelines_path(&tenant_id),
+        target_tenant_directory,
+        temporary_tenant_dir,
+    )
+    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary timelines dir"))?;
+    let temporary_tenant_config_path = rebase_directory(
+        &conf.tenant_config_path(tenant_id),
+        target_tenant_directory,
+        temporary_tenant_dir,
+    )
+    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary config path"))?;
+
+    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true).with_context(
+        || {
+            format!(
+                "Failed to write tenant {} config to {}",
+                tenant_id,
+                temporary_tenant_config_path.display()
+            )
+        },
+    )?;
+    crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
+        format!(
+            "could not create tenant {} temporary timelines directory {}",
+            tenant_id,
+            temporary_tenant_timelines_dir.display()
+        )
+    })?;
+    fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
+        anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
+    });
+
+    fs::rename(&temporary_tenant_dir, target_tenant_directory).with_context(|| {
+        format!(
+            "failed to move tenant {} temporary directory {} into the permanent one {}",
+            tenant_id,
+            temporary_tenant_dir.display(),
+            target_tenant_directory.display()
+        )
+    })?;
+    let target_dir_parent = target_tenant_directory.parent().with_context(|| {
+        format!(
+            "Failed to get tenant {} dir parent for {}",
+            tenant_id,
+            target_tenant_directory.display()
+        )
+    })?;
+    crashsafe::fsync(target_dir_parent).with_context(|| {
+        format!(
+            "Failed to fsync renamed directory's parent {} for tenant {}",
+            target_dir_parent.display(),
+            tenant_id,
+        )
+    })?;
+
+    Ok(())
+}
+
+fn rebase_directory(original_path: &Path, base: &Path, new_base: &Path) -> anyhow::Result<PathBuf> {
+    let relative_path = original_path.strip_prefix(base).with_context(|| {
+        format!(
+            "Failed to strip base prefix '{}' off path '{}'",
+            base.display(),
+            original_path.display()
+        )
+    })?;
+    Ok(new_base.join(relative_path))
+}
+
+pub fn create_tenant(
+    conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
+    tenant_id: TenantId,
+    remote_index: RemoteIndex,
+) -> anyhow::Result<Option<TenantId>> {
+    match tenants_state::write_tenants().entry(tenant_id) {
+        hash_map::Entry::Occupied(_) => {
+            debug!("tenant {tenant_id} already exists");
+            Ok(None)
+        }
         hash_map::Entry::Vacant(v) => {
-            v.insert(Tenant {
-                state: TenantState::Idle,
-                repo,
-            });
+            let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
+            create_tenant_files(conf, tenant_conf, tenant_id)?;
+            let tenant = Arc::new(Tenant::new(
+                conf,
+                tenant_conf,
+                wal_redo_manager,
+                tenant_id,
+                remote_index,
+                conf.remote_storage_config.is_some(),
+            ));
+            tenant.activate(false);
+            v.insert(tenant);
+            Ok(Some(tenant_id))
         }
+    }
+}
+
+pub fn update_tenant_config(
+    conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
+    tenant_id: TenantId,
+) -> anyhow::Result<()> {
+    info!("configuring tenant {tenant_id}");
+    get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);
+    Tenant::persist_tenant_config(&conf.tenant_config_path(tenant_id), tenant_conf, false)?;
+    Ok(())
+}
+
+/// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
+/// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
+pub fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
+    let m = tenants_state::read_tenants();
+    let tenant = m
+        .get(&tenant_id)
+        .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
+    if active_only && !tenant.is_active() {
+        anyhow::bail!("Tenant {tenant_id} is not active")
+    } else {
+        Ok(Arc::clone(tenant))
+    }
+}
+
+pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<()> {
+    // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
+    // It is important that we do not take locks here, and do not check whether the timeline exists
+    // because if we hold tenants_state::write_tenants() while awaiting for the tasks to join
+    // we cannot create new timelines and tenants, and that can take quite some time,
+    // it can even become stuck due to a bug making whole pageserver unavailable for some operations
+    // so this is the way how we deal with concurrent delete requests: shutdown everythig, wait for confirmation
+    // and then try to actually remove timeline from inmemory state and this is the point when concurrent requests
+    // will synchronize and either fail with the not found error or succeed
+
+    debug!("waiting for wal receiver to shutdown");
+    task_mgr::shutdown_tasks(
+        Some(TaskKind::WalReceiverManager),
+        Some(tenant_id),
+        Some(timeline_id),
+    )
+    .await;
+    debug!("wal receiver shutdown confirmed");
+
+    info!("waiting for timeline tasks to shutdown");
+    task_mgr::shutdown_tasks(None, Some(tenant_id), Some(timeline_id)).await;
+    info!("timeline task shutdown completed");
+    match get_tenant(tenant_id, true) {
+        Ok(tenant) => {
+            tenant.delete_timeline(timeline_id)?;
+            if tenant.list_timelines().is_empty() {
+                tenant.activate(false);
+            }
+        }
+        Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
     }
 
     Ok(())
 }
 
-pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
-    Some(access_tenants().get(&tenantid)?.state)
-}
+pub async fn detach_tenant(
+    conf: &'static PageServerConf,
+    tenant_id: TenantId,
+) -> anyhow::Result<()> {
+    let tenant = match {
+        let mut tenants_accessor = tenants_state::write_tenants();
+        tenants_accessor.remove(&tenant_id)
+    } {
+        Some(tenant) => tenant,
+        None => anyhow::bail!("Tenant not found for id {tenant_id}"),
+    };
 
-///
-/// Change the state of a tenant to Active and launch its checkpointer and GC
-/// threads. If the tenant was already in Active state or Stopping, does nothing.
-///
-pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
-    let mut m = access_tenants();
-    let tenant = m
-        .get_mut(&tenantid)
-        .with_context(|| format!("Tenant not found for id {}", tenantid))?;
+    tenant.set_state(TenantState::Paused);
+    // shutdown all tenant and timeline tasks: gc, compaction, page service)
+    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
 
-    info!("activating tenant {}", tenantid);
+    // If removal fails there will be no way to successfully retry detach,
+    // because the tenant no longer exists in the in-memory map. And it needs to be removed from it
+    // before we remove files, because it contains references to tenant
+    // which references ephemeral files which are deleted on drop. So if we keep these references,
+    // we will attempt to remove files which no longer exist. This can be fixed by having shutdown
+    // mechanism for tenant that will clean temporary data to avoid any references to ephemeral files
+    let local_tenant_directory = conf.tenant_path(&tenant_id);
+    fs::remove_dir_all(&local_tenant_directory).with_context(|| {
+        format!(
+            "Failed to remove local tenant directory '{}'",
+            local_tenant_directory.display()
+        )
+    })?;
 
-    match tenant.state {
-        // If the tenant is already active, nothing to do.
-        TenantState::Active => {}
-
-        // If it's Idle, launch the checkpointer and GC threads
-        TenantState::Idle => {
-            thread_mgr::spawn(
-                ThreadKind::Checkpointer,
-                Some(tenantid),
-                None,
-                "Checkpointer thread",
-                move || crate::tenant_threads::checkpoint_loop(tenantid, conf),
-            )?;
-
-            // FIXME: if we fail to launch the GC thread, but already launched the
-            // checkpointer, we're in a strange state.
-
-            thread_mgr::spawn(
-                ThreadKind::GarbageCollector,
-                Some(tenantid),
-                None,
-                "GC thread",
-                move || crate::tenant_threads::gc_loop(tenantid, conf),
-            )?;
-
-            tenant.state = TenantState::Active;
-        }
-
-        TenantState::Stopping => {
-            // don't re-activate it if it's being stopped
-        }
-    }
     Ok(())
 }
 
-pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
-    let m = access_tenants();
-    let tenant = m
-        .get(&tenantid)
-        .with_context(|| format!("Tenant not found for tenant {}", tenantid))?;
-
-    Ok(Arc::clone(&tenant.repo))
-}
-
-pub fn get_timeline_for_tenant(
-    tenantid: ZTenantId,
-    timelineid: ZTimelineId,
-) -> Result<Arc<dyn Timeline>> {
-    get_repository_for_tenant(tenantid)?
-        .get_timeline(timelineid)?
-        .local_timeline()
-        .with_context(|| format!("cannot fetch timeline {}", timelineid))
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TenantInfo {
-    #[serde(with = "hex")]
-    pub id: ZTenantId,
-    pub state: TenantState,
-}
-
-pub fn list_tenants() -> Result<Vec<TenantInfo>> {
-    access_tenants()
+///
+/// Get list of tenants, for the mgmt API
+///
+pub fn list_tenant_info(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
+    tenants_state::read_tenants()
         .iter()
-        .map(|v| {
-            let (id, tenant) = v;
-            Ok(TenantInfo {
+        .map(|(id, tenant)| {
+            let has_in_progress_downloads = remote_index
+            .tenant_entry(id)
+            .map(|entry| entry.has_in_progress_downloads());
+
+            // TODO this is not correct when we might have remote storage sync disabled:
+            // we keep `RemoteTimelineIndex` in memory anyway for simplicity and this error message is printed still
+            if has_in_progress_downloads.is_none() {
+                error!("timeline is not found in remote index while it is present in the tenants registry")
+            }
+
+            TenantInfo {
                 id: *id,
-                state: tenant.state,
-            })
+                state: tenant.current_state(),
+                current_physical_size: None,
+                has_in_progress_downloads,
+            }
         })
         .collect()
+}
+
+#[derive(Debug)]
+pub enum TenantAttachData {
+    Ready(HashMap<TimelineId, TimelineLocalFiles>),
+    Broken(anyhow::Error),
+}
+/// Attempts to collect information about all tenant and timelines, existing on the local FS.
+/// If finds any, deletes all temporary files and directories, created before. Also removes empty directories,
+/// that may appear due to such removals.
+/// Does not fail on particular timeline or tenant collection errors, rather logging them and ignoring the entities.
+fn local_tenant_timeline_files(
+    config: &'static PageServerConf,
+) -> anyhow::Result<HashMap<TenantId, TenantAttachData>> {
+    let _entered = info_span!("local_tenant_timeline_files").entered();
+
+    let mut local_tenant_timeline_files = HashMap::new();
+    let tenants_dir = config.tenants_path();
+    for tenants_dir_entry in fs::read_dir(&tenants_dir)
+        .with_context(|| format!("Failed to list tenants dir {}", tenants_dir.display()))?
+    {
+        match &tenants_dir_entry {
+            Ok(tenants_dir_entry) => {
+                let tenant_dir_path = tenants_dir_entry.path();
+                if is_temporary(&tenant_dir_path) {
+                    info!(
+                        "Found temporary tenant directory, removing: {}",
+                        tenant_dir_path.display()
+                    );
+                    if let Err(e) = fs::remove_dir_all(&tenant_dir_path) {
+                        error!(
+                            "Failed to remove temporary directory '{}': {:?}",
+                            tenant_dir_path.display(),
+                            e
+                        );
+                    }
+                } else {
+                    match collect_timelines_for_tenant(config, &tenant_dir_path) {
+                        Ok((tenant_id, TenantAttachData::Broken(e))) => {
+                            local_tenant_timeline_files.entry(tenant_id).or_insert(TenantAttachData::Broken(e));
+                        },
+                        Ok((tenant_id, TenantAttachData::Ready(collected_files))) => {
+                            if collected_files.is_empty() {
+                                match remove_if_empty(&tenant_dir_path) {
+                                    Ok(true) => info!("Removed empty tenant directory {}", tenant_dir_path.display()),
+                                    Ok(false) => {
+                                        // insert empty timeline entry: it has some non-temporary files inside that we cannot remove
+                                        // so make obvious for HTTP API callers, that something exists there and try to load the tenant
+                                        let _ = local_tenant_timeline_files.entry(tenant_id).or_insert_with(|| TenantAttachData::Ready(HashMap::new()));
+                                    },
+                                    Err(e) => error!("Failed to remove empty tenant directory: {e:?}"),
+                                }
+                            } else {
+                                match local_tenant_timeline_files.entry(tenant_id) {
+                                    hash_map::Entry::Vacant(entry) => {
+                                        entry.insert(TenantAttachData::Ready(collected_files));
+                                    }
+                                    hash_map::Entry::Occupied(entry) =>{
+                                        if let TenantAttachData::Ready(old_timelines) = entry.into_mut() {
+                                            old_timelines.extend(collected_files);
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                        Err(e) => error!(
+                            "Failed to collect tenant files from dir '{}' for entry {:?}, reason: {:#}",
+                            tenants_dir.display(),
+                            tenants_dir_entry,
+                            e
+                        ),
+                    }
+                }
+            }
+            Err(e) => error!(
+                "Failed to list tenants dir entry {:?} in directory {}, reason: {:?}",
+                tenants_dir_entry,
+                tenants_dir.display(),
+                e
+            ),
+        }
+    }
+
+    info!(
+        "Collected files for {} tenants",
+        local_tenant_timeline_files.len(),
+    );
+    Ok(local_tenant_timeline_files)
+}
+
+fn remove_if_empty(tenant_dir_path: &Path) -> anyhow::Result<bool> {
+    let directory_is_empty = tenant_dir_path
+        .read_dir()
+        .with_context(|| {
+            format!(
+                "Failed to read directory '{}' contents",
+                tenant_dir_path.display()
+            )
+        })?
+        .next()
+        .is_none();
+
+    if directory_is_empty {
+        fs::remove_dir_all(&tenant_dir_path).with_context(|| {
+            format!(
+                "Failed to remove empty directory '{}'",
+                tenant_dir_path.display(),
+            )
+        })?;
+
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn is_temporary(path: &Path) -> bool {
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().ends_with(TEMP_FILE_SUFFIX),
+        None => false,
+    }
+}
+
+fn is_uninit_mark(path: &Path) -> bool {
+    match path.file_name() {
+        Some(name) => name
+            .to_string_lossy()
+            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
+        None => false,
+    }
+}
+
+fn collect_timelines_for_tenant(
+    config: &'static PageServerConf,
+    tenant_path: &Path,
+) -> anyhow::Result<(TenantId, TenantAttachData)> {
+    let tenant_id = tenant_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .parse::<TenantId>()
+        .context("Could not parse tenant id out of the tenant dir name")?;
+    let timelines_dir = config.timelines_path(&tenant_id);
+
+    if !timelines_dir.as_path().is_dir() {
+        return Ok((
+            tenant_id,
+            TenantAttachData::Broken(anyhow::anyhow!(
+                "Tenant {} has no timelines directory at {}",
+                tenant_id,
+                timelines_dir.display()
+            )),
+        ));
+    }
+
+    let mut tenant_timelines = HashMap::new();
+    for timelines_dir_entry in fs::read_dir(&timelines_dir)
+        .with_context(|| format!("Failed to list timelines dir entry for tenant {tenant_id}"))?
+    {
+        match timelines_dir_entry {
+            Ok(timelines_dir_entry) => {
+                let timeline_dir = timelines_dir_entry.path();
+                if is_temporary(&timeline_dir) {
+                    info!(
+                        "Found temporary timeline directory, removing: {}",
+                        timeline_dir.display()
+                    );
+                    if let Err(e) = fs::remove_dir_all(&timeline_dir) {
+                        error!(
+                            "Failed to remove temporary directory '{}': {:?}",
+                            timeline_dir.display(),
+                            e
+                        );
+                    }
+                } else if is_uninit_mark(&timeline_dir) {
+                    let timeline_uninit_mark_file = &timeline_dir;
+                    info!(
+                        "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                        timeline_uninit_mark_file.display()
+                    );
+                    let timeline_id = timeline_uninit_mark_file
+                        .file_stem()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                                "Could not parse timeline id out of the timeline uninit mark name {}",
+                                timeline_uninit_mark_file.display()
+                            )
+                        })?;
+                    let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
+                    if let Err(e) =
+                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
+                    {
+                        error!("Failed to clean up uninit marked timeline: {e:?}");
+                    }
+                } else {
+                    let timeline_id = timeline_dir
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                                "Could not parse timeline id out of the timeline dir name {}",
+                                timeline_dir.display()
+                            )
+                        })?;
+                    let timeline_uninit_mark_file =
+                        config.timeline_uninit_mark_file_path(tenant_id, timeline_id);
+                    if timeline_uninit_mark_file.exists() {
+                        info!("Found an uninit mark file for timeline {tenant_id}/{timeline_id}, removing the timeline and its uninit mark");
+                        if let Err(e) = remove_timeline_and_uninit_mark(
+                            &timeline_dir,
+                            &timeline_uninit_mark_file,
+                        ) {
+                            error!("Failed to clean up uninit marked timeline: {e:?}");
+                        }
+                    } else {
+                        match collect_timeline_files(&timeline_dir) {
+                            Ok((metadata, timeline_files)) => {
+                                tenant_timelines.insert(
+                                    timeline_id,
+                                    TimelineLocalFiles::collected(metadata, timeline_files),
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to process timeline dir contents at '{}', reason: {:?}",
+                                    timeline_dir.display(),
+                                    e
+                                );
+                                match remove_if_empty(&timeline_dir) {
+                                    Ok(true) => info!(
+                                        "Removed empty timeline directory {}",
+                                        timeline_dir.display()
+                                    ),
+                                    Ok(false) => (),
+                                    Err(e) => {
+                                        error!("Failed to remove empty timeline directory: {e:?}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to list timelines for entry tenant {tenant_id}, reason: {e:?}")
+            }
+        }
+    }
+
+    if tenant_timelines.is_empty() {
+        // this is normal, we've removed all broken, empty and temporary timeline dirs
+        // but should allow the tenant to stay functional and allow creating new timelines
+        // on a restart, we require tenants to have the timelines dir, so leave it on disk
+        debug!("Tenant {tenant_id} has no timelines loaded");
+    }
+
+    Ok((tenant_id, TenantAttachData::Ready(tenant_timelines)))
+}
+
+fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
+    fs::remove_dir_all(&timeline_dir)
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                // we can leave the uninit mark without a timeline dir,
+                // just remove the mark then
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .with_context(|| {
+            format!(
+                "Failed to remove unit marked timeline directory {}",
+                timeline_dir.display()
+            )
+        })?;
+    fs::remove_file(&uninit_mark).with_context(|| {
+        format!(
+            "Failed to remove timeline uninit mark file {}",
+            uninit_mark.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+// discover timeline files and extract timeline metadata
+//  NOTE: ephemeral files are excluded from the list
+fn collect_timeline_files(
+    timeline_dir: &Path,
+) -> anyhow::Result<(TimelineMetadata, HashMap<PathBuf, LayerFileMetadata>)> {
+    let mut timeline_files = HashMap::new();
+    let mut timeline_metadata_path = None;
+
+    let timeline_dir_entries =
+        fs::read_dir(&timeline_dir).context("Failed to list timeline dir contents")?;
+    for entry in timeline_dir_entries {
+        let entry_path = entry.context("Failed to list timeline dir entry")?.path();
+        let metadata = entry_path.metadata()?;
+
+        if metadata.is_file() {
+            if entry_path.file_name().and_then(OsStr::to_str) == Some(METADATA_FILE_NAME) {
+                timeline_metadata_path = Some(entry_path);
+            } else if is_ephemeral_file(&entry_path.file_name().unwrap().to_string_lossy()) {
+                debug!("skipping ephemeral file {}", entry_path.display());
+                continue;
+            } else if is_temporary(&entry_path) {
+                info!("removing temp timeline file at {}", entry_path.display());
+                fs::remove_file(&entry_path).with_context(|| {
+                    format!(
+                        "failed to remove temp download file at {}",
+                        entry_path.display()
+                    )
+                })?;
+            } else {
+                let layer_metadata = LayerFileMetadata::new(metadata.len());
+                timeline_files.insert(entry_path, layer_metadata);
+            }
+        }
+    }
+
+    // FIXME (rodionov) if attach call succeeded, and then pageserver is restarted before download is completed
+    //   then attach is lost. There would be no retries for that,
+    //   initial collect will fail because there is no metadata.
+    //   We either need to start download if we see empty dir after restart or attach caller should
+    //   be aware of that and retry attach if awaits_download for timeline switched from true to false
+    //   but timelinne didn't appear locally.
+    //   Check what happens with remote index in that case.
+    let timeline_metadata_path = match timeline_metadata_path {
+        Some(path) => path,
+        None => anyhow::bail!("No metadata file found in the timeline directory"),
+    };
+    let metadata = TimelineMetadata::from_bytes(
+        &fs::read(&timeline_metadata_path).context("Failed to read timeline metadata file")?,
+    )
+    .context("Failed to parse timeline metadata file bytes")?;
+
+    anyhow::ensure!(
+        metadata.ancestor_timeline().is_some() || !timeline_files.is_empty(),
+        "Timeline has no ancestor and no layer files"
+    );
+
+    Ok((metadata, timeline_files))
 }

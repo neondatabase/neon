@@ -1,7 +1,11 @@
 openapi: "3.0.2"
 info:
   title: Page Server API
+  description: Neon Pageserver API
   version: "1.0"
+  license:
+    name: "Apache"
+    url: https://github.com/neondatabase/neon/blob/main/LICENSE
 servers:
   - url: ""
 paths:
@@ -17,7 +21,13 @@ paths:
             application/json:
               schema:
                 type: object
-  /v1/timeline/{tenant_id}:
+                required:
+                  - id
+                properties:
+                  id:
+                    type: integer
+
+  /v1/tenant/{tenant_id}:
     parameters:
       - name: tenant_id
         in: path
@@ -26,18 +36,68 @@ paths:
           type: string
           format: hex
     get:
-      description: List tenant timelines
+      description: Get tenant status
       responses:
         "200":
-          description: array of brief timeline descriptions
+          description: Currently returns the flag whether the tenant has inprogress timeline downloads
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantInfo"
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/timeline:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: include-non-incremental-logical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_logical_size_non_incremental
+      - name: include-non-incremental-physical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_physical_size_non_incremental
+    get:
+      description: Get timelines for tenant
+      responses:
+        "200":
+          description: TimelineInfo
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  # currently, just a timeline id string, but when remote index gets to be accessed
-                  # remote/local timeline field would be added at least
-                  type: string
+                  $ref: "#/components/schemas/TimelineInfo"
         "400":
           description: Error when no tenant id found in path
           content:
@@ -62,7 +122,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /v1/timeline/{tenant_id}/{timeline_id}:
+
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}:
     parameters:
       - name: tenant_id
         in: path
@@ -77,7 +138,18 @@ paths:
           type: string
           format: hex
     get:
-      description: Get timeline info for tenant's remote timeline
+      description: Get info about the timeline
+      parameters:
+        - name: include-non-incremental-logical-size
+          in: query
+          schema:
+            type: string
+          description: Controls calculation of current_logical_size_non_incremental
+        - name: include-non-incremental-physical-size
+          in: query
+          schema:
+            type: string
+            description: Controls calculation of current_physical_size_non_incremental
       responses:
         "200":
           description: TimelineInfo
@@ -86,7 +158,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/TimelineInfo"
         "400":
-          description: Error when no tenant id found in path or no branch name
+          description: Error when no tenant id found in path or no timeline id
           content:
             application/json:
               schema:
@@ -109,7 +181,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /v1/branch/{tenant_id}:
+    delete:
+      description: "Attempts to delete specified timeline. On 500 errors should be retried"
+      responses:
+        "200":
+          description: Ok
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp:
     parameters:
       - name: tenant_id
         in: path
@@ -117,24 +219,31 @@ paths:
         schema:
           type: string
           format: hex
-      - name: include-non-incremental-logical-size
-        in: query
+      - name: timeline_id
+        in: path
+        required: true
         schema:
           type: string
-          description: Controls calculation of current_logical_size_non_incremental
+          format: hex
     get:
-      description: Get branches for tenant
+      description: Get LSN by a timestamp
+      parameters:
+        - name: timestamp
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: A timestamp to get the LSN
       responses:
         "200":
-          description: BranchInfo
+          description: OK
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/BranchInfo"
+                type: string
         "400":
-          description: Error when no tenant id found in path
+          description: Error when no tenant id found in path, no timeline id or invalid timestamp
           content:
             application/json:
               schema:
@@ -157,7 +266,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /v1/branch/{tenant_id}/{branch_name}:
+  /v1/tenant/{tenant_id}/attach:
     parameters:
       - name: tenant_id
         in: path
@@ -165,78 +274,173 @@ paths:
         schema:
           type: string
           format: hex
-      - name: branch_name
-        in: path
-        required: true
-        schema:
-          type: string
-      - name: include-non-incremental-logical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_logical_size_non_incremental
-    get:
-      description: Get branches for tenant
-      responses:
-        "200":
-          description: BranchInfo
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BranchInfo"
-        "400":
-          description: Error when no tenant id found in path or no branch name
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  /v1/branch/:
     post:
-      description: Create branch
+      description: Schedules attach operation to happen in the background for given tenant
+      responses:
+        "202":
+          description: Tenant attaching scheduled
+        "400":
+          description: Error when no tenant id found in path parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Timeline not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Tenant download is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/detach:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Detach local tenant
+      responses:
+        "200":
+          description: Tenant detached
+        "400":
+          description: Error when no tenant id found in path parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/size:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: |
+        Calculate tenant's size, which is a mixture of WAL (bytes) and logical_size (bytes).
+      responses:
+        "200":
+          description: OK,
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - id
+                  - size
+                properties:
+                  id:
+                    type: string
+                    format: hex
+                  size:
+                    type: integer
+                    description: |
+                      Size metric in bytes.
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/timeline/:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: |
+        Create a timeline. Returns new timeline id on success.\
+        If no new timeline id is specified in parameters, it would be generated. It's an error to recreate the same timeline.
+        If no pg_version is specified, assume DEFAULT_PG_VERSION hardcoded in the pageserver.
       requestBody:
         content:
           application/json:
             schema:
               type: object
-              required:
-                - "tenant_id"
-                - "name"
-                - "start_point"
               properties:
-                tenant_id:
+                new_timeline_id:
                   type: string
                   format: hex
-                name:
+                ancestor_timeline_id:
                   type: string
-                start_point:
+                  format: hex
+                ancestor_start_lsn:
                   type: string
+                  format: hex
+                pg_version:
+                  type: integer
       responses:
         "201":
-          description: BranchInfo
+          description: TimelineInfo
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BranchInfo"
+                $ref: "#/components/schemas/TimelineInfo"
         "400":
-          description: Malformed branch create request
+          description: Malformed timeline create request
           content:
             application/json:
               schema:
@@ -253,6 +457,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
+        "409":
+          description: Timeline already exists, creation skipped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
         "500":
           description: Generic operation error
           content:
@@ -290,29 +500,72 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
     post:
-      description: Create tenant
+      description: |
+        Create a tenant. Returns new tenant id on success.\
+        If no new tenant id is specified in parameters, it would be generated. It's an error to recreate the same tenant.
       requestBody:
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - "tenant_id"
-              properties:
-                tenant_id:
-                  type: string
-                  format: hex
+              $ref: "#/components/schemas/TenantCreateInfo"
       responses:
         "201":
-          description: CREATED
+          description: New tenant created successfully
+          content:
+            application/json:
+              schema:
+                type: string
+                format: hex
+        "400":
+          description: Malformed tenant create request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "409":
+          description: Tenant already exists, creation skipped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/tenant/config:
+    put:
+      description: |
+        Update tenant's config.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantConfigInfo"
+      responses:
+        "200":
+          description: OK
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  type: string
+                  $ref: "#/components/schemas/TenantInfo"
         "400":
-          description: Malformed tenant create request
+          description: Malformed tenant config request
           content:
             application/json:
               schema:
@@ -335,7 +588,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
 components:
   securitySchemes:
     JWT:
@@ -352,40 +604,69 @@ components:
         id:
           type: string
         state:
-          type: string
-    BranchInfo:
+            oneOf:
+              - type: string
+              - type: object
+                properties:
+                  background_jobs_running:
+                    type: boolean
+
+        current_physical_size:
+          type: integer
+        has_in_progress_downloads:
+          type: boolean
+    TenantCreateInfo:
       type: object
-      required:
-        - name
-        - timeline_id
-        - latest_valid_lsn
-        - current_logical_size
       properties:
-        name:
-          type: string
-        timeline_id:
+        new_tenant_id:
           type: string
           format: hex
-        ancestor_id:
+        tenant_id:
           type: string
           format: hex
-        ancestor_lsn:
+        gc_period:
           type: string
-        current_logical_size:
+        gc_horizon:
           type: integer
-        current_logical_size_non_incremental:
+        pitr_interval:
+          type: string
+        checkpoint_distance:
           type: integer
-        latest_valid_lsn:
+        checkpoint_timeout:
+          type: string
+        compaction_period:
+          type: string
+        compaction_threshold:
+          type: string
+    TenantConfigInfo:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: hex
+        gc_period:
+          type: string
+        gc_horizon:
           type: integer
+        pitr_interval:
+          type: string
+        checkpoint_distance:
+          type: integer
+        checkpoint_timeout:
+          type: string
+        compaction_period:
+          type: string
+        compaction_threshold:
+          type: string
     TimelineInfo:
       type: object
       required:
         - timeline_id
         - tenant_id
         - last_record_lsn
-        - prev_record_lsn
-        - start_lsn
         - disk_consistent_lsn
+        - awaits_download
+        - state
       properties:
         timeline_id:
           type: string
@@ -393,20 +674,74 @@ components:
         tenant_id:
           type: string
           format: hex
+        last_record_lsn:
+          type: string
+          format: hex
+        disk_consistent_lsn:
+          type: string
+          format: hex
+        remote_consistent_lsn:
+          type: string
+          format: hex
         ancestor_timeline_id:
           type: string
           format: hex
-        last_record_lsn:
+        ancestor_lsn:
           type: string
+          format: hex
         prev_record_lsn:
           type: string
-        start_lsn:
+          format: hex
+        current_logical_size:
+          type: integer
+        current_physical_size:
+          type: integer
+        current_logical_size_non_incremental:
+          type: integer
+        current_physical_size_non_incremental:
+          type: integer
+        wal_source_connstr:
           type: string
-        disk_consistent_lsn:
+        last_received_msg_lsn:
           type: string
-        timeline_state:
+          format: hex
+        last_received_msg_ts:
+          type: integer
+        awaits_download:
+          type: boolean
+        state:
           type: string
 
+        # These 'local' and 'remote' fields just duplicate some of the fields
+        # above. They are kept for backwards-compatibility. They can be removed,
+        # when the control plane has been updated to look at the above fields
+        # directly.
+        local:
+          $ref: "#/components/schemas/LocalTimelineInfo"
+        remote:
+          $ref: "#/components/schemas/RemoteTimelineInfo"
+
+    LocalTimelineInfo:
+      type: object
+      properties:
+        ancestor_timeline_id:
+          type: string
+          format: hex
+        ancestor_lsn:
+          type: string
+          format: hex
+        current_logical_size:
+          type: integer
+        current_physical_size:
+          type: integer
+    RemoteTimelineInfo:
+      type: object
+      required:
+        - remote_consistent_lsn
+      properties:
+        remote_consistent_lsn:
+          type: string
+          format: hex
     Error:
       type: object
       required:
@@ -422,6 +757,20 @@ components:
         msg:
           type: string
     ForbiddenError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    NotFoundError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    ConflictError:
       type: object
       required:
         - msg

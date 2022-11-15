@@ -1,0 +1,365 @@
+openapi: "3.0.2"
+info:
+  title: Safekeeper control API
+  version: "1.0"
+
+
+servers:
+  - url: "http://localhost:7676"
+
+
+paths:
+  /v1/status:
+    get:
+      tags:
+      - "Info"
+      summary: Get safekeeper status
+      description: ""
+      operationId: v1GetSafekeeperStatus
+      responses:
+        "200":
+          description: Safekeeper status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SafekeeperStatus"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        default:
+          $ref: "#/components/responses/GenericError"
+
+
+  /v1/tenant/{tenant_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+
+    delete:
+      tags:
+      - "Tenant"
+      summary: Delete tenant and all its timelines
+      description: "Deletes tenant and returns a map of timelines that were deleted along with their statuses"
+      operationId: v1DeleteTenant
+      responses:
+        "200":
+          description: Tenant deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantDeleteResult"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        default:
+          $ref: "#/components/responses/GenericError"
+
+
+  /v1/tenant/{tenant_id}/timeline:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+
+    post:
+      tags:
+      - "Timeline"
+      summary: Register new timeline
+      description: ""
+      operationId: v1CreateTenantTimeline
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TimelineCreateRequest"
+      responses:
+        "201":
+          description: Timeline created
+          # TODO: return timeline info?
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        default:
+          $ref: "#/components/responses/GenericError"
+
+
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+
+    get:
+      tags:
+      - "Timeline"
+      summary: Get timeline information and status
+      description: ""
+      operationId: v1GetTenantTimeline
+      responses:
+        "200":
+          description: Timeline status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TimelineStatus"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        default:
+          $ref: "#/components/responses/GenericError"
+
+    delete:
+      tags:
+      - "Timeline"
+      summary: Delete timeline
+      description: ""
+      operationId: v1DeleteTenantTimeline
+      responses:
+        "200":
+          description: Timeline deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TimelineDeleteResult"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        default:
+          $ref: "#/components/responses/GenericError"
+
+
+  /v1/record_safekeeper_info/{tenant_id}/{timeline_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+
+    post:
+      tags:
+      - "Tests"
+      summary: Used only in tests to hand craft required data
+      description: ""
+      operationId: v1RecordSafekeeperInfo
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkTimelineInfo"
+      responses:
+        "200":
+          description: Timeline info posted
+          # TODO: return timeline info?
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        default:
+          $ref: "#/components/responses/GenericError"
+
+
+components:
+  securitySchemes:
+    JWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+
+  schemas:
+
+    #
+    # Requests
+    #
+
+    TimelineCreateRequest:
+      type: object
+      required:
+        - timeline_id
+        - peer_ids
+      properties:
+        timeline_id:
+          type: string
+          format: hex
+        peer_ids:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+
+    SkTimelineInfo:
+      type: object
+      required:
+        - last_log_term
+        - flush_lsn
+        - commit_lsn
+        - backup_lsn
+        - remote_consistent_lsn
+        - peer_horizon_lsn
+        - safekeeper_connstr
+      properties:
+        last_log_term:
+          type: integer
+          minimum: 0
+        flush_lsn:
+          type: string
+        commit_lsn:
+          type: string
+        backup_lsn:
+          type: string
+        remote_consistent_lsn:
+          type: string
+        peer_horizon_lsn:
+          type: string
+        safekeeper_connstr:
+          type: string
+
+    #
+    # Responses
+    #
+
+    SafekeeperStatus:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: integer
+          minimum: 0 # kind of unsigned integer
+
+    TimelineStatus:
+      type: object
+      required:
+        - timeline_id
+        - tenant_id
+      properties:
+        timeline_id:
+          type: string
+          format: hex
+        tenant_id:
+          type: string
+          format: hex
+        acceptor_state:
+          $ref: '#/components/schemas/AcceptorStateStatus'
+        flush_lsn:
+          type: string
+        timeline_start_lsn:
+          type: string
+        local_start_lsn:
+          type: string
+        commit_lsn:
+          type: string
+        backup_lsn:
+          type: string
+        peer_horizon_lsn:
+          type: string
+        remote_consistent_lsn:
+          type: string
+
+    AcceptorStateStatus:
+      type: object
+      required:
+        - term
+        - epoch
+      properties:
+        term:
+          type: integer
+          minimum: 0 # kind of unsigned integer
+        epoch:
+          type: integer
+          minimum: 0 # kind of unsigned integer
+        term_history:
+          type: array
+          items:
+            $ref: '#/components/schemas/TermSwitchEntry'
+
+    TermSwitchEntry:
+      type: object
+      required:
+        - term
+        - lsn
+      properties:
+        term:
+          type: integer
+          minimum: 0 # kind of unsigned integer
+        lsn:
+          type: string
+
+    TimelineDeleteResult:
+      type: object
+      required:
+        - dir_existed
+        - was_active
+      properties:
+        dir_existed:
+          type: boolean
+        was_active:
+          type: boolean
+
+    TenantDeleteResult:
+      type: object
+      additionalProperties:
+        $ref: "#/components/schemas/TimelineDeleteResult"
+      example:
+       57fd1b39f23704a63423de0a8435d85c:
+        dir_existed: true
+        was_active: false
+       67fd1b39f23704a63423gb8435d85c33:
+        dir_existed: false
+        was_active: false
+
+    #
+    # Errors
+    #
+
+    GenericErrorContent:
+      type: object
+      properties:
+        msg:
+          type: string
+
+  responses:
+
+    #
+    # Errors
+    #
+
+    GenericError:
+      description: Generic error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GenericErrorContent"
+
+    ForbiddenError:
+      description: Forbidden error response
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - msg
+            properties:
+              msg:
+                type: string
+
+
+security:
+  - JWT: []

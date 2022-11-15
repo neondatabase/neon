@@ -11,15 +11,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use zenith_utils::connstring::connection_host_port;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::ZTenantId;
-use zenith_utils::zid::ZTimelineId;
+use utils::{
+    id::{TenantId, TimelineId},
+    lsn::Lsn,
+    postgres_backend::AuthType,
+};
 
-use crate::local_env::LocalEnv;
+use crate::local_env::{LocalEnv, DEFAULT_PG_VERSION};
+use crate::pageserver::PageServerNode;
 use crate::postgresql_conf::PostgresConf;
-use crate::storage::PageServerNode;
 
 //
 // ComputeControlPlane
@@ -27,7 +27,7 @@ use crate::storage::PageServerNode;
 pub struct ComputeControlPlane {
     base_port: u16,
     pageserver: Arc<PageServerNode>,
-    pub nodes: BTreeMap<(ZTenantId, String), Arc<PostgresNode>>,
+    pub nodes: BTreeMap<(TenantId, String), Arc<PostgresNode>>,
     env: LocalEnv,
 }
 
@@ -37,7 +37,7 @@ impl ComputeControlPlane {
     // pgdatadirs
     // |- tenants
     // |  |- <tenant_id>
-    // |  |   |- <branch name>
+    // |  |   |- <node name>
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
@@ -52,7 +52,7 @@ impl ComputeControlPlane {
                 .with_context(|| format!("failed to list {}", tenant_dir.path().display()))?
             {
                 let node = PostgresNode::from_dir_entry(timeline_dir?, &env, &pageserver)?;
-                nodes.insert((node.tenantid, node.name.clone()), Arc::new(node));
+                nodes.insert((node.tenant_id, node.name.clone()), Arc::new(node));
             }
         }
 
@@ -73,40 +73,15 @@ impl ComputeControlPlane {
             .unwrap_or(self.base_port)
     }
 
-    // FIXME: see also parse_point_in_time in branches.rs.
-    fn parse_point_in_time(
-        &self,
-        tenantid: ZTenantId,
-        s: &str,
-    ) -> Result<(ZTimelineId, Option<Lsn>)> {
-        let mut strings = s.split('@');
-        let name = strings.next().unwrap();
-
-        let lsn = strings
-            .next()
-            .map(Lsn::from_str)
-            .transpose()
-            .context("invalid LSN in point-in-time specification")?;
-
-        // Resolve the timeline ID, given the human-readable branch name
-        let timeline_id = self
-            .pageserver
-            .branch_get_by_name(&tenantid, name)?
-            .timeline_id;
-
-        Ok((timeline_id, lsn))
-    }
-
     pub fn new_node(
         &mut self,
-        tenantid: ZTenantId,
+        tenant_id: TenantId,
         name: &str,
-        timeline_spec: &str,
+        timeline_id: TimelineId,
+        lsn: Option<Lsn>,
         port: Option<u16>,
+        pg_version: u32,
     ) -> Result<Arc<PostgresNode>> {
-        // Resolve the human-readable timeline spec into timeline ID and LSN
-        let (timelineid, lsn) = self.parse_point_in_time(tenantid, timeline_spec)?;
-
         let port = port.unwrap_or_else(|| self.get_port());
         let node = Arc::new(PostgresNode {
             name: name.to_owned(),
@@ -114,17 +89,18 @@ impl ComputeControlPlane {
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
             is_test: false,
-            timelineid,
+            timeline_id,
             lsn,
-            tenantid,
+            tenant_id,
             uses_wal_proposer: false,
+            pg_version,
         });
 
         node.create_pgdata()?;
         node.setup_pg_conf(self.env.pageserver.auth_type)?;
 
         self.nodes
-            .insert((tenantid, node.name.clone()), Arc::clone(&node));
+            .insert((tenant_id, node.name.clone()), Arc::clone(&node));
 
         Ok(node)
     }
@@ -139,10 +115,11 @@ pub struct PostgresNode {
     pub env: LocalEnv,
     pageserver: Arc<PageServerNode>,
     is_test: bool,
-    pub timelineid: ZTimelineId,
+    pub timeline_id: TimelineId,
     pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
-    pub tenantid: ZTenantId,
+    pub tenant_id: TenantId,
     uses_wal_proposer: bool,
+    pg_version: u32,
 }
 
 impl PostgresNode {
@@ -173,9 +150,17 @@ impl PostgresNode {
         // Read a few options from the config file
         let context = format!("in config file {}", cfg_path_str);
         let port: u16 = conf.parse_field("port", &context)?;
-        let timelineid: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
-        let tenantid: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
-        let uses_wal_proposer = conf.get("wal_acceptors").is_some();
+        let timeline_id: TimelineId = conf.parse_field("neon.timeline_id", &context)?;
+        let tenant_id: TenantId = conf.parse_field("neon.tenant_id", &context)?;
+        let uses_wal_proposer = conf.get("neon.safekeepers").is_some();
+
+        // Read postgres version from PG_VERSION file to determine which postgres version binary to use.
+        // If it doesn't exist, assume broken data directory and use default pg version.
+        let pg_version_path = entry.path().join("PG_VERSION");
+
+        let pg_version_str =
+            fs::read_to_string(pg_version_path).unwrap_or_else(|_| DEFAULT_PG_VERSION.to_string());
+        let pg_version = u32::from_str(&pg_version_str)?;
 
         // parse recovery_target_lsn, if any
         let recovery_target_lsn: Option<Lsn> =
@@ -188,21 +173,28 @@ impl PostgresNode {
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
             is_test: false,
-            timelineid,
+            timeline_id,
             lsn: recovery_target_lsn,
-            tenantid,
+            tenant_id,
             uses_wal_proposer,
+            pg_version,
         })
     }
 
-    fn sync_safekeepers(&self, auth_token: &Option<String>) -> Result<Lsn> {
-        let pg_path = self.env.pg_bin_dir().join("postgres");
+    fn sync_safekeepers(&self, auth_token: &Option<String>, pg_version: u32) -> Result<Lsn> {
+        let pg_path = self.env.pg_bin_dir(pg_version)?.join("postgres");
         let mut cmd = Command::new(&pg_path);
 
         cmd.arg("--sync-safekeepers")
             .env_clear()
-            .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
+            .env(
+                "LD_LIBRARY_PATH",
+                self.env.pg_lib_dir(pg_version)?.to_str().unwrap(),
+            )
+            .env(
+                "DYLD_LIBRARY_PATH",
+                self.env.pg_lib_dir(pg_version)?.to_str().unwrap(),
+            )
             .env("PGDATA", self.pgdata().to_str().unwrap())
             .stdout(Stdio::piped())
             // Comment this to avoid capturing stderr (useful if command hangs)
@@ -241,9 +233,9 @@ impl PostgresNode {
         );
 
         let sql = if let Some(lsn) = lsn {
-            format!("basebackup {} {} {}", self.tenantid, self.timelineid, lsn)
+            format!("basebackup {} {} {}", self.tenant_id, self.timeline_id, lsn)
         } else {
-            format!("basebackup {} {}", self.tenantid, self.timelineid)
+            format!("basebackup {} {}", self.tenant_id, self.timeline_id)
         };
 
         let mut client = self
@@ -256,8 +248,13 @@ impl PostgresNode {
             .context("page server 'basebackup' command failed")?;
 
         // Read the archive directly from the `CopyOutReader`
-        tar::Archive::new(copyreader)
-            .unpack(&self.pgdata())
+        //
+        // Set `ignore_zeros` so that unpack() reads all the Copy data and
+        // doesn't stop at the end-of-archive marker. Otherwise, if the server
+        // sends an Error after finishing the tarball, we will not notice it.
+        let mut ar = tar::Archive::new(copyreader);
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.pgdata())
             .context("extracting base backup failed")?;
 
         Ok(())
@@ -279,14 +276,12 @@ impl PostgresNode {
             })
     }
 
-    // Connect to a page server, get base backup, and untar it to initialize a
-    // new data directory
+    // Write postgresql.conf with default configuration
+    // and PG_VERSION file to the data directory of a new node.
     fn setup_pg_conf(&self, auth_type: AuthType) -> Result<()> {
         let mut conf = PostgresConf::new();
         conf.append("max_wal_senders", "10");
-        // wal_log_hints is mandatory when running against pageserver (see gh issue#192)
-        // TODO: is it possible to check wal_log_hints at pageserver side via XLOG_PARAMETER_CHANGE?
-        conf.append("wal_log_hints", "on");
+        conf.append("wal_log_hints", "off");
         conf.append("max_replication_slots", "10");
         conf.append("hot_standby", "on");
         conf.append("shared_buffers", "1MB");
@@ -298,16 +293,14 @@ impl PostgresNode {
         conf.append("wal_sender_timeout", "5s");
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
-
-        // Never clean up old WAL. TODO: We should use a replication
-        // slot or something proper, to prevent the compute node
-        // from removing WAL that hasn't been streamed to the safekeeper or
-        // page server yet. (gh issue #349)
-        conf.append("wal_keep_size", "10TB");
+        conf.append("wal_keep_size", "0");
+        // walproposer panics when basebackup is invalid, it is pointless to restart in this case.
+        conf.append("restart_after_crash", "off");
 
         // Configure the node to fetch pages from pageserver
         let pageserver_connstr = {
-            let (host, port) = connection_host_port(&self.pageserver.pg_connection_config);
+            let config = &self.pageserver.pg_connection_config;
+            let (host, port) = (config.host(), config.port());
 
             // Set up authentication
             //
@@ -315,7 +308,7 @@ impl PostgresNode {
             // variable during compute pg startup. It is done this way because
             // otherwise user will be able to retrieve the value using SHOW
             // command or pg_settings
-            let password = if let AuthType::ZenithJWT = auth_type {
+            let password = if let AuthType::NeonJWT = auth_type {
                 "$ZENITH_AUTH_TOKEN"
             } else {
                 ""
@@ -324,13 +317,13 @@ impl PostgresNode {
             // Also note that not all parameters are supported here. Because in compute we substitute $ZENITH_AUTH_TOKEN
             // We parse this string and build it back with token from env var, and for simplicity rebuild
             // uses only needed variables namely host, port, user, password.
-            format!("postgresql://no_user:{}@{}:{}", password, host, port)
+            format!("postgresql://no_user:{password}@{host}:{port}")
         };
-        conf.append("shared_preload_libraries", "zenith");
+        conf.append("shared_preload_libraries", "neon");
         conf.append_line("");
-        conf.append("zenith.page_server_connstring", &pageserver_connstr);
-        conf.append("zenith.zenith_tenant", &self.tenantid.to_string());
-        conf.append("zenith.zenith_timeline", &self.timelineid.to_string());
+        conf.append("neon.pageserver_connstring", &pageserver_connstr);
+        conf.append("neon.tenant_id", &self.tenant_id.to_string());
+        conf.append("neon.timeline_id", &self.timeline_id.to_string());
         if let Some(lsn) = self.lsn {
             conf.append("recovery_target_lsn", &lsn.to_string());
         }
@@ -357,14 +350,14 @@ impl PostgresNode {
             // Configure the node to connect to the safekeepers
             conf.append("synchronous_standby_names", "walproposer");
 
-            let wal_acceptors = self
+            let safekeepers = self
                 .env
                 .safekeepers
                 .iter()
                 .map(|sk| format!("localhost:{}", sk.pg_port))
                 .collect::<Vec<String>>()
                 .join(",");
-            conf.append("wal_acceptors", &wal_acceptors);
+            conf.append("neon.safekeepers", &safekeepers);
         } else {
             // We only use setup without safekeepers for tests,
             // and don't care about data durability on pageserver,
@@ -375,11 +368,13 @@ impl PostgresNode {
             // This isn't really a supported configuration, but can be useful for
             // testing.
             conf.append("synchronous_standby_names", "pageserver");
-            conf.append("zenith.callmemaybe_connstring", &self.connstr());
         }
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
         file.write_all(conf.to_string().as_bytes())?;
+
+        let mut file = File::create(self.pgdata().join("PG_VERSION"))?;
+        file.write_all(self.pg_version.to_string().as_bytes())?;
 
         Ok(())
     }
@@ -392,7 +387,7 @@ impl PostgresNode {
             // latest data from the pageserver. That is a bit clumsy but whole bootstrap
             // procedure evolves quite actively right now, so let's think about it again
             // when things would be more stable (TODO).
-            let lsn = self.sync_safekeepers(auth_token)?;
+            let lsn = self.sync_safekeepers(auth_token, self.pg_version)?;
             if lsn == Lsn(0) {
                 None
             } else {
@@ -408,7 +403,7 @@ impl PostgresNode {
     }
 
     pub fn pgdata(&self) -> PathBuf {
-        self.env.pg_data_dir(&self.tenantid, &self.name)
+        self.env.pg_data_dir(&self.tenant_id, &self.name)
     }
 
     pub fn status(&self) -> &str {
@@ -425,7 +420,7 @@ impl PostgresNode {
     }
 
     fn pg_ctl(&self, args: &[&str], auth_token: &Option<String>) -> Result<()> {
-        let pg_ctl_path = self.env.pg_bin_dir().join("pg_ctl");
+        let pg_ctl_path = self.env.pg_bin_dir(self.pg_version)?.join("pg_ctl");
         let mut cmd = Command::new(pg_ctl_path);
         cmd.args(
             [
@@ -441,15 +436,26 @@ impl PostgresNode {
             .concat(),
         )
         .env_clear()
-        .env("LD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap())
-        .env("DYLD_LIBRARY_PATH", self.env.pg_lib_dir().to_str().unwrap());
+        .env(
+            "LD_LIBRARY_PATH",
+            self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
+        )
+        .env(
+            "DYLD_LIBRARY_PATH",
+            self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
+        );
         if let Some(token) = auth_token {
             cmd.env("ZENITH_AUTH_TOKEN", token);
         }
-        let pg_ctl = cmd.status().context("pg_ctl failed")?;
 
-        if !pg_ctl.success() {
-            anyhow::bail!("pg_ctl failed");
+        let pg_ctl = cmd.output().context("pg_ctl failed")?;
+        if !pg_ctl.status.success() {
+            anyhow::bail!(
+                "pg_ctl failed, exit code: {}, stdout: {}, stderr: {}",
+                pg_ctl.status,
+                String::from_utf8_lossy(&pg_ctl.stdout),
+                String::from_utf8_lossy(&pg_ctl.stderr),
+            );
         }
         Ok(())
     }
@@ -517,7 +523,7 @@ impl PostgresNode {
             "host={} port={} user={} dbname={}",
             self.address.ip(),
             self.address.port(),
-            "zenith_admin",
+            "cloud_admin",
             "postgres"
         )
     }

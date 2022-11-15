@@ -1,0 +1,141 @@
+{
+    "format_version": 1.0,
+
+    "timestamp": "2022-10-12T18:00:00.000Z",
+    "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8c",
+
+    "cluster": {
+        "cluster_id": "docker_compose",
+        "name": "docker_compose_test",
+        "state": "restarted",
+        "roles": [
+            {
+                "name": "cloud_admin",
+                "encrypted_password": "b093c0d3b281ba6da1eacc608620abd8",
+                "options": null
+            }
+        ],
+        "databases": [
+        ],
+        "settings": [
+            {
+                "name": "fsync",
+                "value": "off",
+                "vartype": "bool"
+            },
+            {
+                "name": "wal_level",
+                "value": "replica",
+                "vartype": "enum"
+            },
+            {
+                "name": "hot_standby",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "wal_log_hints",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "log_connections",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "port",
+                "value": "55433",
+                "vartype": "integer"
+            },
+            {
+                "name": "shared_buffers",
+                "value": "1MB",
+                "vartype": "string"
+            },
+            {
+                "name": "max_connections",
+                "value": "100",
+                "vartype": "integer"
+            },
+            {
+                "name": "listen_addresses",
+                "value": "0.0.0.0",
+                "vartype": "string"
+            },
+            {
+                "name": "max_wal_senders",
+                "value": "10",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_replication_slots",
+                "value": "10",
+                "vartype": "integer"
+            },
+            {
+                "name": "wal_sender_timeout",
+                "value": "5s",
+                "vartype": "string"
+            },
+            {
+                "name": "wal_keep_size",
+                "value": "0",
+                "vartype": "integer"
+            },
+            {
+                "name": "password_encryption",
+                "value": "md5",
+                "vartype": "enum"
+            },
+            {
+                "name": "restart_after_crash",
+                "value": "off",
+                "vartype": "bool"
+            },
+            {
+                "name": "synchronous_standby_names",
+                "value": "walproposer",
+                "vartype": "string"
+            },
+            {
+                "name": "shared_preload_libraries",
+                "value": "neon",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.safekeepers",
+                "value": "safekeeper1:5454,safekeeper2:5454,safekeeper3:5454",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.timeline_id",
+                "value": "TIMELINE_ID",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.tenant_id",
+                "value": "TENANT_ID",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.pageserver_connstring",
+                "value": "host=pageserver port=6400",
+                "vartype": "string"
+            },
+            {
+                "name": "max_replication_write_lag",
+                "value": "500MB",
+                "vartype": "string"
+            },
+            {
+                "name": "max_replication_flush_lag",
+                "value": "10GB",
+                "vartype": "string"
+            }
+        ]
+    },
+
+    "delta_operations": [
+    ]
+}

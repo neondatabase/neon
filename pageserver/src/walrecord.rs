@@ -1,16 +1,61 @@
 //!
 //! Functions for parsing WAL records.
 //!
+use anyhow::Result;
 use bytes::{Buf, Bytes};
 use postgres_ffi::pg_constants;
-use postgres_ffi::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
-use postgres_ffi::XLogRecord;
-use postgres_ffi::{BlockNumber, OffsetNumber};
+use postgres_ffi::BLCKSZ;
+use postgres_ffi::{BlockNumber, OffsetNumber, TimestampTz};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
+use postgres_ffi::{XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
 use serde::{Deserialize, Serialize};
 use tracing::*;
+use utils::bin_ser::DeserializeError;
 
-use crate::repository::ZenithWalRecord;
+/// Each update to a page is represented by a NeonWalRecord. It can be a wrapper
+/// around a PostgreSQL WAL record, or a custom neon-specific "record".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NeonWalRecord {
+    /// Native PostgreSQL WAL record
+    Postgres { will_init: bool, rec: Bytes },
+
+    /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
+    ClearVisibilityMapFlags {
+        new_heap_blkno: Option<u32>,
+        old_heap_blkno: Option<u32>,
+        flags: u8,
+    },
+    /// Mark transaction IDs as committed on a CLOG page
+    ClogSetCommitted {
+        xids: Vec<TransactionId>,
+        timestamp: TimestampTz,
+    },
+    /// Mark transaction IDs as aborted on a CLOG page
+    ClogSetAborted { xids: Vec<TransactionId> },
+    /// Extend multixact offsets SLRU
+    MultixactOffsetCreate {
+        mid: MultiXactId,
+        moff: MultiXactOffset,
+    },
+    /// Extend multixact members SLRU.
+    MultixactMembersCreate {
+        moff: MultiXactOffset,
+        members: Vec<MultiXactMember>,
+    },
+}
+
+impl NeonWalRecord {
+    /// Does replaying this WAL record initialize the page from scratch, or does
+    /// it need to be applied over the previous image of the page?
+    pub fn will_init(&self) -> bool {
+        match self {
+            NeonWalRecord::Postgres { will_init, rec: _ } => *will_init,
+
+            // None of the special neon record types currently initialize the page
+            _ => false,
+        }
+    }
+}
 
 /// DecodedBkpBlock represents per-page data contained in a WAL record.
 #[derive(Default)]
@@ -51,6 +96,7 @@ impl DecodedBkpBlock {
     }
 }
 
+#[derive(Default)]
 pub struct DecodedWALRecord {
     pub xl_xid: TransactionId,
     pub xl_info: u8,
@@ -83,6 +129,28 @@ impl XlRelmapUpdate {
             dbid: buf.get_u32_le(),
             tsid: buf.get_u32_le(),
             nbytes: buf.get_i32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlSmgrCreate {
+    pub rnode: RelFileNode,
+    // FIXME: This is ForkNumber in storage_xlog.h. That's an enum. Does it have
+    // well-defined size?
+    pub forknum: u8,
+}
+
+impl XlSmgrCreate {
+    pub fn decode(buf: &mut Bytes) -> XlSmgrCreate {
+        XlSmgrCreate {
+            rnode: RelFileNode {
+                spcnode: buf.get_u32_le(), /* tablespace */
+                dbnode: buf.get_u32_le(),  /* database */
+                relnode: buf.get_u32_le(), /* relation */
+            },
+            forknum: buf.get_u32_le() as u8,
         }
     }
 }
@@ -268,12 +336,11 @@ impl XlXactParsedRecord {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         // The record starts with time of commit/abort
         let xact_time = buf.get_i64_le();
-        let xinfo;
-        if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
-            xinfo = buf.get_u32_le();
+        let xinfo = if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+            buf.get_u32_le()
         } else {
-            xinfo = 0;
-        }
+            0
+        };
         let db_id;
         let ts_id;
         if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
@@ -322,6 +389,16 @@ impl XlXactParsedRecord {
             xid = buf.get_u32_le();
             trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
         }
+
+        if xinfo & postgres_ffi::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS != 0 {
+            let nitems = buf.get_i32_le();
+            debug!(
+                "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
+                nitems
+            );
+            //FIXME: do we need to handle dropped stats here?
+        }
+
         XlXactParsedRecord {
             xid,
             info,
@@ -439,7 +516,18 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
+//
+//
+// For performance reasons, the caller provides the DecodedWALRecord struct and the function just fills it in.
+// It would be more natural for this function to return a DecodedWALRecord as return value,
+// but reusing the caller-supplied struct avoids an allocation.
+// This code is in the hot path for digesting incoming WAL, and is very performance sensitive.
+//
+pub fn decode_wal_record(
+    record: Bytes,
+    decoded: &mut DecodedWALRecord,
+    pg_version: u32,
+) -> Result<()> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
@@ -450,7 +538,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    let xlogrec = XLogRecord::from_bytes(&mut buf);
+    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
 
     trace!(
         "decode_wal_record xl_rmid = {} xl_info = {}",
@@ -468,7 +556,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     let mut blocks_total_len: u32 = 0;
     let mut main_data_len = 0;
     let mut datatotal: u32 = 0;
-    let mut blocks: Vec<DecodedBkpBlock> = Vec::new();
+    decoded.blocks.clear();
 
     // 2. Decode the headers.
     // XLogRecordBlockHeaders if any,
@@ -502,7 +590,6 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             0..=pg_constants::XLR_MAX_BLOCK_ID => {
                 /* XLogRecordBlockHeader */
                 let mut blk = DecodedBkpBlock::new();
-                let fork_flags: u8;
 
                 if block_id <= max_block_id {
                     // TODO
@@ -515,7 +602,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 }
                 max_block_id = block_id;
 
-                fork_flags = buf.get_u8();
+                let fork_flags: u8 = buf.get_u8();
                 blk.forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
                 blk.flags = fork_flags;
                 blk.has_image = (fork_flags & pg_constants::BKPBLOCK_HAS_IMAGE) != 0;
@@ -533,16 +620,28 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     blk.hole_offset = buf.get_u16_le();
                     blk.bimg_info = buf.get_u8();
 
-                    blk.apply_image = (blk.bimg_info & pg_constants::BKPIMAGE_APPLY) != 0;
+                    blk.apply_image = if pg_version == 14 {
+                        (blk.bimg_info & postgres_ffi::v14::bindings::BKPIMAGE_APPLY) != 0
+                    } else {
+                        assert_eq!(pg_version, 15);
+                        (blk.bimg_info & postgres_ffi::v15::bindings::BKPIMAGE_APPLY) != 0
+                    };
 
-                    if blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED != 0 {
+                    let blk_img_is_compressed =
+                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)?;
+
+                    if blk_img_is_compressed {
+                        debug!("compressed block image , pg_version = {}", pg_version);
+                    }
+
+                    if blk_img_is_compressed {
                         if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0 {
                             blk.hole_length = buf.get_u16_le();
                         } else {
                             blk.hole_length = 0;
                         }
                     } else {
-                        blk.hole_length = pg_constants::BLCKSZ - blk.bimg_len;
+                        blk.hole_length = BLCKSZ - blk.bimg_len;
                     }
                     datatotal += blk.bimg_len as u32;
                     blocks_total_len += blk.bimg_len as u32;
@@ -552,9 +651,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                      * bimg_len < BLCKSZ if the HAS_HOLE flag is set.
                      */
                     if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0
-                        && (blk.hole_offset == 0
-                            || blk.hole_length == 0
-                            || blk.bimg_len == pg_constants::BLCKSZ)
+                        && (blk.hole_offset == 0 || blk.hole_length == 0 || blk.bimg_len == BLCKSZ)
                     {
                         // TODO
                         /*
@@ -590,9 +687,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                      * cross-check that bimg_len < BLCKSZ if the IS_COMPRESSED
                      * flag is set.
                      */
-                    if (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0)
-                        && blk.bimg_len == pg_constants::BLCKSZ
-                    {
+                    if !blk_img_is_compressed && blk.bimg_len == BLCKSZ {
                         // TODO
                         /*
                         report_invalid_record(state,
@@ -608,8 +703,8 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                      * IS_COMPRESSED flag is set.
                      */
                     if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE == 0
-                        && blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0
-                        && blk.bimg_len != pg_constants::BLCKSZ
+                        && !blk_img_is_compressed
+                        && blk.bimg_len != BLCKSZ
                     {
                         // TODO
                         /*
@@ -648,7 +743,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                     blk.blkno
                 );
 
-                blocks.push(blk);
+                decoded.blocks.push(blk);
             }
 
             _ => {
@@ -659,7 +754,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
 
     // 3. Decode blocks.
     let mut ptr = record.len() - buf.remaining();
-    for blk in blocks.iter_mut() {
+    for blk in decoded.blocks.iter_mut() {
         if blk.has_image {
             blk.bimg_offset = ptr as u32;
             ptr += blk.bimg_len as usize;
@@ -679,34 +774,31 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         assert_eq!(buf.remaining(), main_data_len as usize);
     }
 
-    DecodedWALRecord {
-        xl_xid: xlogrec.xl_xid,
-        xl_info: xlogrec.xl_info,
-        xl_rmid: xlogrec.xl_rmid,
-        record,
-        blocks,
-        main_data_offset,
-    }
+    decoded.xl_xid = xlogrec.xl_xid;
+    decoded.xl_info = xlogrec.xl_info;
+    decoded.xl_rmid = xlogrec.xl_rmid;
+    decoded.record = record;
+    decoded.main_data_offset = main_data_offset;
+
+    Ok(())
 }
 
 ///
 /// Build a human-readable string to describe a WAL record
 ///
 /// For debugging purposes
-pub fn describe_wal_record(rec: &ZenithWalRecord) -> String {
+pub fn describe_wal_record(rec: &NeonWalRecord) -> Result<String, DeserializeError> {
     match rec {
-        ZenithWalRecord::Postgres { will_init, rec } => {
-            format!(
-                "will_init: {}, {}",
-                will_init,
-                describe_postgres_wal_record(rec)
-            )
-        }
-        _ => format!("{:?}", rec),
+        NeonWalRecord::Postgres { will_init, rec } => Ok(format!(
+            "will_init: {}, {}",
+            will_init,
+            describe_postgres_wal_record(rec)?
+        )),
+        _ => Ok(format!("{:?}", rec)),
     }
 }
 
-fn describe_postgres_wal_record(record: &Bytes) -> String {
+fn describe_postgres_wal_record(record: &Bytes) -> Result<String, DeserializeError> {
     // TODO: It would be nice to use the PostgreSQL rmgrdesc infrastructure for this.
     // Maybe use the postgres wal redo process, the same used for replaying WAL records?
     // Or could we compile the rmgrdesc routines into the dump_layer_file() binary directly,
@@ -719,7 +811,7 @@ fn describe_postgres_wal_record(record: &Bytes) -> String {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    let xlogrec = XLogRecord::from_bytes(&mut buf);
+    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
 
     let unknown_str: String;
 
@@ -767,5 +859,5 @@ fn describe_postgres_wal_record(record: &Bytes) -> String {
         }
     };
 
-    String::from(result)
+    Ok(String::from(result))
 }

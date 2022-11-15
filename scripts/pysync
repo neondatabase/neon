@@ -4,4 +4,10 @@
 # It is intended to be a primary endpoint for all the people who want to
 # just setup test environment without going into details of python package management
 
-poetry install --no-root # this installs dev dependencies by default
+poetry config --list
+
+if [ -z "${CI}" ]; then
+    poetry install --no-root --no-interaction --ansi
+else
+    poetry install --no-root
+fi

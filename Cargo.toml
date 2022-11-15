@@ -1,15 +1,23 @@
+# 'named-profiles' feature was stabilized in cargo 1.57. This line makes the
+# build work with older cargo versions.
+#
+# We have this because as of this writing, the latest cargo Debian package
+# that's available is 1.56. (Confusingly, the Debian package version number
+# is 0.57, whereas 'cargo --version' says 1.56.)
+#
+# See https://tracker.debian.org/pkg/cargo for the current status of the
+# package. When that gets updated, we can remove this.
+cargo-features = ["named-profiles"]
+
 [workspace]
 members = [
     "compute_tools",
     "control_plane",
     "pageserver",
-    "postgres_ffi",
     "proxy",
-    "walkeeper",
+    "safekeeper",
     "workspace_hack",
-    "zenith",
-    "zenith_metrics",
-    "zenith_utils",
+    "libs/*",
 ]
 
 [profile.release]
@@ -17,7 +25,64 @@ members = [
 # Besides, debug info should not affect the performance.
 debug = true
 
-# This is only needed for proxy's tests
-# TODO: we should probably fork tokio-postgres-rustls instead
+# disable debug symbols for all packages except this one to decrease binaries size
+[profile.release.package."*"]
+debug = false
+
+[profile.release-line-debug]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+[profile.release-line-debug-lto]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+lto = true
+
+[profile.release-line-debug-size]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+opt-level = "s"
+[profile.release-line-debug-zize]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+opt-level = "z"
+[profile.release-line-debug-size-lto]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+opt-level = "s"
+lto = true
+[profile.release-line-debug-zize-lto]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+opt-level = "z"
+lto = true
+
+[profile.release-no-debug]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+
+[profile.release-no-debug-size]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+opt-level = "s"
+[profile.release-no-debug-zize]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+opt-level = "z"
+
+[profile.release-no-debug-size-lto]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+opt-level = "s"
+lto = true
+
+[profile.release-no-debug-zize-lto]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+opt-level = "z"
+lto = true
+
+
+# This is only needed for proxy's tests.
+# TODO: we should probably fork `tokio-postgres-rustls` instead.
 [patch.crates-io]
-tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }

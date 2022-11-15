@@ -1,0 +1,2 @@
+ansible_connection: aws_ssm
+ansible_python_interpreter: /usr/bin/python3

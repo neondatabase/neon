@@ -19,7 +19,7 @@
         }
     </style>
 
-    <h2>Zenith Performance Tests</h2>
+    <h2>Neon Performance Tests</h2>
 
     {% for suit_name, suit_data in context.items() %}
     <h3>Runs for {{ suit_name }} </h3>
@@ -38,7 +38,7 @@
         </tr>
         {% for row in suit_data.rows %}
         <tr>
-            <td><a href=https://github.com/zenithdb/zenith/commit/{{ row.revision }}>{{ row.revision[:6] }}</a></td>
+            <td><a href=https://github.com/neondatabase/neon/commit/{{ row.revision }}>{{ row.revision[:6] }}</a></td>
             {% for column_value in row.values %}
             <td class="{{ column_value.color }}">{{ column_value.value }}{{column_value.ratio}}</td>
             {% endfor %}

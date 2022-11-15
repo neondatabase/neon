@@ -1,24 +1,39 @@
-## Zenith test runner
+## Neon test runner
 
 This directory contains integration tests.
 
 Prerequisites:
 - Correctly configured Python, see [`/docs/sourcetree.md`](/docs/sourcetree.md#using-python)
-- Zenith and Postgres binaries
+- Neon and Postgres binaries
     - See the root [README.md](/README.md) for build directions
+      If you want to test tests with test-only APIs, you would need to add `--features testing` to Rust code build commands.
+      For convenience, repository cargo config contains `build_testing` alias, that serves as a subcommand, adding the required feature flags.
+      Usage example: `cargo build_testing --release` is equivalent to `cargo build --features testing --release`
     - Tests can be run from the git tree; or see the environment variables
       below to run from other directories.
-- The zenith git repo, including the postgres submodule
+- The neon git repo, including the postgres submodule
   (for some tests, e.g. `pg_regress`)
+- Some tests (involving storage nodes coordination) require etcd installed. Follow
+  [`the guide`](https://etcd.io/docs/v3.5/install/) to obtain it.
 
 ### Test Organization
 
-The tests are divided into a few batches, such that each batch takes roughly
-the same amount of time. The batches can be run in parallel, to minimize total
-runtime. Currently, there are only two batches:
+Regression tests are in the 'regress' directory. They can be run in
+parallel to minimize total runtime. Most regression test sets up their
+environment with its own pageservers and safekeepers (but see
+`TEST_SHARED_FIXTURES`).
 
-- test_batch_pg_regress: Runs PostgreSQL regression tests
-- test_others: All other tests
+'pg_clients' contains tests for connecting with various client
+libraries. Each client test uses a Dockerfile that pulls an image that
+contains the client, and connects to PostgreSQL with it. The client
+tests can be run against an existing PostgreSQL or Neon installation.
+
+'performance' contains performance regression tests. Each test
+exercises a particular scenario or workload, and outputs
+measurements. They should be run serially, to avoid the tests
+interfering with the performance of each other. Some performance tests
+set up their own Neon environment, while others can be run against an
+existing PostgreSQL or Neon environment.
 
 ### Running the tests
 
@@ -41,17 +56,30 @@ If you want to run all tests that have the string "bench" in their names:
 
 `./scripts/pytest -k bench`
 
+To run tests in parellel we utilize `pytest-xdist` plugin. By default everything runs single threaded. Number of workers can be specified with `-n` argument:
+
+`./scripts/pytest -n4`
+
+By default performance tests are excluded. To run them explicitly pass performance tests selection to the script:
+
+`./scripts/pytest test_runner/performance`
+
 Useful environment variables:
 
-`ZENITH_BIN`: The directory where zenith binaries can be found.
+`NEON_BIN`: The directory where neon binaries can be found.
 `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
+Since pageserver supports several postgres versions, `POSTGRES_DISTRIB_DIR` must contain
+a subdirectory for each version with naming convention `v{PG_VERSION}/`.
+Inside that dir, a `bin/postgres` binary should be present.
+`DEFAULT_PG_VERSION`: The version of Postgres to use,
+This is used to construct full path to the postgres binaries.
+Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION="14"`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
-`ZENITH_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
-`FORCE_MOCK_S3`: inits every test's pageserver with a mock S3 used as a remote storage.
-`--pageserver-config-override=${value}` parameter values when zenith cli is invoked
-`RUST_LOG`: logging configuration to pass into Zenith CLI
+`NEON_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
+`--pageserver-config-override=${value}` parameter values when neon_local cli is invoked
+`RUST_LOG`: logging configuration to pass into Neon CLI
 
 Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
 `./scripts/pytest -s --log-cli-level=INFO ...`
@@ -64,32 +92,32 @@ Exit after the first test failure:
 
 ### Writing a test
 
-Every test needs a Zenith Environment, or ZenithEnv to operate in. A Zenith Environment
+Every test needs a Neon Environment, or NeonEnv to operate in. A Neon Environment
 is like a little cloud-in-a-box, and consists of a Pageserver, 0-N Safekeepers, and
 compute Postgres nodes. The connections between them can be configured to use JWT
 authentication tokens, and some other configuration options can be tweaked too.
 
-The easiest way to get access to a Zenith Environment is by using the `zenith_simple_env`
+The easiest way to get access to a Neon Environment is by using the `neon_simple_env`
 fixture. The 'simple' env may be shared across multiple tests, so don't shut down the nodes
 or make other destructive changes in that environment. Also don't assume that
 there are no tenants or branches or data in the cluster. For convenience, there is a
 branch called `empty`, though. The convention is to create a test-specific branch of
 that and load any test data there, instead of the 'main' branch.
 
-For more complicated cases, you can build a custom Zenith Environment, with the `zenith_env`
+For more complicated cases, you can build a custom Neon Environment, with the `neon_env`
 fixture:
 
 ```python
-def test_foobar(zenith_env_builder: ZenithEnvBuilder):
+def test_foobar(neon_env_builder: NeonEnvBuilder):
     # Prescribe the environment.
     # We want to have 3 safekeeper nodes, and use JWT authentication in the
     # connections to the page server
-    zenith_env_builder.num_safekeepers = 3
-    zenith_env_builder.set_pageserver_auth(True)
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.set_pageserver_auth(True)
 
     # Now create the environment. This initializes the repository, and starts
     # up the page server and the safekeepers
-    env = zenith_env_builder.init()
+    env = neon_env_builder.init_start()
 
     # Run the test
     ...

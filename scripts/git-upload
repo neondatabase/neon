@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 
-from contextlib import contextmanager
-import shlex
-from tempfile import TemporaryDirectory
-from distutils.dir_util import copy_tree
-from pathlib import Path
-
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import textwrap
+from contextlib import contextmanager
+from distutils.dir_util import copy_tree
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Optional
 
 
@@ -80,12 +79,14 @@ class GitRepo:
                 print('No changes detected, quitting')
                 return
 
-            run([
+            git_with_user = [
                 'git',
                 '-c',
                 'user.name=vipvap',
                 '-c',
                 'user.email=vipvap@zenith.tech',
+            ]
+            run(git_with_user + [
                 'commit',
                 '--author="vipvap <vipvap@zenith.tech>"',
                 f'--message={message}',
@@ -94,7 +95,7 @@ class GitRepo:
             for _ in range(5):
                 try:
                     run(['git', 'fetch', 'origin', branch])
-                    run(['git', 'rebase', f'origin/{branch}'])
+                    run(git_with_user + ['rebase', f'origin/{branch}'])
                     run(['git', 'push', 'origin', branch])
                     return
 
