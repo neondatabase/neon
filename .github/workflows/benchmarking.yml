@@ -164,7 +164,7 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:pinned
       options: --init

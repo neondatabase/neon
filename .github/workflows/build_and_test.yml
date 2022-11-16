@@ -18,8 +18,8 @@ env:
 
 jobs:
   tag:
-    runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    runs-on: [ self-hosted, dev, x64 ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
@@ -46,7 +46,7 @@ jobs:
         id: build-tag
 
   build-neon:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -236,7 +236,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -269,7 +269,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -300,7 +300,7 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   merge-allure-report:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -338,7 +338,7 @@ jobs:
           DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
 
   coverage-report:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -415,7 +415,7 @@ jobs:
         shell: bash -euxo pipefail {0}
 
   trigger-e2e-tests:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -460,7 +460,7 @@ jobs:
             }"
 
   neon-image:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
@@ -478,7 +478,7 @@ jobs:
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
 
   compute-tools-image:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
@@ -493,7 +493,7 @@ jobs:
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
   compute-node-image-v14:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
     steps:
@@ -510,7 +510,7 @@ jobs:
         run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}}
 
   compute-node-image-v15:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
     steps:
@@ -528,7 +528,7 @@ jobs:
 
   test-images:
     needs: [ tag, neon-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
 
     steps:
       - name: Checkout
@@ -570,7 +570,7 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag, test-images ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
@@ -586,7 +586,7 @@ jobs:
           aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
 
   push-docker-hub:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     needs: [ promote-images, tag ]
     container: golang:1.19-bullseye
 
@@ -736,7 +736,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-new:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -816,7 +816,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -858,7 +858,7 @@ jobs:
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   deploy-proxy-new:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -928,7 +928,7 @@ jobs:
           helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   promote-compatibility-data:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
