@@ -125,24 +125,23 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 # Create repository in .neon with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/neon_local init
-Starting pageserver at '127.0.0.1:64000' in '.neon'
-
-Pageserver started
-Successfully initialized timeline 7dd0907914ac399ff3be45fb252bfdb7
-Stopping pageserver gracefully...done!
+Starting pageserver at '127.0.0.1:64000' in '.neon'.
+pageserver started, pid: 2545906
+Successfully initialized timeline de200bd42b49cc1814412c7e592dd6e9
+Stopped pageserver 1 process with pid 2545906
 
 # start pageserver and safekeeper
 > ./target/debug/neon_local start
-Starting etcd broker using /usr/bin/etcd
-Starting pageserver at '127.0.0.1:64000' in '.neon'
-
-Pageserver started
-Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'
-Safekeeper started
+Starting etcd broker using "/usr/bin/etcd"
+etcd started, pid: 2545996
+Starting pageserver at '127.0.0.1:64000' in '.neon'.
+pageserver started, pid: 2546005
+Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'.
+safekeeper 1 started, pid: 2546041
 
 # start postgres compute node
 > ./target/debug/neon_local pg start main
-Starting new postgres main on timeline de200bd42b49cc1814412c7e592dd6e9 ...
+Starting new postgres (v14) main on timeline de200bd42b49cc1814412c7e592dd6e9 ...
 Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
 Starting postgres node at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=postgres'
 
