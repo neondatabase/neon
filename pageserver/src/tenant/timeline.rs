@@ -6,12 +6,10 @@ use fail::fail_point;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::TimelineState;
-use remote_storage::DownloadError;
 use tokio::sync::watch;
 use tokio::task::spawn_blocking;
 use tracing::*;
 
-use std::borrow::Cow;
 use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -972,18 +970,8 @@ impl Timeline {
         index_part: &IndexPart,
         remote_client: &RemoteTimelineClient,
         mut local_filenames: HashSet<PathBuf>,
-        local_metadata: TimelineMetadata,
-        first_save: bool,
-    ) -> anyhow::Result<(HashSet<PathBuf>, TimelineMetadata)> {
-        let remote_metadata = index_part.parse_metadata().with_context(|| {
-            format!(
-                "Failed to parse metadata file from remote storage for tenant {}",
-                self.tenant_id
-            )
-        })?;
-
-        let remote_consistent_lsn = remote_metadata.disk_consistent_lsn();
-
+        up_to_date_disk_consistent_lsn: Lsn,
+    ) -> anyhow::Result<HashSet<PathBuf>> {
         let mut remote_filenames: HashSet<PathBuf> = HashSet::new();
         for fname in index_part.timeline_layers.iter() {
             remote_filenames.insert(fname.to_local_path(&PathBuf::from("")));
@@ -1048,10 +1036,10 @@ impl Timeline {
                 .unwrap_or(LayerFileMetadata::MISSING);
 
             if let Some(imgfilename) = ImageFileName::parse_str(fname) {
-                if imgfilename.lsn > remote_consistent_lsn {
+                if imgfilename.lsn > up_to_date_disk_consistent_lsn {
                     warn!(
                         "found future image layer {} on timeline {} remote_consistent_lsn is {}",
-                        imgfilename, self.timeline_id, remote_consistent_lsn
+                        imgfilename, self.timeline_id, up_to_date_disk_consistent_lsn
                     );
                     continue;
                 }
@@ -1078,10 +1066,10 @@ impl Timeline {
                 // OK for a delta layer to have end LSN 101, but if the end LSN
                 // is 102, then it might not have been fully flushed to disk
                 // before crash.
-                if deltafilename.lsn_range.end > remote_consistent_lsn + 1 {
+                if deltafilename.lsn_range.end > up_to_date_disk_consistent_lsn + 1 {
                     warn!(
                         "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
-                        deltafilename, self.timeline_id, remote_consistent_lsn
+                        deltafilename, self.timeline_id, up_to_date_disk_consistent_lsn
                     );
                     continue;
                 }
@@ -1106,50 +1094,12 @@ impl Timeline {
             }
         }
 
-        // Save the metadata file to local disk.
-        // Do this last, so that if we crash in-between, we won't think that the
-        // local state is valid.
-        //
-        // We should not blindly overwrite local metadata with remote one
-        // consider the case when checkpoint came, we updated local metadata and started upload task
-        // but then pageserver crashes, then on start we'll load new metadata, and then reset it to the state of
-        // remote one. But current layermap will have layers from the old metadata which is inconsistent.
-        // And with current logic it wont disgard them during load because during layermap load it sees local
-        // disk consistent lsn which is ahead of layer lsns.
-        // If we treat remote as source of truth we need to completely syc with it, i e delete local files which are
-        // missing on the remote. This will add extra work, wal for these layers needs to be reingested for example
-        //
-        // So the solution is to update local metadata only when remote one has greater disk_consistent_lsn
-
-        // We should merge local metadata with remote one
-        //     1) take metadata with highest disk_consistent_lsn.
-        //     2) Update disk_consistent_lsn inside timeline itself
-        //  FIXME Something else we need to merge?
-        let up_to_date_metadata =
-            if local_metadata.disk_consistent_lsn() < remote_metadata.disk_consistent_lsn() {
-                save_metadata(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_id,
-                    &remote_metadata,
-                    first_save,
-                )?;
-                // NOTE: walreceiver strictly shouldnt be running at this point.
-                //     because it will intersect with this update
-                //     it will start replication from wrong point
-                self.disk_consistent_lsn
-                    .store(remote_metadata.disk_consistent_lsn());
-                remote_metadata
-            } else {
-                local_metadata
-            };
-
         // now these are local only filenames
         let local_only_filenames = local_filenames
             .difference(&remote_filenames)
             .cloned()
             .collect();
-        Ok((local_only_filenames, up_to_date_metadata))
+        Ok(local_only_filenames)
     }
 
     ///
@@ -1164,15 +1114,15 @@ impl Timeline {
     /// This is used during tenant attach. The layer map must have been loaded
     /// with local filesystem contents already.
     ///
-    /// The caller can provide IndexPart if it has it already. If it's None,
-    /// this function will download it.
+    /// The caller should provide IndexPart if it exists on the remote storage. If it's None,
+    /// we assume that it is missing on the remote storage, which means that we initialized
+    /// a timeline and then restarted before successful upload was performed
     ///
-    #[instrument(skip(self, index_part, local_metadata, first_save))]
+    #[instrument(skip(self, index_part, up_to_date_metadata))]
     pub async fn reconcile_with_remote(
         &self,
-        local_metadata: TimelineMetadata,
+        up_to_date_metadata: &TimelineMetadata,
         index_part: Option<&IndexPart>,
-        first_save: bool,
     ) -> anyhow::Result<()> {
         info!("starting");
         let remote_client = self
@@ -1180,42 +1130,33 @@ impl Timeline {
             .as_ref()
             .ok_or_else(|| anyhow!("cannot download without remote storage"))?;
 
+        let disk_consistent_lsn = up_to_date_metadata.disk_consistent_lsn();
+
         // Build a map of local layers for quick lookups
         let mut local_filenames: HashSet<PathBuf> = HashSet::new();
         for layer in self.layers.read().unwrap().iter_historic_layers() {
             local_filenames.insert(layer.filename());
         }
 
-        // If the caller supplied an IndexPart, use it. Otherwise download it from remote storage.
-        // In case there is no such file on remote storage (which is possible if pageserver
-        // was interrupted before index file was uploaded).
-        // FIXME One way around it would be not considering timeline as initialized before upload finishes.
-        // So if there is no index file on the remote we consider all locally existing files as local only
-        // and schedule their upload
-        let index_part: Result<Cow<'_, IndexPart>, DownloadError> = match index_part {
-            Some(ip) => Ok(Cow::Borrowed(ip)),
-            None => remote_client.download_index_file().await.map(Cow::Owned),
-        };
-        let (local_only_filenames, up_to_date_metadata) = match index_part {
-            Ok(index_part) => {
-                remote_client.init_upload_queue(&index_part)?;
-                let (local_only_filenames, up_to_date_metadata) = self
+        let local_only_filenames = match index_part {
+            Some(index_part) => {
+                info!("initializing upload queue from index");
+                let local_only_filenames = self
                     .download_missing(
-                        &index_part,
+                        index_part,
                         remote_client,
                         local_filenames,
-                        local_metadata,
-                        first_save,
+                        disk_consistent_lsn,
                     )
                     .await?;
-                (local_only_filenames, up_to_date_metadata)
+                remote_client.init_upload_queue(index_part)?;
+                local_only_filenames
             }
-            Err(DownloadError::NotFound) => {
-                info!("no index file was found on the remote, assuming initial upload");
-                remote_client.init_upload_queue_for_empty_remote(&local_metadata)?;
-                (local_filenames, local_metadata)
+            None => {
+                info!("initializing upload queue as empty");
+                remote_client.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
+                local_filenames
             }
-            Err(e) => return Err(anyhow::anyhow!(e)),
         };
 
         // TODO what to do with physical size?
@@ -1232,9 +1173,7 @@ impl Timeline {
             remote_client.schedule_layer_file_upload(&absolute, &LayerFileMetadata::new(sz))?;
         }
         if !local_only_filenames.is_empty() {
-            // FIXME this we should merge local and remote metadata, at least remote_consistent_lsn
-            //    see comment in download_missing
-            remote_client.schedule_index_upload(&up_to_date_metadata)?;
+            remote_client.schedule_index_upload(up_to_date_metadata)?;
         }
 
         info!("Done");
@@ -1746,7 +1685,8 @@ impl Timeline {
         // After crash, we will restart WAL streaming and processing from that point.
         if disk_consistent_lsn != old_disk_consistent_lsn {
             assert!(disk_consistent_lsn > old_disk_consistent_lsn);
-            self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)?;
+            self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)
+                .context("update_metadata_file")?;
             // Also update the in-memory copy
             self.disk_consistent_lsn.store(disk_consistent_lsn);
         }
@@ -1801,13 +1741,18 @@ impl Timeline {
             self.tenant_id,
             &metadata,
             false,
-        )?;
+        )
+        .context("save_metadata")?;
 
         if let Some(remote_client) = &self.remote_client {
             for (path, layer_metadata) in layer_paths_to_upload {
-                remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
+                remote_client
+                    .schedule_layer_file_upload(&path, &layer_metadata)
+                    .context("schedule_layer_file_upload")?;
             }
-            remote_client.schedule_index_upload(&metadata)?;
+            remote_client
+                .schedule_index_upload(&metadata)
+                .context("schedule_layer_file_upload")?;
         }
 
         Ok(())

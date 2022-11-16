@@ -15,6 +15,7 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use futures::Stream;
 use pageserver_api::models::TimelineState;
+use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::sync::watch;
 use tokio_util::io::StreamReader;
@@ -360,6 +361,44 @@ impl Drop for TimelineUninitMark {
     }
 }
 
+// We should not blindly overwrite local metadata with remote one.
+// For example, consider the following case:
+//     Checkpoint comes, we update local metadata and start upload task but after that
+//     pageserver crashes. During startup we'll load new metadata, and then reset it
+//     to the state of remote one. But current layermap will have layers from the old
+//     metadata which is inconsistent.
+//     And with current logic it wont disgard them during load because during layermap
+//     load it sees local disk consistent lsn which is ahead of layer lsns.
+//     If we treat remote as source of truth we need to completely sync with it,
+//     i e delete local files which are missing on the remote. This will add extra work,
+//     wal for these layers needs to be reingested for example
+//
+// So the solution is to take remote metadata only when it has greater disk_consistent_lsn
+pub fn merge_local_remote_metadata<'a>(
+    local: Option<&'a TimelineMetadata>,
+    remote: Option<&'a TimelineMetadata>,
+) -> anyhow::Result<(&'a TimelineMetadata, bool)> {
+    match (local, remote) {
+        (None, None) => anyhow::bail!("we should have either local metadata or remote"),
+        (None, Some(remote)) => Ok((remote, false)),
+        (Some(local), None) => Ok((local, true)),
+        (Some(local), Some(remote)) => {
+            // take metadata with highest disk_consistent_lsn.
+            // FIXME Do we need to merge something?
+            if local.disk_consistent_lsn() < remote.disk_consistent_lsn() {
+                Ok((remote, false))
+            } else {
+                Ok((local, true))
+            }
+        }
+    }
+}
+
+struct RemoteStartupData {
+    index_part: IndexPart,
+    remote_metadata: TimelineMetadata,
+}
+
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
@@ -369,12 +408,19 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         remote_client: Option<RemoteTimelineClient>,
-        index_part: Option<&IndexPart>,
-        metadata: TimelineMetadata,
+        remote_startup_data: Option<RemoteStartupData>,
+        local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
+
+        let (up_to_date_metadata, picked_local) = merge_local_remote_metadata(
+            local_metadata.as_ref(),
+            remote_startup_data.as_ref().map(|r| &r.remote_metadata),
+        )
+        .context("merge_local_remote_metadata")?
+        .to_owned();
 
         let timeline = {
             // avoiding holding it across awaits
@@ -387,7 +433,7 @@ impl Tenant {
 
             let dummy_timeline = self.create_timeline_data(
                 timeline_id,
-                metadata.clone(),
+                up_to_date_metadata.clone(),
                 ancestor.clone(),
                 remote_client,
             )?;
@@ -413,7 +459,12 @@ impl Tenant {
                     //     can be called directly on Uninitielized timeline
                     //     also leades to redundant .clone
                     let broken_timeline = self
-                        .create_timeline_data(timeline_id, metadata.clone(), ancestor, None)
+                        .create_timeline_data(
+                            timeline_id,
+                            up_to_date_metadata.clone(),
+                            ancestor,
+                            None,
+                        )
                         .with_context(|| {
                             format!(
                             "Failed to crate broken timeline data for {tenant_id}/{timeline_id}"
@@ -431,9 +482,24 @@ impl Tenant {
             // missing locally, and scheduling uploads for anything that's missing
             // in remote storage.
             timeline
-                .reconcile_with_remote(metadata, index_part, first_save)
+                .reconcile_with_remote(
+                    up_to_date_metadata,
+                    remote_startup_data.as_ref().map(|r| &r.index_part),
+                )
                 .await
                 .context("failed to reconcile with remote")?
+        }
+
+        // Save the metadata file to local disk.
+        if !picked_local {
+            save_metadata(
+                self.conf,
+                timeline_id,
+                tenant_id,
+                up_to_date_metadata,
+                first_save,
+            )
+            .context("save_metadata")?;
         }
 
         // Finally launch walreceiver
@@ -536,27 +602,28 @@ impl Tenant {
         info!("found {} timelines", remote_timelines.len());
 
         let mut timeline_ancestors: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-        let mut index_parts: HashMap<TimelineId, &IndexPart> = HashMap::new();
-        for (timeline_id, index_part) in remote_timelines.iter() {
+        let mut index_parts: HashMap<TimelineId, IndexPart> = HashMap::new();
+        for (timeline_id, index_part) in remote_timelines {
             let remote_metadata = index_part.parse_metadata().with_context(|| {
                 format!(
                     "Failed to parse metadata file from remote storage for tenant {} timeline {}",
                     self.tenant_id, timeline_id
                 )
             })?;
-            timeline_ancestors.insert(*timeline_id, remote_metadata);
-            index_parts.insert(*timeline_id, index_part);
+            timeline_ancestors.insert(timeline_id, remote_metadata);
+            index_parts.insert(timeline_id, index_part);
         }
 
         // For every timeline, download the metadata file, scan the local directory,
         // and build a layer map that contains an entry for each remote and local
         // layer file.
         let sorted_timelines = tree_sort_timelines(timeline_ancestors)?;
-        for (timeline_id, _metadata) in sorted_timelines {
+        for (timeline_id, remote_metadata) in sorted_timelines {
             // TODO again handle early failure
             self.load_remote_timeline(
                 timeline_id,
-                index_parts[&timeline_id],
+                index_parts.remove(&timeline_id).unwrap(),
+                remote_metadata,
                 remote_storage.clone(),
             )
             .await
@@ -584,24 +651,18 @@ impl Tenant {
         Ok(())
     }
 
-    #[instrument(skip(self, index_part, remote_storage), fields(timeline_id=%timeline_id))]
+    #[instrument(skip(self, index_part, remote_metadata, remote_storage), fields(timeline_id=%timeline_id))]
     async fn load_remote_timeline(
         &self,
         timeline_id: TimelineId,
-        index_part: &IndexPart,
+        index_part: IndexPart,
+        remote_metadata: TimelineMetadata,
         remote_storage: GenericRemoteStorage,
     ) -> anyhow::Result<()> {
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
             .context("Failed to create new timeline directory")?;
-
-        let remote_metadata = index_part.parse_metadata().with_context(|| {
-            format!(
-                "Failed to parse metadata file from remote storage for tenant {}",
-                self.tenant_id
-            )
-        })?;
 
         let remote_client =
             create_remote_timeline_client(remote_storage, self.conf, self.tenant_id, timeline_id)?;
@@ -619,11 +680,19 @@ impl Tenant {
             None
         };
 
+        // Even if there is local metadata it cannot be ahead of the remote one
+        // since we're attaching. Even if we resume interrupted attach remote one
+        // cannot be older than the local one
+        let local_metadata = None;
+
         self.setup_timeline(
             timeline_id,
             Some(remote_client),
-            Some(index_part),
-            remote_metadata,
+            Some(RemoteStartupData {
+                index_part,
+                remote_metadata,
+            }),
+            local_metadata,
             ancestor,
             true,
         )
@@ -810,12 +879,13 @@ impl Tenant {
         //    1. "Timeline has no ancestor and no layer files"
 
         // XXX get rid of enable_background_jobs
-        let enable_background_jobs = sorted_timelines.len() > 0;
+        let enable_background_jobs = !sorted_timelines.is_empty();
 
-        for (timeline_id, metadata) in sorted_timelines {
+        for (timeline_id, local_metadata) in sorted_timelines {
             // FIXME should we fail load of whole tenant if one timeline failed?
             //   consider branch hierarchy. Maybe set one to broken and others to Paused or something
-            self.load_local_timeline(timeline_id, metadata).await?;
+            self.load_local_timeline(timeline_id, local_metadata)
+                .await?;
         }
 
         // We're ready for business.
@@ -831,13 +901,13 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, metadata), fields(timeline_id=%timeline_id))]
+    #[instrument(skip(self, local_metadata), fields(timeline_id=%timeline_id))]
     async fn load_local_timeline(
         &self,
         timeline_id: TimelineId,
-        metadata: TimelineMetadata,
+        local_metadata: TimelineMetadata,
     ) -> anyhow::Result<()> {
-        let ancestor = if let Some(ancestor_timeline_id) = metadata.ancestor_timeline() {
+        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
             let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
             .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
             Some(ancestor_timeline)
@@ -858,8 +928,33 @@ impl Tenant {
             })
             .transpose()?;
 
-        self.setup_timeline(timeline_id, remote_client, None, metadata, ancestor, false)
-            .await
+        let remote_startup_data = match &remote_client {
+            Some(remote_client) => match remote_client.download_index_file().await {
+                Ok(index_part) => {
+                    let remote_metadata = index_part.parse_metadata().context("parse_metadata")?;
+                    Some(RemoteStartupData {
+                        index_part,
+                        remote_metadata,
+                    })
+                }
+                Err(DownloadError::NotFound) => {
+                    info!("no index file was found on the remote");
+                    None
+                }
+                Err(e) => return Err(anyhow::anyhow!(e)),
+            },
+            None => None,
+        };
+
+        self.setup_timeline(
+            timeline_id,
+            remote_client,
+            remote_startup_data,
+            Some(local_metadata),
+            ancestor,
+            false,
+        )
+        .await
     }
 
     pub fn tenant_id(&self) -> TenantId {

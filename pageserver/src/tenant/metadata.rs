@@ -242,7 +242,8 @@ pub fn save_metadata(
     let mut file = VirtualFile::open_with_options(
         &path,
         OpenOptions::new().write(true).create_new(first_save),
-    )?;
+    )
+    .context("open_with_options")?;
 
     let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
 
