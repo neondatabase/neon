@@ -274,11 +274,15 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_info = async {
-        let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
-        let tenant_state = tenant.current_state();
-        let timeline = tokio::task::spawn_blocking(move || tenant.get_timeline(timeline_id, false))
-            .await
-            .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
+        let (tenant_state, timeline) = tokio::task::spawn_blocking(move || {
+            let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
+            Ok((
+                tenant.current_state(),
+                tenant.get_timeline(timeline_id, false),
+            ))
+        })
+        .await
+        .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
 
         let timeline = timeline.map_err(ApiError::NotFound)?;
 
