@@ -614,8 +614,9 @@ impl PageServerConf {
         PathBuf::from(format!("../tmp_check/test_{test_name}"))
     }
 
-    #[cfg(test)]
     pub fn dummy_conf(repo_dir: PathBuf) -> Self {
+        let pg_distrib_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
+
         PageServerConf {
             id: NodeId(0),
             wait_lsn_timeout: Duration::from_secs(60),
@@ -626,7 +627,7 @@ impl PageServerConf {
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             superuser: "cloud_admin".to_string(),
             workdir: repo_dir,
-            pg_distrib_dir: PathBuf::new(),
+            pg_distrib_dir,
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
