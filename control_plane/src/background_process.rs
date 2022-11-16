@@ -26,8 +26,18 @@ use nix::unistd::Pid;
 
 use utils::lock_file;
 
-const RETRIES: u32 = 15;
-const RETRY_TIMEOUT_MILLIS: u64 = 500;
+// These constants control the loop used to poll for process start / stop.
+//
+// The loop waits for at most 10 seconds, polling every 100 ms.
+// Once a second, it prints a dot ("."), to give the user an indication that
+// it's waiting. If the process hasn't started/stopped after 5 seconds,
+// it prints a notice that it's taking long, but keeps waiting.
+//
+const RETRY_UNTIL_SECS: u64 = 10;
+const RETRIES: u64 = (RETRY_UNTIL_SECS * 1000) / RETRY_INTERVAL_MILLIS;
+const RETRY_INTERVAL_MILLIS: u64 = 100;
+const DOT_EVERY_RETRIES: u64 = 10;
+const NOTICE_AFTER_RETRIES: u64 = 50;
 
 /// Argument to `start_process`, to indicate whether it should create pidfile or if the process creates
 /// it itself.
@@ -107,16 +117,16 @@ where
                 return Ok(spawned_process);
             }
             Ok(false) => {
-                if retries < 5 {
+                if retries == NOTICE_AFTER_RETRIES {
+                    // The process is taking a long time to start up. Keep waiting, but
+                    // print a message
+                    print!("\n{process_name} has not started yet, continuing to wait");
+                }
+                if retries % DOT_EVERY_RETRIES == 0 {
                     print!(".");
                     io::stdout().flush().unwrap();
-                } else {
-                    if retries == 5 {
-                        println!() // put a line break after dots for second message
-                    }
-                    println!("{process_name} has not started yet, retrying ({retries})...");
                 }
-                thread::sleep(Duration::from_millis(RETRY_TIMEOUT_MILLIS));
+                thread::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS));
             }
             Err(e) => {
                 println!("{process_name} failed to start: {e:#}");
@@ -127,7 +137,8 @@ where
             }
         }
     }
-    anyhow::bail!("{process_name} could not start in {RETRIES} attempts");
+    println!();
+    anyhow::bail!("{process_name} did not start in {RETRY_UNTIL_SECS} seconds");
 }
 
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
@@ -158,7 +169,7 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
     }
 
     // Wait until process is gone
-    for _ in 0..RETRIES {
+    for retries in 0..RETRIES {
         match process_has_stopped(pid) {
             Ok(true) => {
                 println!("\n{process_name} stopped");
@@ -170,9 +181,16 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
                 return Ok(());
             }
             Ok(false) => {
-                print!(".");
-                io::stdout().flush().unwrap();
-                thread::sleep(Duration::from_secs(1))
+                if retries == NOTICE_AFTER_RETRIES {
+                    // The process is taking a long time to start up. Keep waiting, but
+                    // print a message
+                    print!("\n{process_name} has not stopped yet, continuing to wait");
+                }
+                if retries % DOT_EVERY_RETRIES == 0 {
+                    print!(".");
+                    io::stdout().flush().unwrap();
+                }
+                thread::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS));
             }
             Err(e) => {
                 println!("{process_name} with pid {pid} failed to stop: {e:#}");
@@ -180,8 +198,8 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
             }
         }
     }
-
-    anyhow::bail!("{process_name} with pid {pid} failed to stop in {RETRIES} attempts");
+    println!();
+    anyhow::bail!("{process_name} with pid {pid} did not stop in {RETRY_UNTIL_SECS} seconds");
 }
 
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
