@@ -25,6 +25,11 @@ def test_seqscans(neon_with_baseline: PgCompare, rows: int, iters: int, workers:
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
+
+            if True:
+                cur.execute("set enable_seqscan_prefetch = on;")
+                cur.execute("set seqscan_prefetch_buffers = 10;")
+
             cur.execute("create table t (i integer);")
             cur.execute(f"insert into t values (generate_series(1,{rows}));")
 
