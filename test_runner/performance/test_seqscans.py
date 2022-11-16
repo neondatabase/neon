@@ -6,6 +6,7 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import PgCompare
 from fixtures.log_helper import log
+from pytest_lazyfixture import lazy_fixture  # type: ignore
 
 
 @pytest.mark.parametrize(
@@ -20,9 +21,16 @@ from fixtures.log_helper import log
         pytest.param(10000000, 1, 4),
     ],
 )
-def test_seqscans(neon_with_baseline: PgCompare, rows: int, iters: int, workers: int):
-    env = neon_with_baseline
-
+@pytest.mark.parametrize(
+    "env",
+    [
+        # Run on all envs
+        pytest.param(lazy_fixture("neon_compare"), id="neon"),
+        pytest.param(lazy_fixture("vanilla_compare"), id="vanilla"),
+        pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
+    ],
+)
+def test_seqscans(env: PgCompare, rows: int, iters: int, workers: int):
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("create table t (i integer);")
