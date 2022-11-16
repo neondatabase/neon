@@ -2661,6 +2661,8 @@ def test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Iterator[P
 
     yield test_dir
 
+    shutil.rmtree(test_dir)
+
     allure_attach_from_dir(test_dir)
 
 

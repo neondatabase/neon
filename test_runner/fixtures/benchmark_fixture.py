@@ -457,7 +457,10 @@ def pytest_terminal_summary(
                     if prop["unit"] == "s":
                         neon_value = prop["value"]
                         vanilla_value = dict(vanilla_report.user_properties)[key]["value"]
-                        ratio = float(neon_value) / vanilla_value
+                        try:
+                            ratio = float(neon_value) / vanilla_value
+                        except ZeroDivisionError:
+                            ratio = 99999
 
                         results.append((ratio, name.replace("[neon", "[neon/vanilla"), prop["name"]))
 
