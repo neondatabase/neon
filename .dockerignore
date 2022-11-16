@@ -5,6 +5,7 @@
 !Cargo.lock
 !Makefile
 
+!broker/
 !.cargo/
 !.config/
 !control_plane/
