@@ -1198,6 +1198,7 @@ impl Timeline {
         };
         let (local_only_filenames, up_to_date_metadata) = match index_part {
             Ok(index_part) => {
+                remote_client.init_upload_queue(&index_part)?;
                 let (local_only_filenames, up_to_date_metadata) = self
                     .download_missing(
                         &index_part,
@@ -1207,12 +1208,11 @@ impl Timeline {
                         first_save,
                     )
                     .await?;
-                remote_client.init_upload_queue(&index_part)?;
                 (local_only_filenames, up_to_date_metadata)
             }
             Err(DownloadError::NotFound) => {
                 info!("no index file was found on the remote");
-                remote_client.init_upload_queue_empty(&local_metadata)?;
+                remote_client.init_upload_queue_empty()?;
                 (local_filenames, local_metadata)
             }
             Err(e) => return Err(anyhow::anyhow!(e)),
