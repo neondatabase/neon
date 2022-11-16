@@ -35,12 +35,12 @@ Pageserver consists of:
 * On Ubuntu or Debian, this set of packages should be sufficient to build the code:
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev etcd cmake postgresql-client
+libssl-dev clang pkg-config libpq-dev etcd cmake postgresql-client protobuf-compiler
 ```
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
-  libseccomp-devel perl clang cmake etcd postgresql postgresql-contrib
+  libseccomp-devel perl clang cmake etcd postgresql postgresql-contrib protobuf-compiler
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
