@@ -809,6 +809,9 @@ impl Tenant {
         // FIXME original collect_timeline_files contained one more check:
         //    1. "Timeline has no ancestor and no layer files"
 
+        // XXX get rid of enable_background_jobs
+        let enable_background_jobs = sorted_timelines.len() > 0;
+
         for (timeline_id, metadata) in sorted_timelines {
             // FIXME should we fail load of whole tenant if one timeline failed?
             //   consider branch hierarchy. Maybe set one to broken and others to Paused or something
@@ -818,7 +821,7 @@ impl Tenant {
         // We're ready for business.
         // Change to active state under the hood spawns background loops
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate(true);
+        self.activate(enable_background_jobs);
 
         info!("Done");
 

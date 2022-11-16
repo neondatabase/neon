@@ -217,8 +217,9 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.allowed_errors.append(
         ".*marking .* as locally complete, while it doesnt exist in remote index.*"
     )
-    env.pageserver.allowed_errors.append(".*Tenant .* has no timelines directory.*")
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
+    env.pageserver.allowed_errors.append(
+        ".*could not load tenant.*Failed to list timelines directory.*"
+    )
 
     client = env.pageserver.http_client()
 
