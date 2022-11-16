@@ -2,7 +2,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 import toml  # TODO: replace with tomllib for Python >= 3.11
@@ -160,6 +160,7 @@ def test_forward_compatibility(
         from_dir=compatibility_snapshot_dir,
         to_dir=test_output_dir / "compatibility_snapshot",
         port_distributor=port_distributor,
+        pg_distrib_dir=compatibility_postgres_distrib_dir,
     )
 
     breaking_changes_allowed = (
@@ -189,7 +190,12 @@ def test_forward_compatibility(
     ), "Breaking changes are allowed by ALLOW_FORWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
-def prepare_snapshot(from_dir: Path, to_dir: Path, port_distributor: PortDistributor):
+def prepare_snapshot(
+    from_dir: Path,
+    to_dir: Path,
+    port_distributor: PortDistributor,
+    pg_distrib_dir: Optional[Path] = None,
+):
     assert from_dir.exists(), f"Snapshot '{from_dir}' doesn't exist"
     assert (from_dir / "repo").exists(), f"Snapshot '{from_dir}' doesn't contain a repo directory"
     assert (from_dir / "dump.sql").exists(), f"Snapshot '{from_dir}' doesn't contain a dump.sql"
@@ -214,7 +220,7 @@ def prepare_snapshot(from_dir: Path, to_dir: Path, port_distributor: PortDistrib
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
     pageserver_config = toml.load(pageserver_toml)
-    pageserver_config["remote_storage"]["local_path"] = repo_dir / "local_fs_remote_storage"
+    pageserver_config["remote_storage"]["local_path"] = str(repo_dir / "local_fs_remote_storage")
     pageserver_config["listen_http_addr"] = port_distributor.replace_with_new_port(
         pageserver_config["listen_http_addr"]
     )
@@ -224,6 +230,9 @@ def prepare_snapshot(from_dir: Path, to_dir: Path, port_distributor: PortDistrib
     pageserver_config["broker_endpoints"] = [
         port_distributor.replace_with_new_port(ep) for ep in pageserver_config["broker_endpoints"]
     ]
+
+    if pg_distrib_dir:
+        pageserver_config["pg_distrib_dir"] = str(pg_distrib_dir)
 
     with pageserver_toml.open("w") as f:
         toml.dump(pageserver_config, f)
@@ -244,7 +253,10 @@ def prepare_snapshot(from_dir: Path, to_dir: Path, port_distributor: PortDistrib
         sk["http_port"] = port_distributor.replace_with_new_port(sk["http_port"])
         sk["pg_port"] = port_distributor.replace_with_new_port(sk["pg_port"])
 
-    with (snapshot_config_toml).open("w") as f:
+    if pg_distrib_dir:
+        snapshot_config["pg_distrib_dir"] = str(pg_distrib_dir)
+
+    with snapshot_config_toml.open("w") as f:
         toml.dump(snapshot_config, f)
 
     # Ensure that snapshot doesn't contain references to the original path
