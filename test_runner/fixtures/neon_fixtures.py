@@ -30,6 +30,7 @@ import psycopg2
 import pytest
 import requests
 from _pytest.config import Config
+from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from fixtures.log_helper import log
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -2735,6 +2736,15 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return test_dir
 
 
+def pytest_addoption(parser: Parser):
+    parser.addoption(
+        "--cleanup-test-output",
+        action="store_true",
+        default=False,
+        help="Remove test output directory when done",
+    )
+
+
 # This is autouse, so the test output directory always gets created, even
 # if a test doesn't put anything there. It also solves a problem with the
 # neon_simple_env fixture: if TEST_SHARED_FIXTURES is not set, it
@@ -2745,7 +2755,9 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
 @pytest.fixture(scope="function", autouse=True)
-def test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Iterator[Path]:
+def test_output_dir(
+    request: FixtureRequest, top_output_dir: Path, pytestconfig: Config
+) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
     # one directory per test
@@ -2756,7 +2768,10 @@ def test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Iterator[P
 
     yield test_dir
 
-    allure_attach_from_dir(test_dir)
+    if pytestconfig.getoption("--cleanup-test-output"):
+        shutil.rmtree(test_dir)
+    else:
+        allure_attach_from_dir(test_dir)
 
 
 SKIP_DIRS = frozenset(
