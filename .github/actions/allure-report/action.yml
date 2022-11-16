@@ -89,7 +89,7 @@ runs:
             "buildOrder": ${GITHUB_RUN_ID},
             "buildName": "GitHub Actions Run #${{ github.run_number }}/${GITHUB_RUN_ATTEMPT}",
             "buildUrl": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}",
-            "reportUrl": "https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html",
+            "reportUrl": "https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/index.html",
             "reportName": "Allure Report"
           }
         EOF
@@ -171,8 +171,9 @@ runs:
 
         # Upload a history and the final report (in this particular order to not to have duplicated history in 2 places)
         aws s3 mv --recursive --only-show-errors "${TEST_OUTPUT}/allure/report/history" "s3://${BUCKET}/${REPORT_PREFIX}/latest/history"
-        aws s3 mv --recursive --only-show-errors "${TEST_OUTPUT}/allure/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
+        aws s3 mv --recursive --only-show-errors "${TEST_OUTPUT}/allure/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
 
+        RUN_REPORT_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/index.html
         REPORT_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html
 
         # Generate redirect
@@ -180,10 +181,11 @@ runs:
           <!DOCTYPE html>
 
           <meta charset="utf-8">
-          <title>Redirecting to ${REPORT_URL}</title>
-          <meta http-equiv="refresh" content="0; URL=${REPORT_URL}">
+          <title>Redirecting to ${RUN_REPORT_URL}</title>
+          <meta http-equiv="refresh" content="0; URL=${RUN_REPORT_URL}">
         EOF
         aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
+        aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html"
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
         echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
