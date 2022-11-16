@@ -1211,8 +1211,8 @@ impl Timeline {
                 (local_only_filenames, up_to_date_metadata)
             }
             Err(DownloadError::NotFound) => {
-                info!("no index file was found on the remote");
-                remote_client.init_upload_queue_empty()?;
+                info!("no index file was found on the remote, assuming initial upload");
+                remote_client.init_upload_queue_for_empty_remote(&local_metadata)?;
                 (local_filenames, local_metadata)
             }
             Err(e) => return Err(anyhow::anyhow!(e)),
