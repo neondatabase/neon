@@ -1865,7 +1865,7 @@ impl Tenant {
                 tenant_id,
                 new_timeline_id,
             )?;
-            remote_client.init_upload_queue_empty(&new_metadata)?;
+            remote_client.init_upload_queue_empty()?;
             Some(remote_client)
         } else {
             None
