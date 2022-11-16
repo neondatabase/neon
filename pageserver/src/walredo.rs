@@ -1010,3 +1010,110 @@ fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
     tag.ser_into(buf)
         .expect("serialize BufferTag should always succeed");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{PostgresRedoManager, WalRedoManager};
+    use crate::repository::Key;
+    use crate::{config::PageServerConf, walrecord::NeonWalRecord};
+    use bytes::Bytes;
+    use std::str::FromStr;
+    use utils::{id::TenantId, lsn::Lsn};
+
+    #[test]
+    fn short_v14_redo() {
+        let expected = std::fs::read("fixtures/short_v14_redo.page").unwrap();
+
+        let h = RedoHarness::new().unwrap();
+
+        let page = h
+            .manager
+            .request_redo(
+                Key {
+                    field1: 0,
+                    field2: 1663,
+                    field3: 13010,
+                    field4: 1259,
+                    field5: 0,
+                    field6: 0,
+                },
+                Lsn::from_str("0/16E2408").unwrap(),
+                None,
+                short_records(),
+                14,
+            )
+            .unwrap();
+
+        assert_eq!(&expected, &*page);
+    }
+
+    #[test]
+    fn short_v14_fails_for_wrong_key_but_returns_zero_page() {
+        let h = RedoHarness::new().unwrap();
+
+        let page = h
+            .manager
+            .request_redo(
+                Key {
+                    field1: 0,
+                    field2: 1663,
+                    // key should be 13010
+                    field3: 13130,
+                    field4: 1259,
+                    field5: 0,
+                    field6: 0,
+                },
+                Lsn::from_str("0/16E2408").unwrap(),
+                None,
+                short_records(),
+                14,
+            )
+            .unwrap();
+
+        // TODO: there will be some stderr printout, which is forwarded to tracing that could
+        // perhaps be captured as long as it's in the same thread.
+        assert_eq!(page, crate::ZERO_PAGE);
+    }
+
+    #[allow(clippy::octal_escapes)]
+    fn short_records() -> Vec<(Lsn, NeonWalRecord)> {
+        vec![
+            (
+                Lsn::from_str("0/16A9388").unwrap(),
+                NeonWalRecord::Postgres {
+                    will_init: true,
+                    rec: Bytes::from_static(b"j\x03\0\0\0\x04\0\0\xe8\x7fj\x01\0\0\0\0\0\n\0\0\xd0\x16\x13Y\0\x10\0\04\x03\xd4\0\x05\x7f\x06\0\0\xd22\0\0\xeb\x04\0\0\0\0\0\0\xff\x03\0\0\0\0\x80\xeca\x01\0\0\x01\0\xd4\0\xa0\x1d\0 \x04 \0\0\0\0/\0\x01\0\xa0\x9dX\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0.\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\00\x9f\x9a\x01P\x9e\xb2\x01\0\x04\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x02\0!\0\x01\x08 \xff\xff\xff?\0\0\0\0\0\0@\0\0another_table\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x98\x08\0\0\x02@\0\0\0\0\0\0\n\0\0\0\x02\0\0\0\0@\0\0\0\0\0\0\0\0\0\0\0\0\x80\xbf\0\0\0\0\0\0\0\0\0\0pr\x01\0\0\0\0\0\0\0\0\x01d\0\0\0\0\0\0\x04\0\0\x01\0\0\0\0\0\0\0\x0c\x02\0\0\0\0\0\0\0\0\0\0\0\0\0\0/\0!\x80\x03+ \xff\xff\xff\x7f\0\0\0\0\0\xdf\x04\0\0pg_type\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x0b\0\0\0G\0\0\0\0\0\0\0\n\0\0\0\x02\0\0\0\0\0\0\0\0\0\0\0\x0e\0\0\0\0@\x16D\x0e\0\0\0K\x10\0\0\x01\0pr \0\0\0\0\0\0\0\0\x01n\0\0\0\0\0\xd6\x02\0\0\x01\0\0\0[\x01\0\0\0\0\0\0\0\t\x04\0\0\x02\0\0\0\x01\0\0\0\n\0\0\0\n\0\0\0\x7f\0\0\0\0\0\0\0\n\0\0\0\x02\0\0\0\0\0\0C\x01\0\0\x15\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\0.\0!\x80\x03+ \xff\xff\xff\x7f\0\0\0\0\0;\n\0\0pg_statistic\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x0b\0\0\0\xfd.\0\0\0\0\0\0\n\0\0\0\x02\0\0\0;\n\0\0\0\0\0\0\x13\0\0\0\0\0\xcbC\x13\0\0\0\x18\x0b\0\0\x01\0pr\x1f\0\0\0\0\0\0\0\0\x01n\0\0\0\0\0\xd6\x02\0\0\x01\0\0\0C\x01\0\0\0\0\0\0\0\t\x04\0\0\x01\0\0\0\x01\0\0\0\n\0\0\0\n\0\0\0\x7f\0\0\0\0\0\0\x02\0\x01")
+                }
+            ),
+            (
+                Lsn::from_str("0/16D4080").unwrap(),
+                NeonWalRecord::Postgres {
+                    will_init: false,
+                    rec: Bytes::from_static(b"\xbc\0\0\0\0\0\0\0h?m\x01\0\0\0\0p\n\0\09\x08\xa3\xea\0 \x8c\0\x7f\x06\0\0\xd22\0\0\xeb\x04\0\0\0\0\0\0\xff\x02\0@\0\0another_table\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x98\x08\0\0\x02@\0\0\0\0\0\0\n\0\0\0\x02\0\0\0\0@\0\0\0\0\0\0\x05\0\0\0\0@zD\x05\0\0\0\0\0\0\0\0\0pr\x01\0\0\0\0\0\0\0\0\x01d\0\0\0\0\0\0\x04\0\0\x01\0\0\0\x02\0")
+                }
+            )
+        ]
+    }
+
+    struct RedoHarness {
+        // underscored because unused, except for removal at drop
+        _repo_dir: tempfile::TempDir,
+        manager: PostgresRedoManager,
+    }
+
+    impl RedoHarness {
+        fn new() -> anyhow::Result<Self> {
+            let repo_dir = tempfile::tempdir()?;
+            let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
+            let conf = Box::leak(Box::new(conf));
+            let tenant_id = TenantId::generate();
+
+            let manager = PostgresRedoManager::new(conf, tenant_id);
+
+            Ok(RedoHarness {
+                _repo_dir: repo_dir,
+                manager,
+            })
+        }
+    }
+}
