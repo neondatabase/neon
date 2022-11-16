@@ -1,4 +1,4 @@
-ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+ARG REPOSITORY=neondatabase
 ARG COMPUTE_IMAGE=compute-node-v14
 ARG TAG=latest
 
