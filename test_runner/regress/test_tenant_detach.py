@@ -21,6 +21,9 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     pageserver_http = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.append(".*NotFound\\(Tenant .* not found in the local state")
+    # FIXME: we have a race condition between GC and detach. GC might fail with this
+    # error. Similar to https://github.com/neondatabase/neon/issues/2671
+    env.pageserver.allowed_errors.append(".*InternalServerError\\(No such file or directory.*")
 
     # first check for non existing tenant
     tenant_id = TenantId.generate()
