@@ -63,9 +63,11 @@ def test_remote_storage_backup_and_restore(
     )
     env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
 
-    env.pageserver.allowed_errors.append(".*Tenant download is already in progress.*")
     env.pageserver.allowed_errors.append(".*Failed to get local tenant state.*")
-    env.pageserver.allowed_errors.append(".*No metadata file found in the timeline directory.*")
+    # FIXME retry downloads without throwing errors
+    env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
+    # we have a bunch of pytest.raises for this below
+    env.pageserver.allowed_errors.append(".*tenant already exists.*")
 
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
