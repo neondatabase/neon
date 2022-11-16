@@ -195,7 +195,6 @@ enum UploadQueue {
     Initialized(UploadQueueInitialized),
 }
 /// This keeps track of queued and in-progress tasks.
-#[derive(Default)]
 struct UploadQueueInitialized {
     /// Counter to assign task IDs
     task_counter: u64,
@@ -207,13 +206,13 @@ struct UploadQueueInitialized {
     /// Metadata stored in the remote storage, taking into account all
     /// in-progress and queued operations.
     /// DANGER: do not return to outside world, e.g., safekeepers.
-    latest_metadata: Option<TimelineMetadata>,
+    latest_metadata: TimelineMetadata,
 
     /// `disk_consistent_lsn` from the last metadata file that was successfully
-    /// uploaded. None if the upload queue hasn't been initialized yet.
+    /// uploaded. `Lsn(0)` if nothing was uploaded yet.
     /// Unlike `latest_files` or `latest_metadata`, this value is never ahead.
     /// Safekeeper can rely on it to make decisions for WAL storage.
-    last_uploaded_consistent_lsn: Option<Lsn>,
+    last_uploaded_consistent_lsn: Lsn,
 
     // Breakdown of different kinds of tasks currently in-progress
     num_inprogress_layer_uploads: usize,
@@ -233,15 +232,32 @@ struct UploadQueueInitialized {
 }
 
 impl UploadQueue {
-    fn initialize_empty_remote(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
+    fn initialize_empty_remote(
+        &mut self,
+        metadata: &TimelineMetadata,
+    ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
             UploadQueue::Initialized(_) => anyhow::bail!("already initialized"),
         }
 
-        info!("initializing upload queue for new timeline");
+        info!("initializing upload queue for empty remote");
 
-        let state = UploadQueueInitialized::default();
+        let state = UploadQueueInitialized {
+            // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
+            latest_files: Default::default(),
+            latest_metadata: metadata.clone(),
+            // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
+            // safekeepers from garbage-collecting anything.
+            last_uploaded_consistent_lsn: Lsn(0),
+            // what follows are boring default initializations
+            task_counter: Default::default(),
+            num_inprogress_layer_uploads: 0,
+            num_inprogress_metadata_uploads: 0,
+            num_inprogress_deletions: 0,
+            inprogress_tasks: Default::default(),
+            queued_operations: Default::default(),
+        };
 
         *self = UploadQueue::Initialized(state);
         Ok(self.initialized_mut().expect("we just set it"))
@@ -266,18 +282,23 @@ impl UploadQueue {
             files.insert(path.clone(), layer_metadata);
         }
 
-        let metadata = index_part.parse_metadata()?;
-
+        let index_part_metadata = index_part.parse_metadata()?;
         info!(
-            "initializing upload queue with disk_consistent_lsn: {}",
-            metadata.disk_consistent_lsn()
+            "initializing upload queue with remote index_part.disk_consistent_lsn: {}",
+            index_part_metadata.disk_consistent_lsn()
         );
 
         let state = UploadQueueInitialized {
             latest_files: files,
-            latest_metadata: Some(metadata.clone()),
-            last_uploaded_consistent_lsn: Some(metadata.disk_consistent_lsn()),
-            ..Default::default()
+            latest_metadata: index_part_metadata.clone(),
+            last_uploaded_consistent_lsn: index_part_metadata.disk_consistent_lsn(),
+            // what follows are boring default initializations
+            task_counter: 0,
+            num_inprogress_layer_uploads: 0,
+            num_inprogress_metadata_uploads: 0,
+            num_inprogress_deletions: 0,
+            inprogress_tasks: Default::default(),
+            queued_operations: Default::default(),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -334,31 +355,32 @@ impl std::fmt::Display for UploadOp {
 }
 
 impl RemoteTimelineClient {
-    /// Initialize the upload queue. This must be called before any uploads can be
-    /// scheduled.
-    ///
-    /// 'index_part' is the current remote metadata file.
+    /// Initialize the upload queue for a remote storage that already received
+    /// an index file upload, i.e., it's not empty.
+    /// The given `index_part` must be the one on the remote.
     pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
-
         upload_queue.initialize_with_current_remote_index_part(index_part)?;
         Ok(())
     }
 
-    /// Like init_upload_queue, but the list of files is initially empty, and
-    /// metadata is passed as a TimelineMetadata. This is used when creating a
-    /// new timeline.
-    pub fn init_upload_queue_empty(&self) -> anyhow::Result<()> {
-        info!("initializing upload queue for new timeline");
-
+    /// Initialize the upload queue for the case where the remote storage is empty,
+    /// i.e., it doesn't have an `IndexPart`.
+    pub fn init_upload_queue_for_empty_remote(
+        &self,
+        local_metadata: &TimelineMetadata,
+    ) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_empty_remote()?;
+        upload_queue.initialize_empty_remote(local_metadata)?;
         Ok(())
     }
 
     pub fn last_uploaded_consistent_lsn(&self) -> Option<Lsn> {
-        let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialized_mut()?.last_uploaded_consistent_lsn
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|q| q.last_uploaded_consistent_lsn)
     }
 
     //
@@ -442,18 +464,14 @@ impl RemoteTimelineClient {
 
         // As documented in the struct definition, it's ok for latest_metadata to be
         // ahead of what's _actually_ on the remote during index upload.
-        upload_queue.latest_metadata = Some(metadata.clone());
+        upload_queue.latest_metadata = metadata.clone();
 
-        let disk_consistent_lsn = upload_queue
-            .latest_metadata
-            .as_ref()
-            .unwrap()
-            .disk_consistent_lsn();
+        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
 
         let index_part = IndexPart::new(
             upload_queue.latest_files.clone(),
             disk_consistent_lsn,
-            upload_queue.latest_metadata.as_ref().unwrap().to_bytes()?,
+            upload_queue.latest_metadata.to_bytes()?,
         );
         upload_queue
             .queued_operations
@@ -536,15 +554,11 @@ impl RemoteTimelineClient {
             )?;
             upload_queue.latest_files.remove(&relative_path);
         }
-        let disk_consistent_lsn = upload_queue
-            .latest_metadata
-            .as_ref()
-            .unwrap()
-            .disk_consistent_lsn();
+        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
         let index_part = IndexPart::new(
             upload_queue.latest_files.clone(),
             disk_consistent_lsn,
-            upload_queue.latest_metadata.as_ref().unwrap().to_bytes()?,
+            upload_queue.latest_metadata.to_bytes()?,
         );
         upload_queue
             .queued_operations
@@ -755,7 +769,7 @@ impl RemoteTimelineClient {
                 }
                 UploadOp::UploadMetadata(_, lsn) => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
-                    upload_queue.last_uploaded_consistent_lsn = Some(lsn);
+                    upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
                 }
                 UploadOp::Delete(_) => {
                     upload_queue.num_inprogress_deletions -= 1;
@@ -911,7 +925,8 @@ mod tests {
             remote_fs_dir.join(timeline_path.strip_prefix(&harness.conf.workdir)?);
         println!("remote_timeline_dir: {}", remote_timeline_dir.display());
 
-        client.init_upload_queue_empty()?;
+        let metadata = dummy_metadata(Lsn(0x10));
+        client.init_upload_queue_for_empty_remote(&metadata)?;
 
         // Create a couple of dummy files,  schedule upload for them
         let content_foo = dummy_contents("foo");
