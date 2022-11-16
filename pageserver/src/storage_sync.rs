@@ -204,13 +204,15 @@ struct UploadQueueInitialized {
     /// in-progress and queued operations
     latest_files: HashMap<RelativePath, LayerFileMetadata>,
 
-    /// Copy of latest remote metadata file. None if the upload queue hasn't been initialized yet.
-    /// Can be ahead of what's actually stored in remote storage, if new index file upload
-    /// has been scheduled but not finished yet.
+    /// Metadata stored in the remote storage, taking into account all
+    /// in-progress and queued operations.
+    /// DANGER: do not return to outside world, e.g., safekeepers.
     latest_metadata: Option<TimelineMetadata>,
 
     /// `disk_consistent_lsn` from the last metadata file that was successfully
     /// uploaded. None if the upload queue hasn't been initialized yet.
+    /// Unlike `latest_files` or `latest_metadata`, this value is never ahead.
+    /// Safekeeper can rely on it to make decisions for WAL storage.
     last_uploaded_consistent_lsn: Option<Lsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
@@ -437,6 +439,9 @@ impl RemoteTimelineClient {
         let upload_queue = guard
             .initialized_mut()
             .context("upload queue is not initialized")?;
+
+        // As documented in the struct definition, it's ok for latest_metadata to be
+        // ahead of what's _actually_ on the remote during index upload.
         upload_queue.latest_metadata = Some(metadata.clone());
 
         let disk_consistent_lsn = upload_queue
@@ -521,6 +526,9 @@ impl RemoteTimelineClient {
 
         // Update the remote index file, removing the to-be-deleted files from the index,
         // before deleting the actual files.
+        // NB: deleting layers doesn't affect the values stored in TimelineMetadata,
+        //     so, we don't need update it.
+
         for path in paths {
             let relative_path = RelativePath::from_local_path(
                 &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
