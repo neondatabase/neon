@@ -2,6 +2,11 @@
 
 Below you will find a brief overview of each subdir in the source tree in alphabetical order.
 
+`storage_broker`:
+
+Neon storage broker, providing messaging between safekeepers and pageservers.
+[storage_broker.md](./storage_broker.md)
+
 `/control_plane`:
 
 Local control plane.

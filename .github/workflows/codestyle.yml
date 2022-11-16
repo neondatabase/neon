@@ -48,11 +48,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt update
-          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev libssl-dev
+          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev libssl-dev protobuf-compiler
 
       - name: Install macOS postgres dependencies
         if: matrix.os == 'macos-latest'
-        run: brew install flex bison openssl
+        run: brew install flex bison openssl protobuf
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev

@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package storage_broker;
+
+service BrokerService {
+    // Subscribe to safekeeper updates.
+    rpc SubscribeSafekeeperInfo(SubscribeSafekeeperInfoRequest) returns (stream SafekeeperTimelineInfo) {};
+
+    // Publish safekeeper updates.
+    rpc PublishSafekeeperInfo(stream SafekeeperTimelineInfo) returns (google.protobuf.Empty) {};
+}
+
+message SubscribeSafekeeperInfoRequest {
+    oneof subscription_key {
+        google.protobuf.Empty all = 1; // subscribe to everything
+        TenantTimelineId tenant_timeline_id = 2; // subscribe to specific timeline
+    }
+}
+
+message SafekeeperTimelineInfo {
+    uint64 safekeeper_id = 1;
+    TenantTimelineId tenant_timeline_id = 2;
+    // Term of the last entry.
+    uint64 last_log_term = 3;
+    // LSN of the last record.
+    uint64 flush_lsn = 4;
+    // Up to which LSN safekeeper regards its WAL as committed.
+    uint64 commit_lsn = 5;
+    // LSN up to which safekeeper has backed WAL.
+    uint64 backup_lsn = 6;
+    // LSN of last checkpoint uploaded by pageserver.
+    uint64 remote_consistent_lsn = 7;
+    uint64 peer_horizon_lsn = 8;
+    uint64 local_start_lsn = 9;
+    // A connection string to use for WAL receiving.
+    string safekeeper_connstr = 10;
+}
+
+message TenantTimelineId {
+    bytes tenant_id = 1;
+    bytes timeline_id = 2;
+}
