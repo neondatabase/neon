@@ -128,8 +128,8 @@ pub mod index;
 mod upload;
 
 // re-export this
-pub use download::list_remote_timelines;
 pub use download::is_temp_download_file;
+pub use download::list_remote_timelines;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;

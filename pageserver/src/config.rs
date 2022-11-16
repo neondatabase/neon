@@ -391,7 +391,7 @@ impl PageServerConf {
     }
 
     pub fn tenant_attaching_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenant_path(&tenant_id)
+        self.tenant_path(tenant_id)
             .join(TENANT_ATTACHING_MARKER_FILENAME)
     }
 

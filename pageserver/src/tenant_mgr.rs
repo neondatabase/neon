@@ -170,7 +170,7 @@ fn load_local_tenant(
         Tenant::spawn_load(conf, tenant_id, remote_storage)?
     };
     tenants_state::write_tenants().insert(tenant_id, tenant);
-    return Ok(Some(()));
+    Ok(Some(()))
 }
 
 ///

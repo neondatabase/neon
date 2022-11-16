@@ -931,7 +931,10 @@ impl Timeline {
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
             } else if crate::storage_sync::is_temp_download_file(&direntry_path) {
-                info!("skipping temp download file, reconcile_with_remote will resume / clean up: {}", fname);
+                info!(
+                    "skipping temp download file, reconcile_with_remote will resume / clean up: {}",
+                    fname
+                );
             } else if is_ephemeral_file(&fname) {
                 // Delete any old ephemeral files
                 trace!("deleting old ephemeral file in timeline dir: {}", fname);
