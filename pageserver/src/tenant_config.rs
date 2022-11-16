@@ -216,7 +216,6 @@ impl TenantConf {
         }
     }
 
-    #[cfg(test)]
     pub fn dummy_conf() -> Self {
         TenantConf {
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
