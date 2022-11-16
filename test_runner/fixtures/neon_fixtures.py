@@ -2073,9 +2073,9 @@ class NeonProxy(PgProtocol):
         self,
         proxy_port: int,
         http_port: int,
+        mgmt_port: int,
         neon_binpath: Path,
         auth_endpoint=None,
-        mgmt_port=None,
     ):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = "127.0.0.1"
@@ -2099,6 +2099,7 @@ class NeonProxy(PgProtocol):
             str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
+            *["--mgmt", f"{self.host}:{self.mgmt_port}"],
             *["--auth-backend", "postgres"],
             *["--auth-endpoint", self.auth_endpoint],
         ]
@@ -2175,11 +2176,13 @@ def static_proxy(
     auth_endpoint = f"postgres://proxy:password@{host}:{port}/{dbname}"
 
     proxy_port = port_distributor.get_port()
+    mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
 
     with NeonProxy(
         proxy_port=proxy_port,
         http_port=http_port,
+        mgmt_port=mgmt_port,
         neon_binpath=neon_binpath,
         auth_endpoint=auth_endpoint,
     ) as proxy:
