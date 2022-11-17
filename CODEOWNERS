@@ -8,3 +8,4 @@
 /pgxn/ @neondatabase/compute
 /proxy/ @neondatabase/control-plane 
 /safekeeper/ @neondatabase/safekeepers
+/vendor/ @neondatabase/compute
