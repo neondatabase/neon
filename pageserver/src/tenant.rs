@@ -1010,6 +1010,10 @@ impl Tenant {
 
         let gc_timelines = self.refresh_gc_info_internal(target_timeline_id, horizon, pitr)?;
 
+        utils::failpoint_sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
+
+        info!("starting on {} timelines", gc_timelines.len());
+
         // Perform GC for each timeline.
         //
         // Note that we don't hold the GC lock here because we don't want
