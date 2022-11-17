@@ -32,6 +32,11 @@ pub struct RelTag {
     pub relnode: Oid,
 }
 
+impl RelTag {
+    /// Serialized length.
+    pub const LEN: u32 = 1 + 4 + 4 + 4;
+}
+
 impl PartialOrd for RelTag {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))

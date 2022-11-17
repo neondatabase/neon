@@ -135,6 +135,20 @@ pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create background op runtime")
 });
 
+/// [`crate::walredo::PostgresRedoManager`] runtime.
+///
+/// wal-redo uses it's own runtime to avoid deadlocks with the blocking code, see issue
+/// <https://github.com/neondatabase/neon/issues/2975>. It is important that tasks running on this
+/// runtime are not blocking.
+pub static WALREDO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_name("walredo worker")
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("Failed to create walredo runtime")
+});
+
 pub struct PageserverTaskId(u64);
 
 /// Each task that we track is associated with a "task ID". It's just an
@@ -205,6 +219,13 @@ pub enum TaskKind {
 
     // task that handles attaching a tenant
     Attach,
+
+    /// One or more external processes producing pages out of collected [`NeonWalRecord`]s, see
+    /// [`PostgresRedoManager`].
+    ///
+    /// [`NeonWalRecord`]: crate::walrecord::NeonWalRecord
+    /// [`PostgresRedoManager`]: crate::walredo::PostgresRedoManager
+    WalRedo,
 }
 
 #[derive(Default)]

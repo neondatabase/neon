@@ -18,34 +18,24 @@
 //! any WAL records, so that even if an attacker hijacks the Postgres
 //! process, he cannot escape out of it.
 //!
+use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::{BufMut, Bytes, BytesMut};
-use nix::poll::*;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::Serialize;
-use std::fs::OpenOptions;
-use std::io::prelude::*;
-use std::io::{Error, ErrorKind};
-use std::ops::{Deref, DerefMut};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::prelude::CommandExt;
-use std::path::PathBuf;
 use std::process::Stdio;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use std::{fs, io};
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
-use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
+use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn};
 
 use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
-    WAL_REDO_WAIT_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
-use crate::task_mgr::BACKGROUND_RUNTIME;
+use crate::task_mgr::WALREDO_RUNTIME;
 use crate::walrecord::NeonWalRecord;
 use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -67,6 +57,11 @@ use postgres_ffi::BLCKSZ;
 pub struct BufferTag {
     pub rel: RelTag,
     pub blknum: u32,
+}
+
+impl BufferTag {
+    /// Serialized length
+    pub const LEN: u32 = RelTag::LEN + 4;
 }
 
 ///
@@ -98,10 +93,8 @@ pub trait WalRedoManager: Send + Sync {
 /// records.
 ///
 pub struct PostgresRedoManager {
-    tenant_id: TenantId,
     conf: &'static PageServerConf,
-
-    process: Mutex<Option<PostgresRedoProcess>>,
+    handle: Handle,
 }
 
 /// Can this request be served by neon redo functions
@@ -156,6 +149,9 @@ impl WalRedoManager for PostgresRedoManager {
             return Err(WalRedoError::InvalidRequest);
         }
 
+        // convert it to an arc to avoid cloning it on batches
+        let records: Arc<[(Lsn, NeonWalRecord)]> = records.into();
+
         let mut img: Option<Bytes> = base_img;
         let mut batch_neon = can_apply_in_neon(&records[0].1);
         let mut batch_start = 0;
@@ -170,7 +166,8 @@ impl WalRedoManager for PostgresRedoManager {
                         key,
                         lsn,
                         img,
-                        &records[batch_start..i],
+                        &records,
+                        (batch_start..i).into(),
                         self.conf.wal_redo_timeout,
                         pg_version,
                     )
@@ -189,7 +186,8 @@ impl WalRedoManager for PostgresRedoManager {
                 key,
                 lsn,
                 img,
-                &records[batch_start..],
+                &records,
+                (batch_start..).into(),
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
@@ -203,32 +201,33 @@ impl PostgresRedoManager {
     ///
     pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
-        PostgresRedoManager {
-            tenant_id,
-            conf,
-            process: Mutex::new(None),
-        }
-    }
 
-    /// Launch process pre-emptively. Should not be needed except for benchmarking.
-    pub fn launch_process(&mut self, pg_version: u32) -> anyhow::Result<()> {
-        let inner = self.process.get_mut().unwrap();
-        if inner.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
-            *inner = Some(p);
-        }
-        Ok(())
+        let h = WALREDO_RUNTIME.handle();
+        let (handle, fut) = tokio_postgres_redo(conf, tenant_id, h);
+        crate::task_mgr::spawn(
+            h,
+            crate::task_mgr::TaskKind::WalRedo,
+            Some(tenant_id),
+            None,
+            "walredo",
+            true,
+            fut,
+        );
+
+        PostgresRedoManager { conf, handle }
     }
 
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
+    #[allow(clippy::too_many_arguments)]
     fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
-        records: &[(Lsn, NeonWalRecord)],
+        records: &Arc<[(Lsn, NeonWalRecord)]>,
+        records_range: SliceRange,
         wal_redo_timeout: Duration,
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
@@ -236,29 +235,31 @@ impl PostgresRedoManager {
 
         let start_time = Instant::now();
 
-        let mut process_guard = self.process.lock().unwrap();
-        let lock_time = Instant::now();
-
-        // launch the WAL redo process on first use
-        if process_guard.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
-            *process_guard = Some(p);
-        }
-        let process = process_guard.as_mut().unwrap();
-
-        WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
-
         // Relational WAL records are applied using wal-redo-postgres
         let buf_tag = BufferTag { rel, blknum };
-        let result = process
-            .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
-            .map_err(WalRedoError::IoError);
 
-        let end_time = Instant::now();
-        let duration = end_time.duration_since(lock_time);
+        let consumed_records = records_range.sub_slice(records);
+        let record_count = consumed_records.len() as u64;
 
-        let len = records.len();
-        let nbytes = records.iter().fold(0, |acumulator, record| {
+        // while walredo processes are async, and execute on separate thread, this is mostly called
+        // from within async tasks but as a blocking invocation.
+        let result = self
+            .handle
+            .request_redo(Request {
+                target: buf_tag,
+                base_img,
+                records: records.clone(),
+                records_range,
+                timeout: wal_redo_timeout,
+                pg_version,
+                requeues: 0,
+            })
+            .map_err(|e| WalRedoError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)));
+
+        let duration = start_time.elapsed();
+
+        let len = record_count;
+        let nbytes = consumed_records.iter().fold(0, |acumulator, record| {
             acumulator
                 + match &record.1 {
                     NeonWalRecord::Postgres { rec, .. } => rec.len(),
@@ -269,6 +270,7 @@ impl PostgresRedoManager {
         WAL_REDO_TIME.observe(duration.as_secs_f64());
         WAL_REDO_RECORDS_HISTOGRAM.observe(len as f64);
         WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
+        WAL_REDO_RECORD_COUNTER.inc_by(record_count);
 
         debug!(
             "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
@@ -278,18 +280,6 @@ impl PostgresRedoManager {
             lsn
         );
 
-        // If something went wrong, don't try to reuse the process. Kill it, and
-        // next request will launch a new one.
-        if result.is_err() {
-            error!(
-                "error applying {} WAL records ({} bytes) to reconstruct page image at LSN {}",
-                records.len(),
-                nbytes,
-                lsn
-            );
-            let process = process_guard.take().unwrap();
-            process.kill();
-        }
         result
     }
 
@@ -553,18 +543,13 @@ impl PostgresRedoManager {
     }
 }
 
-///
 /// Command with ability not to give all file descriptors to child process
-///
-trait CloseFileDescriptors: CommandExt {
-    ///
-    /// Close file descriptors (other than stdin, stdout, stderr) in child process
-    ///
-    fn close_fds(&mut self) -> &mut Command;
+trait CloseFileDescriptors {
+    fn close_fds(&mut self) -> &mut tokio::process::Command;
 }
 
-impl<C: CommandExt> CloseFileDescriptors for C {
-    fn close_fds(&mut self) -> &mut Command {
+impl CloseFileDescriptors for tokio::process::Command {
+    fn close_fds(&mut self) -> &mut tokio::process::Command {
         unsafe {
             self.pre_exec(move || {
                 // SAFETY: Code executed inside pre_exec should have async-signal-safety,
@@ -587,420 +572,877 @@ impl<C: CommandExt> CloseFileDescriptors for C {
     }
 }
 
-///
-/// Handle to the Postgres WAL redo process
-///
-struct PostgresRedoProcess {
+fn tokio_postgres_redo(
+    conf: &'static PageServerConf,
     tenant_id: TenantId,
-    child: NoLeakChild,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-    stderr: ChildStderr,
+    _handle: &tokio::runtime::Handle,
+) -> (
+    Handle,
+    impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+) {
+    // outer mpmc queue size
+    let expected_inflight = 4;
+    // intermediate queue size, max pipelined. there might be a different kind of balance needed if
+    // multiple processes are used. this already allows for 8 waiting request_redo callers, but
+    // with 4 processes it might mean that only one of them is actually busy.
+    let expected_pipelined = 4;
+
+    let (tx, rx) = flume::bounded::<Payload>(expected_inflight);
+
+    let handle = Handle { tx: tx.clone() };
+
+    let ipc = async move {
+        while let Ok(first) = {
+            let recv_next = rx.recv_async();
+            tokio::pin!(recv_next);
+
+            let watcher = crate::task_mgr::shutdown_watcher();
+            tokio::pin!(watcher);
+
+            tokio::select! {
+                recv = &mut recv_next => {
+                    recv.map_err(|_| "handle dropped while waiting for first")
+                },
+                _ = &mut watcher => {
+                    Err("tenant shutdown while waiting for first item")
+                }
+            }
+        } {
+            let child = launch_walredo(conf, tenant_id, first.0.pg_version).await?;
+            let watcher = crate::task_mgr::shutdown_watcher();
+
+            let fut = walredo_rpc(
+                child,
+                tx.clone(),
+                rx.clone(),
+                tenant_id,
+                expected_pipelined,
+                Some(first),
+                watcher,
+            );
+
+            fut.await;
+        }
+
+        Ok(())
+    };
+
+    (handle, ipc)
 }
 
-impl PostgresRedoProcess {
-    //
-    // Start postgres binary in special WAL redo mode.
-    //
-    #[instrument(skip_all,fields(tenant_id=%tenant_id, pg_version=pg_version))]
-    fn launch(
-        conf: &PageServerConf,
-        tenant_id: TenantId,
-        pg_version: u32,
-    ) -> Result<PostgresRedoProcess, Error> {
-        // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
-        // just create one with constant name. That fails if you try to launch more than
-        // one WAL redo manager concurrently.
-        let datadir = path_with_suffix_extension(
-            conf.tenant_path(&tenant_id).join("wal-redo-datadir"),
-            TEMP_FILE_SUFFIX,
+#[instrument(skip(conf))]
+async fn launch_walredo(
+    conf: &PageServerConf,
+    tenant_id: TenantId,
+    pg_version: u32,
+) -> anyhow::Result<tokio::process::Child> {
+    let datadir = path_with_suffix_extension(
+        conf.tenant_path(&tenant_id).join("wal-redo-datadir"),
+        TEMP_FILE_SUFFIX,
+    );
+
+    match tokio::fs::remove_dir_all(&datadir).await {
+        Ok(()) => {
+            info!("removed existing data directory: {}", datadir.display());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        other => other.with_context(|| {
+            format!(
+                "Failed to cleanup existing wal-redo-datadir at {}",
+                datadir.display()
+            )
+        })?,
+    }
+
+    let pg_bin_dir_path = conf.pg_bin_dir(pg_version)?;
+    let pg_lib_dir_path = conf.pg_lib_dir(pg_version)?;
+
+    info!("running initdb in {}", datadir.display());
+
+    let initdb = tokio::process::Command::new(pg_bin_dir_path.join("initdb"))
+        .arg("-D")
+        .arg(&datadir)
+        .arg("-N")
+        .env_clear()
+        .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
+        .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
+        .close_fds()
+        .output()
+        .await
+        .context("Failed to execute initdb for wal-redo")?;
+
+    anyhow::ensure!(
+        initdb.status.success(),
+        "initdb failed\nstdout: {}\nstderr:\n {}",
+        String::from_utf8_lossy(&initdb.stdout),
+        String::from_utf8_lossy(&initdb.stderr)
+    );
+
+    info!("starting walredo process");
+
+    tokio::process::Command::new(pg_bin_dir_path.join("postgres"))
+        .arg("--wal-redo")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .env_clear()
+        .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
+        .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
+        .env("PGDATA", &datadir)
+        .close_fds()
+        // best effort is probably good enough for us
+        .kill_on_drop(true)
+        .spawn()
+        .context("postgres --wal-redo command failed to start")
+}
+
+async fn walredo_rpc<F>(
+    mut child: tokio::process::Child,
+    work_tx: flume::Sender<Payload>,
+    work_rx: flume::Receiver<Payload>,
+    tenant_id: TenantId,
+    expected_inflight: usize,
+    initial: Option<Payload>,
+    shutdown: F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    let pid = child
+        .id()
+        .expect("pid is present before killing the process");
+
+    info!("Launched wal-redo process for {tenant_id}: {pid}");
+
+    // we send the external the request in different commands
+    let stdin = child.stdin.take().expect("not taken yet");
+
+    // stdout is used to communicate the resulting page
+    let stdout = child.stdout.take().expect("not taken yet");
+
+    #[cfg(not_needed)]
+    {
+        use std::os::unix::io::AsRawFd;
+
+        nix::fcntl::fcntl(
+            stdout.as_raw_fd(),
+            nix::fcntl::FcntlArg::F_SETPIPE_SZ(8192 * 4),
+        )
+        .unwrap();
+
+        nix::fcntl::fcntl(
+            stdin.as_raw_fd(),
+            nix::fcntl::FcntlArg::F_SETPIPE_SZ(1048576),
+        )
+        .unwrap();
+
+        let pipe_sizes =
+            nix::fcntl::fcntl(stdin.as_raw_fd(), nix::fcntl::FcntlArg::F_GETPIPE_SZ).unwrap();
+        let pipe_sizes = (
+            pipe_sizes,
+            nix::fcntl::fcntl(stdout.as_raw_fd(), nix::fcntl::FcntlArg::F_GETPIPE_SZ).unwrap(),
         );
 
-        // Create empty data directory for wal-redo postgres, deleting old one first.
-        if datadir.exists() {
-            info!(
-                "old temporary datadir {} exists, removing",
-                datadir.display()
-            );
-            fs::remove_dir_all(&datadir)?;
-        }
-        let pg_bin_dir_path = conf.pg_bin_dir(pg_version).map_err(|e| {
-            Error::new(
-                ErrorKind::Other,
-                format!("incorrect pg_bin_dir path: {}", e),
-            )
-        })?;
-        let pg_lib_dir_path = conf.pg_lib_dir(pg_version).map_err(|e| {
-            Error::new(
-                ErrorKind::Other,
-                format!("incorrect pg_lib_dir path: {}", e),
-            )
-        })?;
-
-        info!("running initdb in {}", datadir.display());
-        let initdb = Command::new(pg_bin_dir_path.join("initdb"))
-            .args(&["-D", &datadir.to_string_lossy()])
-            .arg("-N")
-            .env_clear()
-            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
-            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path) // macOS
-            .close_fds()
-            .output()
-            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
-
-        if !initdb.status.success() {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!(
-                    "initdb failed\nstdout: {}\nstderr:\n{}",
-                    String::from_utf8_lossy(&initdb.stdout),
-                    String::from_utf8_lossy(&initdb.stderr)
-                ),
-            ));
-        } else {
-            // Limit shared cache for wal-redo-postgres
-            let mut config = OpenOptions::new()
-                .append(true)
-                .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
-            config.write_all(b"shared_buffers=128kB\n")?;
-            config.write_all(b"fsync=off\n")?;
-        }
-
-        // Start postgres itself
-        let child = Command::new(pg_bin_dir_path.join("postgres"))
-            .arg("--wal-redo")
-            .stdin(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdout(Stdio::piped())
-            .env_clear()
-            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
-            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
-            .env("PGDATA", &datadir)
-            // The redo process is not trusted, and runs in seccomp mode that
-            // doesn't allow it to open any files. We have to also make sure it
-            // doesn't inherit any file descriptors from the pageserver, that
-            // would allow an attacker to read any files that happen to be open
-            // in the pageserver.
-            //
-            // The Rust standard library makes sure to mark any file descriptors with
-            // as close-on-exec by default, but that's not enough, since we use
-            // libraries that directly call libc open without setting that flag.
-            .close_fds()
-            .spawn_no_leak_child()
-            .map_err(|e| {
-                Error::new(
-                    e.kind(),
-                    format!("postgres --wal-redo command failed to start: {}", e),
-                )
-            })?;
-
-        let mut child = scopeguard::guard(child, |child| {
-            error!("killing wal-redo-postgres process due to a problem during launch");
-            child.kill_and_wait();
-        });
-
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-
-        macro_rules! set_nonblock_or_log_err {
-            ($file:ident) => {{
-                let res = set_nonblock($file.as_raw_fd());
-                if let Err(e) = &res {
-                    error!(error = %e, file = stringify!($file), pid = child.id(), "set_nonblock failed");
-                }
-                res
-            }};
-        }
-        set_nonblock_or_log_err!(stdin)?;
-        set_nonblock_or_log_err!(stdout)?;
-        set_nonblock_or_log_err!(stderr)?;
-
-        // all fallible operations post-spawn are complete, so get rid of the guard
-        let child = scopeguard::ScopeGuard::into_inner(child);
-
-        Ok(PostgresRedoProcess {
-            tenant_id,
-            child,
-            stdin,
-            stdout,
-            stderr,
-        })
+        debug!(stdin = pipe_sizes.0, stdout = pipe_sizes.1, "pipe sizes");
     }
 
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
-    fn kill(self) {
-        self.child.kill_and_wait();
-    }
+    // used to communicate hopefully utf-8 log messages
+    let stderr = child.stderr.take().expect("not taken yet");
 
-    //
-    // Apply given WAL records ('records') over an old page image. Returns
-    // new page image.
-    //
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
-    fn apply_wal_records(
-        &mut self,
-        tag: BufferTag,
-        base_img: Option<Bytes>,
-        records: &[(Lsn, NeonWalRecord)],
-        wal_redo_timeout: Duration,
-    ) -> Result<Bytes, std::io::Error> {
-        // Serialize all the messages to send the WAL redo process first.
+    let (inter_tx, inter_rx) = tokio::sync::mpsc::channel(expected_inflight);
+
+    let stdin_task = stdin_task(stdin, work_tx, work_rx, inter_tx, initial);
+
+    let stdin_task = async {
+        tokio::pin!(stdin_task);
+        tokio::pin!(shutdown);
+
+        // because stdin and stdout are interconnected with a channel to faciliate
+        // pipelining, we don't need to cancel all of the tasks, just the "feeder" task.
         //
-        // This could be problematic if there are millions of records to replay,
-        // but in practice the number of records is usually so small that it doesn't
-        // matter, and it's better to keep this code simple.
-        //
-        // Most requests start with a before-image with BLCKSZ bytes, followed by
-        // by some other WAL records. Start with a buffer that can hold that
-        // comfortably.
-        let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
-        build_begin_redo_for_block_msg(tag, &mut writebuf);
-        if let Some(img) = base_img {
-            build_push_page_msg(tag, &img, &mut writebuf);
-        }
-        for (lsn, rec) in records.iter() {
-            if let NeonWalRecord::Postgres {
-                will_init: _,
-                rec: postgres_rec,
-            } = rec
-            {
-                build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
-            } else {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "tried to pass neon wal record to postgres WAL redo",
-                ));
+        // using tokio::try_join! later we get the wanted "channel close or shutdown takes
+        // down all tasks after finishing the in-flight work"
+        tokio::select! {
+            ret = &mut stdin_task => ret,
+            _ = &mut shutdown => {
+                // instead of cancelling all of the tasks at once by:
+                //
+                // Err("tenant shutdown, cancelling walredo work")
+                //
+                // just "close" channel connecting stdin and stdout tasks so that
+                // whatever got through, will be processed.
+                //
+                // walredo process might end up seeing one more request we will not
+                // read the response to, but it's most likely killed at that point
+                // anyways.
+                Ok(())
             }
         }
-        build_get_page_msg(tag, &mut writebuf);
-        WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
+    };
 
-        // The input is now in 'writebuf'. Do a blind write first, writing as much as
-        // we can, before calling poll(). That skips one call to poll() if the stdin is
-        // already available for writing, which it almost certainly is because the
-        // process is idle.
-        let mut nwrite = self.stdin.write(&writebuf)?;
+    let stdout_task = stdout_task(stdout, inter_rx);
 
-        // We expect the WAL redo process to respond with an 8k page image. We read it
-        // into this buffer.
-        let mut resultbuf = vec![0; BLCKSZ.into()];
-        let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
+    let stderr_task = stderr_task(stderr);
 
-        // Prepare for calling poll()
-        let mut pollfds = [
-            PollFd::new(self.stdout.as_raw_fd(), PollFlags::POLLIN),
-            PollFd::new(self.stderr.as_raw_fd(), PollFlags::POLLIN),
-            PollFd::new(self.stdin.as_raw_fd(), PollFlags::POLLOUT),
-        ];
+    async move {
+        tokio::pin!(stdin_task);
+        tokio::pin!(stdout_task);
+        tokio::pin!(stderr_task);
 
-        // We do three things simultaneously: send the old base image and WAL records to
-        // the child process's stdin, read the result from child's stdout, and forward any logging
-        // information that the child writes to its stderr to the page server's log.
-        while nresult < BLCKSZ.into() {
-            // If we have more data to write, wake up if 'stdin' becomes writeable or
-            // we have data to read. Otherwise only wake up if there's data to read.
-            let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = loop {
-                match nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32) {
-                    Err(e) if e == nix::errno::Errno::EINTR => continue,
-                    res => break res,
+        let mut stdin_alive = true;
+        let mut stderr_alive = true;
+
+        loop {
+            tokio::select! {
+                res = &mut stdin_task, if stdin_alive => {
+                    stdin_alive = false;
+                    if let Err(e) = res {
+                        warn!("stdin task failed: {e:?}");
+                        break;
+                    }
+                    // don't stop polling on stdin task exit, because we might still have pipelined
+                    // waiting for stdout task to complete them.
+                },
+                res = &mut stdout_task => {
+                    if let Err(e) = res {
+                        warn!("stdout task failed: {e:?}");
+                    }
+                    // always break after stdout task exits, as stderr never/rarely exits
+                    break;
+                },
+                res = &mut stderr_task, if stderr_alive => {
+                    stderr_alive = false;
+                    if let Err(e) = res {
+                        warn!("stderr task failed: {e:?}");
+                        break;
+                    }
+                },
+            };
+        }
+
+        // only reason why this would fail is that it has exited already, which is
+        // possible by manually killing it outside of pageserver or by it dying while
+        // processing.
+        let killed = child.start_kill().is_ok();
+
+        match child.wait().await {
+            Ok(status) => {
+                if !status.success() {
+                    if killed {
+                        // the status will never be success when we kill, at least on unix
+                        debug!(?status, "wal-redo process did not exit successfully as pageserver killed it");
+                    } else {
+                        // situations like killing it from outside manually
+                        warn!(?status, "wal-redo process did not exit successfully but pageserver did not kill it");
+                    };
                 }
-            }?;
-
-            if n == 0 {
-                return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
-            }
-
-            // If we have some messages in stderr, forward them to the log.
-            let err_revents = pollfds[1].revents().unwrap();
-            if err_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
-                let mut errbuf: [u8; 16384] = [0; 16384];
-                let n = self.stderr.read(&mut errbuf)?;
-
-                // The message might not be split correctly into lines here. But this is
-                // good enough, the important thing is to get the message to the log.
-                if n > 0 {
-                    error!(
-                        "wal-redo-postgres: {}",
-                        String::from_utf8_lossy(&errbuf[0..n])
-                    );
-
-                    // To make sure we capture all log from the process if it fails, keep
-                    // reading from the stderr, before checking the stdout.
-                    continue;
-                }
-            } else if err_revents.contains(PollFlags::POLLHUP) {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stderr unexpectedly",
-                ));
-            }
-
-            // If we have more data to write and 'stdin' is writeable, do write.
-            if nwrite < writebuf.len() {
-                let in_revents = pollfds[2].revents().unwrap();
-                if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
-                    nwrite += self.stdin.write(&writebuf[nwrite..])?;
-                } else if in_revents.contains(PollFlags::POLLHUP) {
-                    // We still have more data to write, but the process closed the pipe.
-                    return Err(Error::new(
-                        ErrorKind::BrokenPipe,
-                        "WAL redo process closed its stdin unexpectedly",
-                    ));
-                }
-            }
-
-            // If we have some data in stdout, read it to the result buffer.
-            let out_revents = pollfds[0].revents().unwrap();
-            if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
-                nresult += self.stdout.read(&mut resultbuf[nresult..])?;
-            } else if out_revents.contains(PollFlags::POLLHUP) {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stdout unexpectedly",
-                ));
-            }
-        }
-
-        Ok(Bytes::from(resultbuf))
-    }
-}
-
-/// Wrapper type around `std::process::Child` which guarantees that the child
-/// will be killed and waited-for by this process before being dropped.
-struct NoLeakChild {
-    child: Option<Child>,
-}
-
-impl Deref for NoLeakChild {
-    type Target = Child;
-
-    fn deref(&self) -> &Self::Target {
-        self.child.as_ref().expect("must not use from drop")
-    }
-}
-
-impl DerefMut for NoLeakChild {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.child.as_mut().expect("must not use from drop")
-    }
-}
-
-impl NoLeakChild {
-    fn spawn(command: &mut Command) -> io::Result<Self> {
-        let child = command.spawn()?;
-        Ok(NoLeakChild { child: Some(child) })
-    }
-
-    fn kill_and_wait(mut self) {
-        let child = match self.child.take() {
-            Some(child) => child,
-            None => return,
-        };
-        Self::kill_and_wait_impl(child);
-    }
-
-    #[instrument(skip_all, fields(pid=child.id()))]
-    fn kill_and_wait_impl(mut child: Child) {
-        let res = child.kill();
-        if let Err(e) = res {
-            // This branch is very unlikely because:
-            // - We (= pageserver) spawned this process successfully, so, we're allowed to kill it.
-            // - This is the only place that calls .kill()
-            // - We consume `self`, so, .kill() can't be called twice.
-            // - If the process exited by itself or was killed by someone else,
-            //   .kill() will still succeed because we haven't wait()'ed yet.
-            //
-            // So, if we arrive here, we have really no idea what happened,
-            // whether the PID stored in self.child is still valid, etc.
-            // If this function were fallible, we'd return an error, but
-            // since it isn't, all we can do is log an error and proceed
-            // with the wait().
-            error!(error = %e, "failed to SIGKILL; subsequent wait() might fail or wait for wrong process");
-        }
-
-        match child.wait() {
-            Ok(exit_status) => {
-                info!(exit_status = %exit_status, "wait successful");
             }
             Err(e) => {
-                error!(error = %e, "wait error; might leak the child process; it will show as zombie (defunct)");
+                error!("failed to wait for child process to exit: {e}");
+            }
+        }
+        info!("task exiting");
+    }
+    .instrument(info_span!("wal-redo", pid, %tenant_id))
+    .await
+}
+
+/// Payload from stdin task to stdout task for completion carrying the response channel and the
+/// deadline for reading from stdout.
+type IntermediatePayload = (flume::Sender<anyhow::Result<Bytes>>, tokio::time::Instant);
+
+#[derive(Debug)]
+enum StdinTaskError {
+    IntermediateChannelClosed,
+}
+
+/// Returns a human readable reason for stopping. Channel being closed or shutdown are turned into
+/// `Ok(())`.
+#[allow(clippy::too_many_arguments)]
+#[instrument(name = "stdin", skip_all)]
+async fn stdin_task<AW>(
+    mut stdin: AW,
+    work_tx: flume::Sender<Payload>,
+    work_rx: flume::Receiver<Payload>,
+    inter_tx: tokio::sync::mpsc::Sender<IntermediatePayload>,
+    mut initial: Option<Payload>,
+) -> Result<(), StdinTaskError>
+where
+    AW: tokio::io::AsyncWrite + Unpin,
+{
+    use futures::future::{poll_fn, TryFutureExt};
+    use std::pin::Pin;
+    use tokio::io::AsyncWriteExt;
+    use tokio_util::io::poll_write_buf;
+
+    let mut buffers = BufQueue::default();
+
+    let have_vectored_stdin = stdin.is_write_vectored();
+
+    let mut scratch = BytesMut::with_capacity(if have_vectored_stdin {
+        // without vectoring we aim at 3 messages: begin, page, records + get_page,
+        // with vectoring this will be very much enough
+        1024 * 16
+    } else {
+        // without vectoring, use full buffer
+        1024 * 64
+    });
+
+    loop {
+        let ((request, response), reservation) = {
+            // when running in a multiprocess configuration, we must acquire the write side before
+            // trying to acquire more work from the shared queue, otherwise we'd be stuck holding
+            // the global work while we've overcommited this one process.
+            let reservation = match inter_tx.reserve().await {
+                Ok(r) => r,
+                Err(_send_error) => {
+                    if let Some(mut initial) = initial {
+                        if !initial.0.inc_requeued() {
+                            drop(initial.1.send(Err(anyhow::anyhow!(
+                                "Failed to start the walredo process too many times"
+                            ))));
+                        } else {
+                            // re-queue (while reordering) the initial work item
+                            drop(work_tx.send_async(initial).await);
+                        }
+                    }
+
+                    return Err(StdinTaskError::IntermediateChannelClosed);
+                }
+            };
+
+            let next = initial.take();
+            let next = if next.is_none() {
+                // shutdown is handled outside of this task
+                work_rx.recv_async().await.ok()
+            } else {
+                next
+            };
+
+            match next {
+                Some(t) => (t, reservation),
+                None => {
+                    // the Handle or the request queue sender have been dropped; return Ok(()) to keep
+                    // processing any of already pipelined requests.
+                    //
+                    // the drop however does never seem to happen, but most likely the task is
+                    // descheduled because of a shutdown_watcher.
+                    return Ok(());
+                }
+            }
+        };
+
+        let timeout_at = tokio::time::Instant::now() + request.timeout;
+
+        let records = request.records_range.sub_slice(&request.records);
+
+        if have_vectored_stdin {
+            build_vectored_messages(
+                request.target,
+                request.base_img,
+                records,
+                &mut scratch,
+                &mut buffers,
+            );
+        } else {
+            build_messages(
+                request.target,
+                request.base_img,
+                records,
+                &mut scratch,
+                &mut buffers,
+            );
+        }
+
+        let write_res = async {
+            while buffers.has_remaining() {
+                poll_fn(|cx| poll_write_buf(Pin::new(&mut stdin), cx, &mut buffers))
+                    .await
+                    .map_err(anyhow::Error::new)?;
+            }
+            // in general flush is not needed, does nothing on pipes, but since we now accept
+            // AsyncWrite
+            stdin.flush().await.map_err(anyhow::Error::new)
+        };
+
+        let write_res = tokio::time::timeout_at(timeout_at, write_res)
+            .map_err(|_| anyhow::anyhow!("write timeout"));
+
+        // wait the write to complete before sending the completion over, because we cannot fail
+        // the request after it has been moved. this could be worked around by making the oneshot
+        // into a normal mpsc queue of size 2 and making the read side race against the channel
+        // closing and timeouted read.
+        match write_res.await.and_then(|x| x) {
+            Ok(()) => {
+                // by writing and then completing later we achieve request pipelining with the
+                // walredo process. some workloads fit well into the default 64KB buffer, so we
+                // have an opportunity to keep walredo busy by buffering the requests.
+
+                if inter_tx.is_closed() {
+                    drop(response.send(Err(anyhow::anyhow!(
+                        "Failed to read walredo response: stdout task closed already"
+                    ))));
+                    return Err(StdinTaskError::IntermediateChannelClosed);
+                } else {
+                    reservation.send((response, timeout_at));
+                }
+            }
+            Err(io_or_timeout) => {
+                // TODO: could we somehow manage to keep the request in case we need to
+                // restart the process? see https://github.com/neondatabase/neon/issues/1700
+                // we could send it back to the queue at least here, but not so easily when it's
+                // inflight.
+
+                if let Err(e) =
+                    response.send(Err(io_or_timeout).context("Failed to write request to wal-redo"))
+                {
+                    let e = e.into_inner().expect_err("just created the value");
+                    // log this here, even though we could return an error
+                    warn!("stopping due to io or timeout error: {e:#}");
+                }
+                // we can still continue processing pipelined requests, if any. the
+                // stdout task will exit upon seeing we've dropped the result_txs.
+                return Ok(());
             }
         }
     }
 }
 
-impl Drop for NoLeakChild {
-    fn drop(&mut self) {
-        let child = match self.child.take() {
-            Some(child) => child,
-            None => return,
+#[derive(Debug)]
+enum StdoutTaskError {
+    ReadFailed(std::io::Error),
+    StdoutClosed,
+    ReadTimeout,
+}
+
+/// Always eventually fails, returning a developer friendly reason.
+#[instrument(name = "stdout", skip_all)]
+async fn stdout_task<AR>(
+    mut stdout: AR,
+    mut inter_rx: tokio::sync::mpsc::Receiver<IntermediatePayload>,
+) -> Result<(), StdoutTaskError>
+where
+    AR: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    async fn read_page<AR>(mut stdout: AR, buffer: &mut Vec<u8>) -> Result<(), StdoutTaskError>
+    where
+        AR: tokio::io::AsyncRead + Unpin,
+    {
+        loop {
+            let read = stdout
+                .read_buf(buffer)
+                .await
+                .map_err(StdoutTaskError::ReadFailed)?;
+            if read == 0 {
+                return Err(StdoutTaskError::StdoutClosed);
+            }
+            if buffer.len() < 8192 {
+                continue;
+            }
+            return Ok(());
+        }
+    }
+
+    // the extra past one block is for normally reading and clearing out the readyness for the
+    // stdout. tokio does not expose an api on ChildStdout for this, so we need to have this
+    // "hack". this buffer is reused between reads.
+    let mut page_buf = Vec::with_capacity(8192 + 4096);
+
+    loop {
+        let (completion, timeout_at) = match inter_rx.recv().await {
+            Some(t) => t,
+            None => return Ok(()),
         };
-        // Offload the kill+wait of the child process into the background.
-        // If someone stops the runtime, we'll leak the child process.
-        // We can ignore that case because we only stop the runtime on pageserver exit.
-        BACKGROUND_RUNTIME.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                Self::kill_and_wait_impl(child);
-            })
+
+        let res = tokio::time::timeout_at(timeout_at, read_page(&mut stdout, &mut page_buf))
             .await
-        });
+            .map_err(|_elapsed| StdoutTaskError::ReadTimeout)
+            .and_then(|x| x);
+
+        match res {
+            Ok(()) => {
+                let page = Bytes::copy_from_slice(&page_buf[..8192]);
+                // we don't care about the result, because the caller could be gone
+                drop(completion.into_send_async(Ok(page)).await);
+                page_buf.drain(..8192);
+            }
+            Err(e @ StdoutTaskError::ReadFailed(_)) => {
+                drop(completion.send(Err(anyhow::anyhow!(
+                    "Failed to read response from wal-redo"
+                ))));
+                return Err(e);
+            }
+            Err(e @ StdoutTaskError::StdoutClosed) => {
+                drop(completion.send(Err(anyhow::anyhow!(
+                    "Failed to read response from wal-redo"
+                ))));
+                return Err(e);
+            }
+            Err(e @ StdoutTaskError::ReadTimeout) => {
+                drop(completion.send(Err(anyhow::anyhow!(
+                    "Timed out while waiting for the page from wal-redo"
+                ))));
+                return Err(e);
+            }
+        }
     }
 }
 
-trait NoLeakChildCommandExt {
-    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild>;
+#[derive(Debug)]
+enum StderrTaskError {
+    ReadFailed(std::io::Error),
+    Closed,
 }
 
-impl NoLeakChildCommandExt for Command {
-    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild> {
-        NoLeakChild::spawn(self)
+#[instrument(name = "stderr", skip_all)]
+async fn stderr_task<AR>(stderr: AR) -> Result<(), StderrTaskError>
+where
+    AR: tokio::io::AsyncRead,
+{
+    use tokio::io::AsyncBufReadExt;
+    let stderr = tokio::io::BufReader::new(stderr);
+    let mut buffer = Vec::new();
+
+    tokio::pin!(stderr);
+
+    loop {
+        buffer.clear();
+        match stderr.read_until(b'\n', &mut buffer).await {
+            Ok(0) => return Err(StderrTaskError::Closed),
+            Ok(read) => {
+                let message = String::from_utf8_lossy(&buffer[..read]);
+                error!("wal-redo-process: {}", message.trim());
+            }
+            Err(e) => {
+                return Err(StderrTaskError::ReadFailed(e));
+            }
+        }
     }
 }
 
-// Functions for constructing messages to send to the postgres WAL redo
-// process. See pgxn/neon_walredo/walredoproc.c for
-// explanation of the protocol.
+/// Serializes the wal redo request into `buffers` with the help of scratch buffer `scratch`.
+///
+/// The request is combination of `B + P? + A* + G`.
+///
+/// Compared to [`build_vectored_messages`], this implementation builds at most 3 messages if the
+/// base version of page is included (it's never copied to conserve the "scratch" space).
+///
+/// All of the messages have structure of `command + len + payload?`, where:
+/// - `command` is a single ascii character `[BPAG]`
+/// - `len` is payload length + length of len (4)
+/// - payload is command specific
+fn build_messages(
+    target: BufferTag,
+    base_img: Option<Bytes>,
+    records: &[(Lsn, NeonWalRecord)],
+    scratch: &mut BytesMut,
+    buffers: &mut BufQueue,
+) {
+    let need = message_length(
+        base_img.is_some(),
+        usize::MAX,
+        records.iter().map(|(_lsn, r)| match r {
+            NeonWalRecord::Postgres { rec, .. } => rec.len(),
+            _ => unreachable!(),
+        }),
+    );
 
-fn build_begin_redo_for_block_msg(tag: BufferTag, buf: &mut Vec<u8>) {
-    let len = 4 + 1 + 4 * 4;
+    scratch.reserve(need);
 
-    buf.put_u8(b'B');
-    buf.put_u32(len as u32);
+    let tag = {
+        target.ser_into(&mut scratch.writer()).unwrap();
+        scratch.split().freeze()
+    };
 
-    tag.ser_into(buf)
-        .expect("serialize BufferTag should always succeed");
+    build_begin_message(&tag, scratch);
+
+    if let Some(page) = base_img {
+        assert_eq!(page.len(), 8192);
+        build_push_page_header(&tag, scratch);
+
+        let out = scratch.split().freeze();
+
+        buffers.push(out);
+        buffers.push(page);
+    }
+
+    for (end_lsn, record) in records {
+        let (_will_init, rec) = match record {
+            NeonWalRecord::Postgres { will_init, rec } => (will_init, rec),
+            _ => unreachable!(),
+        };
+
+        build_apply_record_header(end_lsn, rec.len() as u32, scratch);
+        scratch.put(rec.clone());
+    }
+
+    build_get_page_message(&tag, scratch);
+
+    let out = scratch.split().freeze();
+    buffers.push(out);
 }
 
-fn build_push_page_msg(tag: BufferTag, base_img: &[u8], buf: &mut Vec<u8>) {
-    assert!(base_img.len() == 8192);
+/// Calculates the buffer space needed for the messages produced out of this request.
+#[allow(clippy::identity_op)]
+fn message_length<I>(base_img: bool, copy_walrecord_threshold: usize, records: I) -> usize
+where
+    I: Iterator<Item = usize>,
+{
+    let tag_len = BufferTag::LEN as usize;
 
-    let len = 4 + 1 + 4 * 4 + base_img.len();
+    let begin = 1 + 4 + tag_len;
+    let page = if base_img {
+        1 + 4 + tag_len + /* let kernel copy page */ 0
+    } else {
+        0
+    };
 
-    buf.put_u8(b'P');
-    buf.put_u32(len as u32);
-    tag.ser_into(buf)
-        .expect("serialize BufferTag should always succeed");
-    buf.put(base_img);
+    let records = records
+        .map(|rec_len| {
+            1 + 4
+                + 8
+                + if rec_len < copy_walrecord_threshold {
+                    rec_len
+                } else {
+                    0
+                }
+        })
+        .sum::<usize>();
+
+    let get_page = 1 + 4 + tag_len;
+
+    begin + page + records + get_page
 }
 
-fn build_apply_record_msg(endlsn: Lsn, rec: &[u8], buf: &mut Vec<u8>) {
-    let len = 4 + 8 + rec.len();
+/// Compared to [`build_messages`] builds many small messages and aiming for vectored write
+/// handling the gathering of the already allocated records.
+fn build_vectored_messages(
+    target: BufferTag,
+    base_img: Option<Bytes>,
+    records: &[(Lsn, NeonWalRecord)],
+    scratch: &mut BytesMut,
+    buffers: &mut BufQueue,
+) {
+    let copy_walrecord_threshold = 1024;
 
-    buf.put_u8(b'A');
-    buf.put_u32(len as u32);
-    buf.put_u64(endlsn.0);
-    buf.put(rec);
+    let need = message_length(
+        base_img.is_some(),
+        copy_walrecord_threshold,
+        records.iter().map(|(_lsn, r)| match r {
+            NeonWalRecord::Postgres { rec, .. } => rec.len(),
+            _ => unreachable!(),
+        }),
+    );
+
+    scratch.reserve(need);
+
+    let tag = {
+        target.ser_into(&mut scratch.writer()).unwrap();
+        scratch.split().freeze()
+    };
+
+    build_begin_message(&tag, scratch);
+
+    if let Some(page) = base_img {
+        build_push_page_header(&tag, scratch);
+        buffers.push(scratch.split().freeze());
+        buffers.push(page);
+    }
+
+    for (end_lsn, record) in records {
+        let rec = match record {
+            NeonWalRecord::Postgres { rec, .. } => rec,
+            _ => unreachable!(),
+        };
+
+        let record_len = rec.len() as u32;
+        build_apply_record_header(end_lsn, record_len, scratch);
+        if rec.len() < copy_walrecord_threshold {
+            scratch.put(rec.clone());
+        } else {
+            buffers.push(scratch.split().freeze());
+            buffers.push(rec.clone());
+        }
+    }
+
+    build_get_page_message(&tag, scratch);
+    buffers.push(scratch.split().freeze());
 }
 
-fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
-    let len = 4 + 1 + 4 * 4;
+fn build_begin_message(tag: &Bytes, scratch: &mut BytesMut) {
+    scratch.put_u8(b'B');
+    scratch.put_u32(4 + BufferTag::LEN);
+    scratch.put(tag.clone());
+}
 
-    buf.put_u8(b'G');
-    buf.put_u32(len as u32);
-    tag.ser_into(buf)
-        .expect("serialize BufferTag should always succeed");
+fn build_push_page_header(tag: &Bytes, scratch: &mut BytesMut) {
+    let page_len = 8192;
+    scratch.put_u8(b'P');
+    scratch.put_u32(4 + BufferTag::LEN + page_len);
+    scratch.put(tag.clone());
+}
+
+fn build_apply_record_header(end_lsn: &Lsn, record_len: u32, scratch: &mut BytesMut) {
+    scratch.put_u8(b'A');
+    scratch.put_u32(4 + 8 + record_len);
+    scratch.put_u64(end_lsn.0);
+}
+
+fn build_get_page_message(tag: &Bytes, scratch: &mut BytesMut) {
+    scratch.put_u8(b'G');
+    scratch.put_u32(4 + BufferTag::LEN);
+    scratch.put(tag.clone());
+}
+
+type Payload = (Request, flume::Sender<anyhow::Result<Bytes>>);
+
+/// WAL Redo request
+struct Request {
+    target: BufferTag,
+    base_img: Option<Bytes>,
+    records: Arc<[(Lsn, NeonWalRecord)]>,
+    records_range: SliceRange,
+    timeout: std::time::Duration,
+    pg_version: u32,
+    requeues: u8,
+}
+
+impl Request {
+    /// Returns true, if this should be requeued or false, if too many requeuing have happened
+    /// already.
+    fn inc_requeued(&mut self) -> bool {
+        self.requeues = if let Some(remaining) = self.requeues.checked_add(1) {
+            remaining
+        } else {
+            return false;
+        };
+
+        self.requeues < 8
+    }
+}
+
+#[derive(Clone)]
+struct Handle {
+    tx: flume::Sender<Payload>,
+}
+
+impl Handle {
+    fn request_redo(&self, request: Request) -> anyhow::Result<Bytes> {
+        let (result_tx, result_rx) = flume::bounded(1);
+
+        self.tx
+            .send((request, result_tx))
+            .map_err(|_| anyhow::anyhow!("Failed to communicate with the walredo task"))?;
+
+        result_rx
+            .recv()
+            .context("Failed to get a WAL Redo'd page back")
+            .and_then(|x| x)
+    }
+}
+
+enum SliceRange {
+    InclusiveExclusive(std::ops::Range<usize>),
+    RangeFrom(std::ops::RangeFrom<usize>),
+}
+
+impl From<std::ops::Range<usize>> for SliceRange {
+    fn from(r: std::ops::Range<usize>) -> Self {
+        SliceRange::InclusiveExclusive(r)
+    }
+}
+
+impl From<std::ops::RangeFrom<usize>> for SliceRange {
+    fn from(r: std::ops::RangeFrom<usize>) -> Self {
+        SliceRange::RangeFrom(r)
+    }
+}
+
+impl SliceRange {
+    fn sub_slice<'a, T>(&self, full_slice: &'a [T]) -> &'a [T] {
+        match self {
+            SliceRange::InclusiveExclusive(r) => &full_slice[r.start..r.end],
+            SliceRange::RangeFrom(r) => &full_slice[r.start..],
+        }
+    }
+}
+
+/// Conceptually `Vec<Bytes>` masquerading as `bytes::Buf`.
+///
+/// Used to build vectorized writes, in case we have a base page.
+///
+/// Adapted from https://github.com/tokio-rs/bytes/pull/371
+struct BufQueue {
+    bufs: std::collections::VecDeque<Bytes>,
+    remaining: usize,
+}
+
+impl Default for BufQueue {
+    fn default() -> Self {
+        Self {
+            bufs: std::collections::VecDeque::with_capacity(4),
+            remaining: 0,
+        }
+    }
+}
+
+impl BufQueue {
+    fn push(&mut self, buffer: Bytes) {
+        let rem = buffer.remaining();
+        if rem != 0 {
+            self.bufs.push_back(buffer);
+            self.remaining = self.remaining.checked_add(rem).expect("remaining overflow");
+        }
+    }
+
+    #[allow(unused)]
+    fn clear(&mut self) {
+        self.bufs.clear();
+        self.remaining = 0;
+    }
+}
+
+impl bytes::Buf for BufQueue {
+    fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    fn chunk(&self) -> &[u8] {
+        match self.bufs.front() {
+            Some(b) => b.chunk(),
+            None => &[],
+        }
+    }
+
+    fn chunks_vectored<'a>(&'a self, mut dst: &mut [std::io::IoSlice<'a>]) -> usize {
+        let mut n = 0;
+
+        for b in &self.bufs {
+            if dst.is_empty() {
+                break;
+            }
+            let next = b.chunks_vectored(dst);
+            dst = &mut dst[next..];
+            n += next;
+        }
+
+        n
+    }
+
+    fn advance(&mut self, mut cnt: usize) {
+        while cnt != 0 {
+            let front = self.bufs.front_mut().expect("mut not be empty");
+            let rem = front.remaining();
+            let advance = std::cmp::min(cnt, rem);
+            front.advance(advance);
+            if rem == advance {
+                self.bufs.pop_front().unwrap();
+            }
+            cnt -= advance;
+            self.remaining -= advance;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1019,7 +1461,6 @@ mod tests {
         let expected = std::fs::read("fixtures/short_v14_redo.page").unwrap();
 
         let h = RedoHarness::new().unwrap();
-
         let page = h
             .manager
             .request_redo(
@@ -1069,6 +1510,99 @@ mod tests {
         assert_eq!(page, crate::ZERO_PAGE);
     }
 
+    #[tokio::test]
+    async fn shutdown_via_taskmgr() {
+        let h = RedoHarness::new().unwrap();
+
+        let _page = h
+            .manager
+            .request_redo(
+                Key {
+                    field1: 0,
+                    field2: 1663,
+                    field3: 13010,
+                    field4: 1259,
+                    field5: 0,
+                    field6: 0,
+                },
+                Lsn::from_str("0/16E2408").unwrap(),
+                None,
+                short_records(),
+                14,
+            )
+            .unwrap();
+
+        crate::task_mgr::shutdown_tasks(
+            Some(crate::task_mgr::TaskKind::WalRedo),
+            Some(h.tenant_id),
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn stdout_reads_two_pages() {
+        // stdout reads 8192 + 1 bytes at time, this test makes sure we see all bytes in that case,
+        // because cursor can be read for 8193 and 8191 bytes.
+        let mut buffer = Vec::with_capacity(8192 * 2);
+        buffer.extend(std::iter::repeat(0).take(8192));
+        buffer.push(1);
+        buffer.extend((2usize..).map(|x| x as u8).take(8192 - 1));
+        let buffer = std::io::Cursor::new(buffer);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let (ret_tx1, ret_rx1) = flume::bounded(1);
+        let (ret_tx2, ret_rx2) = flume::bounded(1);
+
+        tx.send((ret_tx1, bogus_deadline())).await.unwrap();
+        tx.send((ret_tx2, bogus_deadline())).await.unwrap();
+
+        // important to drop the sender, since we currently wait for the next result_rx before
+        // trying to read (when we would read 0)
+        drop(tx);
+
+        super::stdout_task(buffer, rx)
+            .await
+            .expect("stdout should return ok since all requests were processed");
+
+        let page = ret_rx1.recv_async().await.unwrap().unwrap();
+        let page = page.slice(..);
+        assert!(page.iter().all(|&x| x == 0));
+        assert_eq!(page.len(), 8192);
+
+        let page = ret_rx2.recv_async().await.unwrap().unwrap();
+        let page = page.slice(..);
+        assert!(page.iter().enumerate().all(|(i, &x)| x == (i + 1) as u8));
+        assert_eq!(page.len(), 8192);
+    }
+
+    #[tokio::test]
+    async fn stdout_task_fails_on_closed_stdout() {
+        use super::{stdout_task, StdoutTaskError};
+
+        let buffer = tokio::io::empty();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (ret_tx, ret_rx) = flume::bounded(1);
+
+        tx.send((ret_tx, bogus_deadline())).await.unwrap();
+
+        let e = stdout_task(buffer, rx)
+            .await
+            .expect_err("task should fail because nothing could be read");
+        assert!(matches!(e, StdoutTaskError::StdoutClosed), "{e:?}");
+
+        ret_rx
+            .recv_async()
+            .await
+            .unwrap()
+            .expect_err("response should also be error");
+    }
+
+    fn bogus_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + std::time::Duration::from_secs(2)
+    }
+
     #[allow(clippy::octal_escapes)]
     fn short_records() -> Vec<(Lsn, NeonWalRecord)> {
         vec![
@@ -1093,6 +1627,8 @@ mod tests {
         // underscored because unused, except for removal at drop
         _repo_dir: tempfile::TempDir,
         manager: PostgresRedoManager,
+        tenant_id: TenantId,
+        // FIXME: this needs a own tokio reactor to use the same api
     }
 
     impl RedoHarness {
@@ -1107,6 +1643,7 @@ mod tests {
             Ok(RedoHarness {
                 _repo_dir: repo_dir,
                 manager,
+                tenant_id,
             })
         }
     }
