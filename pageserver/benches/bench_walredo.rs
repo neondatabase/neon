@@ -31,8 +31,7 @@ fn redo_scenarios(c: &mut Criterion) {
     let conf = Box::leak(Box::new(conf));
     let tenant_id = TenantId::generate();
     // std::fs::create_dir_all(conf.tenant_path(&tenant_id)).unwrap();
-    let mut manager = PostgresRedoManager::new(conf, tenant_id);
-    manager.launch_process(14).unwrap();
+    let manager = PostgresRedoManager::new(conf, tenant_id, 14);
 
     let manager = Arc::new(manager);
 
