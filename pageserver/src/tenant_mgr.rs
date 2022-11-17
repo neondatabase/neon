@@ -504,3 +504,58 @@ pub async fn attach_tenant(
         }
     }
 }
+
+#[cfg(feature = "testing")]
+use {
+    crate::repository::GcResult, pageserver_api::models::TimelineGcRequest,
+    utils::http::error::ApiError,
+};
+
+#[cfg(feature = "testing")]
+pub fn immediate_gc(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    gc_req: TimelineGcRequest,
+) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
+    let guard = tenants_state::read_tenants();
+
+    let tenant = guard
+        .get(&tenant_id)
+        .map(Arc::clone)
+        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .map_err(ApiError::NotFound)?;
+
+    let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
+    // Use tenant's pitr setting
+    let pitr = tenant.get_pitr_interval();
+
+    // Run in task_mgr to avoid race with detach operation
+    let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
+    task_mgr::spawn(
+        &tokio::runtime::Handle::current(),
+        TaskKind::GarbageCollector,
+        Some(tenant_id),
+        Some(timeline_id),
+        &format!("timeline_gc_handler garbage collection run for tenant {tenant_id} timeline {timeline_id}"),
+        false,
+        async move {
+            fail::fail_point!("immediate_gc_task_pre");
+            let result = tenant
+                .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
+                .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
+                .await;
+                // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
+                // better once the types support it.
+            match task_done.send(result) {
+                Ok(_) => (),
+                Err(result) => error!("failed to send gc result: {result:?}"),
+            }
+            Ok(())
+        }
+    );
+
+    // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task
+    drop(guard);
+
+    Ok(wait_task_done)
+}

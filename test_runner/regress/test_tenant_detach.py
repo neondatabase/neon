@@ -24,7 +24,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    env.pageserver.allowed_errors.append(".*NotFound\\(Tenant .* not found in the local state")
+    env.pageserver.allowed_errors.append(".*NotFound\\(Tenant .* not found")
 
     # first check for non existing tenant
     tenant_id = TenantId.generate()
@@ -63,7 +63,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(".*gc target timeline does not exist.*")
 
     # Detach while running manual GC.
-    # It should wait for manual GC to finish (right now it doesn't that's why this test fails sometimes)
+    # It should wait for manual GC to finish because it runs in a task associated with the tenant.
     pageserver_http.configure_failpoints(
         ("gc_iteration_internal_after_getting_gc_timelines", "return(2000)")
     )
