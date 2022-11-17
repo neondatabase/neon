@@ -702,22 +702,16 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    // FIXME: currently this will return a 500 error on bad tenant id; it should be 4XX
-    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::NotFound)?;
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
-    let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
-
-    // Use tenant's pitr setting
-    let pitr = tenant.get_pitr_interval();
-    let result = tenant
-        .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
-        .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
+    let wait_task_done = tenant_mgr::immediate_gc(tenant_id, timeline_id, gc_req)?;
+    let gc_result = wait_task_done
         .await
-        // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
-        // better once the types support it.
+        .context("wait for gc task")
+        .map_err(ApiError::InternalServerError)?
         .map_err(ApiError::InternalServerError)?;
-    json_response(StatusCode::OK, result)
+
+    json_response(StatusCode::OK, gc_result)
 }
 
 // Run compaction immediately on given timeline.
