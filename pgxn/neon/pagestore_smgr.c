@@ -454,7 +454,6 @@ prefetch_read(PrefetchRequest *slot)
 	}
 	else
 	{
-		prefetch_on_ps_disconnect();
 		prefetch_cleanup();
 		return false;
 	}

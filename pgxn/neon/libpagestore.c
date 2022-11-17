@@ -244,9 +244,7 @@ pageserver_receive(void)
 		{
 			if (resp_buff.len == -1)
 			{
-				PQfinish(pageserver_conn);
-				pageserver_conn = NULL;
-				connected = false;
+				pageserver_disconnect();
 				return NULL;
 			}
 			else if (resp_buff.len == -2)
