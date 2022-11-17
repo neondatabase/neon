@@ -1141,6 +1141,7 @@ impl Timeline {
         let local_only_filenames = match index_part {
             Some(index_part) => {
                 info!("initializing upload queue from index");
+                remote_client.init_upload_queue(index_part)?;
                 let local_only_filenames = self
                     .download_missing(
                         index_part,
@@ -1149,7 +1150,6 @@ impl Timeline {
                         disk_consistent_lsn,
                     )
                     .await?;
-                remote_client.init_upload_queue(index_part)?;
                 local_only_filenames
             }
             None => {
