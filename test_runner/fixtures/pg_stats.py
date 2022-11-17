@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import List
 
 import pytest
@@ -13,7 +14,7 @@ class PgStatTable:
         self.columns = columns
         self.additional_query = filter_query
 
-    @property
+    @cached_property
     def query(self) -> str:
         return f"SELECT {','.join(self.columns)} FROM {self.table} {self.additional_query}"
 
@@ -55,6 +56,5 @@ def pg_stats_wal() -> List[PgStatTable]:
         PgStatTable(
             "pg_stat_wal",
             ["wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write"],
-            "",
         )
     ]

@@ -10,6 +10,7 @@
 //
 
 use anyhow::{bail, ensure, Context, Result};
+use bytes::Buf;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use pageserver_api::models::{
@@ -18,21 +19,23 @@ use pageserver_api::models::{
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
     PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
+use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::io;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::pin;
 use tokio_util::io::StreamReader;
 use tokio_util::io::SyncIoBridge;
 use tracing::*;
+use utils::id::ConnectionId;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
     postgres_backend_async::{self, PostgresBackend},
-    pq_proto::{BeMessage, FeMessage, RowDescriptor},
     simple_rcu::RcuReadGuard,
 };
 
@@ -45,6 +48,7 @@ use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
 use crate::tenant_mgr;
+use crate::trace::Tracer;
 use crate::CheckpointConfig;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -72,6 +76,12 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::CopyData(bytes) => bytes,
                         FeMessage::CopyDone => { break },
                         FeMessage::Sync => continue,
+                        FeMessage::Terminate => {
+                            let msg = format!("client terminated connection with Terminate message during COPY");
+                            pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
+                            Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                            break;
+                        }
                         m => {
                             let msg = format!("unexpected message {:?}", m);
                             pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
@@ -83,10 +93,10 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                     yield copy_data_bytes;
                 }
                 Ok(None) => {
-                    let msg = "client closed connection";
+                    let msg = "client closed connection during COPY";
                     pgb.write_message(&BeMessage::ErrorResponse(msg))?;
                     pgb.flush().await?;
-                    Err(io::Error::new(io::ErrorKind::Other, msg))?;
+                    Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                 }
                 Err(e) => {
                     Err(io::Error::new(io::ErrorKind::Other, e))?;
@@ -267,6 +277,18 @@ impl PageServerHandler {
         //       so there is no need to reset the association
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
+        // Make request tracer if needed
+        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+        let mut tracer = if tenant.get_trace_read_requests() {
+            let connection_id = ConnectionId::generate();
+            let path = tenant
+                .conf
+                .trace_path(&tenant_id, &timeline_id, &connection_id);
+            Some(Tracer::new(path))
+        } else {
+            None
+        };
+
         // Check that the timeline exists
         let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
@@ -299,7 +321,12 @@ impl PageServerHandler {
 
             trace!("query: {copy_data_bytes:?}");
 
-            let neon_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+            // Trace request if needed
+            if let Some(t) = tracer.as_mut() {
+                t.trace(&copy_data_bytes)
+            }
+
+            let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
@@ -366,14 +393,12 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
 
-        // import_basebackup_from_tar() is not async, mainly because the Tar crate
-        // it uses is not async. So we need to jump through some hoops:
-        // - convert the input from client connection to a synchronous Read
-        // - use block_in_place()
-        let mut copyin_stream = Box::pin(copyin_stream(pgb));
-        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-        tokio::task::block_in_place(|| timeline.import_basebackup_from_tar(reader, base_lsn))?;
-        timeline.initialize()?;
+        let copyin_stream = copyin_stream(pgb);
+        pin!(copyin_stream);
+
+        timeline
+            .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
+            .await?;
 
         // Drain the rest of the Copy data
         let mut bytes_after_tar = 0;
@@ -438,7 +463,7 @@ impl PageServerHandler {
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.checkpoint(CheckpointConfig::Flush)?;
+        timeline.checkpoint(CheckpointConfig::Flush).await?;
 
         info!("done");
         Ok(())

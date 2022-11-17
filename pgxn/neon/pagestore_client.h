@@ -115,6 +115,8 @@ typedef struct
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 }			NeonGetPageResponse;
 
+#define PS_GETPAGERESPONSE_SIZE (MAXALIGN(offsetof(NeonGetPageResponse, page) + BLCKSZ))
+
 typedef struct
 {
 	NeonMessageTag tag;
@@ -138,15 +140,20 @@ extern char *nm_to_string(NeonMessage * msg);
 
 typedef struct
 {
-	NeonResponse *(*request) (NeonRequest * request);
 	void		(*send) (NeonRequest * request);
 	NeonResponse *(*receive) (void);
 	void		(*flush) (void);
 }			page_server_api;
 
+extern void prefetch_on_ps_disconnect(void);
+
 extern page_server_api * page_server;
 
 extern char *page_server_connstring;
+extern int flush_every_n_requests;
+extern int readahead_buffer_size;
+extern bool seqscan_prefetch_enabled;
+extern int seqscan_prefetch_distance;
 extern char *neon_timeline;
 extern char *neon_tenant;
 extern bool wal_redo;
@@ -154,10 +161,7 @@ extern int32 max_cluster_size;
 
 extern const f_smgr *smgr_neon(BackendId backend, RelFileNode rnode);
 extern void smgr_init_neon(void);
-
-extern const f_smgr *smgr_inmem(BackendId backend, RelFileNode rnode);
-extern void smgr_init_inmem(void);
-extern void smgr_shutdown_inmem(void);
+extern void readahead_buffer_resize(int newsize, void *extra);
 
 /* Neon storage manager functionality */
 
@@ -171,7 +175,6 @@ extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
 						BlockNumber blocknum, char *buffer, bool skipFsync);
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum);
-extern void neon_reset_prefetch(SMgrRelation reln);
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
 
@@ -187,29 +190,6 @@ extern int64 neon_dbsize(Oid dbNode);
 extern void neon_truncate(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber nblocks);
 extern void neon_immedsync(SMgrRelation reln, ForkNumber forknum);
-
-/* neon wal-redo storage manager functionality */
-
-extern void inmem_init(void);
-extern void inmem_open(SMgrRelation reln);
-extern void inmem_close(SMgrRelation reln, ForkNumber forknum);
-extern void inmem_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);
-extern bool inmem_exists(SMgrRelation reln, ForkNumber forknum);
-extern void inmem_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo);
-extern void inmem_extend(SMgrRelation reln, ForkNumber forknum,
-						 BlockNumber blocknum, char *buffer, bool skipFsync);
-extern bool inmem_prefetch(SMgrRelation reln, ForkNumber forknum,
-						   BlockNumber blocknum);
-extern void inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-					   char *buffer);
-extern void inmem_write(SMgrRelation reln, ForkNumber forknum,
-						BlockNumber blocknum, char *buffer, bool skipFsync);
-extern void inmem_writeback(SMgrRelation reln, ForkNumber forknum,
-							BlockNumber blocknum, BlockNumber nblocks);
-extern BlockNumber inmem_nblocks(SMgrRelation reln, ForkNumber forknum);
-extern void inmem_truncate(SMgrRelation reln, ForkNumber forknum,
-						   BlockNumber nblocks);
-extern void inmem_immedsync(SMgrRelation reln, ForkNumber forknum);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);

@@ -1,10 +1,11 @@
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
+from contextlib import _GeneratorContextManager, contextmanager
 
 # Type-related stuff
-from typing import Dict, List
+from typing import Dict, Iterator, List
 
 import pytest
+from _pytest.fixtures import FixtureRequest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import NeonEnv, PgBin, PgProtocol, RemotePostgres, VanillaPostgres
 from fixtures.pg_stats import PgStatTable
@@ -28,19 +29,20 @@ class PgCompare(ABC):
         pass
 
     @property
+    @abstractmethod
     def zenbenchmark(self) -> NeonBenchmarker:
         pass
 
     @abstractmethod
-    def flush(self) -> None:
+    def flush(self):
         pass
 
     @abstractmethod
-    def report_peak_memory_use(self) -> None:
+    def report_peak_memory_use(self):
         pass
 
     @abstractmethod
-    def report_size(self) -> None:
+    def report_size(self):
         pass
 
     @contextmanager
@@ -54,7 +56,7 @@ class PgCompare(ABC):
         pass
 
     @contextmanager
-    def record_pg_stats(self, pg_stats: List[PgStatTable]):
+    def record_pg_stats(self, pg_stats: List[PgStatTable]) -> Iterator[None]:
         init_data = self._retrieve_pg_stats(pg_stats)
 
         yield
@@ -84,7 +86,11 @@ class NeonCompare(PgCompare):
     """PgCompare interface for the neon stack."""
 
     def __init__(
-        self, zenbenchmark: NeonBenchmarker, neon_simple_env: NeonEnv, pg_bin: PgBin, branch_name
+        self,
+        zenbenchmark: NeonBenchmarker,
+        neon_simple_env: NeonEnv,
+        pg_bin: PgBin,
+        branch_name: str,
     ):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
@@ -97,15 +103,15 @@ class NeonCompare(PgCompare):
         self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
 
     @property
-    def pg(self):
+    def pg(self) -> PgProtocol:
         return self._pg
 
     @property
-    def zenbenchmark(self):
+    def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
-    def pg_bin(self):
+    def pg_bin(self) -> PgBin:
         return self._pg_bin
 
     def flush(self):
@@ -114,7 +120,7 @@ class NeonCompare(PgCompare):
     def compact(self):
         self.pageserver_http_client.timeline_compact(self.env.initial_tenant, self.timeline)
 
-    def report_peak_memory_use(self) -> None:
+    def report_peak_memory_use(self):
         self.zenbenchmark.record(
             "peak_mem",
             self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
@@ -122,7 +128,7 @@ class NeonCompare(PgCompare):
             report=MetricReport.LOWER_IS_BETTER,
         )
 
-    def report_size(self) -> None:
+    def report_size(self):
         timeline_size = self.zenbenchmark.get_timeline_size(
             self.env.repo_dir, self.env.initial_tenant, self.timeline
         )
@@ -144,17 +150,17 @@ class NeonCompare(PgCompare):
             "num_files_uploaded", total_files, "", report=MetricReport.LOWER_IS_BETTER
         )
 
-    def record_pageserver_writes(self, out_name):
+    def record_pageserver_writes(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_pageserver_writes(self.env.pageserver, out_name)
 
-    def record_duration(self, out_name):
+    def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 
 
 class VanillaCompare(PgCompare):
     """PgCompare interface for vanilla postgres."""
 
-    def __init__(self, zenbenchmark, vanilla_pg: VanillaPostgres):
+    def __init__(self, zenbenchmark: NeonBenchmarker, vanilla_pg: VanillaPostgres):
         self._pg = vanilla_pg
         self._zenbenchmark = zenbenchmark
         vanilla_pg.configure(
@@ -170,24 +176,24 @@ class VanillaCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
-    def pg(self):
+    def pg(self) -> PgProtocol:
         return self._pg
 
     @property
-    def zenbenchmark(self):
+    def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
-    def pg_bin(self):
+    def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
     def flush(self):
         self.cur.execute("checkpoint")
 
-    def report_peak_memory_use(self) -> None:
+    def report_peak_memory_use(self):
         pass  # TODO find something
 
-    def report_size(self) -> None:
+    def report_size(self):
         data_size = self.pg.get_subdir_size("base")
         self.zenbenchmark.record(
             "data_size", data_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
@@ -198,17 +204,17 @@ class VanillaCompare(PgCompare):
         )
 
     @contextmanager
-    def record_pageserver_writes(self, out_name):
+    def record_pageserver_writes(self, out_name: str) -> Iterator[None]:
         yield  # Do nothing
 
-    def record_duration(self, out_name):
+    def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 
 
 class RemoteCompare(PgCompare):
     """PgCompare interface for a remote postgres instance."""
 
-    def __init__(self, zenbenchmark, remote_pg: RemotePostgres):
+    def __init__(self, zenbenchmark: NeonBenchmarker, remote_pg: RemotePostgres):
         self._pg = remote_pg
         self._zenbenchmark = zenbenchmark
 
@@ -217,55 +223,60 @@ class RemoteCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
-    def pg(self):
+    def pg(self) -> PgProtocol:
         return self._pg
 
     @property
-    def zenbenchmark(self):
+    def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
-    def pg_bin(self):
+    def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
     def flush(self):
         # TODO: flush the remote pageserver
         pass
 
-    def report_peak_memory_use(self) -> None:
+    def report_peak_memory_use(self):
         # TODO: get memory usage from remote pageserver
         pass
 
-    def report_size(self) -> None:
+    def report_size(self):
         # TODO: get storage size from remote pageserver
         pass
 
     @contextmanager
-    def record_pageserver_writes(self, out_name):
+    def record_pageserver_writes(self, out_name: str) -> Iterator[None]:
         yield  # Do nothing
 
-    def record_duration(self, out_name):
+    def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 
 
 @pytest.fixture(scope="function")
-def neon_compare(request, zenbenchmark, pg_bin, neon_simple_env) -> NeonCompare:
+def neon_compare(
+    request: FixtureRequest,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    neon_simple_env: NeonEnv,
+) -> NeonCompare:
     branch_name = request.node.name
     return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
 
 
 @pytest.fixture(scope="function")
-def vanilla_compare(zenbenchmark, vanilla_pg) -> VanillaCompare:
+def vanilla_compare(zenbenchmark: NeonBenchmarker, vanilla_pg: VanillaPostgres) -> VanillaCompare:
     return VanillaCompare(zenbenchmark, vanilla_pg)
 
 
 @pytest.fixture(scope="function")
-def remote_compare(zenbenchmark, remote_pg) -> RemoteCompare:
+def remote_compare(zenbenchmark: NeonBenchmarker, remote_pg: RemotePostgres) -> RemoteCompare:
     return RemoteCompare(zenbenchmark, remote_pg)
 
 
 @pytest.fixture(params=["vanilla_compare", "neon_compare"], ids=["vanilla", "neon"])
-def neon_with_baseline(request) -> PgCompare:
+def neon_with_baseline(request: FixtureRequest) -> PgCompare:
     """Parameterized fixture that helps compare neon against vanilla postgres.
 
     A test that uses this fixture turns into a parameterized test that runs against:
@@ -286,8 +297,6 @@ def neon_with_baseline(request) -> PgCompare:
     implementation-specific logic is widely useful across multiple tests, it might
     make sense to add methods to the PgCompare class.
     """
-    fixture = request.getfixturevalue(request.param)
-    if isinstance(fixture, PgCompare):
-        return fixture
-    else:
-        raise AssertionError(f"test error: fixture {request.param} is not PgCompare")
+    fixture = request.getfixturevalue(request.param)  # type: ignore
+    assert isinstance(fixture, PgCompare), f"test error: fixture {fixture} is not PgCompare"
+    return fixture

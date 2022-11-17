@@ -3,9 +3,8 @@
  * inmem_smgr.c
  *
  * This is an implementation of the SMGR interface, used in the WAL redo
- * process (see src/backend/tcop/zenith_wal_redo.c). It has no persistent
- * storage, the pages that are written out are kept in a small number of
- * in-memory buffers.
+ * process. It has no persistent storage, the pages that are written out
+ * are kept in a small number of in-memory buffers.
  *
  * Normally, replaying a WAL record only needs to access a handful of
  * buffers, which fit in the normal buffer cache, so this is just for
@@ -15,15 +14,11 @@
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * IDENTIFICATION
- *	  contrib/neon/inmem_smgr.c
- *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "access/xlog.h"
-#include "pagestore_client.h"
 #include "storage/block.h"
 #include "storage/buf_internals.h"
 #include "storage/relfilenode.h"
@@ -32,6 +27,8 @@
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogutils.h"
 #endif
+
+#include "inmem_smgr.h"
 
 /* Size of the in-memory smgr */
 #define MAX_PAGES 64
@@ -59,10 +56,34 @@ locate_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno)
 	return -1;
 }
 
+
+/* neon wal-redo storage manager functionality */
+static void inmem_init(void);
+static void inmem_open(SMgrRelation reln);
+static void inmem_close(SMgrRelation reln, ForkNumber forknum);
+static void inmem_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);
+static bool inmem_exists(SMgrRelation reln, ForkNumber forknum);
+static void inmem_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo);
+static void inmem_extend(SMgrRelation reln, ForkNumber forknum,
+						 BlockNumber blocknum, char *buffer, bool skipFsync);
+static bool inmem_prefetch(SMgrRelation reln, ForkNumber forknum,
+						   BlockNumber blocknum);
+static void inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+					   char *buffer);
+static void inmem_write(SMgrRelation reln, ForkNumber forknum,
+						BlockNumber blocknum, char *buffer, bool skipFsync);
+static void inmem_writeback(SMgrRelation reln, ForkNumber forknum,
+							BlockNumber blocknum, BlockNumber nblocks);
+static BlockNumber inmem_nblocks(SMgrRelation reln, ForkNumber forknum);
+static void inmem_truncate(SMgrRelation reln, ForkNumber forknum,
+						   BlockNumber nblocks);
+static void inmem_immedsync(SMgrRelation reln, ForkNumber forknum);
+
+
 /*
  *	inmem_init() -- Initialize private state
  */
-void
+static void
 inmem_init(void)
 {
 	used_pages = 0;
@@ -71,7 +92,7 @@ inmem_init(void)
 /*
  *	inmem_exists() -- Does the physical file exist?
  */
-bool
+static bool
 inmem_exists(SMgrRelation reln, ForkNumber forknum)
 {
 	for (int i = 0; i < used_pages; i++)
@@ -90,7 +111,7 @@ inmem_exists(SMgrRelation reln, ForkNumber forknum)
  *
  * If isRedo is true, it's okay for the relation to exist already.
  */
-void
+static void
 inmem_create(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 {
 }
@@ -98,7 +119,7 @@ inmem_create(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 /*
  *	inmem_unlink() -- Unlink a relation.
  */
-void
+static void
 inmem_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo)
 {
 }
@@ -112,7 +133,7 @@ inmem_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo)
  *		EOF).  Note that we assume writing a block beyond current EOF
  *		causes intervening file space to become filled with zeroes.
  */
-void
+static void
 inmem_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 char *buffer, bool skipFsync)
 {
@@ -123,7 +144,7 @@ inmem_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 /*
  *  inmem_open() -- Initialize newly-opened relation.
  */
-void
+static void
 inmem_open(SMgrRelation reln)
 {
 }
@@ -131,7 +152,7 @@ inmem_open(SMgrRelation reln)
 /*
  *	inmem_close() -- Close the specified relation, if it isn't closed already.
  */
-void
+static void
 inmem_close(SMgrRelation reln, ForkNumber forknum)
 {
 }
@@ -139,7 +160,7 @@ inmem_close(SMgrRelation reln, ForkNumber forknum)
 /*
  *	inmem_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
-bool
+static bool
 inmem_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
 	return true;
@@ -148,7 +169,7 @@ inmem_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 /*
  * inmem_writeback() -- Tell the kernel to write pages back to storage.
  */
-void
+static void
 inmem_writeback(SMgrRelation reln, ForkNumber forknum,
 				BlockNumber blocknum, BlockNumber nblocks)
 {
@@ -157,7 +178,7 @@ inmem_writeback(SMgrRelation reln, ForkNumber forknum,
 /*
  *	inmem_read() -- Read the specified block from a relation.
  */
-void
+static void
 inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 		   char *buffer)
 {
@@ -177,7 +198,7 @@ inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
  *		relation (ie, those before the current EOF).  To extend a relation,
  *		use mdextend().
  */
-void
+static void
 inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			char *buffer, bool skipFsync)
 {
@@ -224,7 +245,7 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 /*
  *	inmem_nblocks() -- Get the number of blocks stored in a relation.
  */
-BlockNumber
+static BlockNumber
 inmem_nblocks(SMgrRelation reln, ForkNumber forknum)
 {
 	/*
@@ -243,7 +264,7 @@ inmem_nblocks(SMgrRelation reln, ForkNumber forknum)
 /*
  *	inmem_truncate() -- Truncate relation to specified number of blocks.
  */
-void
+static void
 inmem_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 {
 }
@@ -251,7 +272,7 @@ inmem_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 /*
  *	inmem_immedsync() -- Immediately sync a relation to stable storage.
  */
-void
+static void
 inmem_immedsync(SMgrRelation reln, ForkNumber forknum)
 {
 }

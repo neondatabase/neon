@@ -4,6 +4,7 @@ from typing import List
 
 from fixtures.benchmark_fixture import PgBenchRunResult
 from fixtures.compare_fixtures import NeonCompare
+from fixtures.neon_fixtures import fork_at_current_lsn
 from performance.test_perf_pgbench import utc_now_timestamp
 
 # -----------------------------------------------------------------------
@@ -43,7 +44,8 @@ def test_compare_child_and_root_pgbench_perf(neon_compare: NeonCompare):
     pg_root = env.postgres.create_start("root")
     pg_bin.run_capture(["pgbench", "-i", pg_root.connstr(), "-s10"])
 
-    env.neon_cli.create_branch("child", "root")
+    fork_at_current_lsn(env, pg_root, "child", "root")
+
     pg_child = env.postgres.create_start("child")
 
     run_pgbench_on_branch("root", ["pgbench", "-c10", "-T10", pg_root.connstr()])

@@ -227,13 +227,10 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
     let state = get_state(&request);
 
-    let timelines = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
+    let timelines = info_span!("timeline_list", tenant = %tenant_id).in_scope(|| {
         let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::NotFound)?;
         Ok(tenant.list_timelines())
-    })
-    .await
-    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+    })?;
 
     let mut response_data = Vec::with_capacity(timelines.len());
     for timeline in timelines {
@@ -523,9 +520,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     check_permission(&request, Some(tenant_id))?;
 
     // if tenant is in progress of downloading it can be absent in global tenant map
-    let tenant = tokio::task::spawn_blocking(move || tenant_mgr::get_tenant(tenant_id, false))
-        .await
-        .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
+    let tenant = tenant_mgr::get_tenant(tenant_id, false);
 
     let state = get_state(&request);
     let remote_index = &state.remote_index;
@@ -571,6 +566,44 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     )
 }
 
+async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::InternalServerError)?;
+
+    // this can be long operation, it currently is not backed by any request coalescing or similar
+    let inputs = tenant
+        .gather_size_inputs()
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    let size = inputs.calculate().map_err(ApiError::InternalServerError)?;
+
+    /// Private response type with the additional "unstable" `inputs` field.
+    ///
+    /// The type is described with `id` and `size` in the openapi_spec file, but the `inputs` is
+    /// intentionally left out. The type resides in the pageserver not to expose `ModelInputs`.
+    #[serde_with::serde_as]
+    #[derive(serde::Serialize)]
+    struct TenantHistorySize {
+        #[serde_as(as = "serde_with::DisplayFromStr")]
+        id: TenantId,
+        /// Size is a mixture of WAL and logical size, so the unit is bytes.
+        size: u64,
+        inputs: crate::tenant::size::ModelInputs,
+    }
+
+    json_response(
+        StatusCode::OK,
+        TenantHistorySize {
+            id: tenant_id,
+            size,
+            inputs,
+        },
+    )
+}
+
 // Helper function to standardize the error messages we produce on bad durations
 //
 // Intended to be used with anyhow's `with_context`, e.g.:
@@ -585,6 +618,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
+    println!("tenant create: {:?}", request_data.trace_read_requests);
     let remote_index = get_state(&request).remote_index.clone();
 
     let mut tenant_conf = TenantConfOpt::default();
@@ -625,6 +659,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
         tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
+    }
+    if let Some(trace_read_requests) = request_data.trace_read_requests {
+        tenant_conf.trace_read_requests = Some(trace_read_requests);
     }
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
@@ -713,6 +750,9 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
         tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
     }
+    if let Some(trace_read_requests) = request_data.trace_read_requests {
+        tenant_conf.trace_read_requests = Some(trace_read_requests);
+    }
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
@@ -792,14 +832,14 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
     let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::NotFound)?;
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
-    let _span_guard =
-        info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id).entered();
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
 
     // Use tenant's pitr setting
     let pitr = tenant.get_pitr_interval();
     let result = tenant
         .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
+        .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
+        .await
         // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
         // better once the types support it.
         .map_err(ApiError::InternalServerError)?;
@@ -835,6 +875,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         .map_err(ApiError::NotFound)?;
     timeline
         .checkpoint(CheckpointConfig::Forced)
+        .await
         .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
@@ -898,6 +939,7 @@ pub fn make_router(
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
         .get("/v1/tenant/:tenant_id", tenant_status)
+        .get("/v1/tenant/:tenant_id/size", tenant_size_handler)
         .put("/v1/tenant/config", tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)

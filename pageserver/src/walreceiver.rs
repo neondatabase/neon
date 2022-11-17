@@ -155,22 +155,19 @@ impl<E: Clone> TaskHandle<E> {
 
     /// Aborts current task, waiting for it to finish.
     pub async fn shutdown(self) {
-        match self.join_handle {
-            Some(jh) => {
-                self.cancellation.send(()).ok();
-                match jh.await {
-                    Ok(Ok(())) => debug!("Shutdown success"),
-                    Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
-                    Err(join_error) => {
-                        if join_error.is_cancelled() {
-                            error!("Shutdown task was cancelled");
-                        } else {
-                            error!("Shutdown task join error: {join_error}")
-                        }
+        if let Some(jh) = self.join_handle {
+            self.cancellation.send(()).ok();
+            match jh.await {
+                Ok(Ok(())) => debug!("Shutdown success"),
+                Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
+                Err(join_error) => {
+                    if join_error.is_cancelled() {
+                        error!("Shutdown task was cancelled");
+                    } else {
+                        error!("Shutdown task join error: {join_error}")
                     }
                 }
             }
-            None => {}
         }
     }
 }

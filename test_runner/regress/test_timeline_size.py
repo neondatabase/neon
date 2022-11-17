@@ -11,7 +11,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverHttpClient,
+    PageserverHttpClient,
     PgBin,
     PortDistributor,
     Postgres,
@@ -338,6 +338,7 @@ def test_timeline_size_metrics(
     neon_simple_env: NeonEnv,
     test_output_dir: Path,
     port_distributor: PortDistributor,
+    pg_distrib_dir: Path,
     pg_version: str,
 ):
     env = neon_simple_env
@@ -382,7 +383,7 @@ def test_timeline_size_metrics(
     tl_logical_size_metric = int(matches.group(1))
 
     pgdatadir = test_output_dir / "pgdata-vanilla"
-    pg_bin = PgBin(test_output_dir, pg_version)
+    pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
         vanilla_pg.configure([f"port={port}"])
@@ -462,7 +463,7 @@ def assert_physical_size(env: NeonEnv, tenant_id: TenantId, timeline_id: Timelin
 # Timeline logical size initialization is an asynchronous background task that runs once,
 # try a few times to ensure it's activated properly
 def wait_for_timeline_size_init(
-    client: NeonPageserverHttpClient, tenant: TenantId, timeline: TimelineId
+    client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
 ):
     for i in range(10):
         timeline_details = client.timeline_detail(

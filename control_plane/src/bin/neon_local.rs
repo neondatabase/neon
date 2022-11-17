@@ -9,8 +9,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env::{EtcdBroker, LocalEnv};
+use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
-use control_plane::storage::PageServerNode;
 use control_plane::{etcd, local_env};
 use pageserver_api::models::TimelineInfo;
 use pageserver_api::{

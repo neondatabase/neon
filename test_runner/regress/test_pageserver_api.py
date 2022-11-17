@@ -1,24 +1,24 @@
-import pathlib
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverHttpClient,
-    neon_binpath,
-    pg_distrib_dir,
-    wait_until,
+    PageserverHttpClient,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import wait_until
 
 
 # test that we cannot override node id after init
-def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
+def test_pageserver_init_node_id(
+    neon_simple_env: NeonEnv, neon_binpath: Path, pg_distrib_dir: Path
+):
     repo_dir = neon_simple_env.repo_dir
     pageserver_config = repo_dir / "pageserver.toml"
-    pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
+    pageserver_bin = neon_binpath / "pageserver"
 
     def run_pageserver(args):
         return subprocess.run(
@@ -29,8 +29,9 @@ def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
             stderr=subprocess.PIPE,
         )
 
-    # remove initial config
+    # remove initial config and stop existing pageserver
     pageserver_config.unlink()
+    neon_simple_env.pageserver.stop()
 
     bad_init = run_pageserver(["--init", "-c", f'pg_distrib_dir="{pg_distrib_dir}"'])
     assert (
@@ -60,7 +61,7 @@ def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
     assert "has node id already, it cannot be overridden" in bad_update.stderr
 
 
-def check_client(client: NeonPageserverHttpClient, initial_tenant: TenantId):
+def check_client(client: PageserverHttpClient, initial_tenant: TenantId):
     client.check_status()
 
     # check initial tenant is there
@@ -116,7 +117,7 @@ def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
 
 
 def expect_updated_msg_lsn(
-    client: NeonPageserverHttpClient,
+    client: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     prev_msg_lsn: Optional[Lsn],

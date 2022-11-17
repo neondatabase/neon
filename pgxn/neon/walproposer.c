@@ -43,6 +43,7 @@
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogrecovery.h"
 #endif
+#include "storage/fd.h"
 #include "storage/latch.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -69,11 +70,12 @@
 #include "neon.h"
 #include "walproposer.h"
 #include "walproposer_utils.h"
-#include "replication/walpropshim.h"
+
+static bool syncSafekeepers = false;
 
 char	   *wal_acceptors_list;
 int			wal_acceptor_reconnect_timeout;
-int			wal_acceptor_connect_timeout;
+int			wal_acceptor_connection_timeout;
 bool		am_wal_proposer;
 
 char	   *neon_timeline_walproposer = NULL;
@@ -117,8 +119,8 @@ static TimestampTz last_reconnect_attempt;
 static WalproposerShmemState * walprop_shared;
 
 /* Prototypes for private functions */
-static void WalProposerInitImpl(XLogRecPtr flushRecPtr, uint64 systemId);
-static void WalProposerStartImpl(void);
+static void WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId);
+static void WalProposerStart(void);
 static void WalProposerLoop(void);
 static void InitEventSet(void);
 static void UpdateEventSet(Safekeeper *sk, uint32 events);
@@ -186,9 +188,56 @@ pg_init_walproposer(void)
 	ProcessInterruptsCallback = backpressure_throttling_impl;
 
 	WalProposerRegister();
+}
 
-	WalProposerInit = &WalProposerInitImpl;
-	WalProposerStart = &WalProposerStartImpl;
+/*
+ * Entry point for `postgres --sync-safekeepers`.
+ */
+void
+WalProposerSync(int argc, char *argv[])
+{
+	struct stat stat_buf;
+
+	syncSafekeepers = true;
+#if PG_VERSION_NUM < 150000
+	ThisTimeLineID = 1;
+#endif
+
+	/*
+	 * Initialize postmaster_alive_fds as WaitEventSet checks them.
+	 *
+	 * Copied from InitPostmasterDeathWatchHandle()
+	 */
+	if (pipe(postmaster_alive_fds) < 0)
+		ereport(FATAL,
+				(errcode_for_file_access(),
+					errmsg_internal("could not create pipe to monitor postmaster death: %m")));
+	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
+		ereport(FATAL,
+				(errcode_for_socket_access(),
+					errmsg_internal("could not set postmaster death monitoring pipe to nonblocking mode: %m")));
+
+	ChangeToDataDir();
+
+	/* Create pg_wal directory, if it doesn't exist */
+	if (stat(XLOGDIR, &stat_buf) != 0)
+	{
+		ereport(LOG, (errmsg("creating missing WAL directory \"%s\"", XLOGDIR)));
+		if (MakePGDirectory(XLOGDIR) < 0)
+		{
+			ereport(ERROR,
+					(errcode_for_file_access(),
+						errmsg("could not create directory \"%s\": %m",
+							   XLOGDIR)));
+			exit(1);
+		}
+	}
+
+	WalProposerInit(0, 0);
+
+	BackgroundWorkerUnblockSignals();
+
+	WalProposerStart();
 }
 
 static void
@@ -217,9 +266,9 @@ nwp_register_gucs(void)
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_connect_timeout",
-							"Timeout after which give up connection attempt to safekeeper.",
+							"Timeout for connection establishement and it's maintenance against safekeeper",
 							NULL,
-							&wal_acceptor_connect_timeout,
+							&wal_acceptor_connection_timeout,
 							5000, 0, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
@@ -368,7 +417,9 @@ WalProposerPoll(void)
 			ResetLatch(MyLatch);
 			break;
 		}
-		if (rc == 0)			/* timeout expired: poll state */
+
+		now = GetCurrentTimestamp();
+		if (rc == 0 || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
 		{
 			TimestampTz now;
 
@@ -389,13 +440,11 @@ WalProposerPoll(void)
 			{
 				Safekeeper *sk = &safekeeper[i];
 
-				if ((sk->state == SS_CONNECTING_WRITE ||
-					 sk->state == SS_CONNECTING_READ) &&
-					TimestampDifferenceExceeds(sk->startedConnAt, now,
-											   wal_acceptor_connect_timeout))
+				if (TimestampDifferenceExceeds(sk->latestMsgReceivedAt, now,
+											   wal_acceptor_connection_timeout))
 				{
-					elog(WARNING, "failed to connect to node '%s:%s': exceeded connection timeout %dms",
-						 sk->host, sk->port, wal_acceptor_connect_timeout);
+					elog(WARNING, "failed to connect to node '%s:%s' in '%s' state: exceeded connection timeout %dms",
+						 sk->host, sk->port, FormatSafekeeperState(sk->state), wal_acceptor_connection_timeout);
 					ShutdownConnection(sk);
 				}
 			}
@@ -429,7 +478,7 @@ WalProposerRegister(void)
 }
 
 static void
-WalProposerInitImpl(XLogRecPtr flushRecPtr, uint64 systemId)
+WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 {
 	char	   *host;
 	char	   *sep;
@@ -508,7 +557,7 @@ WalProposerInitImpl(XLogRecPtr flushRecPtr, uint64 systemId)
 }
 
 static void
-WalProposerStartImpl(void)
+WalProposerStart(void)
 {
 
 	/* Initiate connections to all safekeeper nodes */
@@ -711,7 +760,7 @@ ResetConnection(Safekeeper *sk)
 	elog(LOG, "connecting with node %s:%s", sk->host, sk->port);
 
 	sk->state = SS_CONNECTING_WRITE;
-	sk->startedConnAt = GetCurrentTimestamp();
+	sk->latestMsgReceivedAt = GetCurrentTimestamp();
 
 	sock = walprop_socket(sk->conn);
 	sk->eventPos = AddWaitEventToSet(waitEvents, WL_SOCKET_WRITEABLE, sock, NULL, sk);
@@ -869,7 +918,7 @@ HandleConnectionEvent(Safekeeper *sk)
 		case WP_CONN_POLLING_OK:
 			elog(LOG, "connected with node %s:%s", sk->host,
 				 sk->port);
-
+			sk->latestMsgReceivedAt = GetCurrentTimestamp();
 			/*
 			 * We have to pick some event to update event set. We'll
 			 * eventually need the socket to be readable, so we go with that.
@@ -2255,7 +2304,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg)
 		ResetConnection(sk);
 		return false;
 	}
-
+	sk->latestMsgReceivedAt = GetCurrentTimestamp();
 	switch (tag)
 	{
 		case 'g':

@@ -27,14 +27,14 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
     RemoteStorageUsers,
     Safekeeper,
+    SafekeeperHttpClient,
     SafekeeperPort,
     available_remote_storages,
-    neon_binpath,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import get_dir_size, query_scalar
+from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
 
 def wait_lsn_force_checkpoint(
@@ -263,6 +263,12 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_broker", "main")
+
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+
     pg = env.postgres.create_start("test_broker")
     pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
@@ -305,6 +311,11 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.enable_local_fs_remote_storage()
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
+
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
 
     env.neon_cli.create_branch("test_safekeepers_wal_removal")
     pg = env.postgres.create_start("test_safekeepers_wal_removal")
@@ -538,6 +549,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     )
 
     pg.stop_and_destroy()
+    ps_cli.timeline_delete(tenant_id, timeline_id)
 
     # Also delete and manually create timeline on safekeepers -- this tests
     # scenario of manual recovery on different set of safekeepers.
@@ -562,7 +574,6 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         shutil.copy(f_partial_saved, f_partial_path)
 
     # recreate timeline on pageserver from scratch
-    ps_cli.timeline_delete(tenant_id, timeline_id)
     ps_cli.timeline_create(tenant_id, timeline_id)
 
     wait_lsn_timeout = 60 * 3
@@ -796,6 +807,7 @@ class SafekeeperEnv:
         repo_dir: Path,
         port_distributor: PortDistributor,
         pg_bin: PgBin,
+        neon_binpath: Path,
         num_safekeepers: int = 1,
     ):
         self.repo_dir = repo_dir
@@ -807,7 +819,7 @@ class SafekeeperEnv:
         )
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
-        self.bin_safekeeper = os.path.join(str(neon_binpath), "safekeeper")
+        self.bin_safekeeper = str(neon_binpath / "safekeeper")
         self.safekeepers: Optional[List[subprocess.CompletedProcess[Any]]] = None
         self.postgres: Optional[ProposerPostgres] = None
         self.tenant_id: Optional[TenantId] = None
@@ -841,7 +853,7 @@ class SafekeeperEnv:
         safekeeper_dir = self.repo_dir / f"sk{i}"
         safekeeper_dir.mkdir(exist_ok=True)
 
-        args = [
+        cmd = [
             self.bin_safekeeper,
             "-l",
             f"127.0.0.1:{port.pg}",
@@ -853,11 +865,22 @@ class SafekeeperEnv:
             str(i),
             "--broker-endpoints",
             self.broker.client_url(),
-            "--daemonize",
         ]
+        log.info(f'Running command "{" ".join(cmd)}"')
 
-        log.info(f'Running command "{" ".join(args)}"')
-        return subprocess.run(args, check=True)
+        safekeeper_client = SafekeeperHttpClient(
+            port=port.http,
+            auth_token=None,
+        )
+        try:
+            safekeeper_process = start_in_background(
+                cmd, safekeeper_dir, "safekeeper.log", safekeeper_client.check_status
+            )
+            return safekeeper_process
+        except Exception as e:
+            log.error(e)
+            safekeeper_process.kill()
+            raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}")
 
     def get_safekeeper_connstrs(self):
         return ",".join([sk_proc.args[2] for sk_proc in self.safekeepers])
@@ -899,7 +922,10 @@ class SafekeeperEnv:
 
 
 def test_safekeeper_without_pageserver(
-    test_output_dir: str, port_distributor: PortDistributor, pg_bin: PgBin
+    test_output_dir: str,
+    port_distributor: PortDistributor,
+    pg_bin: PgBin,
+    neon_binpath: Path,
 ):
     # Create the environment in the test-specific output dir
     repo_dir = Path(os.path.join(test_output_dir, "repo"))
@@ -908,6 +934,7 @@ def test_safekeeper_without_pageserver(
         repo_dir,
         port_distributor,
         pg_bin,
+        neon_binpath,
     )
 
     with env:
@@ -1064,6 +1091,14 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
 def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
+
+    # FIXME: are these expected?
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Failed to process query for timeline .*: Timeline .* was not found in global map.*",
+            ".*end streaming to Some.*",
+        ]
+    )
 
     # Create two tenants: one will be deleted, other should be preserved.
     tenant_id = env.initial_tenant

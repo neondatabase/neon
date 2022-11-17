@@ -1,17 +1,14 @@
 //! Main entry point for the Page Server executable.
 
-use remote_storage::GenericRemoteStorage;
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
+
+use anyhow::{anyhow, Context};
+use clap::{Arg, ArgAction, Command};
+use fail::FailScenario;
+use nix::unistd::Pid;
 use tracing::*;
 
-use anyhow::{anyhow, bail, Context, Result};
-
-use clap::{Arg, ArgAction, Command};
-use daemonize::Daemonize;
-
-use fail::FailScenario;
 use metrics::set_build_info_metric;
-
 use pageserver::{
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service, profiling, task_mgr,
@@ -19,19 +16,21 @@ use pageserver::{
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
     },
-    tenant_mgr, virtual_file, LOG_FILE_NAME,
+    tenant_mgr, virtual_file,
 };
+use remote_storage::GenericRemoteStorage;
 use utils::{
     auth::JwtAuth,
-    logging,
+    lock_file, logging,
     postgres_backend::AuthType,
     project_git_version,
-    shutdown::exit_now,
     signals::{self, Signal},
     tcp_listener,
 };
 
 project_git_version!(GIT_VERSION);
+
+const PID_FILE_NAME: &str = "pageserver.pid";
 
 const FEATURES: &[&str] = &[
     #[cfg(feature = "testing")]
@@ -65,6 +64,7 @@ fn main() -> anyhow::Result<()> {
     let workdir = workdir
         .canonicalize()
         .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
+
     let cfg_file_path = workdir.join("pageserver.toml");
 
     // Set CWD to workdir for non-daemon modes
@@ -74,8 +74,6 @@ fn main() -> anyhow::Result<()> {
             workdir.display()
         )
     })?;
-
-    let daemonize = arg_matches.get_flag("daemonize");
 
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,
@@ -102,7 +100,7 @@ fn main() -> anyhow::Result<()> {
     virtual_file::init(conf.max_file_descriptors);
     page_cache::init(conf.page_cache_size);
 
-    start_pageserver(conf, daemonize).context("Failed to start pageserver")?;
+    start_pageserver(conf).context("Failed to start pageserver")?;
 
     scenario.teardown();
     Ok(())
@@ -197,11 +195,33 @@ fn initialize_config(
     })
 }
 
-fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()> {
-    // Initialize logger
-    let log_file = logging::init(LOG_FILE_NAME, daemonize, conf.log_format)?;
-
+fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
+    logging::init(conf.log_format)?;
     info!("version: {}", version());
+
+    let lock_file_path = conf.workdir.join(PID_FILE_NAME);
+    let lock_file = match lock_file::create_lock_file(&lock_file_path, Pid::this().to_string()) {
+        lock_file::LockCreationResult::Created {
+            new_lock_contents,
+            file,
+        } => {
+            info!("Created lock file at {lock_file_path:?} with contenst {new_lock_contents}");
+            file
+        }
+        lock_file::LockCreationResult::AlreadyLocked {
+            existing_lock_contents,
+        } => anyhow::bail!(
+            "Could not lock pid file; pageserver is already running in {:?} with PID {}",
+            conf.workdir,
+            existing_lock_contents
+        ),
+        lock_file::LockCreationResult::CreationFailed(e) => {
+            return Err(e.context(format!("Failed to create lock file at {lock_file_path:?}")))
+        }
+    };
+    // ensure that the lock file is held even if the main thread of the process is panics
+    // we need to release the lock file only when the current process is gone
+    let _ = Box::leak(Box::new(lock_file));
 
     // TODO: Check that it looks like a valid repository before going further
 
@@ -217,33 +237,6 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         conf.listen_pg_addr
     );
     let pageserver_listener = tcp_listener::bind(conf.listen_pg_addr.clone())?;
-
-    // NB: Don't spawn any threads before daemonizing!
-    if daemonize {
-        info!("daemonizing...");
-
-        // There shouldn't be any logging to stdin/stdout. Redirect it to the main log so
-        // that we will see any accidental manual fprintf's or backtraces.
-        let stdout = log_file
-            .try_clone()
-            .with_context(|| format!("Failed to clone log file '{:?}'", log_file))?;
-        let stderr = log_file;
-
-        let daemonize = Daemonize::new()
-            .pid_file("pageserver.pid")
-            .working_directory(".")
-            .stdout(stdout)
-            .stderr(stderr);
-
-        // XXX: The parent process should exit abruptly right after
-        // it has spawned a child to prevent coverage machinery from
-        // dumping stats into a `profraw` file now owned by the child.
-        // Otherwise, the coverage data will be damaged.
-        match daemonize.exit_action(|| exit_now(0)).start() {
-            Ok(_) => info!("Success, daemonized"),
-            Err(err) => bail!("{err}. could not daemonize. bailing."),
-        }
-    }
 
     let signals = signals::install_shutdown_handlers()?;
 
@@ -347,14 +340,6 @@ fn cli() -> Command {
     Command::new("Neon page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(version())
-        .arg(
-
-            Arg::new("daemonize")
-                .short('d')
-                .long("daemonize")
-                .action(ArgAction::SetTrue)
-                .help("Run in the background"),
-        )
         .arg(
             Arg::new("init")
                 .long("init")

@@ -4,8 +4,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, Command};
 use const_format::formatcp;
-use daemonize::Daemonize;
-use fs2::FileExt;
+use nix::unistd::Pid;
 use remote_storage::RemoteStorageConfig;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
@@ -16,6 +15,7 @@ use tokio::sync::mpsc;
 use toml_edit::Document;
 use tracing::*;
 use url::{ParseError, Url};
+use utils::lock_file;
 
 use metrics::set_build_info_metric;
 use safekeeper::broker;
@@ -35,12 +35,10 @@ use utils::{
     http::endpoint,
     id::NodeId,
     logging::{self, LogFormat},
-    project_git_version,
-    shutdown::exit_now,
-    signals, tcp_listener,
+    project_git_version, signals, tcp_listener,
 };
 
-const LOCK_FILE_NAME: &str = "safekeeper.lock";
+const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
 project_git_version!(GIT_VERSION);
 
@@ -63,10 +61,6 @@ fn main() -> anyhow::Result<()> {
 
     if arg_matches.get_flag("no-sync") {
         conf.no_sync = true;
-    }
-
-    if arg_matches.get_flag("daemonize") {
-        conf.daemonize = true;
     }
 
     if let Some(addr) = arg_matches.get_one::<String>("listen-pg") {
@@ -143,19 +137,33 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bool) -> Result<()> {
-    let log_file = logging::init("safekeeper.log", conf.daemonize, conf.log_format)?;
-
+    logging::init(conf.log_format)?;
     info!("version: {GIT_VERSION}");
 
     // Prevent running multiple safekeepers on the same directory
-    let lock_file_path = conf.workdir.join(LOCK_FILE_NAME);
-    let lock_file = File::create(&lock_file_path).context("failed to open lockfile")?;
-    lock_file.try_lock_exclusive().with_context(|| {
-        format!(
-            "control file {} is locked by some other process",
-            lock_file_path.display()
-        )
-    })?;
+    let lock_file_path = conf.workdir.join(PID_FILE_NAME);
+    let lock_file = match lock_file::create_lock_file(&lock_file_path, Pid::this().to_string()) {
+        lock_file::LockCreationResult::Created {
+            new_lock_contents,
+            file,
+        } => {
+            info!("Created lock file at {lock_file_path:?} with contenst {new_lock_contents}");
+            file
+        }
+        lock_file::LockCreationResult::AlreadyLocked {
+            existing_lock_contents,
+        } => anyhow::bail!(
+            "Could not lock pid file; safekeeper is already running in {:?} with PID {}",
+            conf.workdir,
+            existing_lock_contents
+        ),
+        lock_file::LockCreationResult::CreationFailed(e) => {
+            return Err(e.context(format!("Failed to create lock file at {lock_file_path:?}")))
+        }
+    };
+    // ensure that the lock file is held even if the main thread of the process is panics
+    // we need to release the lock file only when the current process is gone
+    let _ = Box::leak(Box::new(lock_file));
 
     // Set or read our ID.
     set_id(&mut conf, given_id)?;
@@ -186,31 +194,6 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
             ))
         }
     };
-
-    // XXX: Don't spawn any threads before daemonizing!
-    if conf.daemonize {
-        info!("daemonizing...");
-
-        // There should'n be any logging to stdin/stdout. Redirect it to the main log so
-        // that we will see any accidental manual fprintf's or backtraces.
-        let stdout = log_file.try_clone().unwrap();
-        let stderr = log_file;
-
-        let daemonize = Daemonize::new()
-            .pid_file("safekeeper.pid")
-            .working_directory(Path::new("."))
-            .stdout(stdout)
-            .stderr(stderr);
-
-        // XXX: The parent process should exit abruptly right after
-        // it has spawned a child to prevent coverage machinery from
-        // dumping stats into a `profraw` file now owned by the child.
-        // Otherwise, the coverage data will be damaged.
-        match daemonize.exit_action(|| exit_now(0)).start() {
-            Ok(_) => info!("Success, daemonized"),
-            Err(err) => bail!("Error: {err}. could not daemonize. bailing."),
-        }
-    }
 
     // Register metrics collector for active timelines. It's important to do this
     // after daemonizing, otherwise process collector will be upset.
@@ -383,13 +366,6 @@ fn cli() -> Command {
             Arg::new("pageserver")
                 .short('p')
                 .long("pageserver"),
-        )
-        .arg(
-            Arg::new("daemonize")
-                .short('d')
-                .long("daemonize")
-                .action(ArgAction::SetTrue)
-                .help("Run in the background"),
         )
         .arg(
             Arg::new("no-sync")

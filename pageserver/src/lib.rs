@@ -15,6 +15,7 @@ pub mod tenant;
 pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_tasks;
+pub mod trace;
 pub mod virtual_file;
 pub mod walingest;
 pub mod walreceiver;
@@ -42,8 +43,6 @@ pub const DEFAULT_PG_VERSION: u32 = 14;
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
-
-pub const LOG_FILE_NAME: &str = "pageserver.log";
 
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
@@ -81,7 +80,6 @@ pub async fn shutdown_pageserver(exit_code: i32) {
 
     // There should be nothing left, but let's be sure
     task_mgr::shutdown_tasks(None, None, None).await;
-
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
 }

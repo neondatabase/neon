@@ -260,8 +260,9 @@ impl Layer for DeltaLayer {
 
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
             let mut cursor = file.block_cursor();
+            let mut buf = Vec::new();
             for (entry_lsn, pos) in offsets {
-                let buf = cursor.read_blob(pos).with_context(|| {
+                cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
                     format!(
                         "Failed to read blob from virtual file {}",
                         file.file.path.display()

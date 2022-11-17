@@ -13,7 +13,7 @@ use crate::seqwait::MonotonicCounter;
 pub const XLOG_BLCKSZ: u32 = 8192;
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Lsn(pub u64);
 
@@ -138,7 +138,7 @@ impl FromStr for Lsn {
     ///
     /// If the input string is missing the '/' character, then use `Lsn::from_hex`
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut splitter = s.split('/');
+        let mut splitter = s.trim().split('/');
         if let (Some(left), Some(right), None) = (splitter.next(), splitter.next(), splitter.next())
         {
             let left_num = u32::from_str_radix(left, 16).map_err(|_| LsnParseError)?;
@@ -270,6 +270,11 @@ mod tests {
         );
         assert_eq!(Lsn::from_hex("0"), Ok(Lsn(0)));
         assert_eq!(Lsn::from_hex("F12345678AAAA5555"), Err(LsnParseError));
+
+        let expected_lsn = Lsn(0x3C490F8);
+        assert_eq!(" 0/3C490F8".parse(), Ok(expected_lsn));
+        assert_eq!("0/3C490F8 ".parse(), Ok(expected_lsn));
+        assert_eq!(" 0/3C490F8 ".parse(), Ok(expected_lsn));
     }
 
     #[test]

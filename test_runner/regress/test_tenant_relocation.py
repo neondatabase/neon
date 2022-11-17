@@ -1,9 +1,7 @@
 import os
-import pathlib
-import signal
-import subprocess
 import threading
 from contextlib import closing, contextmanager
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import pytest
@@ -12,19 +10,15 @@ from fixtures.neon_fixtures import (
     Etcd,
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverHttpClient,
+    PageserverHttpClient,
     PortDistributor,
     Postgres,
     assert_no_in_progress_downloads_for_tenant,
-    base_dir,
-    neon_binpath,
-    pg_distrib_dir,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_until,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar, subprocess_capture
+from fixtures.utils import query_scalar, start_in_background, subprocess_capture, wait_until
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -32,13 +26,14 @@ def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
 
 
 @contextmanager
-def new_pageserver_helper(
-    new_pageserver_dir: pathlib.Path,
-    pageserver_bin: pathlib.Path,
-    remote_storage_mock_path: pathlib.Path,
+def new_pageserver_service(
+    new_pageserver_dir: Path,
+    pageserver_bin: Path,
+    remote_storage_mock_path: Path,
     pg_port: int,
     http_port: int,
     broker: Optional[Etcd],
+    pg_distrib_dir: Path,
 ):
     """
     cannot use NeonPageserver yet because it depends on neon cli
@@ -49,7 +44,6 @@ def new_pageserver_helper(
         str(pageserver_bin),
         "--workdir",
         str(new_pageserver_dir),
-        "--daemonize",
         "--update-config",
         f"-c listen_pg_addr='localhost:{pg_port}'",
         f"-c listen_http_addr='localhost:{http_port}'",
@@ -61,16 +55,26 @@ def new_pageserver_helper(
         cmd.append(
             f"-c broker_endpoints=['{broker.client_url()}']",
         )
-
-    log.info("starting new pageserver %s", cmd)
-    out = subprocess.check_output(cmd, text=True)
-    log.info("started new pageserver %s", out)
+    pageserver_client = PageserverHttpClient(
+        port=http_port,
+        auth_token=None,
+        is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
+    )
     try:
-        yield
+        pageserver_process = start_in_background(
+            cmd, new_pageserver_dir, "pageserver.log", pageserver_client.check_status
+        )
+    except Exception as e:
+        log.error(e)
+        pageserver_process.kill()
+        raise Exception(f"Failed to start pageserver as {cmd}, reason: {e}")
+
+    log.info("new pageserver started")
+    try:
+        yield pageserver_process
     finally:
         log.info("stopping new pageserver")
-        pid = int((new_pageserver_dir / "pageserver.pid").read_text())
-        os.kill(pid, signal.SIGQUIT)
+        pageserver_process.kill()
 
 
 @contextmanager
@@ -113,7 +117,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
 def populate_branch(
     pg: Postgres,
     tenant_id: TenantId,
-    ps_http: NeonPageserverHttpClient,
+    ps_http: PageserverHttpClient,
     create_table: bool,
     expected_sum: Optional[int],
 ) -> Tuple[TimelineId, Lsn]:
@@ -146,7 +150,7 @@ def populate_branch(
 
 
 def ensure_checkpoint(
-    pageserver_http: NeonPageserverHttpClient,
+    pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     current_lsn: Lsn,
@@ -159,7 +163,7 @@ def ensure_checkpoint(
 
 
 def check_timeline_attached(
-    new_pageserver_http_client: NeonPageserverHttpClient,
+    new_pageserver_http_client: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     old_timeline_detail: Dict[str, Any],
@@ -187,10 +191,10 @@ def switch_pg_to_new_pageserver(
     new_pageserver_port: int,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-) -> pathlib.Path:
+) -> Path:
     pg.stop()
 
-    pg_config_file_path = pathlib.Path(pg.config_file_path())
+    pg_config_file_path = Path(pg.config_file_path())
     pg_config_file_path.open("a").write(
         f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_port}'"
     )
@@ -213,7 +217,7 @@ def switch_pg_to_new_pageserver(
     return timeline_to_detach_local_path
 
 
-def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path: pathlib.Path):
+def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path: Path):
     with pg_cur(pg) as cur:
         # check that data is still there
         cur.execute("SELECT sum(key) FROM t")
@@ -245,13 +249,20 @@ def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path
 def test_tenant_relocation(
     neon_env_builder: NeonEnvBuilder,
     port_distributor: PortDistributor,
-    test_output_dir,
+    test_output_dir: Path,
+    neon_binpath: Path,
+    base_dir: Path,
     method: str,
     with_load: str,
 ):
     neon_env_builder.enable_local_fs_remote_storage()
 
     env = neon_env_builder.init_start()
+
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
 
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / "local_fs_remote_storage"
@@ -344,21 +355,22 @@ def test_tenant_relocation(
     new_pageserver_pg_port = port_distributor.get_port()
     new_pageserver_http_port = port_distributor.get_port()
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
-    pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
+    pageserver_bin = neon_binpath / "pageserver"
 
-    new_pageserver_http = NeonPageserverHttpClient(
+    new_pageserver_http = PageserverHttpClient(
         port=new_pageserver_http_port,
         auth_token=None,
         is_testing_enabled_or_skip=env.pageserver.is_testing_enabled_or_skip,
     )
 
-    with new_pageserver_helper(
+    with new_pageserver_service(
         new_pageserver_dir,
         pageserver_bin,
         remote_storage_mock_path,
         new_pageserver_pg_port,
         new_pageserver_http_port,
         neon_env_builder.broker,
+        neon_env_builder.pg_distrib_dir,
     ):
 
         # Migrate either by attaching from s3 or import/export basebackup
@@ -367,7 +379,7 @@ def test_tenant_relocation(
                 "poetry",
                 "run",
                 "python",
-                os.path.join(base_dir, "scripts/export_import_between_pageservers.py"),
+                str(base_dir / "scripts/export_import_between_pageservers.py"),
                 "--tenant-id",
                 str(tenant_id),
                 "--from-host",
@@ -383,9 +395,11 @@ def test_tenant_relocation(
                 "--to-pg-port",
                 str(new_pageserver_pg_port),
                 "--pg-distrib-dir",
-                pg_distrib_dir,
+                str(neon_env_builder.pg_distrib_dir),
                 "--work-dir",
-                os.path.join(test_output_dir),
+                str(test_output_dir),
+                "--tmp-pg-port",
+                str(port_distributor.get_port()),
             ]
             subprocess_capture(test_output_dir, cmd, check=True)
         elif method == "minor":

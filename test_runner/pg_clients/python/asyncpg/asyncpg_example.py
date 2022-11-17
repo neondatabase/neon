@@ -24,7 +24,6 @@ if __name__ == "__main__":
         if (v := os.environ.get(k, None)) is not None
     }
 
-    loop = asyncio.new_event_loop()
-    row = loop.run_until_complete(run(**kwargs))
+    row = asyncio.run(run(**kwargs))
 
     print(row[0])

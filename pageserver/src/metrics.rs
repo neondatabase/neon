@@ -31,6 +31,7 @@ const STORAGE_TIME_OPERATIONS: &[&str] = &[
     "compact",
     "create images",
     "init logical size",
+    "logical size",
     "load layer map",
     "gc",
 ];
@@ -365,6 +366,7 @@ pub struct TimelineMetrics {
     pub compact_time_histo: Histogram,
     pub create_images_time_histo: Histogram,
     pub init_logical_size_histo: Histogram,
+    pub logical_size_histo: Histogram,
     pub load_layer_map_histo: Histogram,
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
@@ -397,6 +399,9 @@ impl TimelineMetrics {
         let init_logical_size_histo = STORAGE_TIME
             .get_metric_with_label_values(&["init logical size", &tenant_id, &timeline_id])
             .unwrap();
+        let logical_size_histo = STORAGE_TIME
+            .get_metric_with_label_values(&["logical size", &tenant_id, &timeline_id])
+            .unwrap();
         let load_layer_map_histo = STORAGE_TIME
             .get_metric_with_label_values(&["load layer map", &tenant_id, &timeline_id])
             .unwrap();
@@ -428,6 +433,7 @@ impl TimelineMetrics {
             compact_time_histo,
             create_images_time_histo,
             init_logical_size_histo,
+            logical_size_histo,
             load_layer_map_histo,
             last_record_gauge,
             wait_lsn_time_histo,

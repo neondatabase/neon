@@ -3,10 +3,10 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
-use crate::pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage, FeStartupPacket};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
+use pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage, FeStartupPacket};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;

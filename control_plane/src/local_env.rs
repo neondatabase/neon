@@ -226,12 +226,12 @@ impl LocalEnv {
         }
     }
 
-    pub fn pageserver_bin(&self) -> anyhow::Result<PathBuf> {
-        Ok(self.neon_distrib_dir.join("pageserver"))
+    pub fn pageserver_bin(&self) -> PathBuf {
+        self.neon_distrib_dir.join("pageserver")
     }
 
-    pub fn safekeeper_bin(&self) -> anyhow::Result<PathBuf> {
-        Ok(self.neon_distrib_dir.join("safekeeper"))
+    pub fn safekeeper_bin(&self) -> PathBuf {
+        self.neon_distrib_dir.join("safekeeper")
     }
 
     pub fn pg_data_dirs_path(&self) -> PathBuf {

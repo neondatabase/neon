@@ -318,12 +318,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boxfnonce"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5988cb1d626264ac94100be357308f29ff7cbdd3b36bda27f450a4ee3f713426"
-
-[[package]]
 name = "bstr"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -600,6 +594,7 @@ dependencies = [
  "tar",
  "thiserror",
  "toml",
+ "url",
  "utils",
  "workspace_hack",
 ]
@@ -847,16 +842,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "daemonize"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70c24513e34f53b640819f0ac9f705b673fcf4006d7aab8778bee72ebfc89815"
-dependencies = [
- "boxfnonce",
- "libc",
 ]
 
 [[package]]
@@ -2140,7 +2125,6 @@ dependencies = [
  "crc32c",
  "criterion",
  "crossbeam-utils",
- "daemonize",
  "etcd_broker",
  "fail",
  "futures",
@@ -2161,6 +2145,7 @@ dependencies = [
  "postgres-types",
  "postgres_ffi",
  "pprof",
+ "pq_proto",
  "rand",
  "regex",
  "remote_storage",
@@ -2173,6 +2158,7 @@ dependencies = [
  "svg_fmt",
  "tar",
  "tempfile",
+ "tenant_size_model",
  "thiserror",
  "tokio",
  "tokio-postgres",
@@ -2190,6 +2176,7 @@ name = "pageserver_api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "byteorder",
  "bytes",
  "const_format",
  "postgres_ffi",
@@ -2453,6 +2440,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb9f9e6e233e5c4a35559a617bf40a4ec447db2e84c20b55a6f83167b7e57872"
 
 [[package]]
+name = "pq_proto"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "pin-project-lite",
+ "postgres-protocol",
+ "rand",
+ "serde",
+ "tokio",
+ "tracing",
+ "workspace_hack",
+]
+
+[[package]]
 name = "prettyplease"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2584,6 +2586,7 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.1",
  "pin-project-lite",
+ "pq_proto",
  "rand",
  "rcgen",
  "reqwest",
@@ -3087,7 +3090,6 @@ dependencies = [
  "clap 4.0.15",
  "const_format",
  "crc32c",
- "daemonize",
  "etcd_broker",
  "fs2",
  "git-version",
@@ -3095,11 +3097,13 @@ dependencies = [
  "humantime",
  "hyper",
  "metrics",
+ "nix 0.25.0",
  "once_cell",
  "parking_lot 0.12.1",
  "postgres",
  "postgres-protocol",
  "postgres_ffi",
+ "pq_proto",
  "regex",
  "remote_storage",
  "safekeeper_api",
@@ -3546,6 +3550,13 @@ dependencies = [
  "redox_syscall",
  "remove_dir_all",
  "winapi",
+]
+
+[[package]]
+name = "tenant_size_model"
+version = "0.1.0"
+dependencies = [
+ "workspace_hack",
 ]
 
 [[package]]
@@ -4053,9 +4064,7 @@ dependencies = [
  "metrics",
  "nix 0.25.0",
  "once_cell",
- "pin-project-lite",
- "postgres",
- "postgres-protocol",
+ "pq_proto",
  "rand",
  "routerify",
  "rustls",
@@ -4380,6 +4389,9 @@ dependencies = [
  "crossbeam-utils",
  "either",
  "fail",
+ "futures-channel",
+ "futures-task",
+ "futures-util",
  "hashbrown",
  "indexmap",
  "libc",
@@ -4393,6 +4405,7 @@ dependencies = [
  "rand",
  "regex",
  "regex-syntax",
+ "reqwest",
  "scopeguard",
  "serde",
  "stable_deref_trait",

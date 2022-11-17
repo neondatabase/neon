@@ -31,8 +31,8 @@ use crate::{
     walrecord::DecodedWALRecord,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::id::TenantTimelineId;
-use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
+use pq_proto::ReplicationFeedback;
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 /// Status of the connection.
 #[derive(Debug, Clone)]

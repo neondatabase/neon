@@ -1,5 +1,6 @@
 use std::num::NonZeroU64;
 
+use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::{
@@ -9,7 +10,7 @@ use utils::{
 
 use crate::reltag::RelTag;
 use anyhow::bail;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 /// A state of a tenant in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -72,6 +73,7 @@ pub struct TenantCreateRequest {
     pub walreceiver_connect_timeout: Option<String>,
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+    pub trace_read_requests: Option<bool>,
 }
 
 #[serde_as]
@@ -111,6 +113,7 @@ pub struct TenantConfigRequest {
     pub walreceiver_connect_timeout: Option<String>,
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+    pub trace_read_requests: Option<bool>,
 }
 
 impl TenantConfigRequest {
@@ -129,6 +132,7 @@ impl TenantConfigRequest {
             walreceiver_connect_timeout: None,
             lagging_wal_timeout: None,
             max_lsn_wal_lag: None,
+            trace_read_requests: None,
         }
     }
 }
@@ -225,6 +229,7 @@ pub struct TimelineGcRequest {
 }
 
 // Wrapped in libpq CopyData
+#[derive(PartialEq, Eq)]
 pub enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
@@ -241,21 +246,21 @@ pub enum PagestreamBeMessage {
     DbSize(PagestreamDbSizeResponse),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamExistsRequest {
     pub latest: bool,
     pub lsn: Lsn,
     pub rel: RelTag,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamNblocksRequest {
     pub latest: bool,
     pub lsn: Lsn,
     pub rel: RelTag,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamGetPageRequest {
     pub latest: bool,
     pub lsn: Lsn,
@@ -263,7 +268,7 @@ pub struct PagestreamGetPageRequest {
     pub blkno: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamDbSizeRequest {
     pub latest: bool,
     pub lsn: Lsn,
@@ -296,52 +301,98 @@ pub struct PagestreamDbSizeResponse {
 }
 
 impl PagestreamFeMessage {
-    pub fn parse(mut body: Bytes) -> anyhow::Result<PagestreamFeMessage> {
+    pub fn serialize(&self) -> Bytes {
+        let mut bytes = BytesMut::new();
+
+        match self {
+            Self::Exists(req) => {
+                bytes.put_u8(0);
+                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.rel.spcnode);
+                bytes.put_u32(req.rel.dbnode);
+                bytes.put_u32(req.rel.relnode);
+                bytes.put_u8(req.rel.forknum);
+            }
+
+            Self::Nblocks(req) => {
+                bytes.put_u8(1);
+                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.rel.spcnode);
+                bytes.put_u32(req.rel.dbnode);
+                bytes.put_u32(req.rel.relnode);
+                bytes.put_u8(req.rel.forknum);
+            }
+
+            Self::GetPage(req) => {
+                bytes.put_u8(2);
+                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.rel.spcnode);
+                bytes.put_u32(req.rel.dbnode);
+                bytes.put_u32(req.rel.relnode);
+                bytes.put_u8(req.rel.forknum);
+                bytes.put_u32(req.blkno);
+            }
+
+            Self::DbSize(req) => {
+                bytes.put_u8(3);
+                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.dbnode);
+            }
+        }
+
+        bytes.into()
+    }
+
+    pub fn parse<R: std::io::Read>(body: &mut R) -> anyhow::Result<PagestreamFeMessage> {
         // TODO these gets can fail
 
         // these correspond to the NeonMessageTag enum in pagestore_client.h
         //
         // TODO: consider using protobuf or serde bincode for less error prone
         // serialization.
-        let msg_tag = body.get_u8();
+        let msg_tag = body.read_u8()?;
         match msg_tag {
             0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
+                latest: body.read_u8()? != 0,
+                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
+                    spcnode: body.read_u32::<BigEndian>()?,
+                    dbnode: body.read_u32::<BigEndian>()?,
+                    relnode: body.read_u32::<BigEndian>()?,
+                    forknum: body.read_u8()?,
                 },
             })),
             1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
+                latest: body.read_u8()? != 0,
+                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
+                    spcnode: body.read_u32::<BigEndian>()?,
+                    dbnode: body.read_u32::<BigEndian>()?,
+                    relnode: body.read_u32::<BigEndian>()?,
+                    forknum: body.read_u8()?,
                 },
             })),
             2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
+                latest: body.read_u8()? != 0,
+                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 rel: RelTag {
-                    spcnode: body.get_u32(),
-                    dbnode: body.get_u32(),
-                    relnode: body.get_u32(),
-                    forknum: body.get_u8(),
+                    spcnode: body.read_u32::<BigEndian>()?,
+                    dbnode: body.read_u32::<BigEndian>()?,
+                    relnode: body.read_u32::<BigEndian>()?,
+                    forknum: body.read_u8()?,
                 },
-                blkno: body.get_u32(),
+                blkno: body.read_u32::<BigEndian>()?,
             })),
             3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                latest: body.get_u8() != 0,
-                lsn: Lsn::from(body.get_u64()),
-                dbnode: body.get_u32(),
+                latest: body.read_u8()? != 0,
+                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                dbnode: body.read_u32::<BigEndian>()?,
             })),
-            _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
+            _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
 }
@@ -378,5 +429,60 @@ impl PagestreamBeMessage {
         }
 
         bytes.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Buf;
+
+    use super::*;
+
+    #[test]
+    fn test_pagestream() {
+        // Test serialization/deserialization of PagestreamFeMessage
+        let messages = vec![
+            PagestreamFeMessage::Exists(PagestreamExistsRequest {
+                latest: true,
+                lsn: Lsn(4),
+                rel: RelTag {
+                    forknum: 1,
+                    spcnode: 2,
+                    dbnode: 3,
+                    relnode: 4,
+                },
+            }),
+            PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
+                latest: false,
+                lsn: Lsn(4),
+                rel: RelTag {
+                    forknum: 1,
+                    spcnode: 2,
+                    dbnode: 3,
+                    relnode: 4,
+                },
+            }),
+            PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
+                latest: true,
+                lsn: Lsn(4),
+                rel: RelTag {
+                    forknum: 1,
+                    spcnode: 2,
+                    dbnode: 3,
+                    relnode: 4,
+                },
+                blkno: 7,
+            }),
+            PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
+                latest: true,
+                lsn: Lsn(4),
+                dbnode: 7,
+            }),
+        ];
+        for msg in messages {
+            let bytes = msg.serialize();
+            let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
+            assert!(msg == reconstructed);
+        }
     }
 }

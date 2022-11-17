@@ -143,6 +143,8 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_read_validation_neg", "empty")
 
+    env.pageserver.allowed_errors.append(".*invalid LSN\\(0\\) in request.*")
+
     pg = env.postgres.create_start("test_read_validation_neg")
     log.info("postgres is running on 'test_read_validation_neg' branch")
 

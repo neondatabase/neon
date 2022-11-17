@@ -4,20 +4,23 @@ import re
 import shutil
 import subprocess
 import tarfile
+import time
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple, TypeVar
 
 import allure  # type: ignore
 from fixtures.log_helper import log
 from psycopg2.extensions import cursor
 
+Fn = TypeVar("Fn", bound=Callable[..., Any])
 
-def get_self_dir() -> str:
+
+def get_self_dir() -> Path:
     """Get the path to the directory where this script lives."""
-    return os.path.dirname(os.path.abspath(__file__))
+    return Path(__file__).resolve().parent
 
 
-def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
+def subprocess_capture(capture_dir: Path, cmd: List[str], **kwargs: Any) -> str:
     """Run a process and capture its output
 
     Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
@@ -27,11 +30,11 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     If those files already exist, we will overwrite them.
     Returns basepath for files with captured output.
     """
-    assert type(cmd) is list
-    base = os.path.basename(cmd[0]) + "_{}".format(global_counter())
+    assert isinstance(cmd, list)
+    base = f"{os.path.basename(cmd[0])}_{global_counter()}"
     basepath = os.path.join(capture_dir, base)
-    stdout_filename = basepath + ".stdout"
-    stderr_filename = basepath + ".stderr"
+    stdout_filename = f"{basepath}.stdout"
+    stderr_filename = f"{basepath}.stderr"
 
     try:
         with open(stdout_filename, "w") as stdout_f:
@@ -61,7 +64,7 @@ def global_counter() -> int:
     return _global_counter
 
 
-def print_gc_result(row):
+def print_gc_result(row: Dict[str, Any]):
     log.info("GC duration {elapsed} ms".format_map(row))
     log.info(
         "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_pitr {layers_needed_by_pitr}"
@@ -75,8 +78,7 @@ def etcd_path() -> Path:
     path_output = shutil.which("etcd")
     if path_output is None:
         raise RuntimeError("etcd not found in PATH")
-    else:
-        return Path(path_output)
+    return Path(path_output)
 
 
 def query_scalar(cur: cursor, query: str) -> Any:
@@ -121,7 +123,6 @@ def get_timeline_dir_size(path: Path) -> int:
             # file is a delta layer
             _ = parse_delta_layer(dir_entry.name)
             sz += dir_entry.stat().st_size
-            continue
     return sz
 
 
@@ -154,8 +155,8 @@ def get_scale_for_db(size_mb: int) -> int:
     return round(0.06689 * size_mb - 0.5)
 
 
-ATTACHMENT_NAME_REGEX = re.compile(
-    r".+\.log|.+\.stderr|.+\.stdout|.+\.filediff|.+\.metrics|flamegraph\.svg|regression\.diffs|.+\.html"
+ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
+    r"flamegraph\.svg|regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html)"
 )
 
 
@@ -188,3 +189,57 @@ def allure_attach_from_dir(dir: Path):
                 extension = attachment.suffix.removeprefix(".")
 
             allure.attach.file(source, name, attachment_type, extension)
+
+
+def start_in_background(
+    command: list[str], cwd: Path, log_file_name: str, is_started: Fn
+) -> subprocess.Popen[bytes]:
+    """Starts a process, creates the logfile and redirects stderr and stdout there. Runs the start checks before the process is started, or errors."""
+
+    log.info(f'Running command "{" ".join(command)}"')
+
+    with open(cwd / log_file_name, "wb") as log_file:
+        spawned_process = subprocess.Popen(command, stdout=log_file, stderr=log_file, cwd=cwd)
+        error = None
+        try:
+            return_code = spawned_process.poll()
+            if return_code is not None:
+                error = f"expected subprocess to run but it exited with code {return_code}"
+            else:
+                attempts = 10
+                try:
+                    wait_until(
+                        number_of_iterations=attempts,
+                        interval=1,
+                        func=is_started,
+                    )
+                except Exception:
+                    error = f"Failed to get correct status from subprocess in {attempts} attempts"
+        except Exception as e:
+            error = f"expected subprocess to start but it failed with exception: {e}"
+
+        if error is not None:
+            log.error(error)
+            spawned_process.kill()
+            raise Exception(f"Failed to run subprocess as {command}, reason: {error}")
+
+        log.info("subprocess spawned")
+        return spawned_process
+
+
+def wait_until(number_of_iterations: int, interval: float, func: Fn):
+    """
+    Wait until 'func' returns successfully, without exception. Returns the
+    last return value from the function.
+    """
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            res = func()
+        except Exception as e:
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            last_exception = e
+            time.sleep(interval)
+            continue
+        return res
+    raise Exception("timed out while waiting for %s" % func) from last_exception

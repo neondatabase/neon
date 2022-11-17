@@ -10,7 +10,7 @@
 //! process. Then we get the page image back. Communication with the
 //! postgres process happens via stdin/stdout
 //!
-//! See src/backend/tcop/zenith_wal_redo.c for the other side of
+//! See pgxn/neon_walredo/walredoproc.c for the other side of
 //! this communication.
 //!
 //! The Postgres process is assumed to be secure against malicious WAL
@@ -22,10 +22,10 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
 use serde::Serialize;
-use std::fs;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::CommandExt;
 use std::path::PathBuf;
@@ -34,6 +34,7 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
+use std::{fs, io};
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
@@ -44,6 +45,7 @@ use crate::metrics::{
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
+use crate::task_mgr::BACKGROUND_RUNTIME;
 use crate::walrecord::NeonWalRecord;
 use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -208,6 +210,16 @@ impl PostgresRedoManager {
         }
     }
 
+    /// Launch process pre-emptively. Should not be needed except for benchmarking.
+    pub fn launch_process(&mut self, pg_version: u32) -> anyhow::Result<()> {
+        let inner = self.process.get_mut().unwrap();
+        if inner.is_none() {
+            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
+            *inner = Some(p);
+        }
+        Ok(())
+    }
+
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
@@ -229,7 +241,7 @@ impl PostgresRedoManager {
 
         // launch the WAL redo process on first use
         if process_guard.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, &self.tenant_id, pg_version)?;
+            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
             *process_guard = Some(p);
         }
         let process = process_guard.as_mut().unwrap();
@@ -579,7 +591,8 @@ impl<C: CommandExt> CloseFileDescriptors for C {
 /// Handle to the Postgres WAL redo process
 ///
 struct PostgresRedoProcess {
-    child: Child,
+    tenant_id: TenantId,
+    child: NoLeakChild,
     stdin: ChildStdin,
     stdout: ChildStdout,
     stderr: ChildStderr,
@@ -589,16 +602,17 @@ impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
+    #[instrument(skip_all,fields(tenant_id=%tenant_id, pg_version=pg_version))]
     fn launch(
         conf: &PageServerConf,
-        tenant_id: &TenantId,
+        tenant_id: TenantId,
         pg_version: u32,
     ) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
         let datadir = path_with_suffix_extension(
-            conf.tenant_path(tenant_id).join("wal-redo-datadir"),
+            conf.tenant_path(&tenant_id).join("wal-redo-datadir"),
             TEMP_FILE_SUFFIX,
         );
 
@@ -644,18 +658,16 @@ impl PostgresRedoProcess {
                 ),
             ));
         } else {
-            // Limit shared cache for wal-redo-postres
+            // Limit shared cache for wal-redo-postgres
             let mut config = OpenOptions::new()
                 .append(true)
                 .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
             config.write_all(b"shared_buffers=128kB\n")?;
             config.write_all(b"fsync=off\n")?;
-            config.write_all(b"shared_preload_libraries=neon\n")?;
-            config.write_all(b"neon.wal_redo=on\n")?;
         }
 
         // Start postgres itself
-        let mut child = Command::new(pg_bin_dir_path.join("postgres"))
+        let child = Command::new(pg_bin_dir_path.join("postgres"))
             .arg("--wal-redo")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -664,20 +676,17 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("PGDATA", &datadir)
-            // The redo process is not trusted, so it runs in seccomp mode
-            // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't
-            // inherit any file descriptors from the pageserver that would allow
-            // an attacker to do bad things.
+            // The redo process is not trusted, and runs in seccomp mode that
+            // doesn't allow it to open any files. We have to also make sure it
+            // doesn't inherit any file descriptors from the pageserver, that
+            // would allow an attacker to read any files that happen to be open
+            // in the pageserver.
             //
             // The Rust standard library makes sure to mark any file descriptors with
             // as close-on-exec by default, but that's not enough, since we use
             // libraries that directly call libc open without setting that flag.
-            //
-            // One example is the pidfile of the daemonize library, which doesn't
-            // currently mark file descriptors as close-on-exec. Either way, we
-            // want to be on the safe side and prevent accidental regression.
             .close_fds()
-            .spawn()
+            .spawn_no_leak_child()
             .map_err(|e| {
                 Error::new(
                     e.kind(),
@@ -685,20 +694,33 @@ impl PostgresRedoProcess {
                 )
             })?;
 
-        info!(
-            "launched WAL redo postgres process on {}",
-            datadir.display()
-        );
+        let mut child = scopeguard::guard(child, |child| {
+            error!("killing wal-redo-postgres process due to a problem during launch");
+            child.kill_and_wait();
+        });
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
 
-        set_nonblock(stdin.as_raw_fd())?;
-        set_nonblock(stdout.as_raw_fd())?;
-        set_nonblock(stderr.as_raw_fd())?;
+        macro_rules! set_nonblock_or_log_err {
+            ($file:ident) => {{
+                let res = set_nonblock($file.as_raw_fd());
+                if let Err(e) = &res {
+                    error!(error = %e, file = stringify!($file), pid = child.id(), "set_nonblock failed");
+                }
+                res
+            }};
+        }
+        set_nonblock_or_log_err!(stdin)?;
+        set_nonblock_or_log_err!(stdout)?;
+        set_nonblock_or_log_err!(stderr)?;
+
+        // all fallible operations post-spawn are complete, so get rid of the guard
+        let child = scopeguard::ScopeGuard::into_inner(child);
 
         Ok(PostgresRedoProcess {
+            tenant_id,
             child,
             stdin,
             stdout,
@@ -706,18 +728,16 @@ impl PostgresRedoProcess {
         })
     }
 
-    fn kill(mut self) {
-        let _ = self.child.kill();
-        if let Ok(exit_status) = self.child.wait() {
-            error!("wal-redo-postgres exited with code {}", exit_status);
-        }
-        drop(self);
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
+    fn kill(self) {
+        self.child.kill_and_wait();
     }
 
     //
     // Apply given WAL records ('records') over an old page image. Returns
     // new page image.
     //
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
     fn apply_wal_records(
         &mut self,
         tag: BufferTag,
@@ -730,7 +750,11 @@ impl PostgresRedoProcess {
         // This could be problematic if there are millions of records to replay,
         // but in practice the number of records is usually so small that it doesn't
         // matter, and it's better to keep this code simple.
-        let mut writebuf: Vec<u8> = Vec::new();
+        //
+        // Most requests start with a before-image with BLCKSZ bytes, followed by
+        // by some other WAL records. Start with a buffer that can hold that
+        // comfortably.
+        let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
         build_begin_redo_for_block_msg(tag, &mut writebuf);
         if let Some(img) = base_img {
             build_push_page_msg(tag, &img, &mut writebuf);
@@ -843,8 +867,101 @@ impl PostgresRedoProcess {
     }
 }
 
+/// Wrapper type around `std::process::Child` which guarantees that the child
+/// will be killed and waited-for by this process before being dropped.
+struct NoLeakChild {
+    child: Option<Child>,
+}
+
+impl Deref for NoLeakChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        self.child.as_ref().expect("must not use from drop")
+    }
+}
+
+impl DerefMut for NoLeakChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.child.as_mut().expect("must not use from drop")
+    }
+}
+
+impl NoLeakChild {
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        let child = command.spawn()?;
+        Ok(NoLeakChild { child: Some(child) })
+    }
+
+    fn kill_and_wait(mut self) {
+        let child = match self.child.take() {
+            Some(child) => child,
+            None => return,
+        };
+        Self::kill_and_wait_impl(child);
+    }
+
+    #[instrument(skip_all, fields(pid=child.id()))]
+    fn kill_and_wait_impl(mut child: Child) {
+        let res = child.kill();
+        if let Err(e) = res {
+            // This branch is very unlikely because:
+            // - We (= pageserver) spawned this process successfully, so, we're allowed to kill it.
+            // - This is the only place that calls .kill()
+            // - We consume `self`, so, .kill() can't be called twice.
+            // - If the process exited by itself or was killed by someone else,
+            //   .kill() will still succeed because we haven't wait()'ed yet.
+            //
+            // So, if we arrive here, we have really no idea what happened,
+            // whether the PID stored in self.child is still valid, etc.
+            // If this function were fallible, we'd return an error, but
+            // since it isn't, all we can do is log an error and proceed
+            // with the wait().
+            error!(error = %e, "failed to SIGKILL; subsequent wait() might fail or wait for wrong process");
+        }
+
+        match child.wait() {
+            Ok(exit_status) => {
+                // log at error level since .kill() is something we only do on errors ATM
+                error!(exit_status = %exit_status, "wait successful");
+            }
+            Err(e) => {
+                error!(error = %e, "wait error; might leak the child process; it will show as zombie (defunct)");
+            }
+        }
+    }
+}
+
+impl Drop for NoLeakChild {
+    fn drop(&mut self) {
+        let child = match self.child.take() {
+            Some(child) => child,
+            None => return,
+        };
+        // Offload the kill+wait of the child process into the background.
+        // If someone stops the runtime, we'll leak the child process.
+        // We can ignore that case because we only stop the runtime on pageserver exit.
+        BACKGROUND_RUNTIME.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                Self::kill_and_wait_impl(child);
+            })
+            .await
+        });
+    }
+}
+
+trait NoLeakChildCommandExt {
+    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild>;
+}
+
+impl NoLeakChildCommandExt for Command {
+    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild> {
+        NoLeakChild::spawn(self)
+    }
+}
+
 // Functions for constructing messages to send to the postgres WAL redo
-// process. See vendor/postgres/src/backend/tcop/zenith_wal_redo.c for
+// process. See pgxn/neon_walredo/walredoproc.c for
 // explanation of the protocol.
 
 fn build_begin_redo_for_block_msg(tag: BufferTag, buf: &mut Vec<u8>) {
