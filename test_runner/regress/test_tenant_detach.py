@@ -3,7 +3,13 @@ from threading import Thread
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException, PageserverHttpClient
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PageserverApiException,
+    PageserverHttpClient,
+    RemoteStorageKind,
+)
 from fixtures.types import TenantId, TimelineId
 
 
@@ -27,8 +33,8 @@ Fix in https://github.com/neondatabase/neon/pull/2851 will come as part of
 https://github.com/neondatabase/neon/pull/2785 .
 """
 )
-def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+def test_tenant_detach_smoke(neon_simple_env: NeonEnv):
+    env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.append(".*NotFound\\(Tenant .* not found in the local state")
@@ -98,3 +104,49 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         expected_exception=PageserverApiException, match=f"Tenant {tenant_id} not found"
     ):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
+
+
+# TODO kb rename and fix the test style
+# @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.NOOP])
+def test_tenant_detach_zzz(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_remote_storage_backup_and_restore",
+    )
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_dir = env.repo_dir / "tenants" / str(tenant_id)
+
+    tenant_status_before_detach = pageserver_http.tenant_status(tenant_id=tenant_id)
+    timeline_info_before_detach = pageserver_http.timeline_detail(
+        tenant_id=tenant_id, timeline_id=timeline_id
+    )
+    files_before_detach = [tenant_path for tenant_path in tenant_dir.glob("**/*")]
+    files_before_detach.sort()
+
+    pageserver_http.tenant_detach(tenant_id)
+
+    files_after_detach_with_retain = [tenant_path for tenant_path in tenant_dir.glob("**/*")]
+    files_after_detach_with_retain.sort()
+    assert (
+        files_before_detach == files_after_detach_with_retain
+    ), f"Expected after detach with retain to have exactly the same files, but missing {set(files_before_detach) - set(files_after_detach_with_retain)} and have extra {set(files_after_detach_with_retain) - set(files_before_detach)} files"
+
+    pageserver_http.tenant_attach(tenant_id=tenant_id)
+
+    tenant_status_after_reattach = pageserver_http.tenant_status(tenant_id=tenant_id)
+    assert (
+        tenant_status_before_detach == tenant_status_after_reattach
+    ), f"Tenant after reattach expected to have status {tenant_status_before_detach}, but got {tenant_status_after_reattach}"
+
+    timeline_info_after_reattach = pageserver_http.timeline_detail(
+        tenant_id=tenant_id, timeline_id=timeline_id
+    )
+    assert (
+        timeline_info_before_detach == timeline_info_after_reattach
+    ), f"Tenant timeline after reattach expected to have info {timeline_info_before_detach}, but got {timeline_info_after_reattach}"

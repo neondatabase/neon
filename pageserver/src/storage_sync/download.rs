@@ -113,7 +113,7 @@ pub async fn download_index_parts(
 /// Note: The function is rather expensive from s3 access point of view, it will execute ceil(N/1000) + N requests.
 /// At least one request to obtain a list of tenant timelines (more requests is there are more than 1000 timelines).
 /// And then will attempt to download all index files that belong to these timelines.
-pub async fn gather_tenant_timelines_index_parts(
+pub(super) async fn gather_tenant_timelines_index_parts(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
     tenant_id: TenantId,

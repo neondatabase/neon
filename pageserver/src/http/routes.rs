@@ -14,7 +14,7 @@ use super::models::{
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::storage_sync;
-use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
+use crate::storage_sync::index::RemoteIndex;
 use crate::tenant::{TenantState, Timeline};
 use crate::tenant_config::TenantConfOpt;
 use crate::{config::PageServerConf, tenant_mgr};
@@ -355,112 +355,82 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
 async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
+    let allow_local_files = query_param_present(&request, "allow-local-files");
 
-    info!("Handling tenant attach {tenant_id}");
+    info!("Handling tenant attach {tenant_id}, local files allowed: {allow_local_files}");
 
-    tokio::task::spawn_blocking(move || match tenant_mgr::get_tenant(tenant_id, false) {
-        Ok(tenant) => {
-            if tenant.list_timelines().is_empty() {
-                info!("Attaching to tenant {tenant_id} with zero timelines");
-                Ok(())
-            } else {
-                Err(ApiError::Conflict(
-                    "Tenant is already present locally".to_owned(),
-                ))
-            }
-        }
-        Err(_) => Ok(()),
-    })
-    .await
-    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+    if tenant_mgr::get_tenant(tenant_id, false).is_ok() {
+        return Err(ApiError::Conflict(format!(
+            "Tenant {tenant_id} is already present in pageserver's memory"
+        )));
+    }
 
     let state = get_state(&request);
+    let conf = state.conf;
     let remote_index = &state.remote_index;
+
+    if let Some(remote_storage) = state.remote_storage.as_ref() {
+        storage_sync::initialize_remote_index_entry(conf, remote_storage, remote_index, tenant_id)
+            .await
+            .with_context(|| {
+                format!("Failed to populate remote storage index for the tenant {tenant_id}")
+            })
+            .map_err(ApiError::InternalServerError)?;
+    }
+
+    let mut loaded_from_disk = false;
+    let tenant_dir = conf.tenant_path(&tenant_id);
+    if tenant_dir.exists() {
+        if !allow_local_files {
+            return Err(ApiError::Conflict(
+                "Cannot attach: tenant is not in memory, but has local files".to_string(),
+            ));
+        }
+
+        let tenant_ignore_marker = conf.tenant_ignore_mark_file_path(tenant_id);
+        if tenant_ignore_marker.exists() {
+            tokio::fs::remove_file(&tenant_ignore_marker)
+                .await
+                .with_context(|| {
+                    format!(
+                    "Failed to remove tenant {tenant_id} ignore marker {tenant_ignore_marker:?}"
+                )
+                })
+                .map_err(ApiError::InternalServerError)?;
+        }
+
+        let (_, attach_data) = tenant_mgr::collect_timelines_for_tenant(conf, &tenant_dir)
+            .with_context(|| format!("Failed to collect tenant {tenant_id} files"))
+            .map_err(ApiError::InternalServerError)?;
+        let attached_tenant = tenant_mgr::attach_tenant(conf, remote_index, tenant_id, attach_data);
+        if attached_tenant.current_state() == TenantState::Broken {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Failed to attach tenant {tenant_id} that has local files, try ignoring and attaching the tenant again"
+            )));
+        } else {
+            loaded_from_disk = true;
+        }
+    }
 
     let mut index_accessor = remote_index.write().await;
     if let Some(tenant_entry) = index_accessor.tenant_entry_mut(&tenant_id) {
         if tenant_entry.has_in_progress_downloads() {
-            return Err(ApiError::Conflict(
-                "Tenant download is already in progress".to_string(),
-            ));
+            return Err(ApiError::Conflict(format!(
+                "Tenant {tenant_id} download is already in progress"
+            )));
         }
 
         for (timeline_id, remote_timeline) in tenant_entry.iter_mut() {
             storage_sync::schedule_layer_download(tenant_id, *timeline_id);
             remote_timeline.awaits_download = true;
         }
-        return json_response(StatusCode::ACCEPTED, ());
-    }
-    // no tenant in the index, release the lock to make the potentially lengthy download operation
-    drop(index_accessor);
-
-    // download index parts for every tenant timeline
-    let remote_timelines = match gather_tenant_timelines_index_parts(state, tenant_id).await {
-        Ok(Some(remote_timelines)) => remote_timelines,
-        Ok(None) => return Err(ApiError::NotFound(anyhow!("Unknown remote tenant"))),
-        Err(e) => {
-            error!("Failed to retrieve remote tenant data: {:?}", e);
-            return Err(ApiError::NotFound(anyhow!(
-                "Failed to retrieve remote tenant"
-            )));
-        }
-    };
-
-    // recheck that download is not in progress because
-    // we've released the lock to avoid holding it during the download
-    let mut index_accessor = remote_index.write().await;
-    let tenant_entry = match index_accessor.tenant_entry_mut(&tenant_id) {
-        Some(tenant_entry) => {
-            if tenant_entry.has_in_progress_downloads() {
-                return Err(ApiError::Conflict(
-                    "Tenant download is already in progress".to_string(),
-                ));
-            }
-            tenant_entry
-        }
-        None => index_accessor.add_tenant_entry(tenant_id),
-    };
-
-    // populate remote index with the data from index part and create directories on the local filesystem
-    for (timeline_id, mut remote_timeline) in remote_timelines {
-        tokio::fs::create_dir_all(state.conf.timeline_path(&timeline_id, &tenant_id))
-            .await
-            .context("Failed to create new timeline directory")
-            .map_err(ApiError::InternalServerError)?;
-
-        remote_timeline.awaits_download = true;
-        tenant_entry.insert(timeline_id, remote_timeline);
-        // schedule actual download
-        storage_sync::schedule_layer_download(tenant_id, timeline_id);
+    } else if !loaded_from_disk {
+        return Err(ApiError::NotFound(anyhow::anyhow!(
+            "Tenant {tenant_id} was not found on remote storage and on local disk"
+        )));
     }
 
     json_response(StatusCode::ACCEPTED, ())
-}
-
-/// Note: is expensive from s3 access perspective,
-/// for details see comment to `storage_sync::gather_tenant_timelines_index_parts`
-async fn gather_tenant_timelines_index_parts(
-    state: &State,
-    tenant_id: TenantId,
-) -> anyhow::Result<Option<Vec<(TimelineId, RemoteTimeline)>>> {
-    let index_parts = match state.remote_storage.as_ref() {
-        Some(storage) => {
-            storage_sync::gather_tenant_timelines_index_parts(state.conf, storage, tenant_id).await
-        }
-        None => return Ok(None),
-    }
-    .with_context(|| format!("Failed to download index parts for tenant {tenant_id}"))?;
-
-    let mut remote_timelines = Vec::with_capacity(index_parts.len());
-    for (timeline_id, index_part) in index_parts {
-        let timeline_path = state.conf.timeline_path(&timeline_id, &tenant_id);
-        let remote_timeline = RemoteTimeline::from_index_part(&timeline_path, index_part)
-            .with_context(|| {
-                format!("Failed to convert index part into remote timeline for timeline {tenant_id}/{timeline_id}")
-            })?;
-        remote_timelines.push((timeline_id, remote_timeline));
-    }
-    Ok(Some(remote_timelines))
 }
 
 async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -496,6 +466,25 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await
         // FIXME: Errors from `detach_tenant` can be caused by both both user and internal errors.
+        // Replace this with better handling once the error type permits it.
+        .map_err(ApiError::InternalServerError)?;
+
+    let mut remote_index = state.remote_index.write().await;
+    remote_index.remove_tenant_entry(&tenant_id);
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn tenant_ignore_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let state = get_state(&request);
+    let conf = state.conf;
+    tenant_mgr::ignore_tenant(conf, tenant_id)
+        .instrument(info_span!("ignore_tenant", tenant = %tenant_id))
+        .await
+        // FIXME: Errors from `ignore_tenant` can be caused by both both user and internal errors.
         // Replace this with better handling once the error type permits it.
         .map_err(ApiError::InternalServerError)?;
 
@@ -952,6 +941,7 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)
         .post("/v1/tenant/:tenant_id/detach", tenant_detach_handler)
+        .post("/v1/tenant/:tenant_id/ignore", tenant_ignore_handler)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,

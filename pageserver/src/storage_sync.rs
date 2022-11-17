@@ -187,7 +187,6 @@ use crate::metrics::{IMAGE_SYNC_COUNT, IMAGE_SYNC_TIME_HISTOGRAM};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 use self::download::download_index_parts;
-pub use self::download::gather_tenant_timelines_index_parts;
 
 static SYNC_QUEUE: OnceCell<SyncQueue> = OnceCell::new();
 
@@ -611,6 +610,54 @@ impl TimelineLocalFiles {
     pub(crate) fn ready(metadata: TimelineMetadata) -> Self {
         TimelineLocalFiles(metadata, HashMap::new())
     }
+}
+
+/// Ensures that there's no such remote index entry and scans S3 for all timelines,
+/// to create the index entry from.
+///
+/// Note: is expensive from s3 access perspective,
+/// for details see comment to [`download::gather_tenant_timelines_index_parts`]
+pub async fn initialize_remote_index_entry(
+    conf: &'static PageServerConf,
+    remote_storage: &GenericRemoteStorage,
+    remote_index: &RemoteIndex,
+    entry_id: TenantId,
+) -> anyhow::Result<()> {
+    let index_accessor = remote_index.read().await;
+    anyhow::ensure!(
+        index_accessor.tenant_entry(&entry_id).is_none(),
+        "Cannot populate remote index for already existing tenant entry {entry_id}"
+    );
+    drop(index_accessor);
+
+    let new_index_parts =
+        download::gather_tenant_timelines_index_parts(conf, remote_storage, entry_id)
+            .await
+            .with_context(|| format!("Failed to download index parts for tenant {entry_id}"))?;
+
+    let mut new_remote_timelines = Vec::with_capacity(new_index_parts.len());
+    for (timeline_id, index_part) in new_index_parts {
+        let timeline_path = conf.timeline_path(&timeline_id, &entry_id);
+        let remote_timeline = RemoteTimeline::from_index_part(&timeline_path, index_part)
+            .with_context(|| {
+                format!("Failed to convert index part into remote timeline for timeline {entry_id}/{timeline_id}")
+            })?;
+        new_remote_timelines.push((timeline_id, remote_timeline));
+    }
+
+    let mut index_accessor = remote_index.write().await;
+    let tenant_entry = match index_accessor.tenant_entry_mut(&entry_id) {
+        Some(_) => anyhow::bail!(
+            "Cannot initialize remote index entry for already existing entry {entry_id}"
+        ),
+        None => index_accessor.add_tenant_entry(entry_id),
+    };
+
+    for (timeline_id, remote_timeline) in new_remote_timelines {
+        tenant_entry.insert(timeline_id, remote_timeline);
+    }
+
+    Ok(())
 }
 
 /// Launch a thread to perform remote storage sync tasks.

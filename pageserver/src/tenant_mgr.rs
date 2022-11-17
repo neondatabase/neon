@@ -22,7 +22,9 @@ use crate::tenant::{
 };
 use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
-use crate::{is_temporary, is_uninit_mark, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
+use crate::{
+    is_temporary, is_uninit_mark, IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TEMP_FILE_SUFFIX,
+};
 
 use utils::crashsafe::{self, path_with_suffix_extension};
 use utils::id::{TenantId, TimelineId};
@@ -142,70 +144,82 @@ pub fn attach_local_tenants(
     let _entered = info_span!("attach_local_tenants").entered();
     let number_of_tenants = tenants_to_attach.len();
 
-    for (tenant_id, local_timelines) in tenants_to_attach {
-        let mut tenants_accessor = tenants_state::write_tenants();
-        let tenant = match tenants_accessor.entry(tenant_id) {
-            hash_map::Entry::Occupied(o) => {
-                info!("Tenant {tenant_id} was found in pageserver's memory");
-                Arc::clone(o.get())
-            }
-            hash_map::Entry::Vacant(v) => {
-                info!("Tenant {tenant_id} was not found in pageserver's memory, loading it");
-                let tenant = Arc::new(Tenant::new(
-                    conf,
-                    TenantConfOpt::default(),
-                    Arc::new(PostgresRedoManager::new(conf, tenant_id)),
-                    tenant_id,
-                    remote_index.clone(),
-                    conf.remote_storage_config.is_some(),
-                ));
-                match local_timelines {
-                    TenantAttachData::Broken(_) => {
-                        tenant.set_state(TenantState::Broken);
-                    }
-                    TenantAttachData::Ready(_) => {
-                        match Tenant::load_tenant_config(conf, tenant_id) {
-                            Ok(tenant_conf) => {
-                                tenant.update_tenant_config(tenant_conf);
-                                tenant.activate(false);
-                            }
-                            Err(e) => {
-                                error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
-                                tenant.set_state(TenantState::Broken);
-                            }
-                        };
-                    }
+    for (tenant_id, attach_data) in tenants_to_attach {
+        attach_tenant(conf, remote_index, tenant_id, attach_data);
+    }
+
+    info!("Processed {number_of_tenants} local tenants during attach")
+}
+
+pub fn attach_tenant(
+    conf: &'static PageServerConf,
+    remote_index: &RemoteIndex,
+    tenant_id: TenantId,
+    attach_data: TenantAttachData,
+) -> Arc<Tenant> {
+    let mut tenants_accessor = tenants_state::write_tenants();
+    let tenant = match tenants_accessor.entry(tenant_id) {
+        hash_map::Entry::Occupied(o) => {
+            info!("Tenant {tenant_id} was found in pageserver's memory");
+            Arc::clone(o.get())
+        }
+        hash_map::Entry::Vacant(v) => {
+            info!("Tenant {tenant_id} was not found in pageserver's memory, loading it");
+            let tenant = Arc::new(Tenant::new(
+                conf,
+                TenantConfOpt::default(),
+                Arc::new(PostgresRedoManager::new(conf, tenant_id)),
+                tenant_id,
+                remote_index.clone(),
+                conf.remote_storage_config.is_some(),
+            ));
+            match attach_data {
+                TenantAttachData::Broken(_) => {
+                    tenant.set_state(TenantState::Broken);
                 }
-                v.insert(Arc::clone(&tenant));
-                tenant
+                TenantAttachData::Ready(_) => {
+                    match Tenant::load_tenant_config(conf, tenant_id) {
+                        Ok(tenant_conf) => {
+                            tenant.update_tenant_config(tenant_conf);
+                            tenant.activate(false);
+                        }
+                        Err(e) => {
+                            error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
+                            tenant.set_state(TenantState::Broken);
+                        }
+                    };
+                }
             }
-        };
-        drop(tenants_accessor);
-        match local_timelines {
-            TenantAttachData::Broken(e) => warn!("{}", e),
-            TenantAttachData::Ready(ref timelines) => {
-                info!("Attaching {} timelines for {tenant_id}", timelines.len());
-                debug!("Timelines to attach: {local_timelines:?}");
-                let has_timelines = !timelines.is_empty();
-                let timelines_to_attach = timelines
-                    .iter()
-                    .map(|(&k, v)| (k, v.metadata().to_owned()))
-                    .collect();
-                match tenant.init_attach_timelines(timelines_to_attach) {
-                    Ok(()) => {
-                        info!("successfully loaded local timelines for tenant {tenant_id}");
-                        tenant.activate(has_timelines);
-                    }
-                    Err(e) => {
-                        error!("Failed to attach tenant timelines: {e:?}");
-                        tenant.set_state(TenantState::Broken);
-                    }
+            v.insert(Arc::clone(&tenant));
+            tenant
+        }
+    };
+    drop(tenants_accessor);
+
+    match attach_data {
+        TenantAttachData::Broken(e) => warn!("Attached a broken tenanat: {e}"),
+        TenantAttachData::Ready(ref timelines) => {
+            info!("Attaching {} timelines for {tenant_id}", timelines.len());
+            debug!("Timelines to attach: {timelines:?}");
+            let has_timelines = !timelines.is_empty();
+            let timelines_to_attach = timelines
+                .iter()
+                .map(|(&k, v)| (k, v.metadata().to_owned()))
+                .collect();
+            match tenant.init_attach_timelines(timelines_to_attach) {
+                Ok(()) => {
+                    info!("successfully loaded local timelines for tenant {tenant_id}");
+                    tenant.activate(has_timelines);
+                }
+                Err(e) => {
+                    error!("Failed to attach tenant timelines: {e:?}");
+                    tenant.set_state(TenantState::Broken);
                 }
             }
         }
     }
 
-    info!("Processed {number_of_tenants} local tenants during attach")
+    tenant
 }
 
 ///
@@ -477,6 +491,8 @@ pub async fn detach_tenant(
     // shutdown all tenant and timeline tasks: gc, compaction, page service)
     task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
 
+    drop(tenant);
+
     // If removal fails there will be no way to successfully retry detach,
     // because the tenant no longer exists in the in-memory map. And it needs to be removed from it
     // before we remove files, because it contains references to tenant
@@ -490,6 +506,42 @@ pub async fn detach_tenant(
             local_tenant_directory.display()
         )
     })?;
+
+    Ok(())
+}
+
+pub async fn ignore_tenant(
+    conf: &'static PageServerConf,
+    tenant_id: TenantId,
+) -> anyhow::Result<()> {
+    let tenant = tokio::task::spawn_blocking(move || {
+        let mut tenants_accessor = tenants_state::write_tenants();
+
+        let tenant_entry = match tenants_accessor.entry(tenant_id) {
+            hash_map::Entry::Occupied(o) => o,
+            hash_map::Entry::Vacant(_) => anyhow::bail!("Tenant not found for id {tenant_id}"),
+        };
+
+        // first, place a marker to ensure the tenant does not get loaded on crash
+        let ignore_mark_file = conf.tenant_ignore_mark_file_path(tenant_id);
+        fs::File::create(&ignore_mark_file)
+            .context("Failed to create ignore mark file")
+            .and_then(|_| {
+                crashsafe::fsync_file_and_parent(&ignore_mark_file)
+                    .context("Failed to fsync ignore mark file")
+            })
+            .with_context(|| format!("Failed to crate ignore mark for tenant {tenant_id}"))?;
+
+        Ok(tenant_entry.remove())
+    })
+    .await
+    .with_context(|| format!("Failed to run blocking ignore task for tenant {tenant_id}"))?
+    .with_context(|| format!("Failed to mark tenant {tenant_id} as ignored"))?;
+    // and shutdown all tenant and timeline tasks: gc, compaction, page service)
+    tenant.set_state(TenantState::Paused);
+
+    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
+    drop(tenant);
 
     Ok(())
 }
@@ -556,6 +608,12 @@ fn local_tenant_timeline_files(
                         );
                     }
                 } else {
+                    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+                    if tenant_ignore_mark_file.exists() {
+                        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+                        continue;
+                    }
+
                     match collect_timelines_for_tenant(config, &tenant_dir_path) {
                         Ok((tenant_id, TenantAttachData::Broken(e))) => {
                             local_tenant_timeline_files.entry(tenant_id).or_insert(TenantAttachData::Broken(e));
@@ -635,7 +693,7 @@ fn remove_if_empty(tenant_dir_path: &Path) -> anyhow::Result<bool> {
     }
 }
 
-fn collect_timelines_for_tenant(
+pub fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
 ) -> anyhow::Result<(TenantId, TenantAttachData)> {

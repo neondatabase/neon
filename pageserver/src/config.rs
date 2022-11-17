@@ -27,7 +27,9 @@ use utils::{
 
 use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
-use crate::{METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX};
+use crate::{
+    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX,
+};
 
 pub mod defaults {
     use crate::tenant_config::defaults::*;
@@ -395,6 +397,10 @@ impl PageServerConf {
 
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenants_path().join(tenant_id.to_string())
+    }
+
+    pub fn tenant_ignore_mark_file_path(&self, tenant_id: TenantId) -> PathBuf {
+        self.tenant_path(&tenant_id).join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,

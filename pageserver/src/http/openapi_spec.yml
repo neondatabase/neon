@@ -274,6 +274,13 @@ paths:
         schema:
           type: string
           format: hex
+
+      - name: allow-local-files
+        in: query
+        required: false
+        default: false
+        type: boolean
+        description: Allows to load the tenant with files on pageserver's disk, but not in pageserver's memory
     post:
       description: Schedules attach operation to happen in the background for given tenant
       responses:
@@ -325,10 +332,54 @@ paths:
           type: string
           format: hex
     post:
-      description: Detach local tenant
+      description: |
+        Remove tenant data (including all corresponding timelines) from pageserver's memory and file system.
+        Files on the remote storage are not affected.
       responses:
         "200":
           description: Tenant detached
+        "400":
+          description: Error when no tenant id found in path parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/ignore:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: |
+        Remove tenant data (including all corresponding timelines) from pageserver's memory.
+        Files on local disk and remote storage are not affected.
+
+        Future pageserver restarts won't load the data back until `attach` is called on such tenant.
+      responses:
+        "200":
+          description: Tenant ignored
         "400":
           description: Error when no tenant id found in path parameters
           content:
