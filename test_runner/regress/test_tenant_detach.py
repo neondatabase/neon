@@ -4,6 +4,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException, PageserverHttpClient
 from fixtures.types import TenantId, TimelineId
+import time
 
 
 def do_gc_target(
@@ -11,9 +12,12 @@ def do_gc_target(
 ):
     """Hack to unblock main, see https://github.com/neondatabase/neon/issues/2211"""
     try:
+        log.info("sending gc http request")
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
     except Exception as e:
         log.error("do_gc failed: %s", e)
+    finally:
+        log.info("gc http thread returning")
 
 
 def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
@@ -48,7 +52,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         ]
     )
 
-    # gc should not try to even start
+    # gc should not try to even start on a timeline that doesn't exist
     with pytest.raises(
         expected_exception=PageserverApiException, match="gc target timeline does not exist"
     ):
@@ -58,25 +62,24 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         # the error will be printed to the log too
     env.pageserver.allowed_errors.append(".*gc target timeline does not exist.*")
 
-    # try to concurrently run gc and detach
+    # Detach while running manual GC.
+    # It should wait for manual GC to finish (right now it doesn't that's why this test fails sometimes)
+    pageserver_http.configure_failpoints(
+        ("gc_iteration_internal_after_getting_gc_timelines", "return(2000)")
+    )
     gc_thread = Thread(target=lambda: do_gc_target(pageserver_http, tenant_id, timeline_id))
     gc_thread.start()
+    time.sleep(1)
+    # By now the gc task is spawned but in sleep for another second due to the failpoint.
 
-    last_error = None
-    for i in range(3):
-        try:
-            pageserver_http.tenant_detach(tenant_id)
-        except Exception as e:
-            last_error = e
-            log.error(f"try {i} error detaching tenant: {e}")
-            continue
-        else:
-            break
-    # else is called if the loop finished without reaching "break"
-    else:
-        pytest.fail(f"could not detach tenant: {last_error}")
+    log.info("detaching tenant")
+    pageserver_http.tenant_detach(tenant_id)
+    log.info("tenant detached without error")
 
+    log.info("wait for gc thread to return")
     gc_thread.join(timeout=10)
+    assert not gc_thread.is_alive()
+    log.info("gc thread returned")
 
     # check that nothing is left on disk for deleted tenant
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
