@@ -757,15 +757,13 @@ static NeonResponse *
 page_server_request(void const *req)
 {
 	NeonResponse* resp;
-	page_server->send((NeonRequest *) req);
-	page_server->flush();
-	MyPState->ring_flush = MyPState->ring_unused;
-	consume_prefetch_responses();
-	resp = page_server->receive();
-	if (resp == NULL)
-	{
-		neon_log(ERROR, "end of COPY");
-	}
+	do {
+		page_server->send((NeonRequest *) req);
+		page_server->flush();
+		MyPState->ring_flush = MyPState->ring_unused;
+		consume_prefetch_responses();
+		resp = page_server->receive();
+	} while (resp == NULL);
 	return resp;
 
 }

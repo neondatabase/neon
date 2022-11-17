@@ -234,6 +234,9 @@ pageserver_receive(void)
 	StringInfoData resp_buff;
 	NeonResponse *resp;
 
+	if (!connected)
+		return NULL;
+
 	PG_TRY();
 	{
 		/* read response */
