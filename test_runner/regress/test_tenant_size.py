@@ -166,6 +166,10 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
 
     env = neon_env_builder.init_start()
 
+    # FIXME: we have a race condition between GC and delete timeline. GC might fail with this
+    # error. Similar to https://github.com/neondatabase/neon/issues/2671
+    env.pageserver.allowed_errors.append(".*InternalServerError\\(No such file or directory.*")
+
     tenant_id = env.initial_tenant
     main_branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
 
