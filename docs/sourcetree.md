@@ -84,7 +84,12 @@ A subject for future modularization.
 Helpers for exposing Prometheus metrics from the server.
 
 ### Adding dependencies
-When you add a Cargo dependency, you should update hakari manifest by running `cargo hakari generate` and committing the updated `Cargo.lock` and `workspace_hack/`. There may be no changes, that's fine.
+When you add a Cargo dependency, you should update hakari manifest by running commands below and committing the updated `Cargo.lock` and `workspace_hack/`. There may be no changes, that's fine.
+
+```bash
+cargo hakari generate
+cargo hakari manage-deps
+```
 
 If you don't have hakari installed (`error: no such subcommand: hakari`), install it by running `cargo install cargo-hakari`.
 
