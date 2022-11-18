@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::{io, result};
 
 use anyhow::Context;
+use postgres_connection::PgConnectionConfig;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use utils::{http::error::HttpErrorBody, id::NodeId};
 
-use crate::connection::PgConnectionConfig;
 use crate::pageserver::PageServerNode;
 use crate::{
     background_process,
@@ -86,10 +86,7 @@ impl SafekeeperNode {
 
     /// Construct libpq connection string for connecting to this safekeeper.
     fn safekeeper_connection_config(port: u16) -> PgConnectionConfig {
-        // TODO safekeeper authentication not implemented yet
-        format!("postgresql://no_user@127.0.0.1:{port}/no_db")
-            .parse()
-            .unwrap()
+        PgConnectionConfig::new_host_port(url::Host::parse("127.0.0.1").unwrap(), port)
     }
 
     pub fn datadir_path_by_id(env: &LocalEnv, sk_id: NodeId) -> PathBuf {

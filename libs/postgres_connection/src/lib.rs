@@ -1,0 +1,196 @@
+use anyhow::{bail, Context};
+use std::fmt;
+use url::Host;
+
+/// Parses a string of format either `host:port` or `host` into a corresponding pair.
+/// The `host` part should be a correct `url::Host`, while `port` (if present) should be
+/// a valid decimal u16 of digits only.
+pub fn parse_host_port<S: AsRef<str>>(host_port: S) -> Result<(Host, Option<u16>), anyhow::Error> {
+    let (host, port) = match host_port.as_ref().rsplit_once(':') {
+        Some((host, port)) => (
+            host,
+            // +80 is a valid u16, but not a valid port
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                Some(port.parse::<u16>().context("Unable to parse port")?)
+            } else {
+                bail!("Port contains a non-ascii-digit")
+            },
+        ),
+        None => (host_port.as_ref(), None), // No colons, no port specified
+    };
+    let host = Host::parse(host).context("Unable to parse host")?;
+    Ok((host, port))
+}
+
+#[cfg(test)]
+mod tests_parse_host_port {
+    use crate::parse_host_port;
+    use url::Host;
+
+    #[test]
+    fn test_normal() {
+        let (host, port) = parse_host_port("hello:123").unwrap();
+        assert_eq!(host, Host::Domain("hello".to_owned()));
+        assert_eq!(port, Some(123));
+    }
+
+    #[test]
+    fn test_no_port() {
+        let (host, port) = parse_host_port("hello").unwrap();
+        assert_eq!(host, Host::Domain("hello".to_owned()));
+        assert_eq!(port, None);
+    }
+
+    #[test]
+    fn test_ipv6() {
+        let (host, port) = parse_host_port("[::1]:123").unwrap();
+        assert_eq!(host, Host::<String>::Ipv6(std::net::Ipv6Addr::LOCALHOST));
+        assert_eq!(port, Some(123));
+    }
+
+    #[test]
+    fn test_invalid_host() {
+        assert!(parse_host_port("hello world").is_err());
+    }
+
+    #[test]
+    fn test_invalid_port() {
+        assert!(parse_host_port("hello:+80").is_err());
+    }
+}
+
+pub struct PgConnectionConfig {
+    host: Host,
+    port: u16,
+    password: Option<String>,
+}
+
+/// A simplified PostgreSQL connection configuration. Supports only a subset of possible
+/// settings for simplicity. A password getter or `to_connection_string` methods are not
+/// added by design to avoid accidentally leaking password through logging, command line
+/// arguments to a child process, or likewise.
+impl PgConnectionConfig {
+    pub fn new_host_port(host: Host, port: u16) -> Self {
+        PgConnectionConfig {
+            host,
+            port,
+            password: None,
+        }
+    }
+
+    pub fn host(&self) -> &Host {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn set_host(mut self, h: Host) -> Self {
+        self.host = h;
+        self
+    }
+
+    pub fn set_port(mut self, p: u16) -> Self {
+        self.port = p;
+        self
+    }
+
+    pub fn set_password(mut self, s: Option<String>) -> Self {
+        self.password = s;
+        self
+    }
+
+    /// Return a `<host>:<port>` string.
+    pub fn raw_address(&self) -> String {
+        format!("{}:{}", self.host(), self.port())
+    }
+
+    /// Build a client library-specific connection configuration.
+    /// Used for testing and when we need to add some obscure configuration
+    /// elements at the last moment.
+    pub fn to_tokio_postgres_config(&self) -> tokio_postgres::Config {
+        // Use `tokio_postgres::Config` instead of `postgres::Config` because
+        // the former supports more options to fiddle with later.
+        let mut config = tokio_postgres::Config::new();
+        config.host(&self.host().to_string()).port(self.port);
+        if let Some(password) = &self.password {
+            config.password(password);
+        }
+        config
+    }
+
+    /// Connect using postgres protocol with TLS disabled.
+    pub fn connect_no_tls(&self) -> Result<postgres::Client, postgres::Error> {
+        postgres::Config::from(self.to_tokio_postgres_config()).connect(postgres::NoTls)
+    }
+}
+
+impl fmt::Debug for PgConnectionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // We want `password: Some(REDACTED-STRING)`, not `password: Some("REDACTED-STRING")`
+        // so even if the password is `REDACTED-STRING` (quite unlikely) there is no confusion.
+        // Hence `format_args!()`, it returns a "safe" string which is not escaped by `Debug`.
+        f.debug_struct("PgConnectionConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field(
+                "password",
+                &self
+                    .password
+                    .as_ref()
+                    .map(|_| format_args!("REDACTED-STRING")),
+            )
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests_pg_connection_config {
+    use crate::PgConnectionConfig;
+    use once_cell::sync::Lazy;
+    use url::Host;
+
+    static STUB_HOST: Lazy<Host> = Lazy::new(|| Host::Domain("stub.host.example".to_owned()));
+
+    #[test]
+    fn test_no_password() {
+        let cfg = PgConnectionConfig::new_host_port(STUB_HOST.clone(), 123);
+        assert_eq!(cfg.host(), &*STUB_HOST);
+        assert_eq!(cfg.port(), 123);
+        assert_eq!(cfg.raw_address(), "stub.host.example:123");
+        assert_eq!(
+            format!("{:?}", cfg),
+            "PgConnectionConfig { host: Domain(\"stub.host.example\"), port: 123, password: None }"
+        );
+    }
+
+    #[test]
+    fn test_ipv6() {
+        // May be a special case because hostname contains a colon.
+        let cfg = PgConnectionConfig::new_host_port(Host::parse("[::1]").unwrap(), 123);
+        assert_eq!(
+            cfg.host(),
+            &Host::<String>::Ipv6(std::net::Ipv6Addr::LOCALHOST)
+        );
+        assert_eq!(cfg.port(), 123);
+        assert_eq!(cfg.raw_address(), "[::1]:123");
+        assert_eq!(
+            format!("{:?}", cfg),
+            "PgConnectionConfig { host: Ipv6(::1), port: 123, password: None }"
+        );
+    }
+
+    #[test]
+    fn test_with_password() {
+        let cfg = PgConnectionConfig::new_host_port(STUB_HOST.clone(), 123)
+            .set_password(Some("password".to_owned()));
+        assert_eq!(cfg.host(), &*STUB_HOST);
+        assert_eq!(cfg.port(), 123);
+        assert_eq!(cfg.raw_address(), "stub.host.example:123");
+        assert_eq!(
+            format!("{:?}", cfg),
+            "PgConnectionConfig { host: Domain(\"stub.host.example\"), port: 123, password: Some(REDACTED-STRING) }"
+        );
+    }
+}
