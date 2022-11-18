@@ -116,6 +116,10 @@ pub async fn handle_walreceiver_connection(
         },
     );
 
+    fail::fail_point!("walreceiver_handle_connection_post_spawn", |_| {
+        anyhow::bail!("failpoint walreceiver_handle_connection_post_spawn");
+    });
+
     // Immediately increment the gauge, then create a job to decrement it on task exit.
     // One of the pros of `defer!` is that this will *most probably*
     // get called, even in presence of panics.
