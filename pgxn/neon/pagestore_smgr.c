@@ -1649,7 +1649,8 @@ neon_close(SMgrRelation reln, ForkNumber forknum)
 bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
-	uint64 ring_index PG_USED_FOR_ASSERTS_ONLY;
+	BufferTag	tag;
+	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1665,7 +1666,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	BufferTag tag = (BufferTag) {
+	tag = (BufferTag) {
 		.rnode = reln->smgr_rnode.node,
 		.forkNum = forknum,
 		.blockNum = blocknum

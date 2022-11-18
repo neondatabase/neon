@@ -377,18 +377,18 @@ typedef struct Safekeeper
 	AppendResponse appendResponse;	/* feedback for master */
 } Safekeeper;
 
-extern PGDLLIMPORT void WalProposerMain(Datum main_arg);
-void		WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos);
-void		WalProposerPoll(void);
-void		WalProposerRegister(void);
-void		ParseReplicationFeedbackMessage(StringInfo reply_message,
-											ReplicationFeedback * rf);
+extern void WalProposerSync(int argc, char *argv[]);
+extern void WalProposerMain(Datum main_arg);
+extern void WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos);
+extern void WalProposerPoll(void);
+extern void ParseReplicationFeedbackMessage(StringInfo reply_message,
+											ReplicationFeedback *rf);
 extern void StartProposerReplication(StartReplicationCmd *cmd);
 
-Size		WalproposerShmemSize(void);
-bool		WalproposerShmemInit(void);
-void		replication_feedback_set(ReplicationFeedback * rf);
-void		replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
+extern Size WalproposerShmemSize(void);
+extern bool WalproposerShmemInit(void);
+extern void replication_feedback_set(ReplicationFeedback *rf);
+extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 
 /* libpqwalproposer hooks & helper type */
 
