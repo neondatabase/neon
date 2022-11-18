@@ -163,6 +163,9 @@ pub fn page_set_lsn(pg: &mut [u8], lsn: Lsn) {
     pg[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
 }
 
+// This is port of function with the same name from freespace.c.
+// The only difference is that it does not have "level" parameter because XLogRecordPageWithFreeSpace
+// always call it with level=FSM_BOTTOM_LEVEL
 pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
     let mut leafno = addr;
     const FSM_TREE_DEPTH: u32 = if pg_constants::SLOTS_PER_FSM_PAGE >= 1626 {

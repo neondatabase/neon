@@ -12,8 +12,8 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     n_records = 10000
     n_iter = 10
 
-    # We want to have a lot of lot of layer files to exercise the layer map. Make
-    # gc_horizon and checkpoint_distance very small, so that we get a lot of small layer files.
+    # Problems with FSM/VM forks truncation are most frequently detected during page reconstruction triggered
+    # by image layer generation. So adjust default parameters to make it happen more frequently.
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             "gc_period": "100 m",
@@ -29,7 +29,6 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     env.neon_cli.create_timeline("test_truncate", tenant_id=tenant)
     pg = env.postgres.create_start("test_truncate", tenant_id=tenant)
     cur = pg.connect().cursor()
-    cur.execute("set statement_timeout=0")
     cur.execute("create table t1(x integer)")
     cur.execute(f"insert into t1 values (generate_series(1,{n_records}))")
     cur.execute("vacuum t1")
