@@ -30,7 +30,7 @@ use anyhow::{ensure, Context};
 use etcd_broker::Client;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 use tokio::sync::watch;
 use tracing::*;
 use url::Url;
@@ -88,6 +88,9 @@ pub fn is_etcd_client_initialized() -> bool {
 #[derive(Debug)]
 pub struct TaskHandle<E> {
     join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    /// The sending end of `events_receiver`.
+    /// We keep it alive so that events_receiver.changed() will never return Err()
+    _events_sender: Arc<watch::Sender<TaskStateUpdate<E>>>,
     events_receiver: watch::Receiver<TaskStateUpdate<E>>,
     cancellation: watch::Sender<()>,
 }
@@ -107,7 +110,7 @@ pub enum TaskStateUpdate<E> {
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
     pub fn spawn<Fut>(
-        task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, watch::Receiver<()>) -> Fut
+        task: impl FnOnce(Arc<watch::Sender<TaskStateUpdate<E>>>, watch::Receiver<()>) -> Fut
             + Send
             + 'static,
     ) -> Self
@@ -117,15 +120,20 @@ impl<E: Clone> TaskHandle<E> {
     {
         let (cancellation, cancellation_receiver) = watch::channel(());
         let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
-
-        let join_handle = WALRECEIVER_RUNTIME.spawn(async move {
-            events_sender.send(TaskStateUpdate::Started).ok();
-            task(events_sender, cancellation_receiver).await
+        let events_sender = Arc::new(events_sender);
+        let join_handle = WALRECEIVER_RUNTIME.spawn({
+            let events_sender = Arc::clone(&events_sender);
+            async move {
+                events_sender.send(TaskStateUpdate::Started).ok();
+                let res = task(events_sender, cancellation_receiver).await;
+                res
+            }
         });
 
         TaskHandle {
             join_handle: Some(join_handle),
             events_receiver,
+            _events_sender: events_sender,
             cancellation,
         }
     }
@@ -133,22 +141,10 @@ impl<E: Clone> TaskHandle<E> {
     async fn next_task_event(&mut self) -> TaskEvent<E> {
         match self.events_receiver.changed().await {
             Ok(()) => TaskEvent::Update((self.events_receiver.borrow()).clone()),
-            Err(_task_channel_part_dropped) => {
-                TaskEvent::End(match self.join_handle.take() {
-                    Some(jh) => {
-                        if !jh.is_finished() {
-                            warn!("sender is dropped while join handle is still alive");
-                        }
-
-                        jh.await
-                            .map_err(|e| anyhow::anyhow!("Failed to join task: {e}"))
-                            .and_then(|x| x)
-                    }
-                    None => {
-                        // Another option is to have an enum, join handle or result and give away the reference to it
-                        Err(anyhow::anyhow!("Task was joined more than once"))
-                    }
-                })
+            Err(_events_sender_dropped) => {
+                unreachable!(
+                    "we are keeping the sender alive inside self, it can't be dropped here"
+                );
             }
         }
     }

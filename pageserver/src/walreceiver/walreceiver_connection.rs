@@ -57,7 +57,7 @@ pub struct WalConnectionStatus {
 pub async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
     wal_source_connstr: String,
-    events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
+    events_sender: Arc<watch::Sender<TaskStateUpdate<WalConnectionStatus>>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
