@@ -92,11 +92,10 @@ pageserver_connect()
 
 	while (PQisBusy(pageserver_conn))
 	{
-		int			wc;
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		wc = WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -136,11 +135,10 @@ retry:
 
 	if (ret == 0)
 	{
-		int			wc;
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		wc = WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
