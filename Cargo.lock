@@ -601,6 +601,7 @@ dependencies = [
  "once_cell",
  "pageserver_api",
  "postgres",
+ "postgres_connection",
  "regex",
  "reqwest",
  "safekeeper_api",
@@ -2403,6 +2404,18 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+]
+
+[[package]]
+name = "postgres_connection"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "once_cell",
+ "postgres",
+ "tokio-postgres",
+ "url",
+ "workspace_hack",
 ]
 
 [[package]]
