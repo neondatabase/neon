@@ -32,11 +32,6 @@
 
 #define PageStoreTrace DEBUG5
 
-#define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag,                                  \
-										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
-										 errhidestmt(true), errhidecontext(true)))
-
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
 
@@ -239,6 +234,9 @@ pageserver_receive(void)
 	StringInfoData resp_buff;
 	NeonResponse *resp;
 
+	if (!connected)
+		return NULL;
+
 	PG_TRY();
 	{
 		/* read response */
@@ -248,7 +246,10 @@ pageserver_receive(void)
 		if (resp_buff.len < 0)
 		{
 			if (resp_buff.len == -1)
-				neon_log(ERROR, "end of COPY");
+			{
+				pageserver_disconnect();
+				return NULL;
+			}
 			else if (resp_buff.len == -2)
 				neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
 		}
