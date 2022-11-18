@@ -144,7 +144,9 @@ jobs:
         # neon-captest-new: Run pgbench in a freshly created project
         # neon-captest-reuse: Same, but reusing existing project
         # neon-captest-prefetch: Same, with prefetching enabled (new project)
-        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch ]
+        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
+        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
+        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch, rds-postgres ]
         db_size: [ 10gb ]
         include:
           - platform: neon-captest-new
@@ -207,8 +209,11 @@ jobs:
           rds-aurora)
             CONNSTR=${{ secrets.BENCHMARK_RDS_CONNSTR }}
             ;;
+          rds-postgres)
+            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }}
+            ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-prefetch' or 'rds-aurora'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
