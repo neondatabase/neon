@@ -61,6 +61,7 @@ walkdir = "2.3.2"
 etcd_broker = { path = "../libs/etcd_broker" }
 metrics = { path = "../libs/metrics" }
 pageserver_api = { path = "../libs/pageserver_api" }
+postgres_connection = { path = "../libs/postgres_connection" }
 postgres_ffi = { path = "../libs/postgres_ffi" }
 pq_proto = { path = "../libs/pq_proto" }
 remote_storage = { path = "../libs/remote_storage" }
