@@ -1,10 +1,10 @@
+import time
 from threading import Thread
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException, PageserverHttpClient
 from fixtures.types import TenantId, TimelineId
-import time
 
 
 def do_gc_target(
