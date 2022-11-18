@@ -1,4 +1,6 @@
 use anyhow::{bail, Context};
+use itertools::Itertools;
+use std::borrow::Cow;
 use std::fmt;
 use url::Host;
 
@@ -59,10 +61,12 @@ mod tests_parse_host_port {
     }
 }
 
+#[derive(Clone)]
 pub struct PgConnectionConfig {
     host: Host,
     port: u16,
     password: Option<String>,
+    options: Vec<String>,
 }
 
 /// A simplified PostgreSQL connection configuration. Supports only a subset of possible
@@ -75,6 +79,7 @@ impl PgConnectionConfig {
             host,
             port,
             password: None,
+            options: vec![],
         }
     }
 
@@ -101,6 +106,11 @@ impl PgConnectionConfig {
         self
     }
 
+    pub fn extend_options<I: IntoIterator<Item = S>, S: Into<String>>(mut self, i: I) -> Self {
+        self.options.extend(i.into_iter().map(|s| s.into()));
+        self
+    }
+
     /// Return a `<host>:<port>` string.
     pub fn raw_address(&self) -> String {
         format!("{}:{}", self.host(), self.port())
@@ -116,6 +126,36 @@ impl PgConnectionConfig {
         config.host(&self.host().to_string()).port(self.port);
         if let Some(password) = &self.password {
             config.password(password);
+        }
+        if !self.options.is_empty() {
+            // These options are command-line options and should be escaped before being passed
+            // as an 'options' connection string parameter, see
+            // https://www.postgresql.org/docs/15/libpq-connect.html#LIBPQ-CONNECT-OPTIONS
+            //
+            // They will be space-separated, so each space inside an option should be escaped,
+            // and all backslashes should be escaped before that. Although we don't expect options
+            // with spaces at the moment, they're supported by PostgreSQL. Hence we support them
+            // in this typesafe interface.
+            //
+            // We use `Cow` to avoid allocations in the best case (no escaping). A fully imperative
+            // solution would require 1-2 allocations in the worst case as well, but it's harder to
+            // implement and this function is hardly a bottleneck. The function is only called around
+            // establishing a new connection.
+            #[allow(unstable_name_collisions)]
+            config.options(
+                &self
+                    .options
+                    .iter()
+                    .map(|s| {
+                        if s.contains(['\\', ' ']) {
+                            Cow::Owned(s.replace('\\', "\\\\").replace(' ', "\\ "))
+                        } else {
+                            Cow::Borrowed(s.as_str())
+                        }
+                    })
+                    .intersperse(Cow::Borrowed(" ")) // TODO: use impl from std once it's stabilized
+                    .collect::<String>(),
+            );
         }
         config
     }
@@ -191,6 +231,23 @@ mod tests_pg_connection_config {
         assert_eq!(
             format!("{:?}", cfg),
             "PgConnectionConfig { host: Domain(\"stub.host.example\"), port: 123, password: Some(REDACTED-STRING) }"
+        );
+    }
+
+    #[test]
+    fn test_with_options() {
+        let cfg = PgConnectionConfig::new_host_port(STUB_HOST.clone(), 123).extend_options([
+            "hello",
+            "world",
+            "with space",
+            "and \\ backslashes",
+        ]);
+        assert_eq!(cfg.host(), &*STUB_HOST);
+        assert_eq!(cfg.port(), 123);
+        assert_eq!(cfg.raw_address(), "stub.host.example:123");
+        assert_eq!(
+            cfg.to_tokio_postgres_config().get_options(),
+            Some("hello world with\\ space and\\ \\\\\\ backslashes")
         );
     }
 }

@@ -2159,6 +2159,7 @@ dependencies = [
  "postgres",
  "postgres-protocol",
  "postgres-types",
+ "postgres_connection",
  "postgres_ffi",
  "pprof",
  "pq_proto",
@@ -2411,6 +2412,7 @@ name = "postgres_connection"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "itertools",
  "once_cell",
  "postgres",
  "tokio-postgres",

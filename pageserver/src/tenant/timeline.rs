@@ -40,6 +40,7 @@ use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::tenant_config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
 
+use postgres_connection::PgConnectionConfig;
 use postgres_ffi::to_pg_timestamp;
 use utils::{
     id::{TenantId, TimelineId},
@@ -296,7 +297,7 @@ impl LogicalSize {
 }
 
 pub struct WalReceiverInfo {
-    pub wal_source_connstr: String,
+    pub wal_source_connconf: PgConnectionConfig,
     pub last_received_msg_lsn: Lsn,
     pub last_received_msg_ts: u128,
 }

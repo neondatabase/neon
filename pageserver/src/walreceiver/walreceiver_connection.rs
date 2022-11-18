@@ -30,6 +30,7 @@ use crate::{
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
+use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
 use utils::{id::TenantTimelineId, lsn::Lsn};
@@ -56,22 +57,23 @@ pub struct WalConnectionStatus {
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
-    wal_source_connstr: String,
+    wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
-    info!("connecting to {wal_source_connstr}");
-    let connect_cfg = format!("{wal_source_connstr} application_name=pageserver replication=true");
+    info!("connecting to {wal_source_connconf:?}");
 
-    let (mut replication_client, connection) = time::timeout(
-        connect_timeout,
-        tokio_postgres::connect(&connect_cfg, postgres::NoTls),
-    )
-    .await
-    .context("Timed out while waiting for walreceiver connection to open")?
-    .context("Failed to open walreceiver connection")?;
+    let (mut replication_client, connection) = {
+        let mut config = wal_source_connconf.to_tokio_postgres_config();
+        config.application_name("pageserver");
+        config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
+        time::timeout(connect_timeout, config.connect(postgres::NoTls))
+            .await
+            .context("Timed out while waiting for walreceiver connection to open")?
+            .context("Failed to open walreceiver connection")?
+    };
 
     info!("connected!");
     let mut connection_status = WalConnectionStatus {
@@ -316,7 +318,7 @@ pub async fn handle_walreceiver_connection(
 
             // Update the status about what we just received. This is shown in the mgmt API.
             let last_received_wal = WalReceiverInfo {
-                wal_source_connstr: wal_source_connstr.to_owned(),
+                wal_source_connconf: wal_source_connconf.clone(),
                 last_received_msg_lsn: last_lsn,
                 last_received_msg_ts: ts
                     .duration_since(SystemTime::UNIX_EPOCH)
