@@ -454,7 +454,6 @@ prefetch_read(PrefetchRequest *slot)
 	}
 	else
 	{
-		prefetch_cleanup();
 		return false;
 	}
 }
