@@ -489,9 +489,6 @@ pub async fn attach_tenant(
             // Cannot attach a tenant that already exists. The error message depends on
             // the state it's in.
             match e.get().current_state() {
-                TenantState::Attaching => {
-                    anyhow::bail!("tenant {tenant_id} attach is already in progress")
-                }
                 current_state => {
                     anyhow::bail!("tenant already exists, current state: {current_state:?}")
                 }

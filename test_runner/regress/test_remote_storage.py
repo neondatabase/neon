@@ -130,20 +130,23 @@ def test_remote_storage_backup_and_restore(
     # FIXME implement layer download retries
     # assert tenant_status["has_in_progress_downloads"] is True
 
-    # trigger temporary download files removal
+    # Ensure that an initiated attach operation survives pageserver restart.
+    # It will start downloading as soon as the tenant state has been loaded from disk.
+    # Eventually it will transition from Attaching => Active.
     env.pageserver.stop()
     env.pageserver.start()
-
-    # ensure that an initiated attach operation survives pageserver restart
-    with pytest.raises(
-        Exception, match=r".*(tenant already exists|attach is already in progress).*"
-    ):
-        client.tenant_attach(tenant_id)
-    log.info("waiting for timeline redownload")
+    log.info("waiting for timeline to finish attaching")
+    def assert_attach_fails_and_check_if_reached_active():
+        with pytest.raises(Exception, match="tenant already exists.*(Attaching|Active)"):
+            client.tenant_attach(tenant_id)
+        all_states = client.tenant_list()
+        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
+        assert tenant["has_in_progress_downloads"] == False
+        assert tenant["state"] == {"Active": {"background_jobs_running": True}}
     wait_until(
         number_of_iterations=20,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=assert_attach_fails_and_check_if_reached_active,
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
