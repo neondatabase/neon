@@ -766,6 +766,8 @@ impl Tenant {
     async fn load(self: &Arc<Tenant>) -> anyhow::Result<()> {
         info!("loading tenant task");
 
+        utils::failpoint_sleep_millis_async!("before-loading-tenant");
+
         // TODO split this into two functions, scan and actual load
 
         // Load in-memory state to reflect the local files on disk
@@ -1294,6 +1296,17 @@ impl Tenant {
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TenantState> {
         self.state.subscribe()
+    }
+
+    pub async fn wait_until_loaded(&self) -> anyhow::Result<TenantState> {
+        let mut receiver = self.state.subscribe();
+        loop {
+            let current_state = *receiver.borrow_and_update();
+            if current_state != TenantState::Loading {
+                break Ok(current_state);
+            }
+            receiver.changed().await?;
+        }
     }
 }
 
