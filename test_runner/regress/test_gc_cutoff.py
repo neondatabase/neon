@@ -8,6 +8,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 # normally restarts after it. Also, there should be GC ERRORs in the log,
 # but the fixture checks the log for any unexpected ERRORs after every
 # test anyway, so it doesn't need any special attention here.
+@pytest.mark.timeout(600)
 def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
 
@@ -38,7 +39,7 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     for _ in range(5):
         with pytest.raises(Exception):
-            pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T200", "-Mprepared", connstr])
+            pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T500", "-Mprepared", connstr])
         env.pageserver.stop()
         env.pageserver.start()
         pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
