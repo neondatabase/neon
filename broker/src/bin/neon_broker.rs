@@ -23,7 +23,6 @@ use hyper::{Body, Method, StatusCode};
 use metrics::{Encoder, TextEncoder};
 use neon_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
 use neon_broker::{parse_proto_ttid, EitherBody, DEFAULT_LISTEN_ADDR};
-use once_cell::sync::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -50,6 +49,9 @@ use utils::project_git_version;
 
 project_git_version!(GIT_VERSION);
 
+const DEFAULT_CHAN_SIZE: usize = 256;
+const DEFAULT_HTTP2_KEEPALIVE_INTERVAL: &str = "5000ms";
+
 #[derive(Parser, Debug)]
 #[command(version = GIT_VERSION, about = "Broker for neon storage nodes communication", long_about = None)]
 struct Args {
@@ -57,20 +59,14 @@ struct Args {
     #[arg(short, long, default_value = DEFAULT_LISTEN_ADDR)]
     listen_addr: SocketAddr,
     /// Size of the queue to the subscriber.
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = DEFAULT_CHAN_SIZE)]
     chan_size: usize,
     /// HTTP/2 keepalive interval.
-    #[arg(long, value_parser= humantime::parse_duration, default_value = "5000ms")]
+    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HTTP2_KEEPALIVE_INTERVAL)]
     http2_keepalive_interval: Duration,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
     log_format: String,
-}
-
-// Args is put into OnceCell to make conf available everywhere.
-static ARGS: OnceCell<Args> = OnceCell::new();
-fn get_args() -> &'static Args {
-    ARGS.get().expect("ARGS is not initialized")
 }
 
 type PubId = u64; // id of publisher for registering in maps
@@ -114,11 +110,11 @@ enum SubAnnounce {
     AddTimeline(TenantTimelineId, SubSender),
     /// Remove subscription to the specific timeline
     RemoveTimeline(TenantTimelineId, SubId),
-    
     // RemoveAll is not needed as publisher will notice closed channel while
     // trying to send the next message.
 }
 
+#[derive(Default)]
 struct SharedState {
     // Registered publishers. They sit on the rx end of these channels and
     // receive through it tx handles of chans to subscribers.
@@ -243,12 +239,15 @@ impl SharedState {
 #[derive(Clone)]
 struct Registry {
     shared_state: Arc<Mutex<SharedState>>,
+    chan_size: usize,
 }
+
+const PUB_NOTIFY_CHAN_SIZE: usize = 128;
 
 impl Registry {
     // Register new publisher in shared state.
     pub fn register_publisher(&self) -> Publisher {
-        let (announce_tx, announce_rx) = mpsc::channel(128);
+        let (announce_tx, announce_rx) = mpsc::channel(PUB_NOTIFY_CHAN_SIZE);
         let mut ss = self.shared_state.lock().unwrap();
         let id = ss.register_publisher(announce_tx);
         let (subs_to_all, subs_to_timelines) = (
@@ -276,7 +275,7 @@ impl Registry {
 
     // Register new subscriber in shared state.
     pub async fn register_subscriber(&self, sub_key: SubscriptionKey) -> Subscriber {
-        let (tx, rx) = mpsc::channel(get_args().chan_size);
+        let (tx, rx) = mpsc::channel(self.chan_size);
         let id;
         let mut pub_txs;
         let announce;
@@ -358,7 +357,7 @@ impl Publisher {
         for sub in self.subs_to_all.iter() {
             match sub.try_send(msg.clone()) {
                 Err(TrySendError::Full(_)) => {
-                    trace!("dropping message, channel is full");
+                    warn!("dropping message, channel is full");
                 }
                 Err(TrySendError::Closed(_)) => {
                     cleanup_subs_to_all = true;
@@ -379,7 +378,7 @@ impl Publisher {
         if let Some(subs) = self.subs_to_timelines.get(&ttid) {
             for tx in subs.iter().map(|sub_sender| &sub_sender.1) {
                 if let Err(TrySendError::Full(_)) = tx.try_send(msg.clone()) {
-                    trace!("dropping message, channel is full");
+                    warn!("dropping message, channel is full");
                 }
                 // closed channel is ignored here; we will be notified and remove it soon
             }
@@ -464,8 +463,8 @@ impl NeonBroker for NeonBrokerImpl {
         // transform rx into stream with item = Result, as method result demands
         let output = async_stream::try_stream! {
             while let Some(info) = subscriber.sub_rx.recv().await {
-                yield info
-            }
+                    yield info
+                }
         };
 
         Ok(Response::new(
@@ -501,35 +500,26 @@ async fn http1_handler(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // console_subscriber::init();
-
     let args = Args::parse();
-    ARGS.set(args).expect("ARGS already initialized");
 
-    logging::init(LogFormat::from_config(&get_args().log_format)?)?;
+    logging::init(LogFormat::from_config(&args.log_format)?)?;
     info!("version: {GIT_VERSION}");
 
     let registry = Registry {
-        shared_state: Arc::new(Mutex::new(SharedState {
-            pub_txs: HashMap::new(),
-            next_pub_id: 0,
-            subs_to_all: HashMap::new(),
-            subs_to_timelines: HashMap::new(),
-            num_subs_to_timelines: 0,
-            next_sub_id: 0,
-        })),
+        shared_state: Arc::new(Mutex::new(SharedState::default())),
+        chan_size: args.chan_size,
     };
     let neon_broker_impl = NeonBrokerImpl {
         registry: registry.clone(),
     };
     let neon_broker_server = NeonBrokerServer::new(neon_broker_impl);
 
-    info!("listening on {}", &get_args().listen_addr);
+    info!("listening on {}", &args.listen_addr);
 
     // grpc is served along with http1 for metrics on a single port, hence we
     // don't use tonic's Server.
-    hyper::Server::bind(&get_args().listen_addr)
-        .http2_keep_alive_interval(Some(get_args().http2_keepalive_interval))
+    hyper::Server::bind(&args.listen_addr)
+        .http2_keep_alive_interval(Some(args.http2_keepalive_interval))
         .serve(make_service_fn(move |_| {
             let neon_broker_server_cloned = neon_broker_server.clone();
             async move {
@@ -564,4 +554,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }))
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neon_broker::neon_broker_proto::TenantTimelineId as ProtoTenantTimelineId;
+    use tokio::sync::mpsc::error::TryRecvError;
+    use utils::id::{TenantId, TimelineId};
+
+    fn msg(timeline_id: Vec<u8>) -> SafekeeperTimelineInfo {
+        SafekeeperTimelineInfo {
+            safekeeper_id: 1,
+            tenant_timeline_id: Some(ProtoTenantTimelineId {
+                tenant_id: vec![0x00; 16],
+                timeline_id,
+            }),
+            last_log_term: 0,
+            flush_lsn: 1,
+            commit_lsn: 2,
+            backup_lsn: 3,
+            remote_consistent_lsn: 4,
+            peer_horizon_lsn: 5,
+            safekeeper_connstr: "neon-1-sk-1.local:7676".to_owned(),
+            local_start_lsn: 0,
+        }
+    }
+
+    fn tli_from_u64(i: u64) -> Vec<u8> {
+        let mut timeline_id = vec![0xFF; 8];
+        timeline_id.extend_from_slice(&i.to_be_bytes());
+        timeline_id
+    }
+
+    #[tokio::test]
+    async fn test_registry() {
+        let registry = Registry {
+            shared_state: Arc::new(Mutex::new(SharedState::default())),
+            chan_size: 16,
+        };
+
+        // subscribe to timeline 2
+        let ttid_2 = TenantTimelineId {
+            tenant_id: TenantId::from_slice(&[0x00; 16]).unwrap(),
+            timeline_id: TimelineId::from_slice(&tli_from_u64(2)).unwrap(),
+        };
+        let sub_key_2 = SubscriptionKey::Timeline(ttid_2);
+        let mut subscriber_2 = registry.register_subscriber(sub_key_2).await;
+        let mut subscriber_all = registry.register_subscriber(SubscriptionKey::All).await;
+
+        // send two messages with different keys
+        let msg_1 = msg(tli_from_u64(1));
+        let msg_2 = msg(tli_from_u64(2));
+        let mut publisher = registry.register_publisher();
+        publisher.send_msg(&msg_1).expect("failed to send msg");
+        publisher.send_msg(&msg_2).expect("failed to send msg");
+
+        // msg with key 2 should arrive to subscriber_2
+        assert!(
+            matches!(subscriber_2.sub_rx.try_recv(), Ok(msg) if matches!(msg.tenant_timeline_id.as_ref(), Some(ttid) if parse_proto_ttid(ttid).unwrap() == ttid_2))
+        );
+        // but nothing more
+        assert!(
+            matches!(subscriber_2.sub_rx.try_recv(), Err(err) if matches!(err, TryRecvError::Empty))
+        );
+
+        // subscriber_all should receive both messages
+        assert!(matches!(subscriber_all.sub_rx.try_recv(), Ok(..)));
+        assert!(matches!(subscriber_all.sub_rx.try_recv(), Ok(..)));
+        assert!(
+            matches!(subscriber_all.sub_rx.try_recv(), Err(err) if matches!(err, TryRecvError::Empty))
+        );
+    }
 }

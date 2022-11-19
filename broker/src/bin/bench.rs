@@ -3,18 +3,25 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use neon_broker::neon_broker_proto::neon_broker_client::NeonBrokerClient;
 use neon_broker::neon_broker_proto::subscribe_safekeeper_info_request::SubscriptionKey;
 use neon_broker::neon_broker_proto::TenantTimelineId as ProtoTenantTimelineId;
 use neon_broker::neon_broker_proto::{SafekeeperTimelineInfo, SubscribeSafekeeperInfoRequest};
+use neon_broker::NeonBrokerClientChannel;
 use neon_broker::DEFAULT_LISTEN_ADDR;
 use tokio::time::{self};
 
-use tonic::transport::Channel;
 use tonic::Request;
 
+const ABOUT: &str = r#"
+A simple benchmarking tool for neon_broker. Creates specified number of per
+timeline publishers and subscribers; each publisher continiously sends
+messages, subscribers read them. Each second the tool outputs number of
+messages summed across all subscribers and min number of messages
+recevied by single subscriber.
+"#;
+
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version, about = ABOUT)]
 struct Args {
     /// Number of publishers
     #[clap(short = 'p', long, value_parser, default_value_t = 1)]
@@ -36,13 +43,6 @@ async fn progress_reporter(counters: Vec<Arc<AtomicU64>>) {
     let mut skipped: u64 = 0;
     loop {
         interval.tick().await;
-        // print!(
-        //     "cnts are {:?}",
-        //     counters
-        //         .iter()
-        //         .map(|c| c.load(Ordering::Relaxed))
-        //         .collect::<Vec<_>>()
-        // );
         let c_new = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
         let c_min_new = counters
             .iter()
@@ -78,10 +78,10 @@ fn tli_from_u64(i: u64) -> Vec<u8> {
     timeline_id
 }
 
-async fn subscribe(client: Option<NeonBrokerClient<Channel>>, counter: Arc<AtomicU64>, i: u64) {
+async fn subscribe(client: Option<NeonBrokerClientChannel>, counter: Arc<AtomicU64>, i: u64) {
     let mut client = match client {
         Some(c) => c,
-        None => NeonBrokerClient::connect(format!("http://{}", DEFAULT_LISTEN_ADDR))
+        None => NeonBrokerClientChannel::connect_lazy(format!("http://{}", DEFAULT_LISTEN_ADDR))
             .await
             .unwrap(),
     };
@@ -102,14 +102,13 @@ async fn subscribe(client: Option<NeonBrokerClient<Channel>>, counter: Arc<Atomi
 
     while let Some(_feature) = stream.message().await.unwrap() {
         counter.fetch_add(1, Ordering::Relaxed);
-        // println!("info = {:?}, client {}", _feature, i);
     }
 }
 
-async fn publish(client: Option<NeonBrokerClient<Channel>>, n_keys: u64) {
+async fn publish(client: Option<NeonBrokerClientChannel>, n_keys: u64) {
     let mut client = match client {
         Some(c) => c,
-        None => NeonBrokerClient::connect(format!("http://{}", DEFAULT_LISTEN_ADDR))
+        None => NeonBrokerClientChannel::connect_lazy(format!("http://{}", DEFAULT_LISTEN_ADDR))
             .await
             .unwrap(),
     };
@@ -134,12 +133,7 @@ async fn publish(client: Option<NeonBrokerClient<Channel>>, n_keys: u64) {
                 local_start_lsn: 0,
             };
             counter += 1;
-            // println!("sending info = {:?}", info);
-            if counter >= 10 {
-                break;
-            }
             yield info;
-            time::sleep(Duration::from_millis(1000)).await;
         }
     };
     let response = client.publish_safekeeper_info(Request::new(outbound)).await;
@@ -156,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let h = tokio::spawn(progress_reporter(counters.clone()));
 
-    let c = NeonBrokerClient::connect(format!("http://{}", DEFAULT_LISTEN_ADDR))
+    let c = NeonBrokerClientChannel::connect_lazy(format!("http://{}", DEFAULT_LISTEN_ADDR))
         .await
         .unwrap();
 
