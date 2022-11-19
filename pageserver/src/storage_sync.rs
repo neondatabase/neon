@@ -190,6 +190,12 @@ pub struct RemoteTimelineClient {
 
     storage_impl: GenericRemoteStorage,
 }
+
+// clippy warns that Uninitialized is much smaller than Initialized, which wastes
+// memory for Uninitialized variants. Doesn't matter in practice, there are not
+// that many upload queues in a running pageserver, and most of them are initialized
+// anyway.
+#[allow(clippy::large_enum_variant)]
 enum UploadQueue {
     Uninitialized,
     Initialized(UploadQueueInitialized),
