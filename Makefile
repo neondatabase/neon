@@ -20,18 +20,18 @@ else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
 
-# Seccomp BPF is only available for Linux
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
+	# Seccomp BPF is only available for Linux
 	PG_CONFIGURE_OPTS += --with-libseccomp
-endif
-
-# macOS with brew-installed openssl requires explicit paths
-# It can be configured with OPENSSL_PREFIX variable
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Darwin)
-    OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
-    PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
+else ifeq ($(UNAME_S),Darwin)
+	# macOS with brew-installed openssl requires explicit paths
+	# It can be configured with OPENSSL_PREFIX variable
+	OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
+	PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
+	# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
+	# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
+	EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:
 endif
 
 # Use -C option so that when PostgreSQL "make install" installs the
@@ -73,7 +73,8 @@ $(POSTGRES_INSTALL_DIR)/build/v14/config.status:
 	+@echo "Configuring Postgres v14 build"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/v14
 	(cd $(POSTGRES_INSTALL_DIR)/build/v14 && \
-	$(ROOT_PROJECT_DIR)/vendor/postgres-v14/configure CFLAGS='$(PG_CFLAGS)' \
+	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-v14/configure \
+		CFLAGS='$(PG_CFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/v14 > configure.log)
 
@@ -81,7 +82,8 @@ $(POSTGRES_INSTALL_DIR)/build/v15/config.status:
 	+@echo "Configuring Postgres v15 build"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/v15
 	(cd $(POSTGRES_INSTALL_DIR)/build/v15 && \
-	$(ROOT_PROJECT_DIR)/vendor/postgres-v15/configure CFLAGS='$(PG_CFLAGS)' \
+	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-v15/configure \
+		CFLAGS='$(PG_CFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/v15 > configure.log)
 
@@ -111,6 +113,8 @@ postgres-v14: postgres-v14-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14 MAKELEVEL=0 install
 	+@echo "Compiling libpq v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/src/interfaces/libpq install
+	+@echo "Compiling pg_prewarm v14"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_prewarm install
 	+@echo "Compiling pg_buffercache v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect v14"
@@ -123,6 +127,8 @@ postgres-v15: postgres-v15-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15 MAKELEVEL=0 install
 	+@echo "Compiling libpq v15"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/src/interfaces/libpq install
+	+@echo "Compiling pg_prewarm v15"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pg_prewarm install
 	+@echo "Compiling pg_buffercache v15"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect v15"

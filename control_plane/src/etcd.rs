@@ -6,7 +6,7 @@ use crate::{background_process, local_env};
 
 pub fn start_etcd_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
     let etcd_broker = &env.etcd_broker;
-    println!(
+    print!(
         "Starting etcd broker using {:?}",
         etcd_broker.etcd_binary_path
     );

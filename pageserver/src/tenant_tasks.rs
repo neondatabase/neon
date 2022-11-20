@@ -71,7 +71,7 @@ async fn compaction_loop(tenant_id: TenantId) {
             let mut sleep_duration = tenant.get_compaction_period();
             if let Err(e) = tenant.compaction_iteration() {
                 sleep_duration = wait_duration;
-                error!("Compaction failed, retrying in {:?}: {e:#}", sleep_duration);
+                error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
             }
 
             // Sleep
@@ -120,7 +120,7 @@ async fn gc_loop(tenant_id: TenantId) {
                 if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false).await
                 {
                     sleep_duration = wait_duration;
-                    error!("Gc failed, retrying in {:?}: {e:#}", sleep_duration);
+                    error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);
                 }
             }
 

@@ -237,7 +237,7 @@ impl PageServerNode {
         datadir: &Path,
         update_config: bool,
     ) -> anyhow::Result<Child> {
-        println!(
+        print!(
             "Starting pageserver at '{}' in '{}'",
             self.pg_connection_config.raw_address(),
             datadir.display()

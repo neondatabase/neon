@@ -49,6 +49,11 @@ typedef struct
 
 #define messageTag(m) (((const NeonMessage *)(m))->tag)
 
+#define NEON_TAG "[NEON_SMGR] "
+#define neon_log(tag, fmt, ...) ereport(tag,                                  \
+										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
+										 errhidestmt(true), errhidecontext(true)))
+
 /*
  * supertype of all the Neon*Request structs below
  *
