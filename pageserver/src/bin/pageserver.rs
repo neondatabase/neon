@@ -199,6 +199,20 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     logging::init(conf.log_format)?;
     info!("version: {}", version());
 
+    // If any failpoints were set from FAILPOINTS environment variable,
+    // print them to the log for debugging purposes
+    let failpoints = fail::list();
+    if !failpoints.is_empty() {
+        info!(
+            "started with failpoints: {}",
+            failpoints
+                .iter()
+                .map(|(name, actions)| format!("{name}={actions}"))
+                .collect::<Vec<String>>()
+                .join(";")
+        )
+    }
+
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
     let lock_file = match lock_file::create_lock_file(&lock_file_path, Pid::this().to_string()) {
         lock_file::LockCreationResult::Created {

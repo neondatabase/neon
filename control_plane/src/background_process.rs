@@ -205,17 +205,14 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
     let mut filled_cmd = cmd.env_clear().env("RUST_BACKTRACE", "1");
 
-    let var = "LLVM_PROFILE_FILE";
-    if let Some(val) = std::env::var_os(var) {
-        filled_cmd = filled_cmd.env(var, val);
+    // Pass through these environment variables to the command
+    for var in ["LLVM_PROFILE_FILE", "FAILPOINTS", "RUST_LOG"] {
+        if let Some(val) = std::env::var_os(var) {
+            filled_cmd = filled_cmd.env(var, val);
+        }
     }
 
-    const RUST_LOG_KEY: &str = "RUST_LOG";
-    if let Ok(rust_log_value) = std::env::var(RUST_LOG_KEY) {
-        filled_cmd.env(RUST_LOG_KEY, rust_log_value)
-    } else {
-        filled_cmd
-    }
+    filled_cmd
 }
 
 fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
