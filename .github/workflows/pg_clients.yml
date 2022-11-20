@@ -23,6 +23,7 @@ jobs:
     runs-on: [ ubuntu-latest ]
 
     env:
+      DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
 
     steps:
@@ -53,6 +54,7 @@ jobs:
       with:
         environment: staging
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
 
     - name: Run pytest
       env:
@@ -63,7 +65,7 @@ jobs:
       run: |
         # Test framework expects we have psql binary;
         # but since we don't really need it in this test, let's mock it
-        mkdir -p "$POSTGRES_DISTRIB_DIR/v14/bin" && touch "$POSTGRES_DISTRIB_DIR/v14/bin/psql";
+        mkdir -p "$POSTGRES_DISTRIB_DIR/v${DEFAULT_PG_VERSION}/bin" && touch "$POSTGRES_DISTRIB_DIR/v${DEFAULT_PG_VERSION}/bin/psql";
         ./scripts/pytest \
           --junitxml=$TEST_OUTPUT/junit.xml \
           --tb=short \
