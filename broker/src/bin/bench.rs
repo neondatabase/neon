@@ -18,6 +18,10 @@ timeline publishers and subscribers; each publisher continiously sends
 messages, subscribers read them. Each second the tool outputs number of
 messages summed across all subscribers and min number of messages
 recevied by single subscriber.
+
+For example,
+cargo build -r -p neon_broker --features bench && target/release/neon_broker
+target/release/neon_broker_bench -s 1 -p 1
 "#;
 
 #[derive(Parser, Debug)]

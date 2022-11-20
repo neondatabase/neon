@@ -13,7 +13,7 @@
 //! subscribers.
 //!
 //! Only safekeeper message is supported, but it is not hard to add something
-//! else with templating.
+//! else with generics.
 use clap::{command, Parser};
 use futures_core::Stream;
 use futures_util::StreamExt;
