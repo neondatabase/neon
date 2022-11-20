@@ -135,7 +135,9 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # ensure that an initiated attach operation survives pageserver restart
-    with pytest.raises(Exception, match=r".*(tenant already exists|attach is already in progress).*"):
+    with pytest.raises(
+        Exception, match=r".*(tenant already exists|attach is already in progress).*"
+    ):
         client.tenant_attach(tenant_id)
     log.info("waiting for timeline redownload")
     wait_until(
