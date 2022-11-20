@@ -223,9 +223,6 @@ def test_pageserver_with_empty_tenants(
 
     client = env.pageserver.http_client()
 
-    tenant_without_timelines_dir = env.initial_tenant
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
-
     tenant_with_empty_timelines_dir = client.tenant_create()
     temp_timelines = client.timeline_list(tenant_with_empty_timelines_dir)
     for temp_timeline in temp_timelines:
@@ -245,6 +242,10 @@ def test_pageserver_with_empty_tenants(
     # Trigger timeline reinitialization after pageserver restart
     env.postgres.stop_all()
     env.pageserver.stop()
+
+    tenant_without_timelines_dir = env.initial_tenant
+    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
+
     env.pageserver.start()
 
     client = env.pageserver.http_client()
