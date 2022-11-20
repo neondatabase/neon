@@ -1568,6 +1568,7 @@ class NeonCli(AbstractNeonCli):
     def pageserver_start(
         self,
         overrides: Tuple[str, ...] = (),
+        extra_env_vars: Optional[Dict[str, str]] = None,
     ) -> "subprocess.CompletedProcess[str]":
         start_args = ["pageserver", "start", *overrides]
         append_pageserver_param_overrides(
@@ -1577,11 +1578,11 @@ class NeonCli(AbstractNeonCli):
             pageserver_config_override=self.env.pageserver.config_override,
         )
 
-        s3_env_vars = None
         if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
             s3_env_vars = self.env.remote_storage.access_env_vars()
+            extra_env_vars = (extra_env_vars or {}) | s3_env_vars
 
-        return self.raw_cli(start_args, extra_env_vars=s3_env_vars)
+        return self.raw_cli(start_args, extra_env_vars=extra_env_vars)
 
     def pageserver_stop(self, immediate=False) -> "subprocess.CompletedProcess[str]":
         cmd = ["pageserver", "stop"]
@@ -1762,7 +1763,11 @@ class NeonPageserver(PgProtocol):
             ".*Removing intermediate uninit mark file.*",
         ]
 
-    def start(self, overrides: Tuple[str, ...] = ()) -> "NeonPageserver":
+    def start(
+        self,
+        overrides: Tuple[str, ...] = (),
+        extra_env_vars: Optional[Dict[str, str]] = None,
+    ) -> "NeonPageserver":
         """
         Start the page server.
         `overrides` allows to add some config to this pageserver start.
@@ -1770,7 +1775,7 @@ class NeonPageserver(PgProtocol):
         """
         assert self.running is False
 
-        self.env.neon_cli.pageserver_start(overrides=overrides)
+        self.env.neon_cli.pageserver_start(overrides=overrides, extra_env_vars=extra_env_vars)
         self.running = True
         return self
 
