@@ -1298,14 +1298,27 @@ impl Tenant {
         self.state.subscribe()
     }
 
-    pub async fn wait_until_loaded(&self) -> anyhow::Result<TenantState> {
+    pub async fn wait_to_become_active(&self) -> anyhow::Result<()> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = *receiver.borrow_and_update();
-            if current_state != TenantState::Loading {
-                break Ok(current_state);
+            match current_state {
+                TenantState::Loading | TenantState::Attaching => {
+                    // in these states, there's a chance that we can reach ::Active
+                    receiver.changed().await?;
+                }
+                TenantState::Active { .. } => {
+                    return Ok(());
+                }
+                TenantState::Broken | TenantState::Paused => {
+                    // There's no chance the tenant can transition back into ::Active
+                    anyhow::bail!(
+                        "Tenant {} will not become active. Current state: {:?}",
+                        self.tenant_id,
+                        current_state,
+                    );
+                }
             }
-            receiver.changed().await?;
         }
     }
 }

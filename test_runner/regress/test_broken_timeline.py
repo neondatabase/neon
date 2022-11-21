@@ -18,6 +18,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
             ".*Failed to load delta layer.*",
             ".*could not find data for key.*",
             ".*is not active. Current state: Broken.*",
+            ".*will not become active. Current state: Broken.*",
             ".*failed to load metadata.*",
         ]
     )
@@ -78,7 +79,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     # First timeline would not get loaded into pageserver due to corrupt metadata file
     with pytest.raises(
-        Exception, match=f"Tenant {tenant1} is not active. Current state: Broken"
+        Exception, match=f"Tenant {tenant1} will not become active. Current state: Broken"
     ) as err:
         pg1.start()
     log.info(

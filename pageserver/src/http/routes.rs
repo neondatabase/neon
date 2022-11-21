@@ -396,7 +396,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
                 id: *id,
                 state: *state,
                 current_physical_size: None,
-                has_in_progress_downloads: Some(state == &TenantState::Attaching),
+                has_in_progress_downloads: Some(state.has_in_progress_downloads()),
             })
             .collect::<Vec<TenantInfo>>()
     })
@@ -425,7 +425,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
             id: tenant_id,
             state,
             current_physical_size: Some(current_physical_size),
-            has_in_progress_downloads: Some(state == TenantState::Attaching),
+            has_in_progress_downloads: Some(state.has_in_progress_downloads()),
         };
 
         Ok::<_, anyhow::Error>(tenant_info)
