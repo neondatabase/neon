@@ -232,7 +232,8 @@ jobs:
       if: matrix.platform == 'neon-captest-prefetch'
       run: |
         psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE neondb SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE neondb SET seqscan_prefetch_buffers=10"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE neondb SET effective_io_concurrency=32"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE neondb SET maintenance_io_concurrency=32"
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
