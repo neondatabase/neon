@@ -22,15 +22,20 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
     ],
 )
 @pytest.mark.parametrize(
-    "env",
+    "env, scale",
     [
-        # Run on all envs
-        pytest.param(lazy_fixture("neon_compare"), id="neon"),
-        pytest.param(lazy_fixture("vanilla_compare"), id="vanilla"),
-        pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
+        # Run on all envs. Use 50x larger table on remote cluster to make sure
+        # it doesn't fit in shared buffers, which are larger on remote than local.
+        pytest.param(lazy_fixture("neon_compare"), 1, id="neon"),
+        pytest.param(lazy_fixture("vanilla_compare"), 1, id="vanilla"),
+        pytest.param(
+            lazy_fixture("remote_compare"), 50, id="remote", marks=pytest.mark.remote_cluster
+        ),
     ],
 )
-def test_seqscans(env: PgCompare, rows: int, iters: int, workers: int):
+def test_seqscans(env: PgCompare, scale: int, rows: int, iters: int, workers: int):
+    rows = scale * rows
+
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("drop table if exists t;")
