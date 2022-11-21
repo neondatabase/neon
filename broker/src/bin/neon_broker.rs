@@ -41,7 +41,6 @@ use neon_broker::neon_broker_proto::subscribe_safekeeper_info_request::Subscript
 use neon_broker::neon_broker_proto::{SafekeeperTimelineInfo, SubscribeSafekeeperInfoRequest};
 use neon_broker::{parse_proto_ttid, EitherBody, DEFAULT_LISTEN_ADDR};
 use utils::id::TenantTimelineId;
-use utils::logging::{self, LogFormat};
 use utils::project_git_version;
 
 project_git_version!(GIT_VERSION);
@@ -380,8 +379,12 @@ async fn http1_handler(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    logging::init(LogFormat::from_config(&args.log_format)?)?;
+    #[cfg(not(feature = "console"))] // tokio-console inits tracing_subscriber on its own
+    utils::logging::init(utils::logging::LogFormat::from_config(&args.log_format)?)?;
     info!("version: {GIT_VERSION}");
+
+    #[cfg(feature = "console")]
+    console_subscriber::init();
 
     let registry = Registry {
         shared_state: Arc::new(RwLock::new(SharedState::new(args.chan_size))),

@@ -5,6 +5,9 @@ edition = "2021"
 
 [features]
 bench = []
+# for exploring with tokio-console. Note that tokio_unstable cfg must be enabled, i.e.
+# RUSTFLAGS="--cfg tokio_unstable" cargo build -r -p neon_broker --features console
+console = ["dep:console-subscriber", "tokio/full", "tokio/tracing"]
 
 [[bin]]
 name = "neon_broker_bench"
@@ -28,6 +31,8 @@ tonic = "0.8"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 tokio-stream = "0.1"
 tracing = "0.1.27"
+
+console-subscriber = {version = "0.1.8", optional = true }
 
 metrics = { path = "../libs/metrics" }
 utils = { path = "../libs/utils" }
