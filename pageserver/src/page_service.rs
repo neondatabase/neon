@@ -328,22 +328,23 @@ impl PageServerHandler {
 
             let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
+            let timeline = Arc::clone(&timeline);
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
-                    self.handle_get_rel_exists_request(&timeline, &req).await
+                    self.handle_get_rel_exists_request(timeline, req).await
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.get_rel_size.start_timer();
-                    self.handle_get_nblocks_request(&timeline, &req).await
+                    self.handle_get_nblocks_request(timeline, req).await
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
-                    self.handle_get_page_at_lsn_request(&timeline, &req).await
+                    self.handle_get_page_at_lsn_request(timeline, req).await
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
-                    self.handle_db_size_request(&timeline, &req).await
+                    self.handle_db_size_request(timeline, req).await
                 }
             };
 
@@ -532,14 +533,17 @@ impl PageServerHandler {
     #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_rel_exists_request(
         &self,
-        timeline: &Timeline,
-        req: &PagestreamExistsRequest,
+        timeline: Arc<Timeline>,
+        req: PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+        let lsn = Self::wait_or_get_last_lsn(&timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
-
-        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest)?;
+        let exists =
+            tokio::task::spawn_blocking(move || timeline.get_rel_exists(req.rel, lsn, req.latest))
+                .await
+                .context("Shutdown")
+                .and_then(|x| x)?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
@@ -549,14 +553,17 @@ impl PageServerHandler {
     #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_nblocks_request(
         &self,
-        timeline: &Timeline,
-        req: &PagestreamNblocksRequest,
+        timeline: Arc<Timeline>,
+        req: PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+        let lsn = Self::wait_or_get_last_lsn(&timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
-
-        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest)?;
+        let n_blocks =
+            tokio::task::spawn_blocking(move || timeline.get_rel_size(req.rel, lsn, req.latest))
+                .await
+                .context("Shutdown")
+                .and_then(|x| x)?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
@@ -566,15 +573,19 @@ impl PageServerHandler {
     #[instrument(skip(self, timeline, req), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
     async fn handle_db_size_request(
         &self,
-        timeline: &Timeline,
-        req: &PagestreamDbSizeRequest,
+        timeline: Arc<Timeline>,
+        req: PagestreamDbSizeRequest,
     ) -> Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+        let lsn = Self::wait_or_get_last_lsn(&timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let total_blocks =
-            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)?;
+        let total_blocks = tokio::task::spawn_blocking(move || {
+            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)
+        })
+        .await
+        .context("Shutdown")
+        .and_then(|x| x)?;
 
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -586,11 +597,11 @@ impl PageServerHandler {
     #[instrument(skip(self, timeline, req), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
     async fn handle_get_page_at_lsn_request(
         &self,
-        timeline: &Timeline,
-        req: &PagestreamGetPageRequest,
+        timeline: Arc<Timeline>,
+        req: PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+        let lsn = Self::wait_or_get_last_lsn(&timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
         /*
         // Add a 1s delay to some requests. The delay helps the requests to
@@ -601,11 +612,18 @@ impl PageServerHandler {
         }
         */
 
-        // FIXME: this profiling now happens at different place than it used to. The
-        // current profiling is based on a thread-local variable, so it doesn't work
-        // across awaits
-        let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
-        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
+        let conf = self.conf;
+
+        let page = tokio::task::spawn_blocking(move || {
+            // FIXME: this profiling now happens at different place than it used to. The
+            // current profiling is based on a thread-local variable, so it doesn't work
+            // across awaits
+            let _profiling_guard = profpoint_start(conf, ProfilingConfig::PageRequests);
+            timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)
+        })
+        .await
+        .context("Shutting down")
+        .and_then(|x| x)?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
