@@ -40,7 +40,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
+use super::{walreceiver_connection::WalConnectionStatus, TaskHandle};
 
 /// Spawns the loop to take care of the timeline's WAL streaming connection.
 pub fn spawn_connection_manager_task(
@@ -157,22 +157,21 @@ async fn connection_manager_loop_step(
                 let wal_connection = walreceiver_state.wal_connection.as_mut()
                     .expect("Should have a connection, as checked by the corresponding select! guard");
                 match wal_connection_update {
-                    TaskEvent::Update(c) => {
-                        match c {
-                            TaskStateUpdate::Init | TaskStateUpdate::Started => {},
-                            TaskStateUpdate::Progress(status) => {
-                                if status.has_processed_wal {
-                                    // We have advanced last_record_lsn by processing the WAL received
-                                    // from this safekeeper. This is good enough to clean unsuccessful
-                                    // retries history and allow reconnecting to this safekeeper without
-                                    // sleeping for a long time.
-                                    walreceiver_state.wal_connection_retries.remove(&wal_connection.sk_id);
-                                }
-                                wal_connection.status = status.to_owned();
-                            }
+                    TaskStateUpdate::Init | TaskStateUpdate::Started => {},
+                    TaskStateUpdate::Progress(status) => {
+                        if status.has_processed_wal {
+                            // We have advanced last_record_lsn by processing the WAL received
+                            // from this safekeeper. This is good enough to clean unsuccessful
+                            // retries history and allow reconnecting to this safekeeper without
+                            // sleeping for a long time.
+                            walreceiver_state.wal_connection_retries.remove(&wal_connection.sk_id);
                         }
+                        wal_connection.status = status.to_owned();
                     },
-                    TaskEvent::End(walreceiver_task_result) => {
+                    TaskStateUpdate::Ended => {
+                        let walreceiver_task_result = wal_connection.connection_task
+                            .take_result()
+                            .expect("task ended, must have result");
                         match walreceiver_task_result {
                             Ok(()) => debug!("WAL receiving task finished"),
                             Err(e) => error!("wal receiver task finished with an error: {e:?}"),

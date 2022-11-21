@@ -30,7 +30,10 @@ use anyhow::{ensure, Context};
 use etcd_broker::Client;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::watch;
 use tracing::*;
 use url::Url;
@@ -87,7 +90,8 @@ pub fn is_etcd_client_initialized() -> bool {
 /// That may lead to certain events not being observed by the listener.
 #[derive(Debug)]
 pub struct TaskHandle<E> {
-    join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+    result: Arc<Mutex<Option<anyhow::Result<()>>>>,
     /// The sending end of `events_receiver`.
     /// We keep it alive so that events_receiver.changed() will never return Err()
     _events_sender: Arc<watch::Sender<TaskStateUpdate<E>>>,
@@ -95,16 +99,12 @@ pub struct TaskHandle<E> {
     cancellation: watch::Sender<()>,
 }
 
-pub enum TaskEvent<E> {
-    Update(TaskStateUpdate<E>),
-    End(anyhow::Result<()>),
-}
-
 #[derive(Debug, Clone)]
 pub enum TaskStateUpdate<E> {
     Init,
     Started,
     Progress(E),
+    Ended,
 }
 
 impl<E: Clone> TaskHandle<E> {
@@ -121,26 +121,30 @@ impl<E: Clone> TaskHandle<E> {
         let (cancellation, cancellation_receiver) = watch::channel(());
         let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
         let events_sender = Arc::new(events_sender);
+        let result = Arc::new(Mutex::new(None));
         let join_handle = WALRECEIVER_RUNTIME.spawn({
             let events_sender = Arc::clone(&events_sender);
+            let result = Arc::clone(&result);
             async move {
                 events_sender.send(TaskStateUpdate::Started).ok();
-                let res = task(events_sender, cancellation_receiver).await;
-                res
+                let res = task(Arc::clone(&events_sender), cancellation_receiver).await;
+                *result.lock().unwrap() = Some(res);
+                events_sender.send(TaskStateUpdate::Ended).ok();
             }
         });
 
         TaskHandle {
             join_handle: Some(join_handle),
+            result,
             events_receiver,
             _events_sender: events_sender,
             cancellation,
         }
     }
 
-    async fn next_task_event(&mut self) -> TaskEvent<E> {
+    async fn next_task_event(&mut self) -> TaskStateUpdate<E> {
         match self.events_receiver.changed().await {
-            Ok(()) => TaskEvent::Update((self.events_receiver.borrow()).clone()),
+            Ok(()) => (self.events_receiver.borrow()).clone(),
             Err(_events_sender_dropped) => {
                 unreachable!(
                     "we are keeping the sender alive inside self, it can't be dropped here"
@@ -149,13 +153,25 @@ impl<E: Clone> TaskHandle<E> {
         }
     }
 
+    fn take_result(&self) -> Option<anyhow::Result<()>> {
+        let mut guard = self.result.lock().unwrap();
+        guard.take()
+    }
+
     /// Aborts current task, waiting for it to finish.
-    pub async fn shutdown(self) {
-        if let Some(jh) = self.join_handle {
+    pub async fn shutdown(mut self) {
+        if let Some(jh) = &mut self.join_handle {
             self.cancellation.send(()).ok();
             match jh.await {
-                Ok(Ok(())) => debug!("Shutdown success"),
-                Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
+                Ok(()) => {
+                    let res = self
+                        .take_result()
+                        .expect("task sets result to Some(_) before returning");
+                    match res {
+                        Ok(()) => debug!("Shutdown success"),
+                        Err(e) => error!("Shutdown task error: {e:?}"),
+                    }
+                }
                 Err(join_error) => {
                     if join_error.is_cancelled() {
                         error!("Shutdown task was cancelled");
