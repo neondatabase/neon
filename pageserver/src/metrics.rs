@@ -200,10 +200,11 @@ pub static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
 });
 
 // remote storage metrics
-pub static REMOTE_UPLOAD_QUEUE_ITEMS: Lazy<IntGaugeVec> = Lazy::new(|| {
+
+pub static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
-        "pageserver_remote_upload_queue_items",
-        "Number of items left in the upload queue",
+        "pageserver_remote_upload_queue_unfinished_tasks",
+        "Number of tasks in the upload queue that are not finished yet.",
         &["tenant_id", "timeline_id"],
     )
     .expect("failed to define a metric")
@@ -465,7 +466,7 @@ impl Drop for TimelineMetrics {
             let _ = SMGR_QUERY_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
         }
 
-        let _ = REMOTE_UPLOAD_QUEUE_ITEMS.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS.remove_label_values(&[tenant_id, timeline_id]);
         for file_kind in REMOTE_OPERATION_FILE_KINDS {
             for op in REMOTE_OPERATION_KINDS {
                 for status in REMOTE_OPERATION_STATUSES {

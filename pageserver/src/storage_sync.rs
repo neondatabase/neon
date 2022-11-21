@@ -150,6 +150,7 @@ use self::index::IndexPart;
 use crate::metrics::MeasureRemoteOp;
 use crate::metrics::RemoteOpFileKind;
 use crate::metrics::RemoteOpKind;
+use crate::metrics::REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS;
 use crate::{
     config::PageServerConf,
     storage_sync::index::{LayerFileMetadata, RelativePath},
@@ -363,6 +364,19 @@ impl std::fmt::Display for UploadOp {
     }
 }
 
+macro_rules! upload_queue_items_metric {
+    ($remote_timeline_client:expr, $delta:expr) => {{
+        let remote_timeline_client = &$remote_timeline_client;
+        REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS
+                .get_metric_with_label_values(&[
+                    &remote_timeline_client.tenant_id.to_string(),
+                    &remote_timeline_client.timeline_id.to_string(),
+                ])
+                .unwrap()
+                .add($delta)
+    }}
+}
+
 impl RemoteTimelineClient {
     /// Initialize the upload queue for a remote storage that already received
     /// an index file upload, i.e., it's not empty.
@@ -485,6 +499,7 @@ impl RemoteTimelineClient {
         upload_queue
             .queued_operations
             .push_back(UploadOp::UploadMetadata(index_part, disk_consistent_lsn));
+        upload_queue_items_metric!(self, 1);
 
         info!(
             "scheduled metadata upload with {} files",
@@ -532,6 +547,7 @@ impl RemoteTimelineClient {
                 PathBuf::from(path),
                 layer_metadata.clone(),
             ));
+        upload_queue_items_metric!(self, 1);
 
         info!("scheduled layer file upload {}", path.display());
 
@@ -572,12 +588,14 @@ impl RemoteTimelineClient {
         upload_queue
             .queued_operations
             .push_back(UploadOp::UploadMetadata(index_part, disk_consistent_lsn));
+        upload_queue_items_metric!(self, 1);
 
         // schedule the actual deletions
         for path in paths {
             upload_queue
                 .queued_operations
                 .push_back(UploadOp::Delete(PathBuf::from(path)));
+            upload_queue_items_metric!(self, 1);
             info!("scheduled layer file deletion {}", path.display());
         }
 
@@ -599,6 +617,8 @@ impl RemoteTimelineClient {
                 .initialized_mut()
                 .context("upload queue is not initialized")?;
             upload_queue.queued_operations.push_back(barrier_op);
+            // Don't count this kind of operation!
+
             // Launch the task immediately, if possible
             self.launch_queued_tasks(upload_queue);
         }
@@ -690,6 +710,7 @@ impl RemoteTimelineClient {
                 false,
                 async move {
                     self_rc.perform_upload_task(task).await;
+                    upload_queue_items_metric!(self_rc, -1);
                     Ok(())
                 },
             );
