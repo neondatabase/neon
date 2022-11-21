@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
 use crate::config::PageServerConf;
+use crate::metrics::{MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind};
 use crate::storage_sync::index::LayerFileMetadata;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
@@ -34,7 +35,14 @@ pub async fn download_layer_file<'a>(
     path: &'a RelativePath,
     layer_metadata: &'a LayerFileMetadata,
 ) -> anyhow::Result<u64> {
-    download_layer_file_guts(conf, storage, tenant_id, timeline_id, path, layer_metadata).await
+    download_layer_file_guts(conf, storage, tenant_id, timeline_id, path, layer_metadata)
+        .measure_remote_op(
+            tenant_id,
+            timeline_id,
+            RemoteOpFileKind::Layer,
+            RemoteOpKind::Download,
+        )
+        .await
 }
 
 const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
@@ -267,5 +275,11 @@ pub async fn download_index_part(
 
         Ok(index_part)
     }
+    .measure_remote_op(
+        tenant_id,
+        timeline_id,
+        RemoteOpFileKind::Index,
+        RemoteOpKind::Download,
+    )
     .await
 }

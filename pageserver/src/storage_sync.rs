@@ -147,6 +147,9 @@ use utils::lsn::Lsn;
 
 use self::index::IndexPart;
 
+use crate::metrics::MeasureRemoteOp;
+use crate::metrics::RemoteOpFileKind;
+use crate::metrics::RemoteOpKind;
 use crate::{
     config::PageServerConf,
     storage_sync::index::{LayerFileMetadata, RelativePath},
@@ -708,7 +711,14 @@ impl RemoteTimelineClient {
         loop {
             let upload_result: anyhow::Result<()> = match task.op {
                 UploadOp::UploadLayer(ref path, ref layer_metadata) => {
-                    upload::upload_timeline_layer(&self.storage_impl, path, layer_metadata).await
+                    upload::upload_timeline_layer(&self.storage_impl, path, layer_metadata)
+                        .measure_remote_op(
+                            self.tenant_id,
+                            self.timeline_id,
+                            RemoteOpFileKind::Layer,
+                            RemoteOpKind::Upload,
+                        )
+                        .await
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
                     upload::upload_index_part(
@@ -718,9 +728,24 @@ impl RemoteTimelineClient {
                         self.timeline_id,
                         index_part,
                     )
+                    .measure_remote_op(
+                        self.tenant_id,
+                        self.timeline_id,
+                        RemoteOpFileKind::Index,
+                        RemoteOpKind::Upload,
+                    )
                     .await
                 }
-                UploadOp::Delete(ref path) => delete::delete_layer(&self.storage_impl, path).await,
+                UploadOp::Delete(ref path) => {
+                    delete::delete_layer(&self.storage_impl, path)
+                        .measure_remote_op(
+                            self.tenant_id,
+                            self.timeline_id,
+                            RemoteOpFileKind::Layer,
+                            RemoteOpKind::Delete,
+                        )
+                        .await
+                }
                 UploadOp::Barrier(_) => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
