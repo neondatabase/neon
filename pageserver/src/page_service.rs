@@ -940,15 +940,10 @@ impl postgres_backend_async::Handler for PageServerHandler {
 /// all tenants are still loading.
 async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> Result<Arc<Tenant>> {
     let tenant = tenant_mgr::get_tenant(tenant_id, false)?;
-
-    match tokio::time::timeout(Duration::from_secs(30), tenant.wait_until_loaded()).await {
-        Ok(result) => {
-            let state = result?;
-            if !matches!(state, pageserver_api::models::TenantState::Active { .. }) {
-                anyhow::bail!("Tenant {tenant_id} is not active. Current state: {state:?}");
-            }
-            Ok(tenant)
-        }
+    match tokio::time::timeout(Duration::from_secs(30), tenant.wait_to_become_active()).await {
+        Ok(wait_result) => wait_result
+            // no .context(), the error message is good enough and some tests depend on it
+            .map(move |()| tenant),
         Err(_) => anyhow::bail!("Timeout waiting for tenant {tenant_id} to become Active"),
     }
 }
