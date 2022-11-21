@@ -17,6 +17,9 @@ pub static NUM_SUBS_TIMELINE: Lazy<IntGauge> = Lazy::new(|| {
 });
 
 pub static NUM_SUBS_ALL: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!("broker_all_keys_active_subscribers", "Number of subsciptions to all keys")
-        .expect("Failed to register metric")
+    register_int_gauge!(
+        "broker_all_keys_active_subscribers",
+        "Number of subsciptions to all keys"
+    )
+    .expect("Failed to register metric")
 });

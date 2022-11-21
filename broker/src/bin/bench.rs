@@ -165,7 +165,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for _i in 0..args.num_pubs {
         // let c = Some(c.clone());
-        tokio::spawn(publish(None, args.num_subs as u64));
+        let c = None;
+        tokio::spawn(publish(c, args.num_subs as u64));
     }
 
     h.await?;

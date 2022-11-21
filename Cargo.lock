@@ -1919,6 +1919,7 @@ dependencies = [
  "hyper",
  "metrics",
  "once_cell",
+ "parking_lot 0.12.1",
  "prost 0.11.2",
  "tokio",
  "tokio-stream",
