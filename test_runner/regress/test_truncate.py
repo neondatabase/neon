@@ -4,7 +4,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
-# Benchmark searching the layer map, when there are a lot of small layer files.
+# Test truncation of FSM and VM forks of a relation
 #
 def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
 
