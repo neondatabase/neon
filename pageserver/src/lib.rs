@@ -23,6 +23,7 @@ pub mod walrecord;
 pub mod walredo;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use tracing::info;
 use utils::id::{TenantId, TimelineId};
@@ -120,9 +121,39 @@ impl<T> TenantTimelineValues<T> {
     }
 }
 
-/// A suffix to be used during file sync from the remote storage,
-/// to ensure that we do not leave corrupted files that pretend to be layers.
-const TEMP_FILE_SUFFIX: &str = "___temp";
+/// The name of the metadata file pageserver creates per timeline.
+/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>/metadata`.
+pub const METADATA_FILE_NAME: &str = "metadata";
+
+/// Per-tenant configuration file.
+/// Full path: `tenants/<tenant_id>/config`.
+pub const TENANT_CONFIG_NAME: &str = "config";
+
+/// A suffix used for various temporary files. Any temporary files found in the
+/// data directory at pageserver startup can be automatically removed.
+pub const TEMP_FILE_SUFFIX: &str = "___temp";
+
+/// A marker file to mark that a timeline directory was not fully initialized.
+/// If a timeline directory with this marker is encountered at pageserver startup,
+/// the timeline directory and the marker file are both removed.
+/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
+pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
+
+pub fn is_temporary(path: &Path) -> bool {
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().ends_with(TEMP_FILE_SUFFIX),
+        None => false,
+    }
+}
+
+pub fn is_uninit_mark(path: &Path) -> bool {
+    match path.file_name() {
+        Some(name) => name
+            .to_string_lossy()
+            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
+        None => false,
+    }
+}
 
 #[cfg(test)]
 mod backoff_defaults_tests {

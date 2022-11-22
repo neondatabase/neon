@@ -1828,11 +1828,11 @@ pub mod harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::METADATA_FILE_NAME;
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::DEFAULT_PG_VERSION;
+    use crate::METADATA_FILE_NAME;
     use bytes::BytesMut;
     use hex_literal::hex;
     use once_cell::sync::Lazy;

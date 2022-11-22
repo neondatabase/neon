@@ -12,7 +12,7 @@ use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
 
-use crate::config::{PageServerConf, METADATA_FILE_NAME, TIMELINE_UNINIT_MARK_SUFFIX};
+use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
 use crate::storage_sync::index::{LayerFileMetadata, RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData, TimelineLocalFiles};
@@ -22,7 +22,7 @@ use crate::tenant::{
 };
 use crate::tenant_config::TenantConfOpt;
 use crate::walredo::PostgresRedoManager;
-use crate::TEMP_FILE_SUFFIX;
+use crate::{is_temporary, is_uninit_mark, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::{self, path_with_suffix_extension};
 use utils::id::{TenantId, TimelineId};
@@ -632,22 +632,6 @@ fn remove_if_empty(tenant_dir_path: &Path) -> anyhow::Result<bool> {
         Ok(true)
     } else {
         Ok(false)
-    }
-}
-
-fn is_temporary(path: &Path) -> bool {
-    match path.file_name() {
-        Some(name) => name.to_string_lossy().ends_with(TEMP_FILE_SUFFIX),
-        None => false,
-    }
-}
-
-fn is_uninit_mark(path: &Path) -> bool {
-    match path.file_name() {
-        Some(name) => name
-            .to_string_lossy()
-            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
-        None => false,
     }
 }
 
