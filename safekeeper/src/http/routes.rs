@@ -12,7 +12,6 @@ use tokio::task::JoinError;
 
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
-use crate::safekeeper::TermHistory;
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
@@ -62,12 +61,21 @@ where
     s.serialize_str(&format!("{}", z))
 }
 
+/// Same as TermSwitchEntry, but serializes LSN using display serializer
+/// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
+#[derive(Debug, Serialize)]
+struct TermSwitchApiEntry {
+    pub term: Term,
+    #[serde(serialize_with = "display_serialize")]
+    pub lsn: Lsn,
+}
+
 /// Augment AcceptorState with epoch for convenience
 #[derive(Debug, Serialize)]
 struct AcceptorStateStatus {
     term: Term,
     epoch: Term,
-    term_history: TermHistory,
+    term_history: Vec<TermSwitchApiEntry>,
 }
 
 /// Info about timeline on safekeeper ready for reporting.
@@ -112,10 +120,21 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     let (inmem, state) = tli.get_state();
     let flush_lsn = tli.get_flush_lsn();
 
+    let epoch = state.acceptor_state.get_epoch(flush_lsn);
+    let term_history = state
+        .acceptor_state
+        .term_history
+        .0
+        .into_iter()
+        .map(|ts| TermSwitchApiEntry {
+            term: ts.term,
+            lsn: ts.lsn,
+        })
+        .collect();
     let acc_state = AcceptorStateStatus {
         term: state.acceptor_state.term,
-        epoch: state.acceptor_state.get_epoch(flush_lsn),
-        term_history: state.acceptor_state.term_history,
+        epoch,
+        term_history,
     };
 
     // Note: we report in memory values which can be lost.
@@ -276,4 +295,26 @@ pub fn make_router(
             "/v1/record_safekeeper_info/:tenant_id/:timeline_id",
             record_safekeeper_info,
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_term_switch_entry_api_serialize() {
+        let state = AcceptorStateStatus {
+            term: 1,
+            epoch: 1,
+            term_history: vec![TermSwitchApiEntry {
+                term: 1,
+                lsn: Lsn(0x16FFDDDD),
+            }],
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            json,
+            "{\"term\":1,\"epoch\":1,\"term_history\":[{\"term\":1,\"lsn\":\"0/16FFDDDD\"}]}"
+        );
+    }
 }
