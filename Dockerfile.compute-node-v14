@@ -200,9 +200,6 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # libreadline8 for psql
 # libossp-uuid16 for extension ossp-uuid
 # libgeos, libgdal, libproj and libprotobuf-c1 for PostGIS
-#
-# Lastly, link compute_ctl into zenith_ctl while we're at it,
-# so that we don't need to put this in another layer.
 RUN apt update &&  \
     apt install --no-install-recommends -y \
         libreadline8 \
@@ -211,8 +208,7 @@ RUN apt update &&  \
         libgdal28 \
         libproj19 \
         libprotobuf-c1 && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
-    ln /usr/local/bin/compute_ctl /usr/local/bin/zenith_ctl
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 USER postgres
 ENTRYPOINT ["/usr/local/bin/compute_ctl"]
