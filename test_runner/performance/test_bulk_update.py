@@ -6,7 +6,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 # Benchmark estimating effect of prefetch on bulk update operations
 #
 @pytest.mark.timeout(10000)
-@pytest.mark.parametrize("fillfactor", [10,50,100])
+@pytest.mark.parametrize("fillfactor", [10, 50, 100])
 def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor):
 
     env = neon_env_builder.init_start()
