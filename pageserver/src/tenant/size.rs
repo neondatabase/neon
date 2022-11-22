@@ -183,6 +183,19 @@ pub(super) async fn gather_inputs(
             }
         }
 
+        // all timelines also have an end point if they have made any progress
+        if last_record_lsn > timeline.get_ancestor_lsn()
+            && !interesting_lsns
+                .iter()
+                .any(|(lsn, _)| lsn == &last_record_lsn)
+        {
+            updates.push(Update {
+                lsn: last_record_lsn,
+                command: Command::EndOfBranch,
+                timeline_id: timeline.timeline_id,
+            });
+        }
+
         timeline_inputs.insert(
             timeline.timeline_id,
             TimelineInputs {
@@ -270,48 +283,22 @@ impl ModelInputs {
         // impossible to always determine the a one main branch.
         let mut storage = tenant_size_model::Storage::<Option<TimelineId>>::new(None);
 
-        // tracking these not to require modifying the current implementation of the size model,
-        // which works in relative LSNs and sizes.
-        let mut last_state: HashMap<TimelineId, (Lsn, u64)> = HashMap::new();
-
         for update in &self.updates {
             let Update {
                 lsn,
                 command: op,
                 timeline_id,
             } = update;
+            let Lsn(now) = *lsn;
             match op {
                 Command::Update(sz) => {
-                    let latest = last_state.get_mut(timeline_id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                        "ordering-mismatch: there must had been a previous state for {timeline_id}"
-                    )
-                    })?;
-
-                    let lsn_bytes = {
-                        let Lsn(now) = lsn;
-                        let Lsn(prev) = latest.0;
-                        debug_assert!(prev <= *now, "self.updates should had been sorted");
-                        now - prev
-                    };
-
-                    let size_diff =
-                        i64::try_from(*sz as i128 - latest.1 as i128).with_context(|| {
-                            format!("size difference i64 overflow for {timeline_id}")
-                        })?;
-
-                    storage.modify_branch(&Some(*timeline_id), "".into(), lsn_bytes, size_diff);
-                    *latest = (*lsn, *sz);
+                    storage.insert_point(&Some(*timeline_id), "".into(), now, Some(*sz));
+                }
+                Command::EndOfBranch => {
+                    storage.insert_point(&Some(*timeline_id), "".into(), now, None);
                 }
                 Command::BranchFrom(parent) => {
                     storage.branch(parent, Some(*timeline_id));
-
-                    let size = parent
-                        .as_ref()
-                        .and_then(|id| last_state.get(id))
-                        .map(|x| x.1)
-                        .unwrap_or(0);
-                    last_state.insert(*timeline_id, (*lsn, size));
                 }
             }
         }
@@ -320,10 +307,7 @@ impl ModelInputs {
     }
 }
 
-/// Single size model update.
-///
-/// Sizing model works with relative increments over latest branch state.
-/// Updates are absolute, so additional state needs to be tracked when applying.
+/// A point of interest in the tree of branches
 #[serde_with::serde_as]
 #[derive(
     Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Copy, serde::Serialize, serde::Deserialize,
@@ -342,6 +326,7 @@ struct Update {
 enum Command {
     Update(u64),
     BranchFrom(#[serde_as(as = "Option<serde_with::DisplayFromStr>")] Option<TimelineId>),
+    EndOfBranch,
 }
 
 impl std::fmt::Debug for Command {
@@ -351,6 +336,7 @@ impl std::fmt::Debug for Command {
         match self {
             Self::Update(arg0) => write!(f, "Update({arg0})"),
             Self::BranchFrom(arg0) => write!(f, "BranchFrom({arg0:?})"),
+            Self::EndOfBranch => write!(f, "EndOfBranch"),
         }
     }
 }
