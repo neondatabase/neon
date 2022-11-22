@@ -8,6 +8,7 @@
 #include "postgres.h"
 
 #include "access/csn_log.h"
+#include "access/genam.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/relscan.h"
@@ -15,7 +16,66 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "storage/bufmgr.h"
+#include "rwset.h"
 #include "validate.h"
+
+void validate_index_scan(RWSetRelation *rw_rel)
+{
+    Oid relid = rw_rel->relid;
+    int8 region = rw_rel->region;
+	XidCSN read_csn = rw_rel->csn;
+    Relation rel;
+    HeapScanDesc scan;
+    int nkeys = 0;
+    ScanKey keys = NULL;
+    int scan_flags = 0;
+    dlist_iter page_iter;
+    XLogRecPtr page_lsn = InvalidXLogRecPtr;
+
+    // This function must only be called for index scans in current_region.
+    Assert(region == current_region);
+    Assert(rw_rel->is_index && !rw_rel->is_table_scan);
+
+    // Lock in the same mode as SELECT (AccessShareLock).
+    // TODO(pooja): To avoid starvation, we might want to use RowShareLock.
+    rel = index_open(relid, AccessShareLock);
+    scan = (HeapScanDesc)heap_beginscan(rel, SnapshotAny, nkeys, keys, NULL,
+                                        scan_flags);
+
+    // For each index page, check if the lsn has been updated. 
+    dlist_foreach(page_iter, &rw_rel->pages)
+    {
+        RWSetPage *page = dlist_container(RWSetPage, node, page_iter.cur);
+        
+        // Advance the hscan to specified block and lock the page for sharing.
+        heap_only_get_page(scan, page->blkno);
+        LockBuffer(scan->rs_cbuf, BUFFER_LOCK_SHARE);
+
+        // Get the page_lsn and unlock the page.
+        Page index_page = BufferGetPage(scan->rs_cbuf);
+        page_lsn = PageGetLSN(index_page);
+        LockBuffer(scan->rs_cbuf, BUFFER_LOCK_UNLOCK);
+
+        if (page_lsn > read_csn) {
+            /* 
+             * This page has been updated since the last snapshot, so
+             * we need to fail validation. 
+             * TODO(pooja): We need to check for each tuple to avoid
+             * frequent aborts. 
+             */
+            break;
+        }
+    }
+
+    heap_endscan((TableScanDesc)scan);
+    index_close(rel, AccessShareLock);
+
+    if (page_lsn > read_csn) {
+        ereport(ERROR,
+        (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+            errmsg("read out-of-date index data from a remote partition")));
+    }
+}
 
 void
 validate_table_scan(Oid relid, XidCSN read_csn)
