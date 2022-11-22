@@ -192,10 +192,8 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         "first-branch", main_branch_name, tenant_id
     )
 
-    # unsure why this happens, the size difference is more than a page alignment
     size_after_first_branch = http_client.tenant_size(tenant_id)
-    assert size_after_first_branch > size_at_branch
-    assert size_after_first_branch - size_at_branch == gc_horizon
+    assert size_after_first_branch == size_at_branch
 
     first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
 
@@ -221,7 +219,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         "second-branch", main_branch_name, tenant_id
     )
     size_after_second_branch = http_client.tenant_size(tenant_id)
-    assert size_after_second_branch > size_after_continuing_on_main
+    assert size_after_second_branch == size_after_continuing_on_main
 
     second_branch_pg = env.postgres.create_start("second-branch", tenant_id=tenant_id)
 
