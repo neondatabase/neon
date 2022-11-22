@@ -205,18 +205,19 @@ pub static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|
     register_int_gauge_vec!(
         "pageserver_remote_upload_queue_unfinished_tasks",
         "Number of tasks in the upload queue that are not finished yet.",
-        &["tenant_id", "timeline_id"],
+        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
     )
     .expect("failed to define a metric")
 });
 
+#[derive(Debug, Clone, Copy)]
 pub enum RemoteOpKind {
     Upload,
     Download,
     Delete,
 }
 impl RemoteOpKind {
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Upload => "upload",
             Self::Download => "download",
@@ -225,12 +226,13 @@ impl RemoteOpKind {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum RemoteOpFileKind {
     Layer,
     Index,
 }
 impl RemoteOpFileKind {
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Layer => "layer",
             Self::Index => "index",

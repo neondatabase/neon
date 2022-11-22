@@ -175,6 +175,13 @@ def test_remote_storage_backup_and_restore(
             )
 
 
+# Exercises the upload queue retry code paths.
+# - Use failpoints to cause all storage ops to fail
+# - Churn on database to create layer & index uploads, and layer deletions
+# - Check that these operations are queued up, using the appropriate metrics
+# - Disable failpoints
+# - Wait for all uploads to finish
+# - Verify that remote is consistent and up-to-date (=all retries were done and succeeded)
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_remote_storage_upload_queue_retries(
     neon_env_builder: NeonEnvBuilder,
@@ -250,20 +257,20 @@ def test_remote_storage_upload_queue_retries(
     assert gc_result["layers_removed"] > 0
 
     # confirm all operations are queued up
-    def get_queued_count():
+    def get_queued_count(file_kind, op_kind):
         metrics = client.get_metrics()
         matches = re.search(
-            f'^pageserver_remote_upload_queue_unfinished_tasks{{tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
+            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
             metrics,
             re.MULTILINE,
         )
         assert matches
         return int(matches[1])
 
-    # ensure that operations have queued up
-    queued_count = get_queued_count()
-    log.info(f"queued_count={queued_count}")
-    assert queued_count > 0
+    # ensure that all operation types that can be in the upload queue have queued up
+    assert get_queued_count(file_kind="layer", op_kind="upload") > 0
+    assert get_queued_count(file_kind="index", op_kind="upload") >= 2
+    assert get_queued_count(file_kind="layer", op_kind="remove") > 0
 
     # unblock all operations and wait for them to finish
     configure_storage_sync_failpoints("off")
