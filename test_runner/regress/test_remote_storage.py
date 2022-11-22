@@ -12,6 +12,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
+    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_last_flush_lsn,
