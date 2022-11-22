@@ -1761,6 +1761,8 @@ class NeonPageserver(PgProtocol):
             ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
             ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
             ".*Removing intermediate uninit mark file.*",
+            # FIXME: known race condition in TaskHandle: https://github.com/neondatabase/neon/issues/2885
+            ".*sender is dropped while join handle is still alive.*",
         ]
 
     def start(
