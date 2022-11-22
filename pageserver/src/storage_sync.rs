@@ -823,12 +823,12 @@ impl RemoteTimelineClient {
 
     fn upload_queue_items_metric(&self, delta: i64) {
         REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS
-                .get_metric_with_label_values(&[
-                    &self.tenant_id.to_string(),
-                    &self.timeline_id.to_string(),
-                ])
-                .unwrap()
-                .add(delta)
+            .get_metric_with_label_values(&[
+                &self.tenant_id.to_string(),
+                &self.timeline_id.to_string(),
+            ])
+            .unwrap()
+            .add(delta)
     }
 }
 
