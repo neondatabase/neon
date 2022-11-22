@@ -285,7 +285,7 @@ def test_remote_storage_upload_queue_retries(
         assert tenant["has_in_progress_downloads"] is False
         assert tenant["state"] == {"Active": {"background_jobs_running": True}}
 
-    wait_until(5, 1, tenant_active)
+    wait_until(30, 1, tenant_active)
 
     log.info("restarting postgres to validate")
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
