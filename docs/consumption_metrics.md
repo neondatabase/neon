@@ -1,6 +1,9 @@
 ### Overview
 Pageserver and proxy periodically collect consumption metrics and push them to a HTTP endpoint.
 
+This doc describes current implementation details.
+For design details see [the RFC](./rfcs/021-metering.md) and [the discussion on Github](https://github.com/neondatabase/neon/pull/2884).
+
 - The metrics are collected in a separate thread, and the collection interval and endpoint are configurable.
 
 - Metrics are cached, so that we don't send unchanged metrics on every iteration.
