@@ -81,6 +81,16 @@ def test_remote_storage_backup_and_restore(
 
     checkpoint_numbers = range(1, 3)
 
+    # On the first iteration, exercise retry code path by making the uploads
+    # fail for the first 3 times
+    action = "3*return->off"
+    pageserver_http.configure_failpoints(
+        [
+            ("before-upload-layer", action),
+            ("before-upload-index", action),
+        ]
+    )
+
     for checkpoint_number in checkpoint_numbers:
         with pg.cursor() as cur:
             cur.execute(
@@ -99,14 +109,6 @@ def test_remote_storage_backup_and_restore(
 
         log.info(f"waiting for checkpoint {checkpoint_number} upload")
 
-        # insert upload failpoints to exercise retry code path
-        action = "3*return->off" if checkpoint_number == 0 else "off"
-        pageserver_http.configure_failpoints(
-            [
-                ("before-upload-layer", action),
-                ("before-upload-index", action),
-            ]
-        )
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
