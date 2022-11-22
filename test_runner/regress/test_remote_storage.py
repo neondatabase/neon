@@ -192,12 +192,15 @@ def test_remote_storage_upload_queue_retries(
     # compaction and gc
     tenant_id, timeline_id = env.neon_cli.create_tenant(
         conf={
-            # "gc_horizon": f"{1024 ** 2}",
-            "checkpoint_distance": f"{1024 ** 2}",
+            # small checkpointing and compaction targets to ensure we generate many operations
+            "checkpoint_distance": f"{32 * 1024}",
             "compaction_threshold": "1",
-            "compaction_target_size": f"{1024 ** 2}",
-            # small PITR interval to allow gc
-            "pitr_interval": "1 s",
+            "compaction_target_size": f"{32 * 1024}",
+            # large horizon to avoid automatic GC (our assert on gc_result below relies on that)
+            "gc_horizon": f"{1024 ** 4}",
+            "gc_period": "1h",
+            # disable PITR so that GC considers just gc_horizon
+            "pitr_interval": "0s",
         }
     )
 
@@ -218,14 +221,18 @@ def test_remote_storage_upload_queue_retries(
 
     def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
         # create initial set of layers & upload them with failpoints configured
-        pg.safe_psql(
-            f"""
+        pg.safe_psql_many(
+            [
+                f"""
                INSERT INTO foo (id, val)
                SELECT g, '{data}'
-               FROM generate_series(1, 1000) g
+               FROM generate_series(1, 10000) g
                ON CONFLICT (id) DO UPDATE
                SET val = EXCLUDED.val
-               """
+               """,
+                # to ensure that GC can actually remove some layers
+                "VACUUM foo",
+            ]
         )
         wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
@@ -240,8 +247,7 @@ def test_remote_storage_upload_queue_retries(
     client.timeline_compact(tenant_id, timeline_id)
     gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
     print_gc_result(gc_result)
-    # FIXME why doesn't this assertion work? I think GC is happening....
-    # assert gc_result["layers_removed"] > 0
+    assert gc_result["layers_removed"] > 0
 
     # confirm all operations are queued up
     def get_queued_count():
@@ -290,4 +296,4 @@ def test_remote_storage_upload_queue_retries(
     log.info("restarting postgres to validate")
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
     with pg.cursor() as cur:
-        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'b'") == 1000
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'b'") == 10000
