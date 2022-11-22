@@ -787,7 +787,7 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        target_region: [ us-east-2 ]
+        target_region: [ eu-west-1 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
