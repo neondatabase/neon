@@ -221,7 +221,7 @@ def test_remote_storage_upload_queue_retries(
         pg.safe_psql(
             f"""
                INSERT INTO foo (id, val)
-               SELECT g, '{data}' 
+               SELECT g, '{data}'
                FROM generate_series(1, 1000) g
                ON CONFLICT (id) DO UPDATE
                SET val = EXCLUDED.val
@@ -282,7 +282,7 @@ def test_remote_storage_upload_queue_retries(
     def tenant_active():
         all_states = client.tenant_list()
         [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["has_in_progress_downloads"] == False
+        assert tenant["has_in_progress_downloads"] is False
         assert tenant["state"] == {"Active": {"background_jobs_running": True}}
 
     wait_until(5, 1, tenant_active)
