@@ -17,10 +17,11 @@ use bytes::{BufMut, Bytes, BytesMut};
 pub enum TenantState {
     /// Tenant is fully operational, its background jobs might be running or not.
     Active { background_jobs_running: bool },
-    /// A tenant is recognized by pageserver, but not yet ready to operate:
-    /// e.g. not present locally and being downloaded or being read into memory from the file system.
+    /// A tenant is recognized by pageserver, but it is being detached or the
+    /// system is being shut down.
     Paused,
-    /// A tenant is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    /// A tenant is recognized by the pageserver, but can no longer be used for
+    /// any operations, because it failed to be activated.
     Broken,
 }
 
@@ -36,7 +37,8 @@ pub enum TimelineState {
     /// A timeline is recognized by pageserver, but not yet ready to operate and not allowed to
     /// automatically become Active after certain events: only a management call can change this status.
     Paused,
-    /// A timeline is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    /// A timeline is recognized by the pageserver, but can no longer be used for
+    /// any operations, because it failed to be activated.
     Broken,
 }
 
