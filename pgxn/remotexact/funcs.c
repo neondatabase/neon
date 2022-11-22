@@ -51,9 +51,7 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 	dlist_foreach(rel_iter, &rwset->relations)
 	{
 		RWSetRelation *rel = dlist_container(RWSetRelation, node, rel_iter.cur);
-		Oid relid = rel->relid;
 		int8 region = rel->region;
-		XidCSN read_csn = rel->csn;
 
 		if (region != current_region)
 			continue;
@@ -67,7 +65,7 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 		if (rel->is_index && !rel->is_table_scan)
 			validate_index_scan(rel);
 		else if (!rel->is_index && rel->is_table_scan)
-			validate_table_scan(relid, read_csn); 
+			validate_table_scan(rel); 
 	}
 
 	/*

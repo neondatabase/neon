@@ -22,7 +22,6 @@
 void validate_index_scan(RWSetRelation *rw_rel)
 {
     Oid relid = rw_rel->relid;
-    int8 region = rw_rel->region;
 	XidCSN read_csn = rw_rel->csn;
     Relation rel;
     HeapScanDesc scan;
@@ -30,10 +29,12 @@ void validate_index_scan(RWSetRelation *rw_rel)
     ScanKey keys = NULL;
     int scan_flags = 0;
     dlist_iter page_iter;
+    RWSetPage *page = NULL;
+    Page index_page;
     XLogRecPtr page_lsn = InvalidXLogRecPtr;
 
     // This function must only be called for index scans in current_region.
-    Assert(region == current_region);
+    Assert(rw_rel->region == current_region);
     Assert(rw_rel->is_index && !rw_rel->is_table_scan);
 
     // Lock in the same mode as SELECT (AccessShareLock).
@@ -45,14 +46,14 @@ void validate_index_scan(RWSetRelation *rw_rel)
     // For each index page, check if the lsn has been updated. 
     dlist_foreach(page_iter, &rw_rel->pages)
     {
-        RWSetPage *page = dlist_container(RWSetPage, node, page_iter.cur);
+        page = dlist_container(RWSetPage, node, page_iter.cur);
         
         // Advance the hscan to specified block and lock the page for sharing.
-        heap_only_get_page(scan, page->blkno);
+        heap_getpageonly(scan, page->blkno);
         LockBuffer(scan->rs_cbuf, BUFFER_LOCK_SHARE);
 
         // Get the page_lsn and unlock the page.
-        Page index_page = BufferGetPage(scan->rs_cbuf);
+        index_page = BufferGetPage(scan->rs_cbuf);
         page_lsn = PageGetLSN(index_page);
         LockBuffer(scan->rs_cbuf, BUFFER_LOCK_UNLOCK);
 
@@ -78,13 +79,19 @@ void validate_index_scan(RWSetRelation *rw_rel)
 }
 
 void
-validate_table_scan(Oid relid, XidCSN read_csn)
+validate_table_scan(RWSetRelation *rw_rel)
 {
+    Oid relid = rw_rel->relid;
+    XidCSN read_csn = rw_rel->csn;
     Relation rel;
-	TableScanDesc scan;
+    TableScanDesc scan;
     HeapScanDesc hscan;
 	HeapTuple	htup;
     Snapshot    snapshot = GetActiveSnapshot();
+
+    // This function must only be called for table scans in current_region.
+    Assert(rw_rel->region == current_region);
+    Assert(rw_rel->is_table_scan && !rw_rel->is_index);
 
     rel = table_open(relid, AccessShareLock);
 

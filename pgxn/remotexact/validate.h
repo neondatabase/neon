@@ -14,6 +14,6 @@
 #include "utils/snapshot.h"
 
 void validate_index_scan(RWSetRelation *rw_rel);
-void validate_table_scan(Oid relid, XidCSN read_csn);
+void validate_table_scan(RWSetRelation *rw_rel);
 
 #endif							/* VALIDATE_H */
