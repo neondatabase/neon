@@ -461,14 +461,7 @@ impl Tenant {
                     .context("Cannot branch off the timeline that's not present in pageserver")?;
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
-                    // Wait for the WAL to arrive and be processed on the parent branch up
-                    // to the requested branch point. The repository code itself doesn't
-                    // require it, but if we start to receive WAL on the new timeline,
-                    // decoding the new WAL might need to look up previous pages, relation
-                    // sizes etc. and that would get confused if the previous page versions
-                    // are not in the repository yet.
                     *lsn = lsn.align();
-                    ancestor_timeline.wait_lsn(*lsn).await?;
 
                     let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                     if ancestor_ancestor_lsn > *lsn {
@@ -480,6 +473,14 @@ impl Tenant {
                             ancestor_ancestor_lsn,
                         );
                     }
+
+                    // Wait for the WAL to arrive and be processed on the parent branch up
+                    // to the requested branch point. The repository code itself doesn't
+                    // require it, but if we start to receive WAL on the new timeline,
+                    // decoding the new WAL might need to look up previous pages, relation
+                    // sizes etc. and that would get confused if the previous page versions
+                    // are not in the repository yet.
+                    ancestor_timeline.wait_lsn(*lsn).await?;
                 }
 
                 self.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
