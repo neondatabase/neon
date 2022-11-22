@@ -31,7 +31,7 @@ use crate::tenant::{
     storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
 };
 
-use crate::config::{PageServerConf, METADATA_FILE_NAME};
+use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::BlockNumber;
@@ -55,6 +55,7 @@ use crate::task_mgr::TaskKind;
 use crate::walreceiver::{is_etcd_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
+use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{
     page_cache,

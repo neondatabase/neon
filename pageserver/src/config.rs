@@ -25,11 +25,7 @@ use utils::{
 
 use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
-
-/// The name of the metadata file pageserver creates per timeline.
-pub const METADATA_FILE_NAME: &str = "metadata";
-pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
-const TENANT_CONFIG_NAME: &str = "config";
+use crate::{METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX};
 
 pub mod defaults {
     use crate::tenant_config::defaults::*;
