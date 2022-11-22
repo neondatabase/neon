@@ -1162,7 +1162,10 @@ impl Timeline {
 
         let local_only_filenames = match index_part {
             Some(index_part) => {
-                info!("initializing upload queue from index");
+                info!(
+                    "initializing upload queue from remote index with {} layer files",
+                    index_part.timeline_layers.len()
+                );
                 remote_client.init_upload_queue(index_part)?;
                 let local_only_filenames = self
                     .download_missing(
@@ -2224,6 +2227,13 @@ impl Timeline {
             let new_delta_path = l.path();
 
             let metadata = new_delta_path.metadata()?;
+
+            if let Some(remote_client) = &self.remote_client {
+                remote_client.schedule_layer_file_upload(
+                    &new_delta_path,
+                    &LayerFileMetadata::new(metadata.len()),
+                )?;
+            }
 
             // update the timeline's physical size
             self.metrics.current_physical_size_gauge.add(metadata.len());
