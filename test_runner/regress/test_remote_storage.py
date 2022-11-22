@@ -2,10 +2,10 @@
 # env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import os
+import re
 import shutil
 import time
 from pathlib import Path
-import re
 
 import pytest
 from fixtures.log_helper import log
@@ -14,12 +14,12 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
     assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
-    wait_for_last_record_lsn,
     wait_for_last_flush_lsn,
+    wait_for_last_record_lsn,
     wait_for_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar, wait_until, print_gc_result
+from fixtures.utils import print_gc_result, query_scalar, wait_until
 
 
 #
@@ -232,16 +232,16 @@ def test_remote_storage_upload_queue_retries(
     # let all of them queue up
     configure_storage_sync_failpoints("return")
 
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver('a')
+    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
     client.timeline_checkpoint(tenant_id, timeline_id)
     # now overwrite it again
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver('b')
+    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("b")
     # trigger layer deletion by doing Compaction, then GC
     client.timeline_compact(tenant_id, timeline_id)
     gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
     print_gc_result(gc_result)
     # FIXME why doesn't this assertion work? I think GC is happening....
-    #assert gc_result["layers_removed"] > 0
+    # assert gc_result["layers_removed"] > 0
 
     # confirm all operations are queued up
     def get_queued_count():
