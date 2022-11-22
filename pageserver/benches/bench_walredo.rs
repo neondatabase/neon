@@ -49,7 +49,7 @@ fn redo_scenarios(c: &mut Criterion) {
             BenchmarkId::new("short", thread_count),
             &thread_count,
             |b, thread_count| {
-                add_multithreaded_walredo_requesters(b, *thread_count, &manager, short, 50);
+                add_multithreaded_walredo_requesters(b, *thread_count, &manager, short);
             },
         );
     }
@@ -63,7 +63,7 @@ fn redo_scenarios(c: &mut Criterion) {
             BenchmarkId::new("medium", thread_count),
             &thread_count,
             |b, thread_count| {
-                add_multithreaded_walredo_requesters(b, *thread_count, &manager, medium, 10);
+                add_multithreaded_walredo_requesters(b, *thread_count, &manager, medium);
             },
         );
     }
@@ -76,22 +76,17 @@ fn add_multithreaded_walredo_requesters(
     threads: u32,
     manager: &Arc<PostgresRedoManager>,
     input_factory: fn() -> Request,
-    request_repeats: usize,
 ) {
     assert_ne!(threads, 0);
 
     if threads == 1 {
         b.iter_batched_ref(
-            || {
-                std::iter::repeat(input_factory())
-                    .take(request_repeats)
-                    .collect::<Vec<_>>()
-            },
-            |input| execute_all(input.drain(..), &*manager),
+            || Some(input_factory()),
+            |input| execute_all(input.take(), &*manager),
             criterion::BatchSize::PerIteration,
         );
     } else {
-        let (work_tx, work_rx) = std::sync::mpsc::sync_channel(10);
+        let (work_tx, work_rx) = std::sync::mpsc::sync_channel(threads as usize);
 
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
 
@@ -109,9 +104,7 @@ fn add_multithreaded_walredo_requesters(
                             break;
                         }
 
-                        let input = std::iter::repeat(input_factory())
-                            .take(request_repeats)
-                            .collect::<Vec<_>>();
+                        let input = Some(input_factory());
 
                         barrier.wait();
 
@@ -184,6 +177,7 @@ macro_rules! lsn {
     }};
 }
 
+/// Short payload, 1132 bytes.
 // pg_records are copypasted from log, where they are put with Debug impl of Bytes, which uses \0
 // for null bytes.
 #[allow(clippy::octal_escapes)]
@@ -213,6 +207,7 @@ fn short() -> Request {
     }
 }
 
+/// Medium sized payload, serializes as 26393 bytes.
 // see [`short`]
 #[allow(clippy::octal_escapes)]
 fn medium() -> Request {
