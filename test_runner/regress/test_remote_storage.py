@@ -256,6 +256,7 @@ def test_remote_storage_upload_queue_retries(
     # create some layers & wait for uploads to finish
     overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
     client.timeline_checkpoint(tenant_id, timeline_id)
+    client.timeline_compact(tenant_id, timeline_id)
     overwrite_data_and_wait_for_it_to_arrive_at_pageserver("b")
     client.timeline_checkpoint(tenant_id, timeline_id)
     client.timeline_compact(tenant_id, timeline_id)
