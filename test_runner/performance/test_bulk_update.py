@@ -1,9 +1,6 @@
 import pytest
+from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-    wait_for_last_flush_lsn,
-)
 
 #
 # Benchmark estimating effect of prefetch on bulk update operations
