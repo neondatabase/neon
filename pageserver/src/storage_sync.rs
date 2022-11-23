@@ -129,10 +129,12 @@
 //!   and remote state as per [`IndexPart`]. This is done in
 //!   [`Timeline::setup_timeline`] and [`Timeline::reconcile_with_remote`].
 //!
-//! Note that we currently tolerate leaking files on the remote in the case
-//! of interrupted delete operations where we crash inbetween the index
-//! update that removes the reference to the layer file and the actual deletion
-//! of the layer file.
+//! Note that if we crash during file deletion between the index update
+//! that removes the file from the list of files, and deleting the remote file,
+//! the file is leaked in the remote storage. Similarly, if a new file is created
+//! and uploaded, but the pageserver dies permantently before updating the
+//! remote index file, the new file is leaked in remote storage. We accept and
+//! tolerate that for now.
 //! Note further that we cannot easily fix this by scheduling deletes for every
 //! file that is present only on the remote, because we cannot distinguish the
 //! following two cases:
