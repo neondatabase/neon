@@ -1,0 +1,9 @@
+[package]
+name = "persistent_range_query"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
