@@ -4,7 +4,7 @@
 use std::collections::hash_map;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -16,10 +16,7 @@ use crate::config::PageServerConf;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::{Tenant, TenantState};
 use crate::tenant_config::TenantConfOpt;
-use crate::walredo::PostgresRedoManager;
-use crate::TEMP_FILE_SUFFIX;
 
-use utils::crashsafe::{self, path_with_suffix_extension};
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
@@ -150,19 +147,7 @@ fn load_local_tenant(
             Tenant::spawn_attach(conf, tenant_id, &remote_storage)?
         } else {
             warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
-            // XXX there should be a constructor to make a broken tenant
-            // TODO should we use Tenant::load_tenant_config() here?
-            let tenant_conf = TenantConfOpt::default();
-            let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-            let tenant = Tenant::new(
-                TenantState::Broken,
-                conf,
-                tenant_conf,
-                wal_redo_manager,
-                tenant_id,
-                remote_storage,
-            );
-            Arc::new(tenant)
+            Tenant::create_broken_tenant(conf, tenant_id)
         }
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
@@ -212,131 +197,6 @@ pub async fn shutdown_all_tenants() {
     }
 }
 
-fn create_tenant_files(
-    conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
-) -> anyhow::Result<()> {
-    let target_tenant_directory = conf.tenant_path(&tenant_id);
-    anyhow::ensure!(
-        !target_tenant_directory.exists(),
-        "cannot create new tenant repo: '{tenant_id}' directory already exists",
-    );
-
-    let temporary_tenant_dir =
-        path_with_suffix_extension(&target_tenant_directory, TEMP_FILE_SUFFIX);
-    debug!(
-        "Creating temporary directory structure in {}",
-        temporary_tenant_dir.display()
-    );
-
-    // top-level dir may exist if we are creating it through CLI
-    crashsafe::create_dir_all(&temporary_tenant_dir).with_context(|| {
-        format!(
-            "could not create temporary tenant directory {}",
-            temporary_tenant_dir.display()
-        )
-    })?;
-
-    let creation_result = try_create_target_tenant_dir(
-        conf,
-        tenant_conf,
-        tenant_id,
-        &temporary_tenant_dir,
-        &target_tenant_directory,
-    );
-
-    if creation_result.is_err() {
-        error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
-        if let Err(e) = fs::remove_dir_all(&temporary_tenant_dir) {
-            error!("Failed to remove temporary tenant directory {temporary_tenant_dir:?}: {e}")
-        } else if let Err(e) = crashsafe::fsync(&temporary_tenant_dir) {
-            error!(
-                "Failed to fsync removed temporary tenant directory {temporary_tenant_dir:?}: {e}"
-            )
-        }
-    }
-
-    creation_result
-}
-
-fn try_create_target_tenant_dir(
-    conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
-    temporary_tenant_dir: &Path,
-    target_tenant_directory: &Path,
-) -> Result<(), anyhow::Error> {
-    let temporary_tenant_timelines_dir = rebase_directory(
-        &conf.timelines_path(&tenant_id),
-        target_tenant_directory,
-        temporary_tenant_dir,
-    )
-    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary timelines dir"))?;
-    let temporary_tenant_config_path = rebase_directory(
-        &conf.tenant_config_path(tenant_id),
-        target_tenant_directory,
-        temporary_tenant_dir,
-    )
-    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary config path"))?;
-
-    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true).with_context(
-        || {
-            format!(
-                "Failed to write tenant {} config to {}",
-                tenant_id,
-                temporary_tenant_config_path.display()
-            )
-        },
-    )?;
-    crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
-        format!(
-            "could not create tenant {} temporary timelines directory {}",
-            tenant_id,
-            temporary_tenant_timelines_dir.display()
-        )
-    })?;
-    fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
-        anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
-    });
-
-    fs::rename(&temporary_tenant_dir, target_tenant_directory).with_context(|| {
-        format!(
-            "failed to move tenant {} temporary directory {} into the permanent one {}",
-            tenant_id,
-            temporary_tenant_dir.display(),
-            target_tenant_directory.display()
-        )
-    })?;
-    let target_dir_parent = target_tenant_directory.parent().with_context(|| {
-        format!(
-            "Failed to get tenant {} dir parent for {}",
-            tenant_id,
-            target_tenant_directory.display()
-        )
-    })?;
-    crashsafe::fsync(target_dir_parent).with_context(|| {
-        format!(
-            "Failed to fsync renamed directory's parent {} for tenant {}",
-            target_dir_parent.display(),
-            tenant_id,
-        )
-    })?;
-
-    Ok(())
-}
-
-fn rebase_directory(original_path: &Path, base: &Path, new_base: &Path) -> anyhow::Result<PathBuf> {
-    let relative_path = original_path.strip_prefix(base).with_context(|| {
-        format!(
-            "Failed to strip base prefix '{}' off path '{}'",
-            base.display(),
-            original_path.display()
-        )
-    })?;
-    Ok(new_base.join(relative_path))
-}
-
 pub fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
@@ -349,20 +209,12 @@ pub fn create_tenant(
             Ok(None)
         }
         hash_map::Entry::Vacant(v) => {
-            let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-            create_tenant_files(conf, tenant_conf, tenant_id)?;
-            // create tenant in Active state so it is possible to issue create_timeline
-            // request. Which on timeline activation will trigger tenant activation
-            let tenant = Arc::new(Tenant::new(
-                TenantState::Active {
-                    background_jobs_running: false,
-                },
+            let tenant = Tenant::create_tenant(
                 conf,
                 tenant_conf,
-                wal_redo_manager,
                 tenant_id,
                 remote_storage.cloned(),
-            ));
+            )?;
             v.insert(tenant);
             Ok(Some(tenant_id))
         }
@@ -422,9 +274,6 @@ pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> an
     match get_tenant(tenant_id, true) {
         Ok(tenant) => {
             tenant.delete_timeline(timeline_id)?;
-            if tenant.list_timelines().is_empty() {
-                tenant.activate(false);
-            }
         }
         Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
     }
@@ -436,6 +285,7 @@ pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
+
     let tenant = match {
         let mut tenants_accessor = tenants_state::write_tenants();
         tenants_accessor.remove(&tenant_id)

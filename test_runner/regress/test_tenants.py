@@ -259,6 +259,4 @@ def test_pageserver_with_empty_tenants(
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
-    assert loaded_tenant["state"] == {
-        "Active": {"background_jobs_running": False}
-    }, "Tenant {tenant_with_empty_timelines_dir} with empty timelines dir should be active and ready for timeline creation"
+    assert loaded_tenant["state"] == "Active", "Tenant {tenant_with_empty_timelines_dir} with empty timelines dir should be active and ready for timeline creation"
