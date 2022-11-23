@@ -79,7 +79,7 @@
 //! - We rely on read-after write consistency in the remote storage.
 //! - Layer files are immutable
 //!
-//! ## Implementation  Note
+//! ## Implementation Note
 //!
 //! The *actual* remote state lags behind the *desired* remote state while
 //! there are in-flight operations.
