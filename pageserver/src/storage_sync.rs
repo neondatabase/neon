@@ -146,12 +146,11 @@
 //! # Downloads (= Tenant Attach)
 //!
 //! When we attach a tenant, we perform the following steps:
-//! - create `Tenant` object in `TenantState::Attaching`
-//! - download all of its timelines' remote [`IndexPart`]s
-//! - create its `Timeline` struct
-//! - initialize each `Timeline`'s client's upload queue with its `IndexPart`s
-//! - eagerly download all of the remote layers using the client's download APIs
-//! - transition tenant from `TenantState::Attaching` to `TenantState::Active`.
+//! - create `Tenant` object in `TenantState::Attaching` state
+//! - List timelines that are present in remote storage, and download their remote [`IndexPart`]s
+//! - For each timeline, create `Timeline` struct and a `RemoteTimelineClient`, and initialize the client's upload queue with its `IndexPart`
+//! - eagerly download all the remote layers using the client's download APIs
+//! - transition tenant from `TenantState::Attaching` to `TenantState::Active` state.
 //!
 //! Most of the above happens in [`Timeline::reconcile_with_remote`].
 //! We keep track of the fact that a client is in `Attaching` state in a marker
