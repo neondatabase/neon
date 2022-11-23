@@ -1,0 +1,39 @@
+# Helm chart values for neon-proxy-link.
+# This is a YAML-formatted file.
+
+image:
+  repository: neondatabase/neon
+
+settings:
+  authBackend: "link"
+  authEndpoint: "https://console.stage.neon.tech/authenticate_proxy_request/"
+  uri: "https://console.stage.neon.tech/psql_session/"
+
+# -- Additional labels for neon-proxy-link pods
+podLabels:
+  zenith_service: proxy
+  zenith_env: dev
+  zenith_region: us-east-2
+  zenith_region_slug: us-east-2
+
+service:
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    external-dns.alpha.kubernetes.io/hostname: neon-proxy-link-mgmt.beta.us-east-2.aws.neon.build
+
+exposedService:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    external-dns.alpha.kubernetes.io/hostname: pg.neon.build
+
+#metrics:
+#  enabled: true
+#  serviceMonitor:
+#    enabled: true
+#    selector:
+#      release: kube-prometheus-stack
