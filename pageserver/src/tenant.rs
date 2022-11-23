@@ -551,7 +551,7 @@ impl Tenant {
                 match tenant_clone.attach().await {
                     Ok(_) => {}
                     Err(e) => {
-                        tenant_clone.set_state(TenantState::Broken);
+                        tenant_clone.set_broken();
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
@@ -644,11 +644,9 @@ impl Tenant {
             anyhow::bail!("failpoint attach-beore-activate");
         });
 
-        // FIXME: Check if the state has changed to Stopping while we were downloading stuff
-        // We're ready for business.
-        // Change to active state under the hood spawns background loops
+        // Start background operations and open the tenant for business.
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate();
+        self.activate()?;
 
         info!("Done");
 
@@ -787,7 +785,7 @@ impl Tenant {
                 match tenant_clone.load().await {
                     Ok(()) => {}
                     Err(err) => {
-                        tenant_clone.set_state(TenantState::Broken);
+                        tenant_clone.set_broken();
                         error!("could not load tenant {tenant_id}: {err:?}");
                     }
                 }
@@ -930,10 +928,9 @@ impl Tenant {
                 .await?;
         }
 
-        // We're ready for business.
-        // Change to active state under the hood spawns background loops
+        // Start background operations and open the tenant for business.
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate();
+        self.activate()?;
 
         info!("Done");
 
@@ -1273,47 +1270,102 @@ impl Tenant {
         self.current_state() == TenantState::Active
     }
 
-    /// Changes tenant status to active, if it was not broken before.
-    /// Otherwise, ignores the state change, logging an error.
-    fn activate(&self) {
-        self.set_state(TenantState::Active);
-    }
+    /// Changes tenant status to active, unless shutdown was already requested.
+    fn activate(&self) -> anyhow::Result<()> {
+        let mut result = Ok(());
+        self.state.send_modify(|current_state| {
+            match *current_state {
+                TenantState::Active => {
+                    // activate() was called on an already Active tenant. Shouldn't happen.
+                    result = Err(anyhow::anyhow!("Tenant is already active"));
+                }
+                TenantState::Broken => {
+                    // This shouldn't happen either
+                    result = Err(anyhow::anyhow!("Could not activate tenant because it is in broken state"));
+                }
+                TenantState::Paused => {
+                    // The tenant was detached, or system shutdown was requested, while we were
+                    // loading or attaching the tenant.
+                    info!("Tenant is already in Paused state, skipping activation");
+                }
+                TenantState::Loading | TenantState::Attaching  => {
+                    *current_state = TenantState::Active;
 
-    pub fn set_state(&self, new_state: TenantState) {
-        match (self.current_state(), new_state) {
-            (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
-                debug!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
-            }
-            (TenantState::Broken, _) => {
-                error!("Ignoring state update {new_state:?} for broken tenant");
-            }
-            (_, new_state) => {
-                self.state.send_replace(new_state);
+                    let timelines_accessor = self.timelines.lock().unwrap();
+                    let not_broken_timelines = timelines_accessor
+                        .values()
+                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
 
-                let timelines_accessor = self.timelines.lock().unwrap();
-                let not_broken_timelines = timelines_accessor
-                    .values()
-                    .filter(|timeline| timeline.current_state() != TimelineState::Broken);
-                match new_state {
-                    TenantState::Active => {
-                        // Spawn gc and compaction loops. The loops will shut themselves
-                        // down when they notice that the tenant is inactive.
-                        crate::tenant_tasks::start_background_loops(self.tenant_id);
+                    // Spawn gc and compaction loops. The loops will shut themselves
+                    // down when they notice that the tenant is inactive.
+                    crate::tenant_tasks::start_background_loops(self.tenant_id);
 
-                        for timeline in not_broken_timelines {
-                            timeline.set_state(TimelineState::Active);
-                        }
+                    for timeline in not_broken_timelines {
+                        timeline.set_state(TimelineState::Active);
                     }
-                    TenantState::Paused | TenantState::Broken => {
-                        for timeline in not_broken_timelines {
-                            timeline.set_state(TimelineState::Suspended);
-                        }
-                    }
-                    TenantState::Loading => { /* Should we do something here? */ }
-                    TenantState::Attaching => { /* Should we do something here? */ }
                 }
             }
-        }
+        });
+        result
+    }
+
+
+    /// Change tenant status to paused, to mark that it is being shut down
+    pub fn set_paused(&self) {
+        self.state.send_modify(|current_state| {
+            match *current_state {
+                TenantState::Active | TenantState::Loading | TenantState::Attaching => {
+                    *current_state = TenantState::Paused;
+
+                    // FIXME: If the tenant is still Loading or Attaching, new timelines
+                    // might be created after this. That's harmless, as the Timelines
+                    // won't be accessible to anyone, when the Tenant is in Paused
+                    // state.
+                    let timelines_accessor = self.timelines.lock().unwrap();
+                    let not_broken_timelines = timelines_accessor
+                        .values()
+                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+                    for timeline in not_broken_timelines {
+                        timeline.set_state(TimelineState::Suspended);
+                    }
+                }
+                TenantState::Broken => {
+                    info!("Cannot set tenant to Paused state, it is already in Broken state");
+                }
+                TenantState::Paused => {
+                    // The tenant was detached, or system shutdown was requested, while we were
+                    // loading or attaching the tenant.
+                    info!("Tenant is already in Paused state");
+                }
+            }
+        });
+    }
+
+    pub fn set_broken(&self) {
+        self.state.send_modify(|current_state| {
+            match *current_state {
+                TenantState::Active => {
+                    // Broken tenants can currently only used for fatal errors that happen
+                    // while loading or attaching a tenant. A tenant that has already been
+                    // activated should never be marked as broken. We cope with it the best
+                    // we can, but it shouldn't happen.
+                    *current_state = TenantState::Broken;
+                    warn!("Changing Active tenant to Broken state");
+                }
+                TenantState::Broken => {
+                    // This shouldn't happen either
+                    warn!("Tenant is already broken");
+                }
+                TenantState::Paused => {
+                    // This shouldn't happen either
+                    *current_state = TenantState::Broken;
+                    warn!("Marking Paused tenant as Broken");
+                }
+                TenantState::Loading | TenantState::Attaching  => {
+                    *current_state = TenantState::Broken;
+                }
+            }
+        });
     }
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TenantState> {

@@ -168,7 +168,7 @@ pub async fn shutdown_all_tenants() {
         for (_, tenant) in m.drain() {
             if tenant.is_active() {
                 // updates tenant state, forbidding new GC and compaction iterations from starting
-                tenant.set_state(TenantState::Paused);
+                tenant.set_paused();
                 tenants_to_shut_down.push(tenant)
             }
         }
@@ -294,7 +294,7 @@ pub async fn detach_tenant(
         None => anyhow::bail!("Tenant not found for id {tenant_id}"),
     };
 
-    tenant.set_state(TenantState::Paused);
+    tenant.set_paused();
     // shutdown all tenant and timeline tasks: gc, compaction, page service)
     task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
 
