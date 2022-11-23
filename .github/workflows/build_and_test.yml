@@ -904,8 +904,10 @@ jobs:
         include:
           - target_region:  us-east-2
             target_cluster: dev-us-east-2-beta
+            deploy_link_proxy: true
           - target_region:  eu-west-1
             target_cluster: dev-eu-west-1-zeta
+            deploy_link_proxy: false
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -918,10 +920,16 @@ jobs:
           helm repo add neondatabase https://neondatabase.github.io/helm-charts
           aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
 
-      - name: Re-deploy proxy
+      - name: Re-deploy scram proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+
+      - name: Re-deploy link proxy
+        if: matrix.deploy_link_proxy
+        run: |
+          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+          helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   deploy-proxy-prod-new:
     runs-on: prod
