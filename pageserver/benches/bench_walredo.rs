@@ -41,25 +41,33 @@ fn redo_scenarios(c: &mut Criterion) {
 
     let thread_counts = [1, 2, 4, 8, 16];
 
+    let mut group = c.benchmark_group("short");
+    group.sampling_mode(criterion::SamplingMode::Flat);
+
     for thread_count in thread_counts {
-        c.bench_with_input(
-            BenchmarkId::new("short-50record", thread_count),
+        group.bench_with_input(
+            BenchmarkId::new("short", thread_count),
             &thread_count,
             |b, thread_count| {
                 add_multithreaded_walredo_requesters(b, *thread_count, &manager, short, 50);
             },
         );
     }
+    drop(group);
+
+    let mut group = c.benchmark_group("medium");
+    group.sampling_mode(criterion::SamplingMode::Flat);
 
     for thread_count in thread_counts {
-        c.bench_with_input(
-            BenchmarkId::new("medium-10record", thread_count),
+        group.bench_with_input(
+            BenchmarkId::new("medium", thread_count),
             &thread_count,
             |b, thread_count| {
                 add_multithreaded_walredo_requesters(b, *thread_count, &manager, medium, 10);
             },
         );
     }
+    drop(group);
 }
 
 /// Sets up `threads` number of requesters to `request_redo`, with the given input.
