@@ -640,6 +640,10 @@ impl Tenant {
         crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
             .context("fsync tenant directory after unlinking attach marker file")?;
 
+        fail::fail_point!("attach-before-activate", |_| {
+            anyhow::bail!("failpoint attach-beore-activate");
+        });
+
         // FIXME: Check if the state has changed to Stopping while we were downloading stuff
         // We're ready for business.
         // Change to active state under the hood spawns background loops
