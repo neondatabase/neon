@@ -4,13 +4,15 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
+use std::env::var;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use aws_config::{
-    environment::credentials::EnvironmentVariableCredentialsProvider,
-    imds::credentials::ImdsCredentialsProvider, meta::credentials::CredentialsProviderChain,
+    environment::credentials::EnvironmentVariableCredentialsProvider, imds,
+    imds::credentials::ImdsCredentialsProvider, meta::credentials::provide_credentials_fn,
 };
 use aws_sdk_s3::{
     config::Config,
@@ -19,7 +21,7 @@ use aws_sdk_s3::{
     Client, Endpoint, Region,
 };
 use aws_smithy_http::body::SdkBody;
-use aws_types::credentials::SharedCredentialsProvider;
+use aws_types::credentials::{CredentialsError, ProvideCredentials};
 use hyper::Body;
 use tokio::{io, sync::Semaphore};
 use tokio_util::io::ReaderStream;
@@ -30,6 +32,8 @@ use crate::{
     strip_path_prefix, Download, DownloadError, RemoteObjectId, RemoteStorage, S3Config,
     REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
+
+const DEFAULT_IMDS_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) mod metrics {
     use metrics::{register_int_counter_vec, IntCounterVec};
@@ -136,7 +140,6 @@ struct GetObjectRequest {
     key: String,
     range: Option<String>,
 }
-
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config, workdir: PathBuf) -> anyhow::Result<Self> {
@@ -144,15 +147,30 @@ impl S3Bucket {
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
         );
-        let provider = CredentialsProviderChain::first_try(
-            "Environment",
-            EnvironmentVariableCredentialsProvider::new(),
-        )
-        .or_else("IAM", ImdsCredentialsProvider::builder().build());
-
         let mut config_builder = Config::builder()
             .region(Region::new(aws_config.bucket_region.clone()))
-            .credentials_provider(SharedCredentialsProvider::new(provider));
+            .credentials_provider(provide_credentials_fn(|| async {
+                match var("AWS_ACCESS_KEY_ID").is_ok() && var("AWS_SECRET_ACCESS_KEY").is_ok() {
+                    true => {
+                        EnvironmentVariableCredentialsProvider::new()
+                            .provide_credentials()
+                            .await
+                    }
+                    false => {
+                        let imds_client = imds::Client::builder()
+                            .connect_timeout(DEFAULT_IMDS_TIMEOUT)
+                            .read_timeout(DEFAULT_IMDS_TIMEOUT)
+                            .build()
+                            .await
+                            .map_err(CredentialsError::unhandled)?;
+                        ImdsCredentialsProvider::builder()
+                            .imds_client(imds_client)
+                            .build()
+                            .provide_credentials()
+                            .await
+                    }
+                }
+            }));
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
             let endpoint = Endpoint::immutable(
@@ -176,7 +194,6 @@ impl S3Bucket {
             }
             prefix
         });
-
         Ok(Self {
             client,
             workdir,
