@@ -59,7 +59,7 @@
 //! contains a list of layer files, so it must not be uploaded until all the
 //! layer files that are in its list have been succesfully uploaded.
 //!
-//! The contract between client and it's user is that the user is responsible of
+//! The contract between client and its user is that the user is responsible of
 //! scheduling operations in an order that keeps the remote consistent as
 //! described above.
 //! From the user's perspective, the operations are executed sequentially.
