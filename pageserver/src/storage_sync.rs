@@ -122,7 +122,7 @@
 //!
 //! To recover, the following steps need to be taken:
 //! - Retrieve the current remote [`IndexPart`]. This gives us a
-//!   consistent remote state, assuming the user scheduled operations in
+//!   consistent remote state, assuming the user scheduled the operations in
 //!   the correct order.
 //! - Initiate upload queue with that [`IndexPart`].
 //! - Reschedule all lost operations by comparing the local filesystem state
