@@ -6,7 +6,9 @@ pub mod ops;
 /// Should be a monoid:
 /// * Identity element: for all a: combine(new_for_empty_range(), a) = combine(a, new_for_empty_range()) = a
 /// * Associativity: for all a, b, c: combine(combine(a, b), c) == combine(a, combine(b, c))
-pub trait RangeQueryResult<Key>: Sized {
+pub trait RangeQueryResult<Key>: Sized + Clone {
+    // Clone is equivalent to combine with an empty range.
+
     fn new_for_empty_range() -> Self;
 
     // Contract: left_range.end == right_range.start

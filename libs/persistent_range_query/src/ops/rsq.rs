@@ -18,7 +18,7 @@ impl<T> SumResult<T> {
     }
 }
 
-impl<T: for<'a> AddAssign<&'a T> + From<u8>, Key> RangeQueryResult<Key> for SumResult<T>
+impl<T: Clone + for<'a> AddAssign<&'a T> + From<u8>, Key> RangeQueryResult<Key> for SumResult<T>
 where
     for<'a> &'a T: Add<&'a T, Output = T>,
 {

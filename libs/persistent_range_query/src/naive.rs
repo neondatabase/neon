@@ -75,8 +75,6 @@ impl<
         Initializer: LazyRangeInitializer<Modification::Result, Key>,
         Key: IndexableKey,
     > VecReadableVersion<Modification, Key> for NaiveVecStorage<Modification, Initializer, Key>
-where
-    Modification::Result: Clone,
 {
     fn get(&self, keys: Range<Key>) -> Modification::Result {
         get::<Modification, Key>(&self.all_keys, &self.last_version, keys)
@@ -89,8 +87,6 @@ impl<
         Key: IndexableKey,
     > PersistentVecStorage<Modification, Initializer, Key>
     for NaiveVecStorage<Modification, Initializer, Key>
-where
-    Modification::Result: Clone,
 {
     fn new(all_keys: Range<Key>, initializer: Initializer) -> Self {
         let mut values = Vec::with_capacity(IndexableKey::index(&all_keys, &all_keys.end));
