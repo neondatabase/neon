@@ -1,4 +1,5 @@
 from contextlib import closing
+from typing import Tuple
 
 import pytest
 from fixtures.compare_fixtures import PgCompare
@@ -14,43 +15,50 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
         pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
     ],
 )
-def test_index_vacuum_perf(env: PgCompare):
+@pytest.mark.parametrize(
+    "index_method",
+    [
+        # index method, column type, column definition // parameter "seed" is out of generate_series(1, N)
+        pytest.param(["btree",  "bigint",    "seed"], id="btree"),
+        pytest.param(["brin",   "bigint",    "seed"], id="brin"),
+        pytest.param(["spgist", "text",      "md5(seed::text)::text"], id="spgist"),
+        pytest.param(["hash",   "text",      "md5(seed::text)::text"], id="hash"),
+        pytest.param(["gin",    "bigint[]",  "ARRAY[seed, random() * 1000::bigint]::bigint[]"], id="gin"),
+        pytest.param(["gist",   "int8range", "int8range(seed, seed + (random() * 1000)::bigint, '[]')"], id="gist"),
+    ]
+)
+def test_index_vacuum_perf(env: PgCompare, index_method: Tuple[str, str, str]):
     # Update the same page many times, then measure read performance
     # At 24 bytes/index record this is ~ 192MB of data; which should not fit in
     # shared buffers, especially if we just scanned the table.
     # The table itself will be at least 256MB large (= ntups * 24B tuple header + ntups * 1maxalign data)
     table_size = 8 * 1024 * 1024
+    [index_method, coltype, coldef] = index_method
+
+    table = f"index_testdata_{index_method}"
+    index = f"idx__index_testdata_{index_method}__icol"
 
     with closing(env.pg.connect()) as conn:
-        run_test(env, conn, table_size, "btree",  "bigint",    "seed")
-        run_test(env, conn, table_size, "brin",   "bigint",    "seed")
-        run_test(env, conn, table_size, "spgist", "text",      "md5(seed::text)::text")
-        run_test(env, conn, table_size, "hash",   "text",      "md5(seed::text)::text")
-        run_test(env, conn, table_size, "gin",    "bigint[]",  "ARRAY[seed, random() * 1000::bigint]::bigint[]")
-        run_test(env, conn, table_size, "gist",   "int8range", "int8range(seed, seed + (random() * 1000)::bigint, '[]')")
+        with conn.cursor() as cur:
+            # just in case we didn't finish last run
+            cur.execute(f"DROP TABLE IF EXISTS {table}")
+            # We want/need full control over vacuum.
+            cur.execute(f"CREATE TABLE {table} (icol {coltype}) WITH (autovacuum_enabled = off)")
+            cur.execute(f"INSERT INTO {table} " +
+                        f"(SELECT ({coldef}) as icol " +
+                        f"from generate_series(1, {table_size}) gen(seed))")
 
+            cur.execute("SELECT pg_prewarm('index_testdata')")
 
-def run_test(env: PgCompare, conn, table_size: int, itype: str, coltype: str, gencol: str):
-    with conn.cursor() as cur:
-        # just in case we didn't finish last run
-        cur.execute("DROP TABLE IF EXISTS index_testdata")
-        # We want/need full control over vacuum.
-        cur.execute(f"CREATE TABLE index_testdata (icol {coltype}) WITH (autovacuum_enabled = off)")
-        cur.execute(f"INSERT INTO index_testdata " +
-                    f"(SELECT ({gencol}) as icol " +
-                    f"from generate_series(1, {table_size}) gen(seed))")
-        
-        cur.execute("SELECT pg_prewarm('index_testdata')")
+            cur.execute(f"CREATE INDEX {index} "
+                        f"   ON {table} "
+                        f"       USING {index_method} (icol)")
 
-        cur.execute(f"CREATE INDEX index_testdata_idx_{itype} "
-                    f"   ON index_testdata "
-                    f"       USING {itype} (icol)")
+            # generate a lot of dead tuples
+            cur.execute(f"WITH max_ctid AS (SELECT MAX(ctid) FROM {table}) "
+                        f"DELETE FROM {table} it WHERE it.ctid < max_ctid")
 
-        # generate a lot of dead tuples
-        cur.execute("WITH max_ctid AS (SELECT MAX(ctid) FROM index_testdata) "
-                    "DELETE FROM index_testdata it WHERE it.ctid < max_ctid")
-
-        # VACUUM
-        with env.record_duration(f"vacuum-{itype}"):
-            cur.execute("VACUUM (FREEZE, INDEX_CLEANUP on, PARALLEL 0) index_testdata")
-        cur.execute("DROP TABLE index_testdata")
+            # VACUUM
+            with env.record_duration(f"vacuum"):
+                cur.execute(f"VACUUM (FREEZE, INDEX_CLEANUP on, PARALLEL 0) {table}")
+            cur.execute(f"DROP TABLE {table}")
