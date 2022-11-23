@@ -761,7 +761,6 @@ jobs:
         run: |
           export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           cd "$(pwd)/.github/ansible"
-
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             ./get_binaries.sh
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
@@ -770,6 +769,38 @@ jobs:
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1
           fi
+          ansible-galaxy collection install sivel.toiletwater
+          ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{secrets.NEON_STAGING_API_KEY}}
+          rm -f neon_install.tar.gz .neon_current_version
+
+  deploy-pr-test-new:
+    runs-on: [ self-hosted, dev, x64 ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
+    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
+    needs: [ push-docker-hub, tag, regress-tests ]
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'deploy-test-storage') && 
+      github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        target_region: [ eu-west-1 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Redeploy
+        run: |
+          export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+          cd "$(pwd)/.github/ansible"
+
+          ./get_binaries.sh
 
           ansible-galaxy collection install sivel.toiletwater
           ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{secrets.NEON_STAGING_API_KEY}}
@@ -780,7 +811,7 @@ jobs:
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: |
       (github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -861,7 +892,7 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: |
       (github.ref_name == 'main') &&
       github.event_name != 'workflow_dispatch'
@@ -873,6 +904,8 @@ jobs:
         include:
           - target_region:  us-east-2
             target_cluster: dev-us-east-2-beta
+          - target_region:  eu-west-1
+            target_cluster: dev-eu-west-1-zeta
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -894,7 +927,7 @@ jobs:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: |
       (github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
