@@ -625,7 +625,6 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
-    println!("tenant create: {:?}", request_data.trace_read_requests);
     let remote_index = get_state(&request).remote_index.clone();
 
     let mut tenant_conf = TenantConfOpt::default();
