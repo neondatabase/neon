@@ -36,6 +36,8 @@ pub trait RangeModification<Key> {
     type Result: RangeQueryResult<Key>;
 
     fn no_op() -> Self;
+    fn is_no_op(&self) -> bool;
+    fn is_reinitialization(&self) -> bool;
     fn apply(&self, result: &mut Self::Result, range: &Range<Key>);
     fn compose(later: &Self, earlier: &mut Self);
 }

@@ -76,6 +76,20 @@ where
         AddAssignModification::None
     }
 
+    fn is_no_op(&self) -> bool {
+        match self {
+            AddAssignModification::None => true,
+            _ => false,
+        }
+    }
+
+    fn is_reinitialization(&self) -> bool {
+        match self {
+            AddAssignModification::Assign(_) => true,
+            _ => false,
+        }
+    }
+
     fn apply<'a>(&self, result: &'a mut SumResult<T>, range: &Range<Key>) {
         use AddAssignModification::*;
         match self {
