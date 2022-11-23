@@ -1,7 +1,7 @@
 use persistent_range_query::naive::*;
 use persistent_range_query::ops::rsq::*;
 use persistent_range_query::ops::SameElementsInitializer;
-use persistent_range_query::{PersistentVecStorage, VecVersion};
+use persistent_range_query::{PersistentVecStorage, VecReadableVersion};
 use std::ops::Range;
 
 #[derive(Copy, Clone, Debug)]
@@ -25,13 +25,13 @@ impl SumOfSameElements<K> for i32 {
 
 #[test]
 fn test_naive() {
-    let mut s: NaiveVecVersion<AddAssignModification<i32>, _> =
+    let mut s: NaiveVecStorage<AddAssignModification<i32>, _, _> =
         NaiveVecStorage::new(K(0)..K(12), SameElementsInitializer::new(0i32));
     assert_eq!(*s.get(K(0)..K(12)).sum(), 0);
 
     s.modify(K(2)..K(5), AddAssignModification::Add(3));
     assert_eq!(*s.get(K(0)..K(12)).sum(), 3 + 3 + 3);
-    let s_old = s.clone();
+    let s_old = s.freeze();
 
     s.modify(K(3)..K(6), AddAssignModification::Assign(10));
     assert_eq!(*s.get(K(0)..K(12)).sum(), 3 + 10 + 10 + 10);

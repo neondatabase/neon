@@ -42,17 +42,25 @@ pub trait RangeModification<Key> {
     fn compose(later: &Self, earlier: &mut Self);
 }
 
-pub trait VecVersion<Modification: RangeModification<Key>, Key>: Clone {
+pub trait VecReadableVersion<Modification: RangeModification<Key>, Key> {
     fn get(&self, keys: Range<Key>) -> Modification::Result;
-    fn modify(&mut self, keys: Range<Key>, modification: Modification);
+}
+
+pub trait VecFrozenVersion<Modification: RangeModification<Key>, Key>:
+    Clone + VecReadableVersion<Modification, Key>
+{
 }
 
 pub trait PersistentVecStorage<
     Modification: RangeModification<Key>,
     Initializer: LazyRangeInitializer<Modification::Result, Key>,
     Key,
->
+>: VecReadableVersion<Modification, Key>
 {
-    type Version: VecVersion<Modification, Key>;
-    fn new(all_keys: Range<Key>, initializer: Initializer) -> Self::Version;
+    fn new(all_keys: Range<Key>, initializer: Initializer) -> Self;
+
+    type FrozenVersion: VecFrozenVersion<Modification, Key>;
+
+    fn modify(&mut self, keys: Range<Key>, modification: Modification);
+    fn freeze(&mut self) -> Self::FrozenVersion;
 }
