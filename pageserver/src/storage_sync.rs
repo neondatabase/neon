@@ -1,4 +1,6 @@
-//! This module manages synchronizing local fs with remote storage. It consists of:
+//! This module manages synchronizing local FS with remote storage.
+//!
+//! # Overview
 //!
 //! * [`RemoteTimelineClient`] provides functions related to upload/download of a particular timeline.
 //!   It contains a queue of pending uploads, and manages the queue, performing uploads in parallel
@@ -6,70 +8,174 @@
 //!
 //! * Stand-alone function, [`list_remote_timelines`], to get list of timelines of a tenant.
 //!
-//! These functions use the low-level remote storage client, [`RemoteStorage`], which is defined
-//! in the remote_storage crate (see libs/remote_storage).
+//! These functions use the low-level remote storage client, [`remote_storage::RemoteStorage`].
 //!
-
-//! FIXME: Update below as needed
+//! # APIs & How To Use Them
 //!
-//! At system startup, the pageserver will load all tenants that are found on
-//! local disk. A RemoteTimelineClient is initialized for each timeline. The
-//! upload queue of each RemoteTimelineClient is initially empty, but if there
-//! are any files on local filesystem that don't exist remotely, they are added
-//! to the upload queue at startup.
+//! There is a [RemoteTimelineClient] for each [Timeline][`crate::tenant::Timeline`] in the system,
+//! unless the pageserver is configured without remote storage.
 //!
-//! Some time later, during pageserver checkpoints, in-memory data is flushed to
-//! disk along with its metadata.  Whenever a new layer file is created, the
-//! pageserver also schedules it for upload, by calling schedule_layer_upload.
-//! At a checkpoint, after all the new layer files have been created, the
-//! updated metadata file is also scheduled for upload, by calling
-//! schedule_index_upload.  See [`crate::tenant::timeline`] for the upload calls
-//! and the adjacent logic.
+//! We allocate the client instance in [Timeline][`crate::tenant::Timeline`], i.e.,
+//! either in [`crate::tenant_mgr`] during startup or when creating a new
+//! timeline.
+//! However, the client does not become ready for use until we've initialized its upload queue:
 //!
-//! If no remote storage configuration is provided, the RemoetTimelineClient is
-//! not created and the uploads are skipped.
+//! - For timelines that already have some state on the remote storage, we use
+//!   [`RemoteTimelineClient::init_upload_queue`] .
+//! - For newly created timelines, we use
+//!   [`RemoteTimelineClient::init_upload_queue_for_empty_remote`].
 //!
-//! If a timeline is deleted, its RemoteTimelineClient is dropped, cancelling
-//! all pending uploads.  If a timeline is detached, TODO what happens ???
+//! The former takes the remote's [`IndexPart`] as an argument, possibly retrieved
+//! using [`list_remote_timelines`]. We'll elaborate on [`IndexPart`] in the next section.
 //!
-//! If the pageserver terminates, TODO what happens ???
+//! Whenever we've created/updated/deleted a file in a timeline directory, we schedule
+//! the corresponding remote operation with the timeline's [`RemoteTimelineClient`]:
 //!
-//! To have a consistent set of files, it's important that uploads and deletions
-//! are performed in the right order. For example, the index file contains a
-//! list of layer files, so it must not be uploaded until all the layer files
-//! that are in its list have been succesfully uploaded. RemoteTimelineClient
-//! maintains a queue of operations, and it knows which operations can be
-//! performed in parallel, and which operations act like a "barrier" that
-//! require preceding operations to finish. The calling code just needs to call
-//! the schedule-functions in the correct order, and RemoteTimelineClient will
-//! parallelize the operations in a way that's safe.
+//! - [`RemoteTimelineClient::schedule_layer_file_upload`]  when we've created a new layer file.
+//! - [`RemoteTimelineClient::schedule_index_upload`] when we've update the timeline metadata file.
+//! - [`RemoteTimelineClient::schedule_layer_file_deletion`] when we've deleted one or more layer files.
 //!
-//! The caller should be careful with deletion, though. You should not delete
-//! files locally that haven't been uploaded yet. Otherwise the upload will
-//! fail. After scheduling uploads, you can use the 'wait_completion' function
-//! to wait for them to finish.
+//! Internally, these functions create [`UploadOp`]s and puts them in a queue.
+//!
+//! There are also APIs for downloading files.
+//! These are not part of the aforementioend queuing and will not be discussed
+//! further here, except in the section covering tenant attach.
+//!
+//! # Remote Storage Structure & [`IndexPart`] Index File
+//!
+//! The "directory structure" in the remote storage mirrors the local directory structure, with paths
+//! like `tenants/<tenant_id>/timelines/<timeline_id>/<layer filename>`.
+//! Yet instead of keeping the `metadata` file remotely, we wrap it with more
+//! data in an "index file" aka [`IndexPart`], containing the list of **all** remote
+//! files for a given timeline.
+//! If a file is not referenced from [`IndexPart`], it's not part of the remote storage state.
+//!
+//! Having the `IndexPart` also avoids expensive and slow `S3 list` commands.
+//!
+//! # Consistency
+//!
+//! To have a consistent remote structure, it's important that uploads and
+//! deletions are performed in the right order. For example, the index file
+//! contains a list of layer files, so it must not be uploaded until all the
+//! layer files that are in its list have been succesfully uploaded.
+//!
+//! The contract between client and it's user is that the user is responsible of
+//! scheduling operations in an order that keeps the remote consistent as
+//! described above.
+//! From the user's perspective, the operations are executed sequentially.
+//! Internally, the client knows which operations can be performed in parallel,
+//! and which operations act like a "barrier" that require preceding operations
+//! to finish. The calling code just needs to call the schedule-functions in the
+//! correct order, and the client will parallelize the operations in a way that
+//! is safe.
+//!
+//! The caller should be careful with deletion, though. They should not delete
+//! local files that have been scheduled for upload but not yet finished uploading.
+//! Otherwise the upload will fail. To wait for an upload to finish, use
+//! the 'wait_completion' function (more on that later.)
+//!
+//! All of this relies on the following invariants:
 //!
 //! - We rely on read-after write consistency in the remote storage.
 //! - Layer files are immutable
-
 //!
-//! The "directory structure" in the remote storage mirrors the local directory structure, with paths
-//! like `tenants/<tenant_id>/timelines/<timeline_id>/<layer filename>.
-//! Yet instead of keeping the `metadata` file remotely, we wrap it with more data in [`IndexPart`], containing the list of remote files.
-//! This file gets read to populate the cache, if the remote timeline data is missing from it and gets updated after every successful download.
-//! This way, we optimize S3 storage access by not running the `S3 list` command that could be expencive and slow: knowing both [`TenantId`] and [`TimelineId`],
-//! we can always reconstruct the path to the timeline, use this to get the same path on the remote storage and retrieve its shard contents, if needed, same as any layer files.
-//! TODO: update this paragraph with more details on how the list of remote files is kept up-to-date
+//! ## Implementation  Note
 //!
-//! At pageserver startup, it downloads the index files of every locally-present
-//! tenant, to synchronize the local state with remote storage. Other tenants
-//! that might be present in the remote storage are ignored. When a tenant is
-//! attached to the pageserver, the directory structure for the tenant and all
-//! its timelines are created on local disk, and the timeline index files are
-//! downloaded, to create the local metadata files. The layer files containing
-//! the actual data are downloaded on-demand.
+//! The *actual* remote state lags behind the *desired* remote state while
+//! there are in-flight operations.
+//! We keep track of the desired remote state in
+//! [`UploadQueueInitialized::latest_files`] and [`UploadQueueInitialized::latest_metadata`].
+//! It is initialized based on the [`IndexPart`] that was passed during init
+//! and updated with every `schedule_*` function call.
+//! All this is necessary necessary to compute the future [`IndexPart`]s
+//! when scheduling an operation while other operations that also affect the
+//! remote [`IndexPart`] are in flight.
 //!
-//! NOTES:
+//! # Retries & Error Handling
+//!
+//! The client retries operations indefinitely, using exponential back-off.
+//! There is no way to force a retry, i.e., interrupt the back-off.
+//! This could be built easily.
+//!
+//! # Cancellation
+//!
+//! The operations execute as plain [`task_mgr`] tasks, scoped to
+//! the client's tenant and timeline.
+//! Dropping the client will drop queued operations but not executing operations.
+//! These will complete unless the `task_mgr` tasks are cancelled using `task_mgr`
+//! APIs, e.g., during pagserver shutdown or tenant detach.
+//!
+//! # Completion
+//!
+//! Once an operation has completed, we update
+//! [`UploadQueueInitialized::last_uploaded_consistent_lsn`] which indicates
+//! to safekeepers that they can delete the WAL up to that LSN.
+//!
+//! The [`RemoteTimelineClient::wait_completion`] method can be used to wait
+//! for all pending operations to complete. It does not prevent more
+//! operations from getting scheduled.
+//!
+//! # Crash Consistency
+//!
+//! We do not persist the upload queue state.
+//! If we drop the client, or crash, all unfinished operations are lost.
+//!
+//! To recover , the following steps need to be taken:
+//! - Retrieve the current remote [`IndexPart`]. This gives us a
+//!   consistent remote state, assuming the user scheduled operations in
+//!   the correct order.
+//! - Initiate upload queue with that [`IndexPart`].
+//! - Reschedule all lost operations by comparing the local filesystem state
+//!   and remote state as per [`IndexPart`]. This is done in
+//!   [`Timeline::setup_timeline`] and [`Timeline::reconcile_with_remote`].
+//!
+//! Note that we currently tolerate leaking files on the remote in the case
+//! of interrupted delete operations where we crash inbetween the index
+//! update that removes the reference to the layer file and the actual deletion
+//! of the layer file.
+//! Note further that we cannot easily fix this by scheduling deletes for every
+//! file that is present only on the remote, because we cannot distinguish the
+//! following two cases:
+//! - (1) We had the file locally, deleted it locally, scheduled a remote delete,
+//!   but crashed before it finished remotely.
+//! - (2) We never had the file locally because we were still in tenant attach
+//!   when we crashed. (Similar case for on-demand download in the future.)
+//!
+//! # Downloads (= Tenant Attach)
+//!
+//! When we attach a tenant, we perform the following steps:
+//! - create `Tenant` object in `TenantState::Attaching`
+//! - download all of its timelines' remote [`IndexPart`]s
+//! - create its `Timeline` struct
+//! - initialize each `Timeline`'s client's upload queue with its `IndexPart`s
+//! - eagerly download all of the remote layers using the client's download APIs
+//! - transition tenant from `TenantState::Attaching` to `TenantState::Active`.
+//!
+//! Most of the above happens in [`Timeline::reconcile_with_remote`].
+//! We keep track of the fact that a client is in `Attaching` state in a marker
+//! file on the local disk.
+//! However, the distinction is moot for storage sync since we call
+//! `reconcile_with_remote` for tenants both with and without the marker file.
+//!
+//! In the future, downloading will be done on-demand and `reconcile_with_remote`
+//! will only be responsible for re-scheduling upload ops after a crash of an
+//! `Active` tenant.
+//!
+//! # Operating Without Remote Storage
+//!
+//! If no remote storage configuration is provided, the [`RemoteTimelineClient`] is
+//! not created and the uploads are skipped.
+//! Theoretically, it should be ok to remove and re-add remote storage configuration to
+//! the pageserver config at any time, since it doesn't make a difference to
+//! `reconcile_with_remote`.
+//! Of course, the remote timeline dir must not change while we have de-configured
+//! remote storage, i.e., the pageserver must remain the owner of the given prefix
+//! in remote storage.
+//! But note that we don't test any of this right now.
+//!
+//!
+//! # RANDOM NOTES FROM THE PAST (TODO: DELETE / DEDUP WITH CONTENT ABOVE)
+//!
 //! * pageserver assumes it has exclusive write access to the remote storage. If supported, the way multiple pageservers can be separated in the same storage
 //! (i.e. using different directories in the local filesystem external storage), but totally up to the storage implementation and not covered with the trait API.
 //!
@@ -1061,6 +1167,4 @@ mod tests {
     // TODO: Currently, GC can run between upload retries, removing local layers scheduled for upload. Test this scenario.
     // FIXME: used to have a test for this in upload.rs, `layer_upload_after_local_fs_update()`.
     // I didn't understand how it tests that, though.
-
-    // TODO: Test upload failures and retries
 }
