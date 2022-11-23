@@ -120,7 +120,7 @@
 //! We do not persist the upload queue state.
 //! If we drop the client, or crash, all unfinished operations are lost.
 //!
-//! To recover , the following steps need to be taken:
+//! To recover, the following steps need to be taken:
 //! - Retrieve the current remote [`IndexPart`]. This gives us a
 //!   consistent remote state, assuming the user scheduled operations in
 //!   the correct order.
