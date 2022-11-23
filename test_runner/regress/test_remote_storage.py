@@ -312,7 +312,7 @@ def test_remote_storage_upload_queue_retries(
         all_states = client.tenant_list()
         [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
         assert tenant["has_in_progress_downloads"] is False
-        assert tenant["state"] == {"Active": {"background_jobs_running": True}}
+        assert tenant["state"] == "Active"
 
     wait_until(30, 1, tenant_active)
 

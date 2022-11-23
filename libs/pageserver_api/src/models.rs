@@ -19,10 +19,8 @@ pub enum TenantState {
     Loading,
     // This tenant is being downloaded from cloud storage.
     Attaching,
-    /// Tenant is fully operational, its background jobs might be running or not.
-    Active {
-        background_jobs_running: bool,
-    },
+    /// Tenant is fully operational
+    Active,
     /// A tenant is recognized by pageserver, but it is being detached or the system is being
     /// shut down.
     Paused,
@@ -36,9 +34,7 @@ impl TenantState {
         match self {
             Self::Loading => true,
             Self::Attaching => true,
-            Self::Active {
-                background_jobs_running: _,
-            } => false,
+            Self::Active => false,
             Self::Paused => false,
             Self::Broken => false,
         }
