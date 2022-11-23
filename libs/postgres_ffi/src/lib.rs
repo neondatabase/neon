@@ -163,6 +163,27 @@ pub fn page_set_lsn(pg: &mut [u8], lsn: Lsn) {
     pg[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
 }
 
+// This is port of function with the same name from freespace.c.
+// The only difference is that it does not have "level" parameter because XLogRecordPageWithFreeSpace
+// always call it with level=FSM_BOTTOM_LEVEL
+pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
+    let mut leafno = addr;
+    const FSM_TREE_DEPTH: u32 = if pg_constants::SLOTS_PER_FSM_PAGE >= 1626 {
+        3
+    } else {
+        4
+    };
+
+    /* Count upper level nodes required to address the leaf page */
+    let mut pages: BlockNumber = 0;
+    for _l in 0..FSM_TREE_DEPTH {
+        pages += leafno + 1;
+        leafno /= pg_constants::SLOTS_PER_FSM_PAGE;
+    }
+    /* Turn the page count into 0-based block number */
+    pages - 1
+}
+
 pub mod waldecoder {
 
     use crate::{v14, v15};
