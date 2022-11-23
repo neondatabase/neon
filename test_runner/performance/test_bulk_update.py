@@ -3,7 +3,12 @@ from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 
 
 #
-# Benchmark estimating effect of prefetch on bulk update operations
+# Benchmark effect of prefetch on bulk update operations
+#
+# A sequential scan that's part of a bulk update is the same as any other sequential scan,
+# but dirtying the pages as you go affects the last-written LSN tracking. We used to have
+# an issue with the last-written LSN cache where rapidly evicting dirty pages always
+# invalidated the prefetched responses, which showed up in bad performance in this test.
 #
 @pytest.mark.timeout(10000)
 @pytest.mark.parametrize("fillfactor", [10, 50, 100])
