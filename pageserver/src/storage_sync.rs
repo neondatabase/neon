@@ -32,7 +32,7 @@
 //! the corresponding remote operation with the timeline's [`RemoteTimelineClient`]:
 //!
 //! - [`RemoteTimelineClient::schedule_layer_file_upload`]  when we've created a new layer file.
-//! - [`RemoteTimelineClient::schedule_index_upload`] when we've update the timeline metadata file.
+//! - [`RemoteTimelineClient::schedule_index_upload`] when we've updated the timeline metadata file.
 //! - [`RemoteTimelineClient::schedule_layer_file_deletion`] when we've deleted one or more layer files.
 //!
 //! Internally, these functions create [`UploadOp`]s and puts them in a queue.
