@@ -83,6 +83,16 @@ A subject for future modularization.
 `/libs/metrics`:
 Helpers for exposing Prometheus metrics from the server.
 
+### Adding dependencies
+When you add a Cargo dependency, you should update hakari manifest by running commands below and committing the updated `Cargo.lock` and `workspace_hack/`. There may be no changes, that's fine.
+
+```bash
+cargo hakari generate
+cargo hakari manage-deps
+```
+
+If you don't have hakari installed (`error: no such subcommand: hakari`), install it by running `cargo install cargo-hakari`.
+
 ## Using Python
 Note that Debian/Ubuntu Python packages are stale, as it commonly happens,
 so manual installation of dependencies is not recommended.

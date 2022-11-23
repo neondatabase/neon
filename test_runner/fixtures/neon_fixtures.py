@@ -784,6 +784,8 @@ class NeonEnvBuilder:
 
             self.cleanup_remote_storage()
 
+            self.env.pageserver.assert_no_errors()
+
 
 class NeonEnv:
     """
@@ -1566,6 +1568,7 @@ class NeonCli(AbstractNeonCli):
     def pageserver_start(
         self,
         overrides: Tuple[str, ...] = (),
+        extra_env_vars: Optional[Dict[str, str]] = None,
     ) -> "subprocess.CompletedProcess[str]":
         start_args = ["pageserver", "start", *overrides]
         append_pageserver_param_overrides(
@@ -1575,11 +1578,11 @@ class NeonCli(AbstractNeonCli):
             pageserver_config_override=self.env.pageserver.config_override,
         )
 
-        s3_env_vars = None
         if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
             s3_env_vars = self.env.remote_storage.access_env_vars()
+            extra_env_vars = (extra_env_vars or {}) | s3_env_vars
 
-        return self.raw_cli(start_args, extra_env_vars=s3_env_vars)
+        return self.raw_cli(start_args, extra_env_vars=extra_env_vars)
 
     def pageserver_stop(self, immediate=False) -> "subprocess.CompletedProcess[str]":
         cmd = ["pageserver", "stop"]
@@ -1723,7 +1726,50 @@ class NeonPageserver(PgProtocol):
         self.config_override = config_override
         self.version = env.get_pageserver_version()
 
-    def start(self, overrides: Tuple[str, ...] = ()) -> "NeonPageserver":
+        # After a test finishes, we will scrape the log to see if there are any
+        # unexpected error messages. If your test expects an error, add it to
+        # 'allowed_errors' in the test with something like:
+        #
+        # env.pageserver.allowed_errors.append(".*could not open garage door.*")
+        #
+        # The entries in the list are regular experessions.
+        self.allowed_errors = [
+            # All tests print these, when starting up or shutting down
+            ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
+            ".*Shutdown task error: walreceiver connection handling failure.*",
+            ".*Etcd client error: grpc request error: status: Unavailable.*",
+            ".*query handler for .* failed: Connection reset by peer.*",
+            ".*serving compute connection task.*exited with error: Broken pipe.*",
+            ".*Connection aborted: error communicating with the server: Broken pipe.*",
+            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
+            ".*Connection aborted: error communicating with the server: Connection reset by peer.*",
+            ".*kill_and_wait_impl.*: wait successful.*",
+            ".*end streaming to Some.*",
+            # safekeeper connection can fail with this, in the window between timeline creation
+            # and streaming start
+            ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
+            # Tests related to authentication and authorization print these
+            ".*Error processing HTTP request: Forbidden",
+            # intentional failpoints
+            ".*failpoint ",
+            # FIXME: there is a race condition between GC and detach, see
+            # https://github.com/neondatabase/neon/issues/2442
+            ".*could not remove ephemeral file.*No such file or directory.*",
+            # FIXME: These need investigation
+            ".*gc_loop.*Failed to get a tenant .* Tenant .* not found in the local state.*",
+            ".*compaction_loop.*Failed to get a tenant .* Tenant .* not found in the local state.*",
+            ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
+            ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
+            ".*Removing intermediate uninit mark file.*",
+            # FIXME: known race condition in TaskHandle: https://github.com/neondatabase/neon/issues/2885
+            ".*sender is dropped while join handle is still alive.*",
+        ]
+
+    def start(
+        self,
+        overrides: Tuple[str, ...] = (),
+        extra_env_vars: Optional[Dict[str, str]] = None,
+    ) -> "NeonPageserver":
         """
         Start the page server.
         `overrides` allows to add some config to this pageserver start.
@@ -1731,7 +1777,7 @@ class NeonPageserver(PgProtocol):
         """
         assert self.running is False
 
-        self.env.neon_cli.pageserver_start(overrides=overrides)
+        self.env.neon_cli.pageserver_start(overrides=overrides, extra_env_vars=extra_env_vars)
         self.running = True
         return self
 
@@ -1770,6 +1816,26 @@ class NeonPageserver(PgProtocol):
             auth_token=auth_token,
             is_testing_enabled_or_skip=self.is_testing_enabled_or_skip,
         )
+
+    def assert_no_errors(self):
+        logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
+
+        error_or_warn = re.compile("ERROR|WARN")
+        errors = []
+        while True:
+            line = logfile.readline()
+            if not line:
+                break
+
+            if error_or_warn.search(line):
+                # It's an ERROR or WARN. Is it in the allow-list?
+                for a in self.allowed_errors:
+                    if re.match(a, line):
+                        break
+                else:
+                    errors.append(line)
+
+        assert not errors
 
 
 def append_pageserver_param_overrides(
@@ -2014,9 +2080,9 @@ class NeonProxy(PgProtocol):
         self,
         proxy_port: int,
         http_port: int,
+        mgmt_port: int,
         neon_binpath: Path,
         auth_endpoint=None,
-        mgmt_port=None,
     ):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = "127.0.0.1"
@@ -2030,7 +2096,8 @@ class NeonProxy(PgProtocol):
 
     def start(self):
         """
-        Starts a proxy with option '--auth-backend postgres' and a postgres instance already provided though '--auth-endpoint <postgress-instance>'."
+        Starts a proxy with option '--auth-backend postgres' and a postgres instance
+        already provided though '--auth-endpoint <postgress-instance>'."
         """
         assert self._popen is None
         assert self.auth_endpoint is not None
@@ -2040,6 +2107,7 @@ class NeonProxy(PgProtocol):
             str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
+            *["--mgmt", f"{self.host}:{self.mgmt_port}"],
             *["--auth-backend", "postgres"],
             *["--auth-endpoint", self.auth_endpoint],
         ]
@@ -2116,11 +2184,13 @@ def static_proxy(
     auth_endpoint = f"postgres://proxy:password@{host}:{port}/{dbname}"
 
     proxy_port = port_distributor.get_port()
+    mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
 
     with NeonProxy(
         proxy_port=proxy_port,
         http_port=http_port,
+        mgmt_port=mgmt_port,
         neon_binpath=neon_binpath,
         auth_endpoint=auth_endpoint,
     ) as proxy:

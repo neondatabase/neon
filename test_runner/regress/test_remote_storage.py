@@ -56,6 +56,17 @@ def test_remote_storage_backup_and_restore(
 
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
+
+    # FIXME: Is this expected?
+    env.pageserver.allowed_errors.append(
+        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
+
+    env.pageserver.allowed_errors.append(".*Tenant download is already in progress.*")
+    env.pageserver.allowed_errors.append(".*Failed to get local tenant state.*")
+    env.pageserver.allowed_errors.append(".*No metadata file found in the timeline directory.*")
+
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
 

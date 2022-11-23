@@ -1,12 +1,12 @@
 //! Local mock of Cloud API V2.
 
+use super::{
+    console::{self, AuthInfo, GetAuthInfoError, TransportError, WakeComputeError},
+    AuthSuccess,
+};
 use crate::{
-    auth::{
-        self,
-        backend::console::{self, AuthInfo, GetAuthInfoError, TransportError, WakeComputeError},
-        ClientCredentials,
-    },
-    compute::{self, ComputeConnCfg},
+    auth::{self, ClientCredentials},
+    compute,
     error::io_error,
     scram,
     stream::PqStream,
@@ -37,7 +37,7 @@ impl<'a> Api<'a> {
     pub(super) async fn handle_user(
         self,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<compute::NodeInfo> {
+    ) -> auth::Result<AuthSuccess<compute::ConnCfg>> {
         // We reuse user handling logic from a production module.
         console::handle_user(client, &self, Self::get_auth_info, Self::wake_compute).await
     }
@@ -82,8 +82,8 @@ impl<'a> Api<'a> {
     }
 
     /// We don't need to wake anything locally, so we just return the connection info.
-    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg, WakeComputeError> {
-        let mut config = ComputeConnCfg::new();
+    pub(super) async fn wake_compute(&self) -> Result<compute::ConnCfg, WakeComputeError> {
+        let mut config = compute::ConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
             .port(self.endpoint.port().unwrap_or(5432))

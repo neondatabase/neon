@@ -115,7 +115,7 @@ jobs:
         run: cargo build --locked --all --all-targets
 
   check-rust-dependencies:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init

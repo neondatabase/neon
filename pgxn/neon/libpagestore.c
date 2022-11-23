@@ -32,11 +32,6 @@
 
 #define PageStoreTrace DEBUG5
 
-#define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag,                                  \
-										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
-										 errhidestmt(true), errhidecontext(true)))
-
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
 
@@ -52,6 +47,7 @@ char	   *page_server_connstring_raw;
 
 int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
+int			readahead_buffer_size = 128;
 
 static void pageserver_flush(void);
 
@@ -96,11 +92,10 @@ pageserver_connect()
 
 	while (PQisBusy(pageserver_conn))
 	{
-		int			wc;
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		wc = WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -140,11 +135,10 @@ retry:
 
 	if (ret == 0)
 	{
-		int			wc;
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		wc = WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -238,6 +232,9 @@ pageserver_receive(void)
 	StringInfoData resp_buff;
 	NeonResponse *resp;
 
+	if (!connected)
+		return NULL;
+
 	PG_TRY();
 	{
 		/* read response */
@@ -247,7 +244,10 @@ pageserver_receive(void)
 		if (resp_buff.len < 0)
 		{
 			if (resp_buff.len == -1)
-				neon_log(ERROR, "end of COPY");
+			{
+				pageserver_disconnect();
+				return NULL;
+			}
 			else if (resp_buff.len == -2)
 				neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
 		}
@@ -449,9 +449,22 @@ pg_init_libpagestore(void)
 							NULL,
 							&flush_every_n_requests,
 							8, -1, INT_MAX,
-							PGC_SIGHUP,
+							PGC_USERSET,
 							0,	/* no flags required */
 							NULL, NULL, NULL);
+	DefineCustomIntVariable("neon.readahead_buffer_size",
+							"number of prefetches to buffer",
+							"This buffer is used to store prefetched data; so "
+							"it is important that this buffer is at least as "
+							"large as the configured value of all tablespaces' "
+							"effective_io_concurrency and maintenance_io_concurrency, "
+							"your sessions' values of these, and the value for "
+							"seqscan_prefetch_buffers.",
+							&readahead_buffer_size,
+							128, 16, 1024,
+							PGC_USERSET,
+							0,	/* no flags required */
+							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
 
 	relsize_hash_init();
 

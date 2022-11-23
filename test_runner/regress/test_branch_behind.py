@@ -13,6 +13,9 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
 
+    env.pageserver.allowed_errors.append(".*invalid branch start lsn.*")
+    env.pageserver.allowed_errors.append(".*invalid start lsn .* for ancestor timeline.*")
+
     # Branch at the point where only 100 rows were inserted
     env.neon_cli.create_branch("test_branch_behind")
     pgmain = env.postgres.create_start("test_branch_behind")

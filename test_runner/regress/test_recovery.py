@@ -17,6 +17,10 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
 
     neon_env_builder.start()
 
+    # These warnings are expected, when the pageserver is restarted abruptly
+    env.pageserver.allowed_errors.append(".*found future delta layer.*")
+    env.pageserver.allowed_errors.append(".*found future image layer.*")
+
     # Create a branch for us
     env.neon_cli.create_branch("test_pageserver_recovery", "main")
 

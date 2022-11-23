@@ -22,6 +22,8 @@ storage:
       hosts:
         pageserver-0.us-east-2.aws.neon.build:
           ansible_host: i-0c3e70929edb5d691
+        pageserver-1.us-east-2.aws.neon.build:
+          ansible_host: i-0565a8b4008aa3f40
 
     safekeepers:
       hosts:

@@ -210,6 +210,16 @@ impl PostgresRedoManager {
         }
     }
 
+    /// Launch process pre-emptively. Should not be needed except for benchmarking.
+    pub fn launch_process(&mut self, pg_version: u32) -> anyhow::Result<()> {
+        let inner = self.process.get_mut().unwrap();
+        if inner.is_none() {
+            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
+            *inner = Some(p);
+        }
+        Ok(())
+    }
+
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///

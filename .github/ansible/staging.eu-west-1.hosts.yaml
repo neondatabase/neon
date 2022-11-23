@@ -1,0 +1,33 @@
+storage:
+  vars:
+    bucket_name: neon-dev-storage-eu-west-1
+    bucket_region: eu-west-1
+    console_mgmt_base_url: http://console-staging.local
+    etcd_endpoints: etcd-0.eu-west-1.aws.neon.build:2379
+    pageserver_config_stub:
+      pg_distrib_dir: /usr/local
+      remote_storage:
+        bucket_name: "{{ bucket_name }}"
+        bucket_region: "{{ bucket_region }}"
+        prefix_in_bucket: "pageserver/v1"
+    safekeeper_s3_prefix: safekeeper/v1/wal
+    hostname_suffix: ""
+    remote_user: ssm-user
+    ansible_aws_ssm_region: eu-west-1
+    ansible_aws_ssm_bucket_name: neon-dev-storage-eu-west-1
+    console_region_id: aws-eu-west-1
+
+  children:
+    pageservers:
+      hosts:
+        pageserver-0.eu-west-1.aws.neon.build:
+          ansible_host: i-01d496c5041c7f34c
+
+    safekeepers:
+      hosts:
+        safekeeper-0.eu-west-1.aws.neon.build:
+          ansible_host: i-05226ef85722831bf
+        safekeeper-1.eu-west-1.aws.neon.build:
+          ansible_host: i-06969ee1bf2958bfc
+        safekeeper-2.eu-west-1.aws.neon.build:
+          ansible_host: i-087892e9625984a0b

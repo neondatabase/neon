@@ -7,6 +7,11 @@ from fixtures.utils import wait_until
 def test_timeline_delete(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
+    env.pageserver.allowed_errors.append(".*Timeline .* was not found.*")
+    env.pageserver.allowed_errors.append(".*timeline not found.*")
+    env.pageserver.allowed_errors.append(".*Cannot delete timeline which has child timelines.*")
+    env.pageserver.allowed_errors.append(".*Tenant .* not found in the local state.*")
+
     ps_http = env.pageserver.http_client()
 
     # first try to delete non existing timeline

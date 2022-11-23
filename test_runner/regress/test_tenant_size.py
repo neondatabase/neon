@@ -166,6 +166,10 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
 
     env = neon_env_builder.init_start()
 
+    # FIXME: we have a race condition between GC and delete timeline. GC might fail with this
+    # error. Similar to https://github.com/neondatabase/neon/issues/2671
+    env.pageserver.allowed_errors.append(".*InternalServerError\\(No such file or directory.*")
+
     tenant_id = env.initial_tenant
     main_branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
 
@@ -188,10 +192,8 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         "first-branch", main_branch_name, tenant_id
     )
 
-    # unsure why this happens, the size difference is more than a page alignment
     size_after_first_branch = http_client.tenant_size(tenant_id)
-    assert size_after_first_branch > size_at_branch
-    assert size_after_first_branch - size_at_branch == gc_horizon
+    assert size_after_first_branch == size_at_branch
 
     first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
 
@@ -217,7 +219,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         "second-branch", main_branch_name, tenant_id
     )
     size_after_second_branch = http_client.tenant_size(tenant_id)
-    assert size_after_second_branch > size_after_continuing_on_main
+    assert size_after_second_branch == size_after_continuing_on_main
 
     second_branch_pg = env.postgres.create_start("second-branch", tenant_id=tenant_id)
 
@@ -263,6 +265,8 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         except PageserverApiException as e:
             # compaction is ok but just retry if this fails; related to #2442
             if "cannot lock compaction critical section" in str(e):
+                # also ignore it in the log
+                env.pageserver.allowed_errors.append(".*cannot lock compaction critical section.*")
                 time.sleep(1)
                 continue
             raise

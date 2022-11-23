@@ -49,6 +49,11 @@ typedef struct
 
 #define messageTag(m) (((const NeonMessage *)(m))->tag)
 
+#define NEON_TAG "[NEON_SMGR] "
+#define neon_log(tag, fmt, ...) ereport(tag,                                  \
+										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
+										 errhidestmt(true), errhidecontext(true)))
+
 /*
  * supertype of all the Neon*Request structs below
  *
@@ -150,6 +155,8 @@ extern void prefetch_on_ps_disconnect(void);
 extern page_server_api * page_server;
 
 extern char *page_server_connstring;
+extern int flush_every_n_requests;
+extern int readahead_buffer_size;
 extern bool seqscan_prefetch_enabled;
 extern int seqscan_prefetch_distance;
 extern char *neon_timeline;
@@ -159,6 +166,7 @@ extern int32 max_cluster_size;
 
 extern const f_smgr *smgr_neon(BackendId backend, RelFileNode rnode);
 extern void smgr_init_neon(void);
+extern void readahead_buffer_resize(int newsize, void *extra);
 
 /* Neon storage manager functionality */
 

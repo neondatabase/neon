@@ -190,7 +190,7 @@ runs:
         prefix: latest
 
     - name: Create Allure report
-      if: always()
+      if: success() || failure()
       uses: ./.github/actions/allure-report
       with:
         action: store

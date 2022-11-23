@@ -37,7 +37,7 @@
 
 - [Source view](./sourcetree.md)
   - [docker.md](./docker.md) — Docker images and building pipeline.
-  - [Error handling and logging]()
+  - [Error handling and logging](./error-handling.md)
   - [Testing]()
     - [Unit testing]()
     - [Integration testing]()

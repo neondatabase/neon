@@ -119,6 +119,7 @@ static TimestampTz last_reconnect_attempt;
 static WalproposerShmemState * walprop_shared;
 
 /* Prototypes for private functions */
+static void WalProposerRegister(void);
 static void WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId);
 static void WalProposerStart(void);
 static void WalProposerLoop(void);
@@ -455,7 +456,7 @@ WalProposerPoll(void)
 /*
  * Register a background worker proposing WAL to wal acceptors.
  */
-void
+static void
 WalProposerRegister(void)
 {
 	BackgroundWorker bgw;
