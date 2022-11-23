@@ -38,7 +38,7 @@
 //! Internally, these functions create [`UploadOp`]s and puts them in a queue.
 //!
 //! There are also APIs for downloading files.
-//! These are not part of the aforementioend queuing and will not be discussed
+//! These are not part of the aforementioned queuing and will not be discussed
 //! further here, except in the section covering tenant attach.
 //!
 //! # Remote Storage Structure & [`IndexPart`] Index File
