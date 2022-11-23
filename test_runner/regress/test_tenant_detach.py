@@ -3,8 +3,17 @@ from threading import Thread
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException, PageserverHttpClient
-from fixtures.types import TenantId, TimelineId
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    PageserverApiException,
+    PageserverHttpClient,
+    RemoteStorageKind,
+    available_remote_storages,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
+from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import query_scalar
 
 
 def do_gc_target(
@@ -88,3 +97,75 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         expected_exception=PageserverApiException, match=f"Tenant {tenant_id} not found"
     ):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
+
+
+#
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+def test_detach_while_attaching(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_detach_while_attaching",
+    )
+
+    ##### First start, insert secret data and upload it to the remote storage
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+    pg = env.postgres.create_start("main")
+
+    client = env.pageserver.http_client()
+
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+
+    checkpoint_numbers = range(1, 3)
+
+    # Create table, and insert some rows. Make it big enough that it doesn't fit in
+    # shared_buffers, otherwise the SELECT after restart will just return answer
+    # from shared_buffers without hitting the page server, which defeats the point
+    # of this test.
+    with pg.cursor() as cur:
+        cur.execute("CREATE TABLE foo (t text)")
+        cur.execute(
+            """
+            INSERT INTO foo
+            SELECT 'long string to consume some space' || g
+            FROM generate_series(1, 100000) g
+            """
+        )
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    # wait until pageserver receives that data
+    wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
+
+    # run checkpoint manually to be sure that data landed in remote storage
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+
+    log.info(f"waiting for upload")
+
+    # wait until pageserver successfully uploaded a checkpoint to remote storage
+    wait_for_upload(client, tenant_id, timeline_id, current_lsn)
+    log.info(f"upload is done")
+
+    # Detach it
+    pageserver_http.tenant_detach(tenant_id)
+
+    # And re-attach
+    pageserver_http.configure_failpoints([("attach-before-activate", "sleep(5000)")])
+
+    pageserver_http.tenant_attach(tenant_id)
+
+    # Before it has chance to finish, detach it again
+    pageserver_http.tenant_detach(tenant_id)
+
+    # is there a better way to assert that failpoint triggered?
+    time.sleep(10)
+
+    # Attach it again. If the GC and compaction loops from the previous attach/detach
+    # cycle are still running, things could get really confusing..
+    pageserver_http.tenant_attach(tenant_id)
+    
+    with pg.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM foo");
