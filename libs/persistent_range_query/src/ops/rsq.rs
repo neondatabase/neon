@@ -3,7 +3,7 @@
 use crate::ops::SameElementsInitializer;
 use crate::{LazyRangeInitializer, RangeModification, RangeQueryResult};
 use std::borrow::Borrow;
-use std::ops::{AddAssign, Range};
+use std::ops::{Add, AddAssign, Range};
 
 // TODO: commutative Add
 
@@ -18,9 +18,23 @@ impl<T> SumResult<T> {
     }
 }
 
-impl<T: for<'a> AddAssign<&'a T> + From<u8>, Key> RangeQueryResult<Key> for SumResult<T> {
+impl<T: for<'a> AddAssign<&'a T> + From<u8>, Key> RangeQueryResult<Key> for SumResult<T>
+where
+    for<'a> &'a T: Add<&'a T, Output = T>,
+{
     fn new_for_empty_range() -> Self {
         SumResult { sum: 0.into() }
+    }
+
+    fn combine(
+        left: &Self,
+        _left_range: &Range<Key>,
+        right: &Self,
+        _right_range: &Range<Key>,
+    ) -> Self {
+        SumResult {
+            sum: &left.sum + &right.sum,
+        }
     }
 
     fn add(left: &mut Self, _left_range: &Range<Key>, right: &Self, _right_range: &Range<Key>) {

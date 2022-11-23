@@ -11,22 +11,14 @@ pub trait RangeQueryResult<Key>: Sized {
 
     // Contract: left_range.end == right_range.start
     // left_range.start == left_range.end == right_range.start == right_range.end is still possible
-    fn combine(left: &Self, left_range: &Range<Key>, right: &Self, right_range: &Range<Key>) -> Self
-    where
-        Self: Clone,
-    {
-        let mut left = left.clone();
-        Self::add(&mut left, left_range, right, right_range);
-        left
-    }
+    fn combine(
+        left: &Self,
+        left_range: &Range<Key>,
+        right: &Self,
+        right_range: &Range<Key>,
+    ) -> Self;
 
-    // TODO: does it work with non-Clone?
-    fn add(left: &mut Self, left_range: &Range<Key>, right: &Self, right_range: &Range<Key>)
-    where
-        Self: Clone,
-    {
-        *left = Self::combine(left, left_range, right, right_range);
-    }
+    fn add(left: &mut Self, left_range: &Range<Key>, right: &Self, right_range: &Range<Key>);
 }
 
 pub trait LazyRangeInitializer<Result: RangeQueryResult<Key>, Key> {
