@@ -35,7 +35,7 @@
 //! - [`RemoteTimelineClient::schedule_index_upload`] when we've updated the timeline metadata file.
 //! - [`RemoteTimelineClient::schedule_layer_file_deletion`] when we've deleted one or more layer files.
 //!
-//! Internally, these functions create [`UploadOp`]s and puts them in a queue.
+//! Internally, these functions create [`UploadOp`]s and put them in a queue.
 //!
 //! There are also APIs for downloading files.
 //! These are not part of the aforementioned queuing and will not be discussed
