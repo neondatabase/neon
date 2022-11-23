@@ -11,14 +11,15 @@ pub enum ClientCredsParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
-    #[error("Inconsistent project name inferred from SNI ('{0}') and project option ('{1}').")]
-    InconsistentProjectNames(String, String),
+    #[error("Inconsistent project name inferred from SNI ('{}') and project option ('{}').", .domain, .option)]
+    InconsistentProjectNames { domain: String, option: String },
 
     #[error(
-        "SNI ('{1}') inconsistently formatted with respect to common name ('{0}'). \
-        SNI should be formatted as '<project-name>.{0}'."
+        "SNI ('{}') inconsistently formatted with respect to common name ('{}'). \
+        SNI should be formatted as '<project-name>.{}'.",
+        .sni, .cn, .cn,
     )]
-    InconsistentSni(String, String),
+    InconsistentSni { sni: String, cn: String },
 
     #[error("Project name ('{0}') must contain only alphanumeric characters and hyphen.")]
     MalformedProjectName(String),
@@ -67,7 +68,7 @@ impl<'a> ClientCredentials<'a> {
         let dbname = get_param("database")?;
 
         // Project name might be passed via PG's command-line options.
-        let project_a = params.options_raw().and_then(|mut options| {
+        let project_option = params.options_raw().and_then(|mut options| {
             options
                 .find_map(|opt| opt.strip_prefix("project="))
                 .map(Cow::Borrowed)
@@ -75,18 +76,26 @@ impl<'a> ClientCredentials<'a> {
 
         // Alternative project name is in fact a subdomain from SNI.
         // NOTE: we do not consider SNI if `common_name` is missing.
-        let project_b = sni
+        let project_domain = sni
             .zip(common_name)
             .map(|(sni, cn)| {
                 subdomain_from_sni(sni, cn)
-                    .ok_or_else(|| InconsistentSni(sni.into(), cn.into()))
+                    .ok_or_else(|| InconsistentSni {
+                        sni: sni.into(),
+                        cn: cn.into(),
+                    })
                     .map(Cow::<'static, str>::Owned)
             })
             .transpose()?;
 
-        let project = match (project_a, project_b) {
+        let project = match (project_option, project_domain) {
             // Invariant: if we have both project name variants, they should match.
-            (Some(a), Some(b)) if a != b => Some(Err(InconsistentProjectNames(a.into(), b.into()))),
+            (Some(option), Some(domain)) if option != domain => {
+                Some(Err(InconsistentProjectNames {
+                    domain: domain.into(),
+                    option: option.into(),
+                }))
+            }
             // Invariant: project name may not contain certain characters.
             (a, b) => a.or(b).map(|name| match project_name_valid(&name) {
                 false => Err(MalformedProjectName(name.into())),
@@ -123,6 +132,7 @@ fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ClientCredsParseError::*;
 
     #[test]
     #[ignore = "TODO: fix how database is handled"]
@@ -210,9 +220,30 @@ mod tests {
         let sni = Some("second.localhost");
         let common_name = Some("localhost");
 
-        assert!(matches!(
-            ClientCredentials::parse(&options, sni, common_name).expect_err("should fail"),
-            ClientCredsParseError::InconsistentProjectNames(_, _)
-        ));
+        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
+        match err {
+            InconsistentProjectNames { domain, option } => {
+                assert_eq!(option, "first");
+                assert_eq!(domain, "second");
+            }
+            _ => panic!("bad error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_inconsistent_sni() {
+        let options = StartupMessageParams::new([("user", "john_doe"), ("database", "world")]);
+
+        let sni = Some("project.localhost");
+        let common_name = Some("example.com");
+
+        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
+        match err {
+            InconsistentSni { sni, cn } => {
+                assert_eq!(sni, "project.localhost");
+                assert_eq!(cn, "example.com");
+            }
+            _ => panic!("bad error: {err:?}"),
+        }
     }
 }
