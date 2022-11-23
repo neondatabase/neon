@@ -2,7 +2,7 @@ use persistent_range_query::naive::*;
 use persistent_range_query::ops::rsq::*;
 use persistent_range_query::ops::SameElementsInitializer;
 use persistent_range_query::{PersistentVecStorage, VecVersion};
-use std::ops::{Mul, Range, Sub};
+use std::ops::Range;
 
 #[derive(Copy, Clone, Debug)]
 struct K(u8);
@@ -17,27 +17,15 @@ impl IndexableKey for K {
     }
 }
 
-struct KDiff(i16);
-
-impl Sub<&K> for &K {
-    type Output = KDiff;
-
-    fn sub(self, rhs: &K) -> Self::Output {
-        KDiff((self.0 as i16) - (rhs.0 as i16))
-    }
-}
-
-impl<'a> Mul<KDiff> for &'a i32 {
-    type Output = i32;
-
-    fn mul(self, rhs: KDiff) -> Self::Output {
-        self * (rhs.0 as i32)
+impl SumOfSameElements<K> for i32 {
+    fn sum(initial_element_value: &Self, keys: &Range<K>) -> Self {
+        initial_element_value * (keys.end.0 - keys.start.0) as Self
     }
 }
 
 #[test]
 fn test_naive() {
-    let mut s: NaiveVecVersion<_, _, AddAssignModification<_>> =
+    let mut s: NaiveVecVersion<AddAssignModification<i32>, _> =
         NaiveVecStorage::new(K(0)..K(12), SameElementsInitializer::new(0i32));
     assert_eq!(*s.get(K(0)..K(12)).sum(), 0);
 

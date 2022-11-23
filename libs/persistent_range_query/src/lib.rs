@@ -29,8 +29,8 @@ pub trait RangeQueryResult<Key>: Sized {
     }
 }
 
-pub trait LazyRangeInitializer<Key, R> {
-    fn get(&self, range: &Range<Key>) -> R;
+pub trait LazyRangeInitializer<Result: RangeQueryResult<Key>, Key> {
+    fn get(&self, range: &Range<Key>) -> Result;
 }
 
 /// Should be a monoid:
@@ -40,29 +40,25 @@ pub trait LazyRangeInitializer<Key, R> {
 /// Should left act on Result:
 /// * Identity operation: for all r: no_op().apply(r) == r
 /// * Compatibility: for all op_1, op_2, r: op_1.apply(op_2.apply(r)) == compose(op_1, op_2).apply(r)
-pub trait RangeModification<Result, Key> {
+pub trait RangeModification<Key> {
+    type Result: RangeQueryResult<Key>;
+
     fn no_op() -> Self;
-    fn apply<'a>(&self, result: &mut Result, range: &Range<Key>);
+    fn apply(&self, result: &mut Self::Result, range: &Range<Key>);
     fn compose(later: &Self, earlier: &mut Self);
 }
 
-pub trait VecVersion<
-    Key,
-    Result: RangeQueryResult<Key>,
-    Modification: RangeModification<Result, Key>,
->: Clone
-{
-    fn get(&self, keys: Range<Key>) -> Result;
+pub trait VecVersion<Modification: RangeModification<Key>, Key>: Clone {
+    fn get(&self, keys: Range<Key>) -> Modification::Result;
     fn modify(&mut self, keys: Range<Key>, modification: Modification);
 }
 
 pub trait PersistentVecStorage<
+    Modification: RangeModification<Key>,
+    Initializer: LazyRangeInitializer<Modification::Result, Key>,
     Key,
-    Result: RangeQueryResult<Key>,
-    Initializer: LazyRangeInitializer<Key, Result>,
-    Modification: RangeModification<Result, Key>,
 >
 {
-    type Version: VecVersion<Key, Result, Modification>;
+    type Version: VecVersion<Modification, Key>;
     fn new(all_keys: Range<Key>, initializer: Initializer) -> Self::Version;
 }

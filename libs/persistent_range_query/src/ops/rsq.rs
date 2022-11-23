@@ -3,7 +3,7 @@
 use crate::ops::SameElementsInitializer;
 use crate::{LazyRangeInitializer, RangeModification, RangeQueryResult};
 use std::borrow::Borrow;
-use std::ops::{AddAssign, Mul, Range, Sub};
+use std::ops::{AddAssign, Range};
 
 // TODO: commutative Add
 
@@ -28,15 +28,18 @@ impl<T: for<'a> AddAssign<&'a T> + From<u8>, Key> RangeQueryResult<Key> for SumR
     }
 }
 
-impl<Key, T, TR: Borrow<T>, KeyDiff> LazyRangeInitializer<Key, SumResult<T>>
-    for SameElementsInitializer<TR>
+pub trait SumOfSameElements<Key> {
+    fn sum(initial_element_value: &Self, keys: &Range<Key>) -> Self;
+}
+
+impl<T: SumOfSameElements<Key>, TB: Borrow<T>, Key> LazyRangeInitializer<SumResult<T>, Key>
+    for SameElementsInitializer<TB>
 where
-    for<'a> &'a T: Mul<KeyDiff, Output = T>,
-    for<'b> &'b Key: Sub<Output = KeyDiff>,
+    SumResult<T>: RangeQueryResult<Key>,
 {
     fn get(&self, range: &Range<Key>) -> SumResult<T> {
         SumResult {
-            sum: self.initial_element_value.borrow() * (&range.end - &range.start),
+            sum: SumOfSameElements::sum(self.initial_element_value.borrow(), range),
         }
     }
 }
@@ -48,11 +51,13 @@ pub enum AddAssignModification<T> {
     Assign(T),
 }
 
-impl<T: Clone + for<'a> AddAssign<&'a T>, Key> RangeModification<SumResult<T>, Key>
-    for AddAssignModification<T>
+impl<T: Clone + for<'a> AddAssign<&'a T>, Key> RangeModification<Key> for AddAssignModification<T>
 where
-    for<'a> SameElementsInitializer<&'a T>: LazyRangeInitializer<Key, SumResult<T>>,
+    SumResult<T>: RangeQueryResult<Key>,
+    for<'a> SameElementsInitializer<&'a T>: LazyRangeInitializer<SumResult<T>, Key>,
 {
+    type Result = SumResult<T>;
+
     fn no_op() -> Self {
         AddAssignModification::None
     }
