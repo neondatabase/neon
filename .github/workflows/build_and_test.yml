@@ -774,7 +774,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-pr-test-new:
-    runs-on: dev
+    runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
