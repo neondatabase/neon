@@ -61,7 +61,7 @@ def test_pageserver_init_node_id(
     assert "has node id already, it cannot be overridden" in bad_update.stderr
 
 
-def check_client(client: PageserverHttpClient, initial_tenant: TenantId):
+def check_client(client: PageserverHttpClient, initial_tenant: TenantId, pg_version: str):
     client.check_status()
 
     # check initial tenant is there
@@ -77,7 +77,9 @@ def check_client(client: PageserverHttpClient, initial_tenant: TenantId):
 
     # create timeline
     timeline_id = TimelineId.generate()
-    client.timeline_create(tenant_id=tenant_id, new_timeline_id=timeline_id)
+    client.timeline_create(
+        tenant_id=tenant_id, new_timeline_id=timeline_id, pg_version=int(pg_version)
+    )
 
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) > 0
@@ -174,7 +176,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
 def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
-        check_client(client, env.initial_tenant)
+        check_client(client, env.initial_tenant, env.pg_version)
 
 
 def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilder):
@@ -184,4 +186,4 @@ def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilde
     management_token = env.auth_keys.generate_management_token()
 
     with env.pageserver.http_client(auth_token=management_token) as client:
-        check_client(client, env.initial_tenant)
+        check_client(client, env.initial_tenant, env.pg_version)

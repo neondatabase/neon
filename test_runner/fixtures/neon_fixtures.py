@@ -1156,6 +1156,7 @@ class PageserverHttpClient(requests.Session):
         new_timeline_id: Optional[TimelineId] = None,
         ancestor_timeline_id: Optional[TimelineId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
+        pg_version: Optional[int] = None,
     ) -> Dict[Any, Any]:
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline",
@@ -1163,6 +1164,7 @@ class PageserverHttpClient(requests.Session):
                 "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
                 "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
                 "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
+                "pg_version": pg_version,
             },
         )
         self.verbose_error(res)

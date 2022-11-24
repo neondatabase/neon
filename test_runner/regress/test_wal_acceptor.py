@@ -574,7 +574,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         shutil.copy(f_partial_saved, f_partial_path)
 
     # recreate timeline on pageserver from scratch
-    ps_cli.timeline_create(tenant_id, timeline_id)
+    ps_cli.timeline_create(tenant_id, timeline_id, pg_version=pg_version)
 
     wait_lsn_timeout = 60 * 3
     started_at = time.time()

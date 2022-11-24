@@ -333,7 +333,7 @@ def check_neon_works(
 
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
     pageserver_http.timeline_delete(tenant_id, timeline_id)
-    pageserver_http.timeline_create(tenant_id, timeline_id)
+    pageserver_http.timeline_create(tenant_id, timeline_id, pg_version=int(pg_version))
     pg_bin.run(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
     )
