@@ -1,6 +1,6 @@
 use crate::{
     LazyRangeInitializer, PersistentVecStorage, RangeModification, RangeQueryResult,
-    VecFrozenVersion, VecReadableVersion,
+    VecReadableVersion,
 };
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -42,7 +42,7 @@ impl<Modification: RangeModification<Key>, Key: IndexableKey> VecReadableVersion
 }
 
 // Manual implementation of `Clone` becase `derive` requires `Modification: Clone`
-impl<'a, Modification: RangeModification<Key>, Key: Clone> Clone
+impl<Modification: RangeModification<Key>, Key: Clone> Clone
     for NaiveFrozenVersion<Modification, Key>
 {
     fn clone(&self) -> Self {
@@ -51,11 +51,6 @@ impl<'a, Modification: RangeModification<Key>, Key: Clone> Clone
             values: self.values.clone(),
         }
     }
-}
-
-impl<'a, Modification: RangeModification<Key>, Key: IndexableKey>
-    VecFrozenVersion<Modification, Key> for NaiveFrozenVersion<Modification, Key>
-{
 }
 
 // TODO: is it at all possible to store previous versions in this struct,

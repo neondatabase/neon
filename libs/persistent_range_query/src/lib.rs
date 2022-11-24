@@ -48,8 +48,17 @@ pub trait VecReadableVersion<Modification: RangeModification<Key>, Key> {
     fn get(&self, keys: Range<Key>) -> Modification::Result;
 }
 
+// TODO: use trait alias when stabilized
 pub trait VecFrozenVersion<Modification: RangeModification<Key>, Key>:
     Clone + VecReadableVersion<Modification, Key>
+{
+}
+
+impl<
+        T: Clone + VecReadableVersion<Modification, Key>,
+        Modification: RangeModification<Key>,
+        Key,
+    > VecFrozenVersion<Modification, Key> for T
 {
 }
 

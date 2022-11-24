@@ -90,7 +90,7 @@ where
         }
     }
 
-    fn apply<'a>(&self, result: &'a mut SumResult<T>, range: &Range<Key>) {
+    fn apply(&self, result: &mut SumResult<T>, range: &Range<Key>) {
         use AddAssignModification::*;
         match self {
             None => {}
