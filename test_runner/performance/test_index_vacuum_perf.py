@@ -1,5 +1,4 @@
 from contextlib import closing
-from typing import Tuple
 
 import pytest
 from fixtures.compare_fixtures import PgCompare
@@ -16,32 +15,31 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
     ],
 )
 @pytest.mark.parametrize(
-    "index_method",
+    "index_method,coltype,coldef",
     [
         # index method, column type, column definition // parameter "seed" is out of generate_series(1, N)
-        pytest.param(["btree", "bigint", "seed"], id="btree"),
-        pytest.param(["brin", "bigint", "seed"], id="brin"),
-        pytest.param(["spgist", "text", "md5(seed::text)::text"], id="spgist"),
-        pytest.param(["hash", "text", "md5(seed::text)::text"], id="hash"),
+        pytest.param("btree", "bigint", "seed", id="btree"),
+        pytest.param("brin", "bigint", "seed", id="brin"),
+        pytest.param("spgist", "text", "md5(seed::text)::text", id="spgist"),
+        pytest.param("hash", "text", "md5(seed::text)::text", id="hash"),
+        pytest.param("gin", "bigint[]", "ARRAY[seed, random() * 1000::bigint]::bigint[]", id="gin"),
         pytest.param(
-            ["gin", "bigint[]", "ARRAY[seed, random() * 1000::bigint]::bigint[]"], id="gin"
-        ),
-        pytest.param(
-            ["gist", "int8range", "int8range(seed, seed + (random() * 1000)::bigint, '[]')"],
+            "gist",
+            "int8range",
+            "int8range(seed, seed + (random() * 1000)::bigint, '[]')",
             id="gist",
         ),
     ],
 )
-def test_index_vacuum_perf(env: PgCompare, index_method: Tuple[str, str, str]):
+def test_index_vacuum_perf(env: PgCompare, index_method: str, coltype: str, coldef: str):
     # Update the same page many times, then measure read performance
     # At 24 bytes/index record this is ~ 192MB of data; which should not fit in
     # shared buffers, especially if we just scanned the table.
     # The table itself will be at least 256MB large (= ntups * 24B tuple header + ntups * 1maxalign data)
     table_size = 8 * 1024 * 1024
-    [my_index_method, coltype, coldef] = index_method
 
-    table = f"index_testdata_{my_index_method}"
-    index = f"idx__index_testdata_{my_index_method}__icol"
+    table = f"index_testdata_{index_method}"
+    index = f"idx__index_testdata_{index_method}__icol"
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -58,7 +56,7 @@ def test_index_vacuum_perf(env: PgCompare, index_method: Tuple[str, str, str]):
             cur.execute("SELECT pg_prewarm('index_testdata')")
 
             cur.execute(
-                f"CREATE INDEX {index} " f"   ON {table} " f"       USING {my_index_method} (icol)"
+                f"CREATE INDEX {index} " f"   ON {table} " f"       USING {index_method} (icol)"
             )
 
             # generate a lot of dead tuples
