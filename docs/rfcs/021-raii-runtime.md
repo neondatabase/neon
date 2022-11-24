@@ -6,7 +6,7 @@ Currently, we have several problems regarding the runtime:
 
 - `TenantState` doesn't clearly show what happens with the tenant. Repository and code comments need to describe how state transitions occur and what they mean. It is critical since the code is going to have more states. The same applies to `TimelineState`.
 - Current tenant and timeline access, shutdown design fails to shut down tenants properly, timelines, background tasks, and control their lifetimes, resulting in races.
-- `tasks_mgr` runtime is redundant, and its design allows us to have even more races without noticing.
+- `tasks_mgr` runtime is redundant, and its design allows us to have even more races without noticing. More specifically, it's just a wrapper around the closures with the possibility to select and wait for a specific task set based on `TenantId`, `TimelineId`, and `TaskKind`. We don't need it since this RFC addresses where to store `JoinHandle`s in the tenant and timeline to synchronise properly. Fixing this in the current task runtime could take a lot of painstaking work because the idea could be better.
 
 This RFC describes how to rewrite a runtime in a more RAII fashion, fixing part of its problems.
 
@@ -18,27 +18,52 @@ Before we start, some synchronisation primitives should be proposed.
     - `SignalSender` / `SignalWatcher`: wait only for proper signals and `panic!` when it receives `RecvError`.
     - `DropSender` / `DropWatcher`: wait only for `RecvError` and don't have any function in the interface to signal.
     - Non-generic `Sender` / `Receiver` wrappers for both drops and signals.
-2. For the cancellation proposal, we'll need an object that both can wait for a task to finish and send a cancellation request. We'll call it `CancelationSender` / `CancellationReceiver`. It could be coded using two tokio channels.
-3. For the cancellation proposal, we'll need a triple `StateKeeper` / `StateSubscriber` / `StateHider`. This triple atomically changes the state and sends it to subscribers like `tokio::watch`. But when there's at least one `StateHider`, we put the new state to the buffer that is being read only by subscribers, and `StateKeeper` will read the older value. After all `StateHider`s are gone, we atomically (with respect to the new possible `StateHider`s) change the state.
+2. For the control flow proposal, we'll need an object that can control the looped task's control flow: loop it, pause it, make manual iteration, cancel and wait for a task to finish. We'll call it the `LoopedTaskOperator` / `LoopedTaskController` pair. Every operation panics if the `LoopedTaskController` is dropped earlier than `LoopedTaskControlFlow`.
 
     ```rust
-    impl<S> StateKeeper<S> {
-        pub fn get_state(&self) -> S;
-        pub fn set_state(&self, state: S);
-        pub fn subscribe(&self) -> StateSubscriber;
+    /// This enum represents what the looped task should do when
+    /// it has finished another iteration.
+    enum LoopedTaskControlFlow {
+        /// Continue the flow
+        Continue,
+        /// Wait for the next state update
+        Pause,
+        /// Cancel (break) the execution
+        Break,
     }
 
-    impl<S> StateSubscriber<S> {
-        pub fn get_state(&self) -> S;
-        pub fn state_hider(&self) -> StateHider;
+    impl LoopedTaskOperator {
+        /// Get the current state and mark it as read. If the state is read,
+        /// then `LoopedTaskOperator` doesn't get an update.
+        pub async fn get_state(&mut self) -> LoopedTaskControlFlow;
     }
 
-    impl<S> Clone for StateSubscriber<S>;
+    impl LoopedTaskController {
+        /// Continue the execution after each iteration. Sends the `Continue` state.
+        /// Panics when `LoopedTaskOperator` is dropped.
+        pub fn continue(&mut self);
 
-    impl<S> Drop for StateHider<S>;
+        /// Continue the execution after iteration. Sends the `Continue`, but after
+        /// `LoopedTaskOperator` gets the state, it is atomically exchanged for unread
+        /// `Pause`.
+        /// Panics when `LoopedTaskOperator` is dropped.
+        pub fn continue_once(&mut self);
+
+        /// Pause the iteration. Sends the `Pause` state.
+        /// Panics when `LoopedTaskOperator` is dropped.
+        pub fn pause(&mut self);
+
+        /// Break the iteration. Sends the `Break` state.
+        /// Panics when `LoopedTaskOperator` is dropped.
+        pub fn break(&mut self);
+
+        /// Wait for the task to finish. It's considered finished when `LoopedTaskOperator`
+        /// is dropped.
+        pub async fn wait(&mut self);
+    }
+
+    pub fn looped_task_channel() -> (LoopedTaskOperator, LoopedTaskController);
     ```
-
- The purpose of this non-trivial primitive is to hide the state changes from the closures running in the tenant and timeline until closures finish the work. It is explained in more detail later.
 
 ## States and transitions in `TenantState`
 
@@ -57,17 +82,12 @@ Problems:
 Proposed states:
 
 1. `Infant` - just created, no activity yet.
-    - Do we need this state?
 2. `Loading` - currently loads its data from the disk to the memory.
 3. `Broken` - cannot load the tenant; unrecoverable error happened. It is the final state.
 4. `Downloading` - downloading the data files from object storage.
-    - Is it better to change to `Attaching`?
 5. `Active` - fully operational, background tasks are running.
 6. `ShuttingDown` - tenant is being shut down; no new closures could be run.
-    - What should happen to operations running on the tenant when we change the state to this one?
-    - Is it better to change to `Terminating`?
 7. `Shutdown` - tenant is shut down, background operations are finished, and ready to recycle. It is the final state.
-    - Is it better to change to `Terminated`?
 
 Transitions:
 
@@ -187,7 +207,7 @@ The owner of the timeline is the tenant, as it was before.
 
 ### States and transitions in `TimelineState`
 
-We can use the same states for `TimelineState`. (Do we need any additional states for `TimelineState`?)
+We can use the states from `TenantState` for `TimelineState`.
 
 ## `task_mgr` removal from tenant and timeline
 
@@ -204,6 +224,6 @@ The only really interesting property is 1. The join handles received from spawni
 It appears we don't need this selector; we need a great design where join handles will be stored in the owner, more in a tree-like way. It appears our accessors can do this kind of thing!
 
 1. `TenantAccessor` could be joined using the `DropWatcher`, so we can subscribe for a drop. The same applies to `TimelineGuard`.
-2. The background tasks attached to the tenant or timeline are joined by the tenant or timeline itself when the drop ends.
+2. The background tasks attached to the tenant or timeline are joined by the tenant or timeline itself when the drop ends. This is done by using `CancelationSender` / `CancellationReceiver` interface.
 3. For cancellation, we should only use the `CancelationSender` / `CancellationReceiver` in proper tasks. It behaves as `JoinGuard` with the possibility from another side to check whether we should stop.
 4. After that, it's perfectly possible to run `spawn_blocking` tasks!
