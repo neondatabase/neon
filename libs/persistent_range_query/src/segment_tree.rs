@@ -194,12 +194,12 @@ impl<
     > VecReadableVersion<Modification, Key>
     for PersistentSegmentTreeVersion<Modification, Initializer, Key>
 {
-    fn get(&self, keys: Range<Key>) -> Modification::Result {
+    fn get(&self, keys: &Range<Key>) -> Modification::Result {
         get(
             &mut self.root.clone(), // TODO: do not always force a branch
             &self.all_keys,
             self.initializer.as_ref(),
-            &keys,
+            keys,
         )
     }
 }
@@ -217,7 +217,7 @@ impl<
     > VecReadableVersion<Modification, Key>
     for PersistentSegmentTree<Modification, Initializer, Key>
 {
-    fn get(&self, keys: Range<Key>) -> Modification::Result {
+    fn get(&self, keys: &Range<Key>) -> Modification::Result {
         self.0.get(keys)
     }
 }
@@ -239,13 +239,13 @@ impl<
 
     type FrozenVersion = PersistentSegmentTreeVersion<Modification, Initializer, Key>;
 
-    fn modify(&mut self, keys: Range<Key>, modification: Modification) {
+    fn modify(&mut self, keys: &Range<Key>, modification: &Modification) {
         modify(
             &mut self.0.root, // TODO: do not always force a branch
             &self.0.all_keys,
             self.0.initializer.as_ref(),
-            &keys,
-            &modification,
+            keys,
+            modification,
         )
     }
 

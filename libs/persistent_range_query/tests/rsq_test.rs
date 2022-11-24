@@ -34,20 +34,20 @@ fn test_storage<
     S: PersistentVecStorage<AddAssignModification<i32>, SameElementsInitializer<i32>, K>,
 >() {
     let mut s = S::new(K(0)..K(12), SameElementsInitializer::new(0i32));
-    assert_eq!(*s.get(K(0)..K(12)).sum(), 0);
+    assert_eq!(*s.get(&(K(0)..K(12))).sum(), 0);
 
-    s.modify(K(2)..K(5), AddAssignModification::Add(3));
-    assert_eq!(*s.get(K(0)..K(12)).sum(), 3 + 3 + 3);
+    s.modify(&(K(2)..K(5)), &AddAssignModification::Add(3));
+    assert_eq!(*s.get(&(K(0)..K(12))).sum(), 3 + 3 + 3);
     let s_old = s.freeze();
 
-    s.modify(K(3)..K(6), AddAssignModification::Assign(10));
-    assert_eq!(*s.get(K(0)..K(12)).sum(), 3 + 10 + 10 + 10);
+    s.modify(&(K(3)..K(6)), &AddAssignModification::Assign(10));
+    assert_eq!(*s.get(&(K(0)..K(12))).sum(), 3 + 10 + 10 + 10);
 
-    s.modify(K(4)..K(7), AddAssignModification::Add(2));
-    assert_eq!(*s.get(K(0)..K(12)).sum(), 3 + 10 + 12 + 12 + 2);
+    s.modify(&(K(4)..K(7)), &AddAssignModification::Add(2));
+    assert_eq!(*s.get(&(K(0)..K(12))).sum(), 3 + 10 + 12 + 12 + 2);
 
-    assert_eq!(*s.get(K(4)..K(6)).sum(), 12 + 12);
-    assert_eq!(*s_old.get(K(4)..K(6)).sum(), 3);
+    assert_eq!(*s.get(&(K(4)..K(6))).sum(), 12 + 12);
+    assert_eq!(*s_old.get(&(K(4)..K(6))).sum(), 3);
 }
 
 #[test]

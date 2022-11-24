@@ -19,7 +19,7 @@ pub trait IndexableKey: Clone {
 fn get<Modification: RangeModification<Key>, Key: IndexableKey>(
     all_keys: &Range<Key>,
     values: &Vec<Modification::Result>,
-    keys: Range<Key>,
+    keys: &Range<Key>,
 ) -> Modification::Result {
     let mut result = Modification::Result::new_for_empty_range();
     let mut result_range = keys.start.clone()..keys.start.clone();
@@ -36,7 +36,7 @@ fn get<Modification: RangeModification<Key>, Key: IndexableKey>(
 impl<Modification: RangeModification<Key>, Key: IndexableKey> VecReadableVersion<Modification, Key>
     for NaiveFrozenVersion<Modification, Key>
 {
-    fn get(&self, keys: Range<Key>) -> Modification::Result {
+    fn get(&self, keys: &Range<Key>) -> Modification::Result {
         get::<Modification, Key>(&self.all_keys, &self.values, keys)
     }
 }
@@ -71,7 +71,7 @@ impl<
         Key: IndexableKey,
     > VecReadableVersion<Modification, Key> for NaiveVecStorage<Modification, Initializer, Key>
 {
-    fn get(&self, keys: Range<Key>) -> Modification::Result {
+    fn get(&self, keys: &Range<Key>) -> Modification::Result {
         get::<Modification, Key>(&self.all_keys, &self.last_version, keys)
     }
 }
@@ -97,7 +97,7 @@ impl<
 
     type FrozenVersion = NaiveFrozenVersion<Modification, Key>;
 
-    fn modify(&mut self, keys: Range<Key>, modification: Modification) {
+    fn modify(&mut self, keys: &Range<Key>, modification: &Modification) {
         for index in IndexableKey::index(&self.all_keys, &keys.start)
             ..IndexableKey::index(&self.all_keys, &keys.end)
         {

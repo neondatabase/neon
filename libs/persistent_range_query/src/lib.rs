@@ -46,7 +46,7 @@ pub trait RangeModification<Key> {
 }
 
 pub trait VecReadableVersion<Modification: RangeModification<Key>, Key> {
-    fn get(&self, keys: Range<Key>) -> Modification::Result;
+    fn get(&self, keys: &Range<Key>) -> Modification::Result;
 }
 
 // TODO: use trait alias when stabilized
@@ -73,6 +73,6 @@ pub trait PersistentVecStorage<
 
     type FrozenVersion: VecFrozenVersion<Modification, Key>;
 
-    fn modify(&mut self, keys: Range<Key>, modification: Modification);
+    fn modify(&mut self, keys: &Range<Key>, modification: &Modification);
     fn freeze(&mut self) -> Self::FrozenVersion;
 }
