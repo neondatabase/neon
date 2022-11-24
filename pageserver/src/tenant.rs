@@ -705,29 +705,6 @@ impl Tenant {
         .await
     }
 
-    pub fn create_tenant(
-        conf: &'static PageServerConf,
-        tenant_conf: TenantConfOpt,
-        tenant_id: TenantId,
-        remote_storage: Option<GenericRemoteStorage>,
-    ) -> anyhow::Result<Arc<Tenant>> {
-        let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-        create_tenant_files(conf, tenant_conf, tenant_id)?;
-        // create tenant in Loading state, and activate it immediately so that it is
-        // possible to issue create_timeline request on it.
-        let tenant = Arc::new(Tenant::new(
-            TenantState::Loading,
-            conf,
-            tenant_conf,
-            wal_redo_manager,
-            tenant_id,
-            remote_storage,
-        ));
-        tenant.activate()?;
-
-        Ok(tenant)
-    }
-
     /// Create a placeholder Tenant object for a broken tenant
     pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
@@ -2234,11 +2211,11 @@ fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> a
     Ok(())
 }
 
-fn create_tenant_files(
+pub(crate) fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PathBuf> {
     let target_tenant_directory = conf.tenant_path(&tenant_id);
     anyhow::ensure!(
         !target_tenant_directory.exists(),
@@ -2279,7 +2256,9 @@ fn create_tenant_files(
         }
     }
 
-    creation_result
+    creation_result?;
+
+    Ok(target_tenant_directory)
 }
 
 fn try_create_target_tenant_dir(
