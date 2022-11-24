@@ -869,9 +869,6 @@ impl Tenant {
                     continue;
                 }
 
-                // TODO There was also remove if dir is empty logic
-                // TODO if attach failed we can be missing metadata here
-
                 let file_name = entry.file_name();
                 if let Ok(timeline_id) =
                     file_name.to_str().unwrap_or_default().parse::<TimelineId>()
