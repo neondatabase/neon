@@ -120,8 +120,6 @@ def test_detach_while_attaching(
     tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
-    checkpoint_numbers = range(1, 3)
-
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
     # from shared_buffers without hitting the page server, which defeats the point
@@ -143,11 +141,11 @@ def test_detach_while_attaching(
     # run checkpoint manually to be sure that data landed in remote storage
     pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
-    log.info(f"waiting for upload")
+    log.info("waiting for upload")
 
     # wait until pageserver successfully uploaded a checkpoint to remote storage
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
-    log.info(f"upload is done")
+    log.info("upload is done")
 
     # Detach it
     pageserver_http.tenant_detach(tenant_id)
@@ -166,6 +164,6 @@ def test_detach_while_attaching(
     # Attach it again. If the GC and compaction loops from the previous attach/detach
     # cycle are still running, things could get really confusing..
     pageserver_http.tenant_attach(tenant_id)
-    
+
     with pg.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM foo");
+        cur.execute("SELECT COUNT(*) FROM foo")
