@@ -558,7 +558,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         .map(TenantId::from)
         .unwrap_or_else(TenantId::generate);
 
-    let new_tenant_id = tokio::task::spawn_blocking(move || {
+    let new_tenant = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
         let state = get_state(&request);
 
@@ -566,7 +566,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
             state.conf,
             tenant_conf,
             target_tenant_id,
-            state.remote_storage.as_ref(),
+            state.remote_storage.clone(),
         )
         // FIXME: `create_tenant` can fail from both user and internal errors. Replace this
         // with better error handling once the type permits it
@@ -575,8 +575,28 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     .await
     .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
 
-    Ok(match new_tenant_id {
-        Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,
+    Ok(match new_tenant {
+        Some(tenant) => {
+            // We created the tenant. Existing API semantics are that the tenant
+            // is Active when this function returns.
+            match tenant.wait_to_become_active().await {
+                res @ Err(_) => {
+                    // This shouldn't happen because we just created the tenant directory
+                    // in tenant_mgr::create_tenat, and there aren't any remote timelines
+                    // to load, so, nothing can really fail during load.
+                    // Don't do cleanup because we don't know how we got here.
+                    // Then tenant will likekly be in `Broken` state and subsequent
+                    // calls will fail.
+                    res.context("created tenant failed to become active")
+                        .map_err(ApiError::InternalServerError)?;
+                }
+                Ok(_) => (),
+            }
+            json_response(
+                StatusCode::CREATED,
+                TenantCreateResponse(tenant.tenant_id()),
+            )?
+        }
         None => json_response(StatusCode::CONFLICT, ())?,
     })
 }

@@ -78,7 +78,10 @@ pub fn init_tenant_mgr(
                     }
                 } else {
                     match load_local_tenant(conf, &tenant_dir_path, remote_storage.clone()) {
-                        Ok(Some(_)) => number_of_tenants += 1,
+                        Ok(Some(tenant)) => {
+                            tenants_state::write_tenants().insert(tenant.tenant_id(), tenant);
+                            number_of_tenants += 1;
+                        }
                         Ok(None) => {
                             // This case happens if we crash during attach before creating the attach marker file
                             if let Err(e) = std::fs::remove_dir(&tenant_dir_path) {
@@ -121,7 +124,7 @@ fn load_local_tenant(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     remote_storage: Option<GenericRemoteStorage>,
-) -> anyhow::Result<Option<()>> {
+) -> anyhow::Result<Option<Arc<Tenant>>> {
     if !tenant_path.is_dir() {
         anyhow::bail!("tenant_path is not a directory: {tenant_path:?}")
     }
@@ -154,8 +157,7 @@ fn load_local_tenant(
         // Start loading the tenant into memory. It will initially be in Loading state.
         Tenant::spawn_load(conf, tenant_id, remote_storage)?
     };
-    tenants_state::write_tenants().insert(tenant_id, tenant);
-    Ok(Some(()))
+    Ok(Some(tenant))
 }
 
 ///
@@ -201,18 +203,38 @@ pub fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-    remote_storage: Option<&GenericRemoteStorage>,
-) -> anyhow::Result<Option<TenantId>> {
+    remote_storage: Option<GenericRemoteStorage>,
+) -> anyhow::Result<Option<Arc<Tenant>>> {
     match tenants_state::write_tenants().entry(tenant_id) {
         hash_map::Entry::Occupied(_) => {
             debug!("tenant {tenant_id} already exists");
             Ok(None)
         }
         hash_map::Entry::Vacant(v) => {
-            let tenant =
-                Tenant::create_tenant(conf, tenant_conf, tenant_id, remote_storage.cloned())?;
-            v.insert(tenant);
-            Ok(Some(tenant_id))
+            // Hold the write_tenants() lock, since all of this is local IO.
+            // If this section ever becomes contentious, introduce a new `TenantState::Creating`.
+            let tenant_directory = super::tenant::create_tenant_files(conf, tenant_conf, tenant_id)
+                .context("create tenant files")?;
+            let created_tenant = load_local_tenant(conf, &tenant_directory, remote_storage)
+                .context("load created tenant")?;
+            match created_tenant {
+                None => {
+                    // We get None in case the directory is empty.
+                    // This shouldn't happen here, because we just created the directory.
+                    // So, skip any cleanup work for now, we don't know how we reached this state.
+                    anyhow::bail!("we just created the tenant directory, it can't be empty");
+                }
+                Some(tenant) => {
+                    anyhow::ensure!(
+                        tenant_id == tenant.tenant_id(),
+                        "loaded created tenant has unexpected tenant id (expect {} != actual {})",
+                        tenant_id,
+                        tenant.tenant_id()
+                    );
+                    v.insert(Arc::clone(&tenant));
+                    Ok(Some(tenant))
+                }
+            }
         }
     }
 }
