@@ -640,9 +640,7 @@ impl Tenant {
         crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
             .context("fsync tenant directory after unlinking attach marker file")?;
 
-        fail::fail_point!("attach-before-activate", |_| {
-            anyhow::bail!("failpoint attach-beore-activate");
-        });
+        utils::failpoint_sleep_millis_async!("attach-before-activate");
 
         // Start background operations and open the tenant for business.
         // The loops will shut themselves down when they notice that the tenant is inactive.
