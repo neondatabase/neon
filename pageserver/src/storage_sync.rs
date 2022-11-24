@@ -103,7 +103,7 @@
 //! the client's tenant and timeline.
 //! Dropping the client will drop queued operations but not executing operations.
 //! These will complete unless the `task_mgr` tasks are cancelled using `task_mgr`
-//! APIs, e.g., during pageserver shutdown or tenant detach.
+//! APIs, e.g., during pageserver shutdown, timeline delete, or tenant detach.
 //!
 //! # Completion
 //!
@@ -238,9 +238,11 @@ use anyhow::Context;
 // re-export this
 pub use download::is_temp_download_file;
 pub use download::list_remote_timelines;
+use tracing::{info_span, Instrument};
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
+use std::mem::discriminant;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -310,6 +312,7 @@ pub struct RemoteTimelineClient {
 enum UploadQueue {
     Uninitialized,
     Initialized(UploadQueueInitialized),
+    ShutDown(UploadQueueShutDown),
 }
 /// This keeps track of queued and in-progress tasks.
 struct UploadQueueInitialized {
@@ -348,6 +351,10 @@ struct UploadQueueInitialized {
     queued_operations: VecDeque<UploadOp>,
 }
 
+struct UploadQueueShutDown {
+    last_uploaded_consistent_lsn: Lsn,
+}
+
 impl UploadQueue {
     fn initialize_empty_remote(
         &mut self,
@@ -355,7 +362,9 @@ impl UploadQueue {
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
-            UploadQueue::Initialized(_) => anyhow::bail!("already initialized"),
+            UploadQueue::Initialized(_) | UploadQueue::ShutDown(_) => {
+                anyhow::bail!("already initialized, state {:?}", discriminant(self))
+            }
         }
 
         info!("initializing upload queue for empty remote");
@@ -386,7 +395,9 @@ impl UploadQueue {
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
-            UploadQueue::Initialized(_) => anyhow::bail!("already initialized"),
+            UploadQueue::Initialized(_) | UploadQueue::ShutDown(_) => {
+                anyhow::bail!("already initialized, state {:?}", discriminant(self))
+            }
         }
 
         let mut files = HashMap::new();
@@ -422,10 +433,12 @@ impl UploadQueue {
         Ok(self.initialized_mut().expect("we just set it"))
     }
 
-    fn initialized_mut(&mut self) -> Option<&mut UploadQueueInitialized> {
+    fn initialized_mut(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
-            UploadQueue::Uninitialized => None,
-            UploadQueue::Initialized(x) => Some(x),
+            UploadQueue::Uninitialized | UploadQueue::ShutDown(_) => {
+                anyhow::bail!("queue is in state {:?}", discriminant(self))
+            }
+            UploadQueue::Initialized(x) => Ok(x),
         }
     }
 }
@@ -453,6 +466,16 @@ enum UploadOp {
 
     /// Barrier. When the barrier operation is reached,
     Barrier(tokio::sync::watch::Sender<()>),
+}
+
+impl UploadOp {
+    fn as_barrier(&self) -> Option<&tokio::sync::watch::Sender<()>> {
+        if let Self::Barrier(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
 }
 
 impl std::fmt::Display for UploadOp {
@@ -493,11 +516,11 @@ impl RemoteTimelineClient {
     }
 
     pub fn last_uploaded_consistent_lsn(&self) -> Option<Lsn> {
-        self.upload_queue
-            .lock()
-            .unwrap()
-            .initialized_mut()
-            .map(|q| q.last_uploaded_consistent_lsn)
+        match &*self.upload_queue.lock().unwrap() {
+            UploadQueue::Uninitialized => None,
+            UploadQueue::Initialized(q) => Some(q.last_uploaded_consistent_lsn),
+            UploadQueue::ShutDown(q) => Some(q.last_uploaded_consistent_lsn),
+        }
     }
 
     //
@@ -800,7 +823,11 @@ impl RemoteTimelineClient {
                     self_rc.perform_upload_task(task).await;
                     self_rc.update_upload_queue_unfinished_metric(-1, &task_clone.op);
                     Ok(())
-                },
+                }
+                // FIXME this captures the parent span, i.e. log messages inside the task will look like so:
+                // 2022-11-24T17:34:35.707155Z  INFO layer flush task{tenant=81892ec7b59f9ac3f06f5ab5d8c1fe3d timeline=82f9c121ee5778016485e775550e8c61}:flush_frozen_layer{tenant_id=81892ec7b59f9ac3f06f5ab5d8c1fe3d timeline_id=82f9c121ee5778016485e775550e8c61 layer=inmem-0000000001696629-00000000016AFA39}:remote_upload{tenant=81892ec7b59f9ac3f06f5ab5d8c1fe3d timeline=82f9c121ee5778016485e775550e8c61 upload_task_id=1556}: shutting down
+                // How to avoid this?
+                .instrument(info_span!("remote_upload", tenant = %self.tenant_id, timeline = %self.timeline_id, upload_task_id = %task_id)),
             );
 
             // Loop back to process next task
@@ -849,9 +876,9 @@ impl RemoteTimelineClient {
                     .await
             }
             UploadOp::Barrier(_) => {
-                // unreachable. Barrier operations are handled synchronously in
-                // launch_queued_tasks
-                anyhow::bail!("unexpected Barrier operation in perform_upload_task");
+                // Barrier operations are handled synchronously in
+                // launch_queued_tasks.
+                unreachable!("unexpected Barrier operation in perform_upload_task");
             }
         }
     }
@@ -865,11 +892,24 @@ impl RemoteTimelineClient {
     /// queue that were waiting by the completion are launched.
     ///
     async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
-        // Loop to retry until it completes.
-        loop {
+        // Loop to retry until we reach one of the following outcomes.
+        enum Outcome {
+            TaskSucceeded,
+            ShutdownRequested,
+        }
+        let outcome: Outcome = loop {
             match self.perform_upload_task_impl(&task).await {
                 Ok(()) => {
-                    break;
+                    let retries = task.retries.load(Ordering::SeqCst);
+                    if retries > 0 {
+                        info!(
+                            "remote task {} completed successfully after {} retries",
+                            task.op, retries
+                        );
+                    } else {
+                        info!("remote task {} completed successfully", task.op);
+                    }
+                    break Outcome::TaskSucceeded;
                 }
                 Err(e) => {
                     let retries = task.retries.fetch_add(1, Ordering::SeqCst);
@@ -879,6 +919,10 @@ impl RemoteTimelineClient {
                         task.op, retries, e
                     );
 
+                    if task_mgr::is_shutdown_requested() {
+                        break Outcome::ShutdownRequested;
+                    }
+
                     exponential_backoff(
                         retries,
                         DEFAULT_BASE_BACKOFF_SECONDS,
@@ -887,42 +931,92 @@ impl RemoteTimelineClient {
                     .await;
                 }
             }
-        }
+        };
 
-        let retries = task.retries.load(Ordering::SeqCst);
-        if retries > 0 {
-            info!(
-                "remote task {} completed successfully after {} retries",
-                task.op, retries
-            );
-        } else {
-            info!("remote task {} completed successfully", task.op);
-        }
+        match outcome {
+            Outcome::TaskSucceeded => {
+                let mut upload_queue = self.upload_queue.lock().unwrap();
+                let mut upload_queue = upload_queue.initialized_mut().expect(
+                    "callers are responsible for ensuring this is only called on initialized queue",
+                );
+                upload_queue.inprogress_tasks.remove(&task.task_id);
 
-        // The task has completed succesfully. Remove it from the in-progress list.
-        {
-            let mut upload_queue = self.upload_queue.lock().unwrap();
-            let mut upload_queue = upload_queue.initialized_mut().expect(
-                "callers are responsible for ensuring this is only called on initialized queue",
-            );
-            upload_queue.inprogress_tasks.remove(&task.task_id);
+                match task.op {
+                    UploadOp::UploadLayer(_, _) => {
+                        upload_queue.num_inprogress_layer_uploads -= 1;
+                    }
+                    UploadOp::UploadMetadata(_, lsn) => {
+                        upload_queue.num_inprogress_metadata_uploads -= 1;
+                        upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
+                    }
+                    UploadOp::Delete(_, _) => {
+                        upload_queue.num_inprogress_deletions -= 1;
+                    }
+                    UploadOp::Barrier(_) => unreachable!(
+                        "Barrier operations are handled synchronously in launch_queued_tasks"
+                    ),
+                };
 
-            match task.op {
-                UploadOp::UploadLayer(_, _) => {
-                    upload_queue.num_inprogress_layer_uploads -= 1;
+                // Launch any queued tasks that were unblocked by this one.
+                self.launch_queued_tasks(upload_queue);
+            }
+            Outcome::ShutdownRequested => {
+                // Whichever *tasks* for this RemoteTimelineClient grabs the mutex first will transition the queue
+                // into shut down state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
+                // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
+                let mut guard = self.upload_queue.lock().unwrap();
+                let mut upload_queue = UploadQueue::Uninitialized;
+                std::mem::swap(&mut *guard, &mut upload_queue);
+                match upload_queue {
+                    UploadQueue::Uninitialized => panic!("callers are responsible for ensuring this is only called on initialized queue"),
+                    UploadQueue::ShutDown(_) => {
+                        info!("another concurrent task already shut down the queue")
+                    }, // nothing to do
+                    UploadQueue::Initialized(qi) => {
+                        info!("shutting down");
+
+                        let UploadQueueInitialized{
+                            last_uploaded_consistent_lsn,
+                            task_counter: _task_counter,
+                            latest_files: _latest_files,
+                            latest_metadata: _latest_metadata,
+                            num_inprogress_layer_uploads, num_inprogress_metadata_uploads, num_inprogress_deletions,
+                            inprogress_tasks,
+                            queued_operations } = qi;
+
+                        // consistency checks
+                        assert_eq!(
+                            num_inprogress_layer_uploads +
+                            num_inprogress_metadata_uploads +
+                            num_inprogress_deletions,
+                            inprogress_tasks.len()
+                        ) ;
+
+                        // Assert that we're really dropping all barrier ops later.
+                        let inprogress_barrires =  inprogress_tasks
+                            .iter()
+                            .filter_map(|(_, t)| t.op.as_barrier());
+                        assert_eq!(inprogress_barrires.count(), 0, "barriers are processes synchronously in launch_queued_tasks");
+
+                        // teardown queued ops
+                        for op in queued_operations {
+                            self.update_upload_queue_unfinished_metric(-1, &op);
+                            // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
+                            // which is exactly what we want to happen.
+                            drop(op);
+                        }
+
+                        // Set up the ShutDown state
+                        let upload_queue = UploadQueue::ShutDown(UploadQueueShutDown {
+                            last_uploaded_consistent_lsn,
+                        });
+                        *guard = upload_queue;
+
+                        // We're done.
+                        drop(guard);
+                    }
                 }
-                UploadOp::UploadMetadata(_, lsn) => {
-                    upload_queue.num_inprogress_metadata_uploads -= 1;
-                    upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
-                }
-                UploadOp::Delete(_, _) => {
-                    upload_queue.num_inprogress_deletions -= 1;
-                }
-                UploadOp::Barrier(_) => unreachable!(),
-            };
-
-            // Launch any queued tasks that were unblocked by this one.
-            self.launch_queued_tasks(upload_queue);
+            }
         }
     }
 
