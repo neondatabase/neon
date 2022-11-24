@@ -529,9 +529,9 @@ impl Tenant {
         tenant_id: TenantId,
         remote_storage: &GenericRemoteStorage,
     ) -> anyhow::Result<Arc<Tenant>> {
-        // FIXME: where to get tenant config when attaching? This will just fill in
-        // the defaults
-        let tenant_conf = Self::load_tenant_config(conf, tenant_id)?;
+        // XXX: Attach should provide the config, especially during tenant migration.
+        //      See https://github.com/neondatabase/neon/issues/1555
+        let tenant_conf = TenantConfOpt::default();
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
