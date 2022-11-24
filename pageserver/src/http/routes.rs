@@ -579,18 +579,15 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         Some(tenant) => {
             // We created the tenant. Existing API semantics are that the tenant
             // is Active when this function returns.
-            match tenant.wait_to_become_active().await {
-                res @ Err(_) => {
-                    // This shouldn't happen because we just created the tenant directory
-                    // in tenant_mgr::create_tenat, and there aren't any remote timelines
-                    // to load, so, nothing can really fail during load.
-                    // Don't do cleanup because we don't know how we got here.
-                    // Then tenant will likekly be in `Broken` state and subsequent
-                    // calls will fail.
-                    res.context("created tenant failed to become active")
-                        .map_err(ApiError::InternalServerError)?;
-                }
-                Ok(_) => (),
+            if let res @ Err(_) = tenant.wait_to_become_active().await {
+                // This shouldn't happen because we just created the tenant directory
+                // in tenant_mgr::create_tenant, and there aren't any remote timelines
+                // to load, so, nothing can really fail during load.
+                // Don't do cleanup because we don't know how we got here.
+                // The tenant will likely be in `Broken` state and subsequent
+                // calls will fail.
+                res.context("created tenant failed to become active")
+                    .map_err(ApiError::InternalServerError)?;
             }
             json_response(
                 StatusCode::CREATED,
