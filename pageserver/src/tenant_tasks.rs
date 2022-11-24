@@ -6,12 +6,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::TENANT_TASK_EVENTS;
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr;
 use crate::tenant::{Tenant, TenantState};
 use crate::tenant_mgr;
 use tracing::*;
 use utils::id::TenantId;
 
+#[cfg(test)]
+pub fn start_background_loops(tenant_id: TenantId) {
+    // Do not start the background loops.
+    // Right now, in tests, Tenant is only created by TenantHarness,
+    // and all tests that use TenantHarness assume that there are
+    // no background loops that do compaction and GC. If they want it
+    // to happen, they call the corresponding functions directly.
+    //
+    // XXX replace this with a TenantConfigRequest flag that is
+    // also usable by tests, see https://github.com/neondatabase/neon/issues/2917
+}
+
+#[cfg(not(test))]
+use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+#[cfg(not(test))]
 pub fn start_background_loops(tenant_id: TenantId) {
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
