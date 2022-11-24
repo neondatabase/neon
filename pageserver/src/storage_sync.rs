@@ -807,6 +807,55 @@ impl RemoteTimelineClient {
         }
     }
 
+    async fn perform_upload_task_impl(
+        self: &Arc<Self>,
+        task: &Arc<UploadTask>,
+    ) -> anyhow::Result<()> {
+        match &task.op {
+            UploadOp::UploadLayer(ref path, ref layer_metadata) => {
+                upload::upload_timeline_layer(&self.storage_impl, path, layer_metadata)
+                    .measure_remote_op(
+                        self.tenant_id,
+                        self.timeline_id,
+                        RemoteOpFileKind::Layer,
+                        RemoteOpKind::Upload,
+                    )
+                    .await
+            }
+            UploadOp::UploadMetadata(ref index_part, _lsn) => {
+                upload::upload_index_part(
+                    self.conf,
+                    &self.storage_impl,
+                    self.tenant_id,
+                    self.timeline_id,
+                    index_part,
+                )
+                .measure_remote_op(
+                    self.tenant_id,
+                    self.timeline_id,
+                    RemoteOpFileKind::Index,
+                    RemoteOpKind::Upload,
+                )
+                .await
+            }
+            UploadOp::Delete(metric_file_kind, ref path) => {
+                delete::delete_layer(&self.storage_impl, path)
+                    .measure_remote_op(
+                        self.tenant_id,
+                        self.timeline_id,
+                        *metric_file_kind,
+                        RemoteOpKind::Delete,
+                    )
+                    .await
+            }
+            UploadOp::Barrier(_) => {
+                // unreachable. Barrier operations are handled synchronously in
+                // launch_queued_tasks
+                anyhow::bail!("unexpected Barrier operation in perform_upload_task");
+            }
+        }
+    }
+
     ///
     /// Perform an upload task.
     ///
@@ -818,52 +867,7 @@ impl RemoteTimelineClient {
     async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
         // Loop to retry until it completes.
         loop {
-            let upload_result: anyhow::Result<()> = match &task.op {
-                UploadOp::UploadLayer(ref path, ref layer_metadata) => {
-                    upload::upload_timeline_layer(&self.storage_impl, path, layer_metadata)
-                        .measure_remote_op(
-                            self.tenant_id,
-                            self.timeline_id,
-                            RemoteOpFileKind::Layer,
-                            RemoteOpKind::Upload,
-                        )
-                        .await
-                }
-                UploadOp::UploadMetadata(ref index_part, _lsn) => {
-                    upload::upload_index_part(
-                        self.conf,
-                        &self.storage_impl,
-                        self.tenant_id,
-                        self.timeline_id,
-                        index_part,
-                    )
-                    .measure_remote_op(
-                        self.tenant_id,
-                        self.timeline_id,
-                        RemoteOpFileKind::Index,
-                        RemoteOpKind::Upload,
-                    )
-                    .await
-                }
-                UploadOp::Delete(metric_file_kind, ref path) => {
-                    delete::delete_layer(&self.storage_impl, path)
-                        .measure_remote_op(
-                            self.tenant_id,
-                            self.timeline_id,
-                            *metric_file_kind,
-                            RemoteOpKind::Delete,
-                        )
-                        .await
-                }
-                UploadOp::Barrier(_) => {
-                    // unreachable. Barrier operations are handled synchronously in
-                    // launch_queued_tasks
-                    warn!("unexpected Barrier operation in perform_upload_task");
-                    break;
-                }
-            };
-
-            match upload_result {
+            match self.perform_upload_task_impl(&task).await {
                 Ok(()) => {
                     break;
                 }
