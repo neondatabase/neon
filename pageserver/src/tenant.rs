@@ -892,10 +892,6 @@ impl Tenant {
         // Sort the array of timeline IDs into tree-order, so that parent comes before
         // all its children.
         let sorted_timelines = tree_sort_timelines(timelines_to_load)?;
-        // FIXME if we init some of the timelines and one of them is broken we
-        //      potentially will end up with partially launched wal receivers.
-        //    1. Either move it out of initialize_with_lock
-        //    2. Or pass it as a flag
         // FIXME original collect_timeline_files contained one more check:
         //    1. "Timeline has no ancestor and no layer files"
 
