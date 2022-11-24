@@ -724,10 +724,7 @@ impl Tenant {
     }
 
     /// Create a placeholder Tenant object for a broken tenant
-    pub fn create_broken_tenant(
-        conf: &'static PageServerConf,
-        tenant_id: TenantId,
-    ) -> Arc<Tenant> {
+    pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
             TenantState::Broken,
@@ -739,7 +736,7 @@ impl Tenant {
         ));
         tenant
     }
-    
+
     ///
     /// Load a tenant that's available on local disk
     ///
@@ -1281,14 +1278,16 @@ impl Tenant {
                 }
                 TenantState::Broken => {
                     // This shouldn't happen either
-                    result = Err(anyhow::anyhow!("Could not activate tenant because it is in broken state"));
+                    result = Err(anyhow::anyhow!(
+                        "Could not activate tenant because it is in broken state"
+                    ));
                 }
                 TenantState::Paused => {
                     // The tenant was detached, or system shutdown was requested, while we were
                     // loading or attaching the tenant.
                     info!("Tenant is already in Paused state, skipping activation");
                 }
-                TenantState::Loading | TenantState::Attaching  => {
+                TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Active;
 
                     let timelines_accessor = self.timelines.lock().unwrap();
@@ -1308,7 +1307,6 @@ impl Tenant {
         });
         result
     }
-
 
     /// Change tenant status to paused, to mark that it is being shut down
     pub fn set_paused(&self) {
@@ -1361,7 +1359,7 @@ impl Tenant {
                     *current_state = TenantState::Broken;
                     warn!("Marking Paused tenant as Broken");
                 }
-                TenantState::Loading | TenantState::Attaching  => {
+                TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Broken;
                 }
             }
@@ -2228,7 +2226,6 @@ fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> a
 
     Ok(())
 }
-
 
 fn create_tenant_files(
     conf: &'static PageServerConf,
