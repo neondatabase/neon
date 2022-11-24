@@ -2,6 +2,7 @@ use std::ops::Range;
 
 pub mod naive;
 pub mod ops;
+pub mod segment_tree;
 
 /// Should be a monoid:
 /// * Identity element: for all a: combine(new_for_empty_range(), a) = combine(a, new_for_empty_range()) = a

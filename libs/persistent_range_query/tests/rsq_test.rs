@@ -1,10 +1,11 @@
 use persistent_range_query::naive::*;
 use persistent_range_query::ops::rsq::*;
 use persistent_range_query::ops::SameElementsInitializer;
+use persistent_range_query::segment_tree::{MidpointableKey, PersistentSegmentTree};
 use persistent_range_query::{PersistentVecStorage, VecReadableVersion};
 use std::ops::Range;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct K(u8);
 
 impl IndexableKey for K {
@@ -23,10 +24,16 @@ impl SumOfSameElements<K> for i32 {
     }
 }
 
-#[test]
-fn test_naive() {
-    let mut s: NaiveVecStorage<AddAssignModification<i32>, _, _> =
-        NaiveVecStorage::new(K(0)..K(12), SameElementsInitializer::new(0i32));
+impl MidpointableKey for K {
+    fn midpoint(range: &Range<Self>) -> Self {
+        K(range.start.0 + (range.end.0 - range.start.0) / 2)
+    }
+}
+
+fn test_storage<
+    S: PersistentVecStorage<AddAssignModification<i32>, SameElementsInitializer<i32>, K>,
+>() {
+    let mut s = S::new(K(0)..K(12), SameElementsInitializer::new(0i32));
     assert_eq!(*s.get(K(0)..K(12)).sum(), 0);
 
     s.modify(K(2)..K(5), AddAssignModification::Add(3));
@@ -41,4 +48,14 @@ fn test_naive() {
 
     assert_eq!(*s.get(K(4)..K(6)).sum(), 12 + 12);
     assert_eq!(*s_old.get(K(4)..K(6)).sum(), 3);
+}
+
+#[test]
+fn test_naive() {
+    test_storage::<NaiveVecStorage<_, _, _>>();
+}
+
+#[test]
+fn test_segment_tree() {
+    test_storage::<PersistentSegmentTree<_, _, _>>();
 }
