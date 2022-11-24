@@ -209,12 +209,8 @@ pub fn create_tenant(
             Ok(None)
         }
         hash_map::Entry::Vacant(v) => {
-            let tenant = Tenant::create_tenant(
-                conf,
-                tenant_conf,
-                tenant_id,
-                remote_storage.cloned(),
-            )?;
+            let tenant =
+                Tenant::create_tenant(conf, tenant_conf, tenant_id, remote_storage.cloned())?;
             v.insert(tenant);
             Ok(Some(tenant_id))
         }
@@ -285,7 +281,6 @@ pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
-
     let tenant = match {
         let mut tenants_accessor = tenants_state::write_tenants();
         tenants_accessor.remove(&tenant_id)
