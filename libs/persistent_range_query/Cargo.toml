@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+
+[dev-dependencies]
+rand = "0.8.3"

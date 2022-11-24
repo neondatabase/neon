@@ -2259,6 +2259,7 @@ checksum = "478c572c3d73181ff3c2539045f6eb99e5491218eae919370993b890cdbdd98e"
 name = "persistent_range_query"
 version = "0.1.0"
 dependencies = [
+ "rand",
  "workspace_hack",
 ]
 
