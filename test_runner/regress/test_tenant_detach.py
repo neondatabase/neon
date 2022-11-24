@@ -153,7 +153,7 @@ def test_detach_while_attaching(
     pageserver_http.tenant_detach(tenant_id)
 
     # And re-attach
-    pageserver_http.configure_failpoints([("attach-before-activate", "sleep(5000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
 
     pageserver_http.tenant_attach(tenant_id)
 
