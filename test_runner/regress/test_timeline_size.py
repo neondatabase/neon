@@ -27,6 +27,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
+from fixtures.pg_version import PgVersion
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size, wait_until
 
@@ -489,7 +490,7 @@ def test_timeline_size_metrics(
     test_output_dir: Path,
     port_distributor: PortDistributor,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
 ):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()

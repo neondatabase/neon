@@ -32,6 +32,7 @@ from fixtures.neon_fixtures import (
     available_remote_storages,
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
@@ -582,7 +583,11 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         shutil.copy(f_partial_saved, f_partial_path)
 
     # recreate timeline on pageserver from scratch
-    ps_cli.timeline_create(tenant_id, timeline_id)
+    ps_cli.timeline_create(
+        pg_version=PgVersion.from_int(pg_version),
+        tenant_id=tenant_id,
+        new_timeline_id=timeline_id,
+    )
 
     wait_lsn_timeout = 60 * 3
     started_at = time.time()

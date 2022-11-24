@@ -16,6 +16,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
@@ -50,7 +51,7 @@ def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_o
     # it creates a new snapshot for releases after we tested the current version against the previous snapshot in `test_backward_compatibility`.
     #
     # There's no cleanup here, it allows to adjust the data in `test_backward_compatibility` itself without re-collecting it.
-    neon_env_builder.pg_version = "14"
+    neon_env_builder.pg_version = PgVersion.V14
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_local_fs_remote_storage()
     neon_env_builder.preserve_database_files = True
@@ -98,7 +99,7 @@ def test_backward_compatibility(
     test_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
     request: FixtureRequest,
 ):
     """
@@ -153,7 +154,7 @@ def test_backward_compatibility(
 def test_forward_compatibility(
     test_output_dir: Path,
     port_distributor: PortDistributor,
-    pg_version: str,
+    pg_version: PgVersion,
     request: FixtureRequest,
     neon_binpath: Path,
 ):
@@ -345,7 +346,7 @@ def check_neon_works(
     neon_target_binpath: Path,
     neon_current_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
     port_distributor: PortDistributor,
     test_output_dir: Path,
     pg_bin: PgBin,
@@ -404,7 +405,7 @@ def check_neon_works(
 
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
     pageserver_http.timeline_delete(tenant_id, timeline_id)
-    pageserver_http.timeline_create(tenant_id, timeline_id)
+    pageserver_http.timeline_create(pg_version, tenant_id, timeline_id)
     pg_bin.run(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
     )
