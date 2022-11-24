@@ -197,7 +197,7 @@ In this specific RFC:
 
 1. We use a `StateKeeper` / `StateSubscriber` / `StateHider` primitive to ensure all closures are gone, and running closures can't tell the difference.
 2. It's proposed to run only non-cancellable short-living closures and check in the code reviews that the closure won't run for a long time. This should be easy to spot. Moreover: _all of the current code does not use long-running functions inside tenants_, even when GC or compaction is run.
-3. To cancel GC and compaction, we could use the `CancelationSender` / `CancellationReceiver` pair. After they finish iteration, they check whether they should stop, and we wait for this to happen.
+3. To cancel GC and compaction, we could use the `LoopedTaskOperator` / `LoopedTaskController` pair. After they finish iteration, they check whether they should stop, and we wait for this to happen. Also, we can receive commands to pause, continue and continue the loop once.
 
 ## `TimelineAccessor`
 
@@ -224,6 +224,6 @@ The only really interesting property is 1. The join handles received from spawni
 It appears we don't need this selector; we need a great design where join handles will be stored in the owner, more in a tree-like way. It appears our accessors can do this kind of thing!
 
 1. `TenantAccessor` could be joined using the `DropWatcher`, so we can subscribe for a drop. The same applies to `TimelineGuard`.
-2. The background tasks attached to the tenant or timeline are joined by the tenant or timeline itself when the drop ends. This is done by using `CancelationSender` / `CancellationReceiver` interface.
-3. For cancellation, we should only use the `CancelationSender` / `CancellationReceiver` in proper tasks. It behaves as `JoinGuard` with the possibility from another side to check whether we should stop.
+2. The background tasks attached to the tenant or timeline are joined by the tenant or timeline itself when the drop ends. This is done by using `LoopedTaskOperator` / `LoopedTaskController` interface.
+3. For cancellation, we should only use the `LoopedTaskOperator` / `LoopedTaskController` in proper tasks. It behaves as `JoinGuard` with the possibility from another side to check whether we should stop.
 4. After that, it's perfectly possible to run `spawn_blocking` tasks!
