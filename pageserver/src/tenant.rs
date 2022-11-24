@@ -726,15 +726,14 @@ impl Tenant {
     /// Create a placeholder Tenant object for a broken tenant
     pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-        let tenant = Arc::new(Tenant::new(
+        Arc::new(Tenant::new(
             TenantState::Broken,
             conf,
             TenantConfOpt::default(),
             wal_redo_manager,
             tenant_id,
             None,
-        ));
-        tenant
+        ))
     }
 
     ///
