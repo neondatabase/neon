@@ -103,7 +103,7 @@
 //! the client's tenant and timeline.
 //! Dropping the client will drop queued operations but not executing operations.
 //! These will complete unless the `task_mgr` tasks are cancelled using `task_mgr`
-//! APIs, e.g., during pagserver shutdown or tenant detach.
+//! APIs, e.g., during pageserver shutdown or tenant detach.
 //!
 //! # Completion
 //!
