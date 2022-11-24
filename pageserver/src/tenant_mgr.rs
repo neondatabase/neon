@@ -213,10 +213,9 @@ pub fn create_tenant(
         hash_map::Entry::Vacant(v) => {
             // Hold the write_tenants() lock, since all of this is local IO.
             // If this section ever becomes contentious, introduce a new `TenantState::Creating`.
-            let tenant_directory = super::tenant::create_tenant_files(conf, tenant_conf, tenant_id)
-                .context("create tenant files")?;
-            let created_tenant = load_local_tenant(conf, &tenant_directory, remote_storage)
-                .context("load created tenant")?;
+            let tenant_directory =
+                super::tenant::create_tenant_files(conf, tenant_conf, tenant_id)?;
+            let created_tenant = load_local_tenant(conf, &tenant_directory, remote_storage)?;
             match created_tenant {
                 None => {
                     // We get None in case the directory is empty.
