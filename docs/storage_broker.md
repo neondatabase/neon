@@ -23,5 +23,5 @@ Broker serves /metrics on the same port as grpc service.
 
 grpcurl can be used to check which values are currently being pushed:
 ```
-grpcurl -proto broker/proto/broker.proto -d '{"all":{}}' -plaintext localhost:50051 storage_broker.NeonBroker/SubscribeSafekeeperInfo
+grpcurl -proto broker/proto/broker.proto -d '{"all":{}}' -plaintext localhost:50051 storage_broker.BrokerService/SubscribeSafekeeperInfo
 ```
