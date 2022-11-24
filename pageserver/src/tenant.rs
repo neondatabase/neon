@@ -2556,7 +2556,7 @@ pub mod harness {
             let walredo_mgr = Arc::new(TestRedoManager);
 
             let tenant = Arc::new(Tenant::new(
-                TenantState::Active,
+                TenantState::Loading,
                 self.conf,
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
