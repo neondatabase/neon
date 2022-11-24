@@ -707,16 +707,17 @@ impl Tenant {
     ) -> anyhow::Result<Arc<Tenant>> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         create_tenant_files(conf, tenant_conf, tenant_id)?;
-        // create tenant in Active state so it is possible to issue create_timeline
-        // request. Which on timeline activation will trigger tenant activation
+        // create tenant in Loading state, and activate it immediately so that it is
+        // possible to issue create_timeline request on it.
         let tenant = Arc::new(Tenant::new(
-            TenantState::Active,
+            TenantState::Loading,
             conf,
             tenant_conf,
             wal_redo_manager,
             tenant_id,
             remote_storage,
         ));
+        tenant.activate()?;
 
         Ok(tenant)
     }
@@ -1286,6 +1287,8 @@ impl Tenant {
                 }
                 TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Active;
+
+                    info!("Activating tenant {}", self.tenant_id);
 
                     let timelines_accessor = self.timelines.lock().unwrap();
                     let not_broken_timelines = timelines_accessor
