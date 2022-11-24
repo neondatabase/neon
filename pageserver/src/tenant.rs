@@ -165,12 +165,21 @@ struct TimelineUninitMark {
 }
 
 impl UninitializedTimeline<'_> {
-    /// Ensures timeline data is valid, loads it into pageserver's memory and removes uninit mark file on success.
+    /// Ensures timeline data is valid, loads it into pageserver's memory and removes
+    /// uninit mark file on success.
+    ///
+    /// The new timeline is initialized in Active state, and its background jobs are
+    /// started
     pub fn initialize(self) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         self.initialize_with_lock(&mut timelines, true, true)
     }
 
+    /// Like `initialize`, but the caller is already holding lock on Tenant::timelines.
+    /// If `launch_wal_receiver` is false, the WAL receiver not launched, even though
+    /// timeline is initialized in Active state. This is used during tenant load and
+    /// attach, where the WAL receivers are launched only after all the timelines have
+    /// been initialized.
     fn initialize_with_lock(
         mut self,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
@@ -403,7 +412,7 @@ struct RemoteStartupData {
 /// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
     /// Yet another helper for timeline initialization.
-    /// Contains common part for `load_remote_timeline` and `load_remote_timeline`
+    /// Contains common part for `load_local_timeline` and `load_remote_timeline`
     async fn setup_timeline(
         &self,
         timeline_id: TimelineId,
@@ -501,9 +510,6 @@ impl Tenant {
             )
             .context("save_metadata")?;
         }
-
-        // Finally launch walreceiver
-        timeline.launch_wal_receiver();
 
         Ok(())
     }
@@ -1301,6 +1307,7 @@ impl Tenant {
 
                     for timeline in not_broken_timelines {
                         timeline.set_state(TimelineState::Active);
+                        timeline.launch_wal_receiver();
                     }
                 }
             }

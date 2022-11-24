@@ -44,7 +44,8 @@ impl TenantState {
 /// A state of a timeline in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TimelineState {
-    /// Timeline is fully operational, its background jobs are running.
+    /// Timeline is fully operational. If the containing Tenant is Active, the timeline's
+    /// background jobs are running otherwise they will be launched when the tenant is activated.
     Active,
     /// A timeline is recognized by pageserver, but not yet ready to operate.
     /// The status indicates, that the timeline could eventually go back to Active automatically:
