@@ -320,3 +320,82 @@ def test_remote_storage_upload_queue_retries(
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
     with pg.cursor() as cur:
         assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
+
+
+# Test that we correctly handle timeline with layers stuck in upload queue
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_timeline_deletion_with_files_stuck_in_upload_queue(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_remote_storage_backup_and_restore",
+    )
+
+    env = neon_env_builder.init_start()
+
+    # create tenant with config that will determinstically allow
+    # compaction and gc
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        conf={
+            # small checkpointing and compaction targets to ensure we generate many operations
+            "checkpoint_distance": f"{64 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{64 * 1024}",
+            # large horizon to avoid automatic GC (our assert on gc_result below relies on that)
+            "gc_horizon": f"{1024 ** 4}",
+            "gc_period": "1h",
+            # disable PITR so that GC considers just gc_horizon
+            "pitr_interval": "0s",
+        }
+    )
+
+    client = env.pageserver.http_client()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+
+    client.configure_failpoints(("before-upload-layer", "return"))
+
+    pg.safe_psql_many(
+        [
+            "CREATE TABLE foo (x INTEGER)",
+            "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
+        ]
+    )
+    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    client.timeline_checkpoint(tenant_id, timeline_id)
+
+    timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    assert timeline_path.exists()
+    assert len(list(timeline_path.glob("*"))) >= 8
+
+    def get_queued_count(file_kind, op_kind):
+        metrics = client.get_metrics()
+        matches = re.search(
+            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
+            metrics,
+            re.MULTILINE,
+        )
+        assert matches
+        return int(matches[1])
+
+    assert get_queued_count(file_kind="index", op_kind="upload") > 0
+
+    # timeline delete should work despite layer files stuck in upload
+    log.info("sending delete request")
+    client.timeline_delete(tenant_id, timeline_id)
+
+    assert not timeline_path.exists()
+
+    # timeline deletion should kill ongoing uploads
+    assert get_queued_count(file_kind="index", op_kind="upload") == 0
+
+    # Just to be sure, unblock ongoing uploads. If the previous assert was incorrect, or the prometheus metric broken,
+    # this would likely generate some ERROR level log entries that the NeonEnvBuilder would detect
+    client.configure_failpoints(("before-upload-layer", "off"))
+    # XXX force retry, currently we have to wait for exponential backoff
+    time.sleep(10)
+
+
+# TODO Test that we correctly handle GC of files that are stuck in upload queue.
