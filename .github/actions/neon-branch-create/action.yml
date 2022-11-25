@@ -1,0 +1,158 @@
+name: 'Create Branch'
+description: 'Create Branch using API'
+
+inputs:
+  api_key:
+    desctiption: 'Neon API key'
+    required: true
+  environment:
+    desctiption: 'dev (aka captest) or staging'
+    required: true
+  project_id:
+    desctiption: 'ID of the Project to create Branch in'
+    required: true
+outputs:
+  dsn:
+    description: 'Created Branch DSN (for main database)'
+    value: ${{ steps.change-password.outputs.dsn }}
+  branch_id:
+    description: 'Created Branch ID'
+    value: ${{ steps.create-branch.outputs.branch_id }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Parse Input
+      id: parse-input
+      shell: bash -euxo pipefail {0}
+      run: |
+        case "${ENVIRONMENT}" in
+          dev)
+            API_HOST=console.dev.neon.tech
+            REGION_ID=${REGION_ID:-eu-west-1}
+            ;;
+          staging)
+            API_HOST=console.stage.neon.tech
+            REGION_ID=${REGION_ID:-us-east-1}
+            ;;
+          *)
+            echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
+            exit 1
+            ;;
+        esac
+
+        echo "api_host=${API_HOST}" >> $GITHUB_OUTPUT
+        echo "region_id=${REGION_ID}" >> $GITHUB_OUTPUT
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        REGION_ID: ${{ inputs.region_id }}
+
+    - name: Create New Branch
+      id: create-branch
+      shell: bash -euxo pipefail {0}
+      run: |
+        for i in $(seq 1 10); do
+         branch=$(curl \
+            "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches" \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${API_KEY}" \
+            --data "{
+              \"branch\": {
+                \"name\": \"Created by actions/neon-branch-create; GITHUB_RUN_ID=${GITHUB_RUN_ID} at $(date +%s)\"
+              }
+            }")
+
+          if [ -z "${branch}" ]; then
+            sleep 1
+            continue
+          fi
+
+          branch_id=$(echo $branch | jq --raw-output '.branch.id')
+          if [ "${branch_id}" == "null" ]; then
+            sleep 1
+            continue
+          fi
+
+          break
+        done
+
+        if [ -z "${branch_id}" ] || [ "${branch_id}" == "null" ]; then
+          echo 2>&1 "Failed to create branch after 10 attempts, the latest response was: ${branch}"
+          exit 1
+        fi
+
+        branch_id=$(echo $branch | jq --raw-output '.branch.id')
+        echo "branch_id=${branch_id}" >> $GITHUB_OUTPUT
+
+        host=$(echo $branch | jq --raw-output '.endpoints[0].host')
+        echo "host=${host}" >> $GITHUB_OUTPUT
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        API_HOST: ${{ steps.parse-input.outputs.api_host }}
+        PROJECT_ID: ${{ inputs.project_id }}
+
+    - name: Get Role name
+      id: role-name
+      shell: bash -euxo pipefail {0}
+      run: |
+        roles=$(curl \
+          "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles" \
+          --fail \
+          --header "Accept: application/json" \
+          --header "Content-Type: application/json" \
+          --header "Authorization: Bearer ${API_KEY}"
+          )
+
+        role_name=$(echo $roles | jq --raw-output '.roles[] | select(.protected == false) | .name')
+        echo "role_name=${role_name}" >> $GITHUB_OUTPUT
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        API_HOST: ${{ steps.parse-input.outputs.api_host }}
+        PROJECT_ID: ${{ inputs.project_id }}
+        BRANCH_ID: ${{ steps.create-branch.outputs.branch_id }}
+
+    - name: Change Password
+      id: change-password
+      # A shell without `set -x` to not to expose password/dsn in logs
+      shell: bash -euo pipefail {0}
+      run: |
+        for i in $(seq 1 10); do
+          reset_password=$(curl \
+            "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles/${ROLE_NAME}/reset_password" \
+            --request POST \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${API_KEY}"
+            )
+
+          if [ -z "${reset_password}" ]; then
+            sleep 1
+            continue
+          fi
+
+          password=$(echo $reset_password | jq --raw-output '.role.password')
+          if [ "${password}" == "null" ]; then
+            sleep 1
+            continue
+          fi
+
+          echo "::add-mask::${password}"
+          break
+        done
+
+        if [ -z "${password}" ] || [ "${password}" == "null" ]; then
+          echo 2>&1 "Failed to reset password after 10 attempts, the latest response was: ${reset_password}"
+          exit 1
+        fi
+
+        dsn="postgres://${ROLE_NAME}:${password}@${HOST}/neondb"
+        echo "::add-mask::${dsn}"
+        echo "dsn=${dsn}" >> $GITHUB_OUTPUT
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        API_HOST: ${{ steps.parse-input.outputs.api_host }}
+        PROJECT_ID: ${{ inputs.project_id }}
+        BRANCH_ID: ${{ steps.create-branch.outputs.branch_id }}
+        ROLE_NAME: ${{ steps.role-name.outputs.role_name }}
+        HOST: ${{ steps.create-branch.outputs.host }}
