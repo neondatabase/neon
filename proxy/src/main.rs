@@ -40,6 +40,18 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _guard = sentry::init((
+        "https://0b4e22f1b09d47a8a0058d6d7eb87dcb@o1373725.ingest.sentry.io/4504220230483968",
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            ..Default::default()
+        },
+    ));
+
+    sentry::configure_scope(|scope| {
+        scope.set_tag("process", "proxy");
+    });
+
     tracing_subscriber::fmt()
         .with_ansi(atty::is(atty::Stream::Stdout))
         .with_target(false)

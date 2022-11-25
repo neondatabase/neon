@@ -43,6 +43,18 @@ const ID_FILE_NAME: &str = "safekeeper.id";
 project_git_version!(GIT_VERSION);
 
 fn main() -> anyhow::Result<()> {
+    let _guard = sentry::init((
+        "https://66b1408cdcb44b1fb11a0bf136a8bb4c@o1373725.ingest.sentry.io/4504220229632000",
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            ..Default::default()
+        },
+    ));
+
+    sentry::configure_scope(|scope| {
+        scope.set_tag("process", "safekeeper");
+    });
+
     let arg_matches = cli().get_matches();
 
     if let Some(addr) = arg_matches.get_one::<String>("dump-control-file") {
