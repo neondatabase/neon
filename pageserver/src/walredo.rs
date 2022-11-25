@@ -22,6 +22,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
 use serde::Serialize;
+use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
@@ -56,6 +57,8 @@ use postgres_ffi::v14::nonrelfile_utils::{
     transaction_id_set_status,
 };
 use postgres_ffi::BLCKSZ;
+use shmpipe::*;
+
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -101,6 +104,7 @@ pub struct PostgresRedoManager {
     tenant_id: TenantId,
     conf: &'static PageServerConf,
 
+	pipe: usize,
     process: Mutex<Option<PostgresRedoProcess>>,
 }
 
@@ -203,9 +207,15 @@ impl PostgresRedoManager {
     ///
     pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
+		let name = CString::new(tenant_id.to_string()).unwrap();
+		let pipe;
+		unsafe {
+			pipe = shmem_pipe_init(name.as_ptr());
+		};
         PostgresRedoManager {
             tenant_id,
             conf,
+			pipe,
             process: Mutex::new(None),
         }
     }
@@ -235,62 +245,43 @@ impl PostgresRedoManager {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
 
         let start_time = Instant::now();
+		{
+			let mut process_guard = self.process.lock().unwrap();
 
-        let mut process_guard = self.process.lock().unwrap();
-        let lock_time = Instant::now();
-
-        // launch the WAL redo process on first use
-        if process_guard.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
-            *process_guard = Some(p);
+			// launch the WAL redo process on first use
+			if process_guard.is_none() {
+				let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
+				*process_guard = Some(p);
+			}
+		}
+		let tag = BufferTag { rel, blknum };
+        let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
+        build_begin_redo_for_block_msg(tag, &mut writebuf);
+        if let Some(img) = base_img {
+            build_push_page_msg(tag, &img, &mut writebuf);
         }
-        let process = process_guard.as_mut().unwrap();
-
-        WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
-
-        // Relational WAL records are applied using wal-redo-postgres
-        let buf_tag = BufferTag { rel, blknum };
-        let result = process
-            .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
-            .map_err(WalRedoError::IoError);
-
-        let end_time = Instant::now();
-        let duration = end_time.duration_since(lock_time);
-
-        let len = records.len();
-        let nbytes = records.iter().fold(0, |acumulator, record| {
-            acumulator
-                + match &record.1 {
-                    NeonWalRecord::Postgres { rec, .. } => rec.len(),
-                    _ => unreachable!("Only PostgreSQL records are accepted in this batch"),
-                }
-        });
-
-        WAL_REDO_TIME.observe(duration.as_secs_f64());
-        WAL_REDO_RECORDS_HISTOGRAM.observe(len as f64);
-        WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
-
-        debug!(
-            "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
-            len,
-            nbytes,
-            duration.as_micros(),
-            lsn
-        );
-
-        // If something went wrong, don't try to reuse the process. Kill it, and
-        // next request will launch a new one.
-        if result.is_err() {
-            error!(
-                "error applying {} WAL records ({} bytes) to reconstruct page image at LSN {}",
-                records.len(),
-                nbytes,
-                lsn
-            );
-            let process = process_guard.take().unwrap();
-            process.kill();
+        for (lsn, rec) in records.iter() {
+            if let NeonWalRecord::Postgres {
+                will_init: _,
+                rec: postgres_rec,
+            } = rec
+            {
+                build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
+            } else {
+                return Err(WalRedoError::IoError(Error::new(
+                    ErrorKind::Other,
+                    "tried to pass neon wal record to postgres WAL redo",
+                )));
+            }
         }
-        result
+        build_get_page_msg(tag, &mut writebuf);
+        WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
+
+		let mut page = [0u8; BLCKSZ as usize];
+		unsafe {
+			shmem_pipe_process_request(self.pipe, writebuf.as_ptr(), writebuf.len(), page.as_mut_ptr());
+		}
+		Ok(Bytes::copy_from_slice(&page))
     }
 
     ///
@@ -669,6 +660,7 @@ impl PostgresRedoProcess {
         // Start postgres itself
         let child = Command::new(pg_bin_dir_path.join("postgres"))
             .arg("--wal-redo")
+            .arg("--disable-seccomp")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())

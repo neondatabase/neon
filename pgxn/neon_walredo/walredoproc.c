@@ -93,6 +93,13 @@
 
 PG_MODULE_MAGIC;
 
+struct pipe_t;
+
+extern struct pipe_t* shmem_pipe_open(char const* name);
+extern void shmem_pipe_get_request(struct pipe_t* pipe, char** data, uint32* size, uint32* msg_id);
+extern void shmem_pipe_send_response(struct pipe_t* pipe, uint32 msg_id, char const* resp, size_t resp_size);
+
+
 static int	ReadRedoCommand(StringInfo inBuf);
 static void BeginRedoForBlock(StringInfo input_message);
 static void PushPage(StringInfo input_message);
@@ -103,6 +110,9 @@ static void GetPage(StringInfo input_message);
 static ssize_t buffered_read(void *buf, size_t count);
 
 static BufferTag target_redo_tag;
+
+static uint32 msg_id;
+static struct pipe_t* ps_pipe;
 
 static XLogReaderState *reader_state;
 
@@ -136,6 +146,9 @@ enter_seccomp_mode(void)
 		 */
 		PG_SCMP_ALLOW(getpid),
 
+		/* getcwd() is used to extqct tenant name */
+		PG_SCMP_ALLOW(getcwd),
+
 		/* Enable those for a proper shutdown.
 		PG_SCMP_ALLOW(munmap),
 		PG_SCMP_ALLOW(shmctl),
@@ -153,6 +166,15 @@ enter_seccomp_mode(void)
 }
 #endif /* HAVE_LIBSECCOMP */
 
+static char* get_tenant_id()
+{
+	char* pgdata = pstrdup(getenv("PGDATA"));
+	char* sep = strrchr(pgdata, '/');
+	*sep = '\0';
+	sep = strrchr(pgdata, '/');
+	return sep+1;
+}
+
 /*
  * Entry point for the WAL redo process.
  *
@@ -168,6 +190,7 @@ WalRedoMain(int argc, char *argv[])
 #ifdef HAVE_LIBSECCOMP
 	bool		enable_seccomp;
 #endif
+	ps_pipe = shmem_pipe_open(get_tenant_id());
 
 	am_wal_redo_postgres = true;
 
@@ -287,69 +310,76 @@ WalRedoMain(int argc, char *argv[])
 	 * Main processing loop
 	 */
 	MemoryContextSwitchTo(MessageContext);
-	initStringInfo(&input_message);
 
 	for (;;)
 	{
 		/* Release memory left over from prior query cycle. */
-		resetStringInfo(&input_message);
 
 		set_ps_display("idle");
+
+		shmem_pipe_get_request(ps_pipe, &input_message.data, (uint32*)&input_message.len, &msg_id);
+		input_message.cursor = 0;
 
 		/*
 		 * (3) read a command (loop blocks here)
 		 */
-		firstchar = ReadRedoCommand(&input_message);
-		switch (firstchar)
+		while (true)
 		{
-			case 'B':			/* BeginRedoForBlock */
-				BeginRedoForBlock(&input_message);
-				break;
+			firstchar = input_message.data[input_message.cursor];
+			input_message.cursor += 5; /* skip command char and length */
+			switch (firstchar)
+			{
+				case 'B':			/* BeginRedoForBlock */
+					BeginRedoForBlock(&input_message);
+					continue;
 
-			case 'P':			/* PushPage */
-				PushPage(&input_message);
-				break;
+				case 'P':			/* PushPage */
+					PushPage(&input_message);
+					continue;
 
-			case 'A':			/* ApplyRecord */
-				ApplyRecord(&input_message);
-				break;
+				case 'A':			/* ApplyRecord */
+					ApplyRecord(&input_message);
+					continue;
 
-			case 'G':			/* GetPage */
-				GetPage(&input_message);
-				break;
+				case 'G':			/* GetPage */
+					GetPage(&input_message);
+					break;
 
-				/*
-				 * EOF means we're done. Perform normal shutdown.
-				 */
-			case EOF:
-				ereport(LOG,
-						(errmsg("received EOF on stdin, shutting down")));
+					/*
+					 * EOF means we're done. Perform normal shutdown.
+					 */
+				case EOF:
+					ereport(LOG,
+							(errmsg("received EOF on stdin, shutting down")));
 
 #ifdef HAVE_LIBSECCOMP
-				/*
-				 * Skip the shutdown sequence, leaving some garbage behind.
-				 * Hopefully, postgres will clean it up in the next run.
-				 * This way we don't have to enable extra syscalls, which is nice.
-				 * See enter_seccomp_mode() above.
-				 */
-				if (enable_seccomp)
-					_exit(0);
+					/*
+					 * Skip the shutdown sequence, leaving some garbage behind.
+					 * Hopefully, postgres will clean it up in the next run.
+					 * This way we don't have to enable extra syscalls, which is nice.
+					 * See enter_seccomp_mode() above.
+					 */
+					if (enable_seccomp)
+						_exit(0);
 #endif /* HAVE_LIBSECCOMP */
-				/*
-				 * NOTE: if you are tempted to add more code here, DON'T!
-				 * Whatever you had in mind to do should be set up as an
-				 * on_proc_exit or on_shmem_exit callback, instead. Otherwise
-				 * it will fail to be called during other backend-shutdown
-				 * scenarios.
-				 */
-				proc_exit(0);
+					/*
+					 * NOTE: if you are tempted to add more code here, DON'T!
+					 * Whatever you had in mind to do should be set up as an
+					 * on_proc_exit or on_shmem_exit callback, instead. Otherwise
+					 * it will fail to be called during other backend-shutdown
+					 * scenarios.
+					 */
+					proc_exit(0);
 
-			default:
-				ereport(FATAL,
+				default:
+					ereport(FATAL,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("invalid frontend message type %d",
 								firstchar)));
+			}
+			break;
 		}
+		free(input_message.data);
 	}							/* end of input-reading loop */
 }
 
@@ -556,7 +586,6 @@ ApplyRecord(StringInfo input_message)
 	char	   *errormsg;
 	XLogRecPtr	lsn;
 	XLogRecord *record;
-	int			nleft;
 	ErrorContextCallback errcallback;
 #if PG_VERSION_NUM >= 150000
 	DecodedXLogRecord *decoded;
@@ -574,11 +603,7 @@ ApplyRecord(StringInfo input_message)
 
 	/* note: the input must be aligned here */
 	record = (XLogRecord *) pq_getmsgbytes(input_message, sizeof(XLogRecord));
-
-	nleft = input_message->len - input_message->cursor;
-	if (record->xl_tot_len != sizeof(XLogRecord) + nleft)
-		elog(ERROR, "mismatch between record (%d) and message size (%d)",
-			 record->xl_tot_len, (int) sizeof(XLogRecord) + nleft);
+	input_message->cursor += record->xl_tot_len - sizeof(XLogRecord);
 
 	/* Setup error traceback support for ereport() */
 	errcallback.callback = apply_error_callback;
@@ -765,22 +790,7 @@ GetPage(StringInfo input_message)
 	page = BufferGetPage(buf);
 	/* single thread, so don't bother locking the page */
 
-	/* Response: Page content */
-	tot_written = 0;
-	do {
-		ssize_t		rc;
-
-		rc = write(STDOUT_FILENO, &page[tot_written], BLCKSZ - tot_written);
-		if (rc < 0) {
-			/* If interrupted by signal, just retry */
-			if (errno == EINTR)
-				continue;
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not write to stdout: %m")));
-		}
-		tot_written += rc;
-	} while (tot_written < BLCKSZ);
+	shmem_pipe_send_response(ps_pipe, msg_id, page, BLCKSZ);
 
 	ReleaseBuffer(buf);
 	DropRelFileNodeAllLocalBuffers(rnode);

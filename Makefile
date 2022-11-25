@@ -8,6 +8,7 @@ POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 # environment variable.
 #
 BUILD_TYPE ?= debug
+PG_LDFLAGS = -lshmpipe $(LDFLAGS)
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
 	PG_CFLAGS = -O2 -g3 $(CFLAGS)
@@ -75,6 +76,7 @@ $(POSTGRES_INSTALL_DIR)/build/v14/config.status:
 	(cd $(POSTGRES_INSTALL_DIR)/build/v14 && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-v14/configure \
 		CFLAGS='$(PG_CFLAGS)' \
+		LDFLAGS='$(PG_LDFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/v14 > configure.log)
 
@@ -84,6 +86,7 @@ $(POSTGRES_INSTALL_DIR)/build/v15/config.status:
 	(cd $(POSTGRES_INSTALL_DIR)/build/v15 && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-v15/configure \
 		CFLAGS='$(PG_CFLAGS)' \
+		LDFLAGS='$(PG_LDFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/v15 > configure.log)
 

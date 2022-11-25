@@ -1,0 +1,8 @@
+[package]
+name = "shmpipe"
+version = "0.0.1"
+edition = "2021"
+description = "FFI bindings to libshmpipe"
+
+links = "shmpipe"
+build = "build.rs"
