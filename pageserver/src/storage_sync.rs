@@ -478,16 +478,6 @@ enum UploadOp {
     Barrier(tokio::sync::watch::Sender<()>),
 }
 
-impl UploadOp {
-    fn as_barrier(&self) -> Option<&tokio::sync::watch::Sender<()>> {
-        if let Self::Barrier(v) = self {
-            Some(v)
-        } else {
-            None
-        }
-    }
-}
-
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -846,15 +836,16 @@ impl RemoteTimelineClient {
         tokio::select! {
             _ = task_mgr::shutdown_watcher() => {
                 info!("received cancellation request while uploading");
+                self.update_upload_queue_unfinished_metric(-1, &task.op);
                 self.stop();
             },
-            _ = self.perform_upload_task(task) => {
+            _ = self.perform_upload_task(&task) => {
                 // done
             },
         }
     }
 
-    async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
+    async fn perform_upload_task(self: &Arc<Self>, task: &UploadTask) {
         // Loop to retry until it completes.
         // Note: this might get cancelled by the caller, if the task is shutdown!
         loop {
@@ -994,64 +985,59 @@ impl RemoteTimelineClient {
         // into stopped state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
         // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
         let mut guard = self.upload_queue.lock().unwrap();
-        let upload_queue = match guard.deref_mut() {
+        match &*guard {
             UploadQueue::Uninitialized => panic!(
                 "callers are responsible for ensuring this is only called on initialized queue"
             ),
             UploadQueue::Stopped(_) => {
+                // nothing to do
                 info!("another concurrent task already shut down the queue");
-                return;
-            } // nothing to do
-            UploadQueue::Initialized(qi) => qi,
-        };
-        info!("shutting down upload queue");
+            }
+            UploadQueue::Initialized(qi) => {
+                info!("shutting down upload queue");
 
-        let UploadQueueInitialized {
-            last_uploaded_consistent_lsn,
-            task_counter: _task_counter,
-            latest_files: _latest_files,
-            latest_metadata: _latest_metadata,
-            num_inprogress_layer_uploads,
-            num_inprogress_metadata_uploads,
-            num_inprogress_deletions,
-            inprogress_tasks,
-            queued_operations,
-        } = upload_queue;
+                // Replace the queue with the Stopped state, taking ownership of the old
+                // Initialized queue. We will do some checks on it, and then drop it.
+                let qi = {
+                    let last_uploaded_consistent_lsn = qi.last_uploaded_consistent_lsn;
+                    let upload_queue = std::mem::replace(
+                        &mut *guard,
+                        UploadQueue::Stopped(UploadQueueStopped {
+                            last_uploaded_consistent_lsn,
+                        }),
+                    );
+                    if let UploadQueue::Initialized(qi) = upload_queue {
+                        qi
+                    } else {
+                        unreachable!("we checked in the match above that it is Initialized");
+                    }
+                };
 
-        // consistency checks
-        assert_eq!(
-            *num_inprogress_layer_uploads
-                + *num_inprogress_metadata_uploads
-                + *num_inprogress_deletions,
-            inprogress_tasks.len()
-        );
+                // consistency check
+                assert_eq!(
+                    qi.num_inprogress_layer_uploads
+                        + qi.num_inprogress_metadata_uploads
+                        + qi.num_inprogress_deletions,
+                    qi.inprogress_tasks.len()
+                );
 
-        // Assert that we really drop all barrier ops later.
-        let inprogress_barriers = upload_queue
-            .inprogress_tasks
-            .iter()
-            .filter_map(|(_, t)| t.op.as_barrier());
-        assert_eq!(
-            inprogress_barriers.count(),
-            0,
-            "barriers are processed synchronously in launch_queued_tasks"
-        );
+                // We don't need to do anything here for in-progress tasks. They will finish
+                // on their own, decrement the unfinished-task counter themselves, and observe
+                // that the queue is Stopped.
+                drop(qi.inprogress_tasks);
 
-        // teardown queued ops
-        for op in queued_operations.into_iter() {
-            self.update_upload_queue_unfinished_metric(-1, &op);
-            // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
-            // which is exactly what we want to happen.
-            drop(op);
+                // Tear down queued ops
+                for op in qi.queued_operations.into_iter() {
+                    self.update_upload_queue_unfinished_metric(-1, &op);
+                    // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
+                    // which is exactly what we want to happen.
+                    drop(op);
+                }
+
+                // We're done.
+                drop(guard);
+            }
         }
-
-        // Set up the Stopped state
-        *guard = UploadQueue::Stopped(UploadQueueStopped {
-            last_uploaded_consistent_lsn: *last_uploaded_consistent_lsn,
-        });
-
-        // We're done.
-        drop(guard);
     }
 }
 
