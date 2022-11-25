@@ -312,13 +312,10 @@ pub struct RemoteTimelineClient {
 enum UploadQueue {
     Uninitialized,
     Initialized(UploadQueueInitialized),
-    ShutDown(UploadQueueShutDown),
+    ShuttingDown(UploadQueueShuttingDown),
 }
 /// This keeps track of queued and in-progress tasks.
 struct UploadQueueInitialized {
-    /// Counter to assign task IDs
-    task_counter: u64,
-
     /// All layer files stored in the remote storage, taking into account all
     /// in-progress and queued operations
     latest_files: HashMap<RelativePath, LayerFileMetadata>,
@@ -327,6 +324,20 @@ struct UploadQueueInitialized {
     /// in-progress and queued operations.
     /// DANGER: do not return to outside world, e.g., safekeepers.
     latest_metadata: TimelineMetadata,
+
+    common: UploadQueueRunningCommon,
+
+    /// Queued operations that have not been launched yet. They might depend on previous
+    /// tasks to finish. For example, metadata upload cannot be performed before all
+    /// preceding layer file uploads have completed.
+    queued_operations: VecDeque<UploadOp>,
+}
+
+struct UploadQueueShuttingDown(UploadQueueRunningCommon);
+
+struct UploadQueueRunningCommon {
+    /// Counter to assign task IDs
+    task_counter: u64,
 
     /// `disk_consistent_lsn` from the last metadata file that was successfully
     /// uploaded. `Lsn(0)` if nothing was uploaded yet.
@@ -344,15 +355,6 @@ struct UploadQueueInitialized {
     /// also be waiting on the `concurrency_limiter` Semaphore in S3Bucket, or it can
     /// be waiting for retry in `exponential_backoff`.
     inprogress_tasks: HashMap<u64, Arc<UploadTask>>,
-
-    /// Queued operations that have not been launched yet. They might depend on previous
-    /// tasks to finish. For example, metadata upload cannot be performed before all
-    /// preceding layer file uploads have completed.
-    queued_operations: VecDeque<UploadOp>,
-}
-
-struct UploadQueueShutDown {
-    last_uploaded_consistent_lsn: Lsn,
 }
 
 impl UploadQueue {
@@ -362,7 +364,7 @@ impl UploadQueue {
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
-            UploadQueue::Initialized(_) | UploadQueue::ShutDown(_) => {
+            UploadQueue::Initialized(_) | UploadQueue::ShuttingDown(_) => {
                 anyhow::bail!("already initialized, state {:?}", discriminant(self))
             }
         }
@@ -373,15 +375,17 @@ impl UploadQueue {
             // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
             latest_files: Default::default(),
             latest_metadata: metadata.clone(),
-            // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
-            // safekeepers from garbage-collecting anything.
-            last_uploaded_consistent_lsn: Lsn(0),
-            // what follows are boring default initializations
-            task_counter: Default::default(),
-            num_inprogress_layer_uploads: 0,
-            num_inprogress_metadata_uploads: 0,
-            num_inprogress_deletions: 0,
-            inprogress_tasks: Default::default(),
+            common: UploadQueueRunningCommon {
+                task_counter: Default::default(),
+                // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
+                // safekeepers from garbage-collecting anything.
+                last_uploaded_consistent_lsn: Lsn(0),
+                // what follows are boring default initializations
+                num_inprogress_layer_uploads: 0,
+                num_inprogress_metadata_uploads: 0,
+                num_inprogress_deletions: 0,
+                inprogress_tasks: Default::default(),
+            },
             queued_operations: Default::default(),
         };
 
@@ -395,7 +399,7 @@ impl UploadQueue {
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
-            UploadQueue::Initialized(_) | UploadQueue::ShutDown(_) => {
+            UploadQueue::Initialized(_) | UploadQueue::ShuttingDown(_) => {
                 anyhow::bail!("already initialized, state {:?}", discriminant(self))
             }
         }
@@ -419,13 +423,15 @@ impl UploadQueue {
         let state = UploadQueueInitialized {
             latest_files: files,
             latest_metadata: index_part_metadata.clone(),
-            last_uploaded_consistent_lsn: index_part_metadata.disk_consistent_lsn(),
-            // what follows are boring default initializations
-            task_counter: 0,
-            num_inprogress_layer_uploads: 0,
-            num_inprogress_metadata_uploads: 0,
-            num_inprogress_deletions: 0,
-            inprogress_tasks: Default::default(),
+            common: UploadQueueRunningCommon {
+                task_counter: 0,
+                last_uploaded_consistent_lsn: index_part_metadata.disk_consistent_lsn(),
+                // what follows are boring default initializations
+                num_inprogress_layer_uploads: 0,
+                num_inprogress_metadata_uploads: 0,
+                num_inprogress_deletions: 0,
+                inprogress_tasks: Default::default(),
+            },
             queued_operations: Default::default(),
         };
 
@@ -435,7 +441,7 @@ impl UploadQueue {
 
     fn initialized_mut(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
-            UploadQueue::Uninitialized | UploadQueue::ShutDown(_) => {
+            UploadQueue::Uninitialized | UploadQueue::ShuttingDown(_) => {
                 anyhow::bail!("queue is in state {:?}", discriminant(self))
             }
             UploadQueue::Initialized(x) => Ok(x),
@@ -518,8 +524,10 @@ impl RemoteTimelineClient {
     pub fn last_uploaded_consistent_lsn(&self) -> Option<Lsn> {
         match &*self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
-            UploadQueue::Initialized(q) => Some(q.last_uploaded_consistent_lsn),
-            UploadQueue::ShutDown(q) => Some(q.last_uploaded_consistent_lsn),
+            UploadQueue::Initialized(UploadQueueInitialized { common, .. })
+            | UploadQueue::ShuttingDown(UploadQueueShuttingDown(common)) => {
+                Some(common.last_uploaded_consistent_lsn)
+            }
         }
     }
 
@@ -742,8 +750,12 @@ impl RemoteTimelineClient {
     /// the ordering constraints.
     ///
     /// The caller needs to already hold the `upload_queue` lock.
-    fn launch_queued_tasks(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
-        while let Some(next_op) = upload_queue.queued_operations.front() {
+    fn launch_queued_tasks(
+        self: &Arc<Self>,
+        upload_queue_initialized: &mut UploadQueueInitialized,
+    ) {
+        let upload_queue: &mut UploadQueueRunningCommon = &mut upload_queue_initialized.common;
+        while let Some(next_op) = upload_queue_initialized.queued_operations.front() {
             // Can we run this task now?
             let can_run_now = match next_op {
                 UploadOp::UploadLayer(_, _) => {
@@ -774,7 +786,10 @@ impl RemoteTimelineClient {
             }
 
             // We can launch this task. Remove it from the queue first.
-            let next_op = upload_queue.queued_operations.pop_front().unwrap();
+            let next_op = upload_queue_initialized
+                .queued_operations
+                .pop_front()
+                .unwrap();
 
             info!("starting op: {}", next_op);
 
@@ -895,7 +910,7 @@ impl RemoteTimelineClient {
         // Loop to retry until we reach one of the following outcomes.
         enum Outcome {
             TaskSucceeded,
-            ShutdownRequested,
+            TaskAbortedDueToShutdownRequest,
         }
         let outcome: Outcome = loop {
             match self.perform_upload_task_impl(&task).await {
@@ -920,7 +935,7 @@ impl RemoteTimelineClient {
                     );
 
                     if task_mgr::is_shutdown_requested() {
-                        break Outcome::ShutdownRequested;
+                        break Outcome::TaskAbortedDueToShutdownRequest;
                     }
 
                     exponential_backoff(
@@ -933,89 +948,106 @@ impl RemoteTimelineClient {
             }
         };
 
-        match outcome {
-            Outcome::TaskSucceeded => {
-                let mut upload_queue = self.upload_queue.lock().unwrap();
-                let mut upload_queue = upload_queue.initialized_mut().expect(
-                    "callers are responsible for ensuring this is only called on initialized queue",
-                );
-                upload_queue.inprogress_tasks.remove(&task.task_id);
+        let mut guard = self.upload_queue.lock().unwrap();
 
-                match task.op {
-                    UploadOp::UploadLayer(_, _) => {
-                        upload_queue.num_inprogress_layer_uploads -= 1;
-                    }
-                    UploadOp::UploadMetadata(_, lsn) => {
-                        upload_queue.num_inprogress_metadata_uploads -= 1;
-                        upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
-                    }
-                    UploadOp::Delete(_, _) => {
-                        upload_queue.num_inprogress_deletions -= 1;
-                    }
-                    UploadOp::Barrier(_) => unreachable!(
-                        "Barrier operations are handled synchronously in launch_queued_tasks"
-                    ),
-                };
+        // We're done running this task, either because it succeeded or because of shutdown request.
+        // Either way, do the accounting.
+        {
+            let mut upload_queue = match &mut *guard {
+                UploadQueue::Uninitialized => panic!(
+                    "callers are responsible for ensuring this is only called on initialized queue"
+                ),
+                UploadQueue::Initialized(qi) => &mut qi.common,
+                UploadQueue::ShuttingDown(sd) => &mut sd.0,
+            };
 
-                // Launch any queued tasks that were unblocked by this one.
-                self.launch_queued_tasks(upload_queue);
-            }
-            Outcome::ShutdownRequested => {
-                // Whichever *tasks* for this RemoteTimelineClient grabs the mutex first will transition the queue
-                // into shut down state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
-                // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
-                let mut guard = self.upload_queue.lock().unwrap();
-                let mut upload_queue = UploadQueue::Uninitialized;
-                std::mem::swap(&mut *guard, &mut upload_queue);
-                match upload_queue {
-                    UploadQueue::Uninitialized => panic!("callers are responsible for ensuring this is only called on initialized queue"),
-                    UploadQueue::ShutDown(_) => {
-                        info!("another concurrent task already shut down the queue")
-                    }, // nothing to do
-                    UploadQueue::Initialized(qi) => {
-                        info!("shutting down");
+            upload_queue.inprogress_tasks.remove(&task.task_id);
 
-                        let UploadQueueInitialized{
-                            last_uploaded_consistent_lsn,
-                            task_counter: _task_counter,
-                            latest_files: _latest_files,
-                            latest_metadata: _latest_metadata,
-                            num_inprogress_layer_uploads, num_inprogress_metadata_uploads, num_inprogress_deletions,
-                            inprogress_tasks,
-                            queued_operations } = qi;
-
-                        // consistency checks
-                        assert_eq!(
-                            num_inprogress_layer_uploads +
-                            num_inprogress_metadata_uploads +
-                            num_inprogress_deletions,
-                            inprogress_tasks.len()
-                        ) ;
-
-                        // Assert that we're really dropping all barrier ops later.
-                        let inprogress_barrires =  inprogress_tasks
-                            .iter()
-                            .filter_map(|(_, t)| t.op.as_barrier());
-                        assert_eq!(inprogress_barrires.count(), 0, "barriers are processes synchronously in launch_queued_tasks");
-
-                        // teardown queued ops
-                        for op in queued_operations {
-                            self.update_upload_queue_unfinished_metric(-1, &op);
-                            // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
-                            // which is exactly what we want to happen.
-                            drop(op);
-                        }
-
-                        // Set up the ShutDown state
-                        let upload_queue = UploadQueue::ShutDown(UploadQueueShutDown {
-                            last_uploaded_consistent_lsn,
-                        });
-                        *guard = upload_queue;
-
-                        // We're done.
-                        drop(guard);
-                    }
+            match task.op {
+                UploadOp::UploadLayer(_, _) => {
+                    upload_queue.num_inprogress_layer_uploads -= 1;
                 }
+                UploadOp::UploadMetadata(_, lsn) => {
+                    upload_queue.num_inprogress_metadata_uploads -= 1;
+                    upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
+                }
+                UploadOp::Delete(_, _) => {
+                    upload_queue.num_inprogress_deletions -= 1;
+                }
+                UploadOp::Barrier(_) => unreachable!(
+                    "Barrier operations are handled synchronously in launch_queued_tasks"
+                ),
+            };
+        }
+
+        // Now decide whether to schedule new ops or shut down
+        match (&mut *guard, outcome) {
+            (UploadQueue::Uninitialized, _) => unreachable!("queue must be initialized"),
+            // the common case
+            (UploadQueue::Initialized(qi), Outcome::TaskSucceeded) => self.launch_queued_tasks(qi),
+            // we are the first task to observe the need to shut down
+            // => transition into UploadQueue::ShuttingDown state
+            (UploadQueue::Initialized(qi), Outcome::TaskAbortedDueToShutdownRequest) => {
+                info!("shutting down the upload queue");
+
+                // put a temporary value in place to get the owned queue
+                let UploadQueueInitialized {
+                    latest_files: _latest_files,
+                    latest_metadata: _latest_metadata,
+                    common,
+                    queued_operations,
+                } = qi;
+
+                // consistency checks
+                assert_eq!(
+                    common.num_inprogress_layer_uploads
+                        + common.num_inprogress_metadata_uploads
+                        + common.num_inprogress_deletions,
+                    common.inprogress_tasks.len()
+                );
+                let inprogress_barrires = common
+                    .inprogress_tasks
+                    .iter()
+                    .filter_map(|(_, t)| t.op.as_barrier());
+                assert_eq!(
+                    inprogress_barrires.count(),
+                    0,
+                    "barriers are processes synchronously in launch_queued_tasks"
+                );
+
+                // teardown queued ops
+                for op in queued_operations {
+                    self.update_upload_queue_unfinished_metric(-1, &op);
+                    // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
+                    // which is exactly what we want to happen.
+                    drop(op);
+                }
+
+                // Set up the ShuttingDown state
+                // XXX Can this be done more elegantly?
+                // Borrow checker doesn't understand that the '&mut *guard' borrow ends with the `*guard = ...`.
+                let common = {
+                    let mut c = UploadQueueRunningCommon {
+                        task_counter: Default::default(),
+                        last_uploaded_consistent_lsn: Lsn(0),
+                        num_inprogress_layer_uploads: Default::default(),
+                        num_inprogress_metadata_uploads: Default::default(),
+                        num_inprogress_deletions: Default::default(),
+                        inprogress_tasks: Default::default(),
+                    };
+                    std::mem::swap(common, &mut c);
+                    c
+                };
+                *guard = UploadQueue::ShuttingDown(UploadQueueShuttingDown(common));
+            }
+            // the next two cases are where we're a task that was running while another
+            // observed that we need to shut down and took the previous match arm
+            (UploadQueue::ShuttingDown(_), Outcome::TaskSucceeded) => (),
+            (UploadQueue::ShuttingDown(_), Outcome::TaskAbortedDueToShutdownRequest) => {
+                error!(
+                    "aborting task because upload queue is shutting down: {}",
+                    task.op
+                );
             }
         }
     }
@@ -1206,8 +1238,8 @@ mod tests {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();
             assert!(upload_queue.queued_operations.is_empty());
-            assert!(upload_queue.inprogress_tasks.len() == 2);
-            assert!(upload_queue.num_inprogress_layer_uploads == 2);
+            assert!(upload_queue.common.inprogress_tasks.len() == 2);
+            assert!(upload_queue.common.num_inprogress_layer_uploads == 2);
         }
 
         // Schedule upload of index. Check that it is queued
@@ -1226,7 +1258,7 @@ mod tests {
             let upload_queue = guard.initialized_mut().unwrap();
 
             assert!(upload_queue.queued_operations.is_empty());
-            assert!(upload_queue.inprogress_tasks.is_empty());
+            assert!(upload_queue.common.inprogress_tasks.is_empty());
         }
 
         // Download back the index.json, and check that the list of files is correct
@@ -1249,9 +1281,9 @@ mod tests {
 
             // Deletion schedules upload of the index file, and the file deletion itself
             assert!(upload_queue.queued_operations.len() == 2);
-            assert!(upload_queue.inprogress_tasks.len() == 1);
-            assert!(upload_queue.num_inprogress_layer_uploads == 1);
-            assert!(upload_queue.num_inprogress_deletions == 0);
+            assert!(upload_queue.common.inprogress_tasks.len() == 1);
+            assert!(upload_queue.common.num_inprogress_layer_uploads == 1);
+            assert!(upload_queue.common.num_inprogress_deletions == 0);
         }
         assert_remote_files(&["foo", "bar", "index_part.json"], &remote_timeline_dir);
 
