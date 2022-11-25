@@ -839,10 +839,7 @@ impl RemoteTimelineClient {
                     self_rc.update_upload_queue_unfinished_metric(-1, &task_clone.op);
                     Ok(())
                 }
-                // FIXME this captures the parent span, i.e. log messages inside the task will look like so:
-                // 2022-11-24T17:34:35.707155Z  INFO layer flush task{tenant=81892ec7b59f9ac3f06f5ab5d8c1fe3d timeline=82f9c121ee5778016485e775550e8c61}:flush_frozen_layer{tenant_id=81892ec7b59f9ac3f06f5ab5d8c1fe3d timeline_id=82f9c121ee5778016485e775550e8c61 layer=inmem-0000000001696629-00000000016AFA39}:remote_upload{tenant=81892ec7b59f9ac3f06f5ab5d8c1fe3d timeline=82f9c121ee5778016485e775550e8c61 upload_task_id=1556}: shutting down
-                // How to avoid this?
-                .instrument(info_span!("remote_upload", tenant = %self.tenant_id, timeline = %self.timeline_id, upload_task_id = %task_id)),
+                .instrument(info_span!(parent: None, "remote_upload", tenant = %self.tenant_id, timeline = %self.timeline_id, upload_task_id = %task_id)),
             );
 
             // Loop back to process next task
