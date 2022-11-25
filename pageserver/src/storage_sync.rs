@@ -1269,8 +1269,4 @@ mod tests {
 
         Ok(())
     }
-
-    // TODO: Currently, GC can run between upload retries, removing local layers scheduled for upload. Test this scenario.
-    // FIXME: used to have a test for this in upload.rs, `layer_upload_after_local_fs_update()`.
-    // I didn't understand how it tests that, though.
 }
