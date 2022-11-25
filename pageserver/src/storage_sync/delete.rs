@@ -12,29 +12,26 @@ pub(super) async fn delete_layer(
     fail::fail_point!("before-delete-layer", |_| {
         anyhow::bail!("failpoint before-delete-layer")
     });
-    async {
-        debug!(
-            "Deleting layer from remote storage: {:?}",
-            local_layer_path.display()
-        );
+    debug!(
+        "Deleting layer from remote storage: {:?}",
+        local_layer_path.display()
+    );
 
-        let storage_path = storage
-            .remote_object_id(local_layer_path)
-            .with_context(|| {
-                format!(
-                    "Failed to get the layer storage path for local path '{}'",
-                    local_layer_path.display()
-                )
-            })?;
-
-        // FIXME: If the deletion fails because the object already didn't exist,
-        // it would be good to just issue a warning but consider it success.
-        storage.delete(&storage_path).await.with_context(|| {
+    let storage_path = storage
+        .remote_object_id(local_layer_path)
+        .with_context(|| {
             format!(
-                "Failed to delete remote layer from storage at '{:?}'",
-                storage_path
+                "Failed to get the layer storage path for local path '{}'",
+                local_layer_path.display()
             )
-        })
-    }
-    .await
+        })?;
+
+    // FIXME: If the deletion fails because the object already didn't exist,
+    // it would be good to just issue a warning but consider it success.
+    storage.delete(&storage_path).await.with_context(|| {
+        format!(
+            "Failed to delete remote layer from storage at '{:?}'",
+            storage_path
+        )
+    })
 }
