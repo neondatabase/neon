@@ -421,16 +421,13 @@ pub fn merge_local_remote_metadata<'a>(
                 | (Less, Equal)
                 | (Equal, Less)
                 | (Less, Greater)
-                | (Greater, Less) => None,
-            };
-            res.with_context(|| {
-                format!(
-                    r#"remote metadata appears to be ahead of local metadata:
+                | (Greater, Less) => {
+                    bail!(r#"remote metadata appears to be ahead of local metadata:
 local:
   {local:#?}
 remote:
   {remote:#?}
-"#
+"#);
                 )
             })
         }
