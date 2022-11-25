@@ -471,7 +471,7 @@ impl Tenant {
                         .create_timeline_data(
                             timeline_id,
                             up_to_date_metadata.clone(),
-                            ancestor,
+                            ancestor.clone(),
                             None,
                         )
                         .with_context(|| {
@@ -498,6 +498,13 @@ impl Tenant {
                 .await
                 .context("failed to reconcile with remote")?
         }
+
+        // Sanity check: a timeline should have some content.
+        anyhow::ensure!(
+            ancestor.is_some() ||
+                timeline.layers.read().unwrap().iter_historic_layers().next().is_some(),
+            "Timeline has no ancestor and no layer files"
+        );
 
         // Save the metadata file to local disk.
         if !picked_local {

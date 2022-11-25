@@ -20,6 +20,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
             ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
             ".*failed to load metadata.*",
+            ".*could not load tenant.*load local timeline.*",
         ]
     )
 
@@ -86,12 +87,14 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}"
     )
 
-    # Second timeline has no ancestors, only the metadata file and no layer files
-    # This will fail with an error like "extracting base backup failed" and cause
-    # "could not find data for key"
-    with pytest.raises(Exception, match=".*could not find data for key.*") as err:
+    # Second timeline has no ancestors, only the metadata file and no layer files.
+    # That is checked explicitly in the pageserver, and causes the tenant to be marked
+    # as broken.
+    with pytest.raises(
+        Exception, match=f"Tenant {tenant2} will not become active. Current state: Broken"
+    ) as err:
         pg2.start()
-    log.info(f"As expected, compute startup failed eagerly for timeline with missing layers: {err}")
+    log.info(f"As expected, compute startup failed for timeline with missing layers: {err}")
 
     # Third timeline will also fail during basebackup, because the layer file is corrupt.
     # (We don't check layer file contents on startup, when loading the timeline)
