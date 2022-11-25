@@ -1024,6 +1024,7 @@ impl Timeline {
                                 error!("could not rename file \"{}\": {:?}",
                                        local_path.display(), err);
                             }
+                            self.metrics.current_physical_size_gauge.sub(local_size);
                             false
                         } else {
                             true
@@ -1067,7 +1068,7 @@ impl Timeline {
                 }
 
                 trace!("downloading image file: {}", file = path.display());
-                remote_client
+                let sz = remote_client
                     .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
                     .await
                     .context("download image layer")?;
@@ -1076,11 +1077,11 @@ impl Timeline {
                 let image_layer =
                     ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
 
-                // FIXME: when to update physical size?
                 self.layers
                     .write()
                     .unwrap()
                     .insert_historic(Arc::new(image_layer));
+                self.metrics.current_physical_size_gauge.add(sz);
             } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
                 // Create a DeltaLayer struct for each delta file.
                 // The end-LSN is exclusive, while disk_consistent_lsn is
@@ -1097,7 +1098,7 @@ impl Timeline {
                 }
 
                 trace!("downloading image file: {}", file = path.display());
-                remote_client
+                let sz = remote_client
                     .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
                     .await
                     .context("download delta layer")?;
@@ -1106,11 +1107,11 @@ impl Timeline {
                 let delta_layer =
                     DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
 
-                // FIXME: when to update physical size?
                 self.layers
                     .write()
                     .unwrap()
                     .insert_historic(Arc::new(delta_layer));
+                self.metrics.current_physical_size_gauge.add(sz);
             } else {
                 bail!("unexpected layer filename in remote storage: {}", fname);
             }
@@ -1183,8 +1184,6 @@ impl Timeline {
                 local_filenames
             }
         };
-
-        // TODO what to do with physical size?
 
         // Are there local files that don't exist remotely? Schedule uploads for them
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);

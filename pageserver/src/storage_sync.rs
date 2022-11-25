@@ -544,11 +544,13 @@ impl RemoteTimelineClient {
     /// Download a (layer) file from `path`, into local filesystem.
     ///
     /// 'layer_metadata' is the metadata from the remote index file.
+    ///
+    /// On success, returns the size of the downloaded file.
     pub async fn download_layer_file(
         &self,
         path: &RelativePath,
         layer_metadata: &LayerFileMetadata,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let downloaded_size = download::download_layer_file(
             self.conf,
             &self.storage_impl,
@@ -576,7 +578,7 @@ impl RemoteTimelineClient {
                 );
             }
         }
-        Ok(())
+        Ok(downloaded_size)
     }
 
     //
