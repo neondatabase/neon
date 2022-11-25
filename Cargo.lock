@@ -4753,6 +4753,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-core",
+ "url",
 ]
 
 [[package]]
