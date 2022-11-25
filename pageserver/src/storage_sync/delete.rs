@@ -26,8 +26,9 @@ pub(super) async fn delete_layer(
             )
         })?;
 
-    // FIXME: If the deletion fails because the object already didn't exist,
+    // XXX: If the deletion fails because the object already didn't exist,
     // it would be good to just issue a warning but consider it success.
+    // https://github.com/neondatabase/neon/issues/2934
     storage.delete(&storage_path).await.with_context(|| {
         format!(
             "Failed to delete remote layer from storage at '{:?}'",
