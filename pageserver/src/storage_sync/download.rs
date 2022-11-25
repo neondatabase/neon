@@ -9,7 +9,6 @@ use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
 use crate::config::PageServerConf;
-use crate::metrics::{MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind};
 use crate::storage_sync::index::LayerFileMetadata;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
@@ -28,39 +27,6 @@ async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Er
 ///
 /// Returns the size of the downloaded file.
 pub async fn download_layer_file<'a>(
-    conf: &'static PageServerConf,
-    storage: &'a GenericRemoteStorage,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    path: &'a RelativePath,
-    layer_metadata: &'a LayerFileMetadata,
-) -> anyhow::Result<u64> {
-    download_layer_file_guts(conf, storage, tenant_id, timeline_id, path, layer_metadata)
-        .measure_remote_op(
-            tenant_id,
-            timeline_id,
-            RemoteOpFileKind::Layer,
-            RemoteOpKind::Download,
-        )
-        .await
-}
-
-const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
-
-pub fn is_temp_download_file(path: &Path) -> bool {
-    let extension = path.extension().map(|pname| {
-        pname
-            .to_str()
-            .expect("paths passed to this function must be valid Rust strings")
-    });
-    match extension {
-        Some(TEMP_DOWNLOAD_EXTENSION) => true,
-        Some(_) => false,
-        None => false,
-    }
-}
-
-async fn download_layer_file_guts<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
     tenant_id: TenantId,
@@ -163,6 +129,22 @@ async fn download_layer_file_guts<'a>(
     Ok(bytes_amount)
 }
 
+
+const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
+
+pub fn is_temp_download_file(path: &Path) -> bool {
+    let extension = path.extension().map(|pname| {
+        pname
+            .to_str()
+            .expect("paths passed to this function must be valid Rust strings")
+    });
+    match extension {
+        Some(TEMP_DOWNLOAD_EXTENSION) => true,
+        Some(_) => false,
+        None => false,
+    }
+}
+
 /// List timelines of given tenant in remote storage
 pub async fn list_remote_timelines<'a>(
     storage: &'a GenericRemoteStorage,
@@ -234,27 +216,26 @@ pub async fn download_index_part(
     tenant_id: TenantId,
     timeline_id: TimelineId,
 ) -> Result<IndexPart, DownloadError> {
-    async {
-        let index_part_path = conf
-            .metadata_path(timeline_id, tenant_id)
-            .with_file_name(IndexPart::FILE_NAME);
-        let part_storage_path = storage
-            .remote_object_id(&index_part_path)
-            .with_context(|| {
-                format!(
-                    "Failed to get the index part storage path for local path '{}'",
-                    index_part_path.display()
-                )
-            })
-            .map_err(DownloadError::BadInput)?;
+    let index_part_path = conf
+        .metadata_path(timeline_id, tenant_id)
+        .with_file_name(IndexPart::FILE_NAME);
+    let part_storage_path = storage
+        .remote_object_id(&index_part_path)
+        .with_context(|| {
+            format!(
+                "Failed to get the index part storage path for local path '{}'",
+                index_part_path.display()
+            )
+        })
+        .map_err(DownloadError::BadInput)?;
 
-        let mut index_part_download = storage.download(&part_storage_path).await?;
+    let mut index_part_download = storage.download(&part_storage_path).await?;
 
-        let mut index_part_bytes = Vec::new();
-        tokio::io::copy(
-            &mut index_part_download.download_stream,
-            &mut index_part_bytes,
-        )
+    let mut index_part_bytes = Vec::new();
+    tokio::io::copy(
+        &mut index_part_download.download_stream,
+        &mut index_part_bytes,
+    )
         .await
         .with_context(|| {
             format!(
@@ -264,22 +245,14 @@ pub async fn download_index_part(
         })
         .map_err(DownloadError::Other)?;
 
-        let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
-            .with_context(|| {
-                format!(
-                    "Failed to deserialize index part file into file '{}'",
-                    index_part_path.display()
-                )
-            })
-            .map_err(DownloadError::Other)?;
+    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
+        .with_context(|| {
+            format!(
+                "Failed to deserialize index part file into file '{}'",
+                index_part_path.display()
+            )
+        })
+        .map_err(DownloadError::Other)?;
 
-        Ok(index_part)
-    }
-    .measure_remote_op(
-        tenant_id,
-        timeline_id,
-        RemoteOpFileKind::Index,
-        RemoteOpKind::Download,
-    )
-    .await
+    Ok(index_part)
 }

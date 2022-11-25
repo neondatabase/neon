@@ -22,27 +22,24 @@ pub(super) async fn upload_index_part<'a>(
     fail_point!("before-upload-index", |_| {
         bail!("failpoint before-upload-index")
     });
-    async {
-        let index_part_bytes = serde_json::to_vec(&index_part)
-            .context("Failed to serialize index part file into bytes")?;
-        let index_part_size = index_part_bytes.len();
-        let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
+    let index_part_bytes = serde_json::to_vec(&index_part)
+        .context("Failed to serialize index part file into bytes")?;
+    let index_part_size = index_part_bytes.len();
+    let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-        let index_part_path = conf
-            .metadata_path(timeline_id, tenant_id)
-            .with_file_name(IndexPart::FILE_NAME);
-        storage
-            .upload_storage_object(
-                Box::new(index_part_bytes),
-                index_part_size,
-                &index_part_path,
-            )
-            .await
-            .with_context(|| {
-                format!("Failed to upload index part for '{tenant_id} / {timeline_id}'")
-            })
-    }
-    .await
+    let index_part_path = conf
+        .metadata_path(timeline_id, tenant_id)
+        .with_file_name(IndexPart::FILE_NAME);
+    storage
+        .upload_storage_object(
+            Box::new(index_part_bytes),
+            index_part_size,
+            &index_part_path,
+        )
+        .await
+        .with_context(|| {
+            format!("Failed to upload index part for '{tenant_id} / {timeline_id}'")
+        })
 }
 
 /// Attempts to upload given layer files.
@@ -57,54 +54,51 @@ pub(super) async fn upload_timeline_layer(
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
     });
-    async {
-        let storage_path = storage.remote_object_id(source_path).with_context(|| {
+    let storage_path = storage.remote_object_id(source_path).with_context(|| {
+        format!(
+            "Failed to get the layer storage path for local path '{}'",
+            source_path.display()
+        )
+    })?;
+
+    let source_file = fs::File::open(&source_path).await.with_context(|| {
+        format!(
+            "Failed to open a source file for layer '{}'",
+            source_path.display()
+        )
+    })?;
+
+    let fs_size = source_file
+        .metadata()
+        .await
+        .with_context(|| {
             format!(
-                "Failed to get the layer storage path for local path '{}'",
+                "Failed to get the source file metadata for layer '{}'",
                 source_path.display()
             )
-        })?;
+        })?
+        .len();
 
-        let source_file = fs::File::open(&source_path).await.with_context(|| {
-            format!(
-                "Failed to open a source file for layer '{}'",
-                source_path.display()
-            )
-        })?;
-
-        let fs_size = source_file
-            .metadata()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to get the source file metadata for layer '{}'",
-                    source_path.display()
-                )
-            })?
-            .len();
-
-        // FIXME: this looks bad
-        if let Some(metadata_size) = known_metadata.file_size() {
-            if metadata_size != fs_size {
-                bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
-            }
-        } else {
-            // this is a silly state we would like to avoid
+    // FIXME: this looks bad
+    if let Some(metadata_size) = known_metadata.file_size() {
+        if metadata_size != fs_size {
+            bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
         }
-
-        let fs_size = usize::try_from(fs_size).with_context(|| format!("File {source_path:?} size {fs_size} could not be converted to usize"))?;
-
-        storage
-            .upload(Box::new(source_file), fs_size, &storage_path, None)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to upload a layer from local path '{}'",
-                    source_path.display()
-                )
-            })?;
-
-        Ok(())
+    } else {
+        // this is a silly state we would like to avoid
     }
-    .await
+
+    let fs_size = usize::try_from(fs_size).with_context(|| format!("File {source_path:?} size {fs_size} could not be converted to usize"))?;
+
+    storage
+        .upload(Box::new(source_file), fs_size, &storage_path, None)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to upload a layer from local path '{}'",
+                source_path.display()
+            )
+        })?;
+
+    Ok(())
 }

@@ -234,10 +234,8 @@ mod download;
 pub mod index;
 mod upload;
 
-// re-export this
-pub use download::is_temp_download_file;
-pub use download::list_remote_timelines;
-use tracing::{info_span, Instrument};
+// re-export these
+pub use download::{is_temp_download_file, list_remote_timelines};
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
@@ -250,6 +248,7 @@ use anyhow::ensure;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use tokio::runtime::Runtime;
 use tracing::{error, info, warn};
+use tracing::{info_span, Instrument};
 
 use utils::lsn::Lsn;
 
@@ -538,6 +537,12 @@ impl RemoteTimelineClient {
             self.tenant_id,
             self.timeline_id,
         )
+        .measure_remote_op(
+            self.tenant_id,
+            self.timeline_id,
+            RemoteOpFileKind::Index,
+            RemoteOpKind::Download,
+        )
         .await
     }
 
@@ -558,6 +563,12 @@ impl RemoteTimelineClient {
             self.timeline_id,
             path,
             layer_metadata,
+        )
+        .measure_remote_op(
+            self.tenant_id,
+            self.timeline_id,
+            RemoteOpFileKind::Layer,
+            RemoteOpKind::Download,
         )
         .await?;
 
