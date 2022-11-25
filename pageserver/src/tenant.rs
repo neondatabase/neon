@@ -403,15 +403,15 @@ pub fn merge_local_remote_metadata<'a>(
                 .latest_gc_cutoff_lsn()
                 .cmp(&remote.latest_gc_cutoff_lsn());
             use std::cmp::Ordering::*;
-            let res = match (consistent_lsn_cmp, gc_cutoff_lsn_cmp) {
+            match (consistent_lsn_cmp, gc_cutoff_lsn_cmp) {
                 // It wouldn't matter, but pick the local one so that we don't rewrite the metadata file.
-                (Equal, Equal) => Some((local, true)),
+                (Equal, Equal) => Ok((local, true)),
                 // Local state is clearly ahead of the remote.
-                (Greater, Greater) => Some((local, true)),
+                (Greater, Greater) => Ok((local, true)),
                 // We have local layer files that aren't on the remote, but GC horizon is on par.
-                (Greater, Equal) => Some((local, true)),
+                (Greater, Equal) => Ok((local, true)),
                 // Local GC started running but we couldn't sync it to the remote.
-                (Equal, Greater) => Some((local, true)),
+                (Equal, Greater) => Ok((local, true)),
 
                 // We always update the local value first, so something else must have
                 // updated the remote value, probably a different pageserver.
@@ -422,14 +422,16 @@ pub fn merge_local_remote_metadata<'a>(
                 | (Equal, Less)
                 | (Less, Greater)
                 | (Greater, Less) => {
-                    bail!(r#"remote metadata appears to be ahead of local metadata:
+                    anyhow::bail!(
+                        r#"remote metadata appears to be ahead of local metadata:
 local:
   {local:#?}
 remote:
   {remote:#?}
-"#);
-                )
-            })
+"#
+                    );
+                }
+            }
         }
     }
 }
