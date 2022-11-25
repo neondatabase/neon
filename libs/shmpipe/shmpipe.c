@@ -7,12 +7,15 @@
 #include <assert.h>
 #include <unistd.h>
 #include <sys/fcntl.h>
+#include <stdatomic.h>
 #include "shmpipe.h"
 
 #define QUEUE_BUF_SIZE (128*1024) /* should be power of two */
 
 /* Make sure that massge header always fits in buffer */
 #define MESSAGE_DATA_ALIGNMENT sizeof(message_header_t)
+
+#define RELEASE_CPU()  sched_yield()
 
 typedef struct {
 	uint32 id;    /* message id is used to identify responses */
@@ -24,12 +27,13 @@ typedef struct {
 	size_t         pos; /* position in ring buffer */
 } queue_pos_t;
 
+typedef atomic_bool latch_t;
+
 typedef struct {
-	pthread_mutex_t cs;    /* queue critical section */
+	latch_t cs;    /* queue critical section */
 	queue_pos_t head;
 	queue_pos_t tail;
 	int busy;              /* in process of sending message */
-	int n_blocked;         /* number of sender waiting on busy flag */
 	char data[QUEUE_BUF_SIZE];
 } queue_t;
 
@@ -39,6 +43,20 @@ typedef struct pipe_t {
 	uint32  msg_id; /* generator of message ids, protected by request queue mutex */
 } pipe_t;
 
+
+static void latch_acquire(latch_t* latch)
+{
+    latch_t unset = 0;
+ 	while (!atomic_compare_exchange_strong(latch, &unset, 1)) {
+		RELEASE_CPU();
+		unset = 0;
+	}
+}
+
+static void latch_release(latch_t* latch)
+{
+	atomic_store(latch, 0);
+}
 
 #define ALIGN(x,y) (((x) + (y) - 1) & ~((y) - 1))
 
@@ -50,7 +68,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 	int header_received = 0;
 	size_t resp_size = sizeof(resp_hdr);
 
-	pthread_mutex_lock(&pipe->req.cs);
+	latch_acquire(&pipe->req.cs);
 
 	/* append data to queue head */
 	while (req_size != 0)
@@ -61,22 +79,13 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 					 : pipe->req.tail.pos - pipe->req.head.pos) - MESSAGE_DATA_ALIGNMENT;
 		if (available == 0)
 		{
-			if (header_sent)
-				pthread_cond_broadcast(&pipe->req.head.cv); /* notify receiver that head is advanced */
-
-			while (1)
+			do
 			{
-				/* Wait until tail is advanced: mutex is still locked, preventing write of other messages */
-				pthread_cond_wait(&pipe->req.tail.cv, &pipe->req.cs);
-
-				if (!header_sent && pipe->req.busy)
-				{
-					/* Somebody else is sending message */
-					pipe->req.n_blocked += 1;
-				}
-				else
-					break;
-			}
+				/* Wait until tail is advanced */
+				latch_release(&pipe->req.cs);
+				RELEASE_CPU();
+				latch_acquire(&pipe->req.cs);
+			} while (!header_sent && pipe->req.busy);
 		}
 		else
 		{
@@ -116,18 +125,12 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 	/* Align position on header length */
 	pipe->req.head.pos = ALIGN(pipe->req.head.pos, MESSAGE_DATA_ALIGNMENT) % QUEUE_BUF_SIZE;
 
-	pthread_cond_broadcast(&pipe->req.head.cv); /* notify receiver that head is advanced */
-	if (pipe->req.n_blocked != 0)
-	{
-		pthread_cond_broadcast(&pipe->req.tail.cv); /* Wakeup waiting receivers */
-		pipe->req.n_blocked = 0;
-	}
 	assert(pipe->req.busy);
 	pipe->req.busy = 0;
 
-	pthread_mutex_unlock(&pipe->req.cs);
+	latch_release(&pipe->req.cs);
 
-	pthread_mutex_lock(&pipe->resp.cs);
+	latch_acquire(&pipe->resp.cs);
 
 	/* Get response from queue tail */
 	while (resp_size != 0)
@@ -137,22 +140,13 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 			: QUEUE_BUF_SIZE - (pipe->resp.tail.pos - pipe->resp.head.pos);
 		if (available == 0)
 		{
-			if (header_received)
-				pthread_cond_broadcast(&pipe->resp.tail.cv); /* Signal that tail is advanced */
-
-			while (1)
+			do
 			{
 				/* wait until head is advanced */
-				pthread_cond_wait(&pipe->resp.head.cv, &pipe->resp.cs);
-
-				if (!header_received && pipe->resp.busy)
-				{
-					/* Somebody else is receiving message */
-					pipe->resp.n_blocked += 1;
-				}
-				else
-					break;
-			}
+				latch_release(&pipe->resp.cs);
+				RELEASE_CPU();
+				latch_acquire(&pipe->resp.cs);
+			} while (!header_received && pipe->resp.busy);
 		}
 		else
 		{
@@ -165,9 +159,9 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 				if (resp_hdr.id != req_hdr.id)
 				{
 					/* Not my response */
-					pipe->resp.n_blocked += 1;
-					/* Wait for another response */
-					pthread_cond_wait(&pipe->resp.head.cv, &pipe->resp.cs);
+					latch_release(&pipe->resp.cs);
+					RELEASE_CPU();
+					latch_acquire(&pipe->resp.cs);
 				}
 				else
 				{
@@ -200,16 +194,10 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 	/* Align position on header length */
 	pipe->resp.tail.pos = ALIGN(pipe->resp.tail.pos, MESSAGE_DATA_ALIGNMENT) % QUEUE_BUF_SIZE;
 
-	pthread_cond_broadcast(&pipe->resp.tail.cv); /* Signal that tail is advanced */
-	if (pipe->resp.n_blocked != 0)
-	{
-		pthread_cond_broadcast(&pipe->resp.head.cv); /* Wakeup other threads waiting for their responses */
-		pipe->resp.n_blocked = 0;
-	}
 	assert(pipe->resp.busy);
 	pipe->resp.busy = 0;
 
-	pthread_mutex_unlock(&pipe->resp.cs);
+	latch_release(&pipe->resp.cs);
 }
 
 void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg_id)
@@ -219,7 +207,7 @@ void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg
 	size_t req_size = sizeof req_hdr;
 	char* req  = NULL;
 
-	pthread_mutex_lock(&pipe->req.cs);
+	latch_acquire(&pipe->req.cs);
 
 	/* Take request from queue head */
 	while (req_size != 0)
@@ -229,11 +217,10 @@ void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg
 			: QUEUE_BUF_SIZE - (pipe->req.tail.pos - pipe->req.head.pos);
 		if (available == 0)
 		{
-			if (header_received)
-				pthread_cond_broadcast(&pipe->req.tail.cv); /* notify that tail is advanced */
-
 			/* wait until head is advanced */
-			pthread_cond_wait(&pipe->req.head.cv, &pipe->req.cs);
+			latch_release(&pipe->req.cs);
+			RELEASE_CPU();
+			latch_acquire(&pipe->req.cs);
 		}
 		else
 		{
@@ -272,15 +259,15 @@ void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg
 	}
 	/* Align position on header length */
 	pipe->req.tail.pos = ALIGN(pipe->req.tail.pos, MESSAGE_DATA_ALIGNMENT) % QUEUE_BUF_SIZE;
-	pthread_cond_broadcast(&pipe->req.tail.cv); /* notify that tail is advanced */
 
-	pthread_mutex_unlock(&pipe->req.cs);
+	latch_release(&pipe->req.cs);
 }
 
 void shmem_pipe_send_response(pipe_t* pipe, uint32 msg_id, char const* resp, size_t resp_size)
 {
 	int header_sent = 0;
-	pthread_mutex_lock(&pipe->resp.cs);
+
+	latch_acquire(&pipe->resp.cs);
 
 	/* Put response at queue head */
 	while (resp_size != 0)
@@ -291,11 +278,10 @@ void shmem_pipe_send_response(pipe_t* pipe, uint32 msg_id, char const* resp, siz
 					 : pipe->resp.tail.pos - pipe->resp.head.pos) - MESSAGE_DATA_ALIGNMENT;
 		if (available == 0)
 		{
-			if (header_sent)
-				pthread_cond_broadcast(&pipe->resp.head.cv); /* notify that head is advanced */
-
 			/* wait untul tail is advanced */
-			pthread_cond_wait(&pipe->resp.tail.cv, &pipe->resp.cs);
+			latch_release(&pipe->resp.cs);
+			RELEASE_CPU();
+			latch_acquire(&pipe->resp.cs);
 		}
 		else
 		{
@@ -333,9 +319,8 @@ void shmem_pipe_send_response(pipe_t* pipe, uint32 msg_id, char const* resp, siz
 	}
 	/* Align position on header length */
 	pipe->resp.head.pos = ALIGN(pipe->resp.head.pos, MESSAGE_DATA_ALIGNMENT) % QUEUE_BUF_SIZE;
-	pthread_cond_broadcast(&pipe->resp.head.cv); /* notify that head is advanced */
 
-	pthread_mutex_unlock(&pipe->resp.cs);
+	latch_release(&pipe->resp.cs);
 }
 
 pipe_t* shmem_pipe_init(char const* name)
@@ -343,26 +328,6 @@ pipe_t* shmem_pipe_init(char const* name)
 	char buf[64];
 	int fd;
 	pipe_t* pipe;
-	pthread_mutexattr_t mutex_attr;
-	pthread_condattr_t   cond_attr;
-
-    if (pthread_mutexattr_init(&mutex_attr)) {
-		perror("pthread_mutexattr_init");
-		return NULL;
-    }
-    if (pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED)) {
-		perror("pthread_mutexattr_setpshared");
-		return NULL;
-    }
-
-    if (pthread_condattr_init(&cond_attr)) {
-		perror("pthread_condattr_init");
-		return NULL;
-    }
-    if (pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED)) {
-		perror("pthread_condattr_setpshared");
-		return NULL;
-    }
 
 	sprintf(buf, "/walredo-pipe-%s", name);
 	if ((fd = shm_open(buf, O_CREAT | O_RDWR | O_TRUNC, 0600)) < 0)
@@ -385,16 +350,8 @@ pipe_t* shmem_pipe_init(char const* name)
 	}
 	close(fd);
 
-	pthread_mutex_init(&pipe->resp.cs, &mutex_attr);
-	pthread_mutex_init(&pipe->req.cs, &mutex_attr);
-
-	pthread_cond_init(&pipe->resp.head.cv, &cond_attr);
-	pthread_cond_init(&pipe->resp.tail.cv, &cond_attr);
-	pthread_cond_init(&pipe->req.head.cv, &cond_attr);
-	pthread_cond_init(&pipe->req.tail.cv, &cond_attr);
-
-    pthread_condattr_destroy(&cond_attr);
-    pthread_mutexattr_destroy(&mutex_attr);
+	atomic_init(&pipe->resp.cs, 0);
+	atomic_init(&pipe->req.cs, 0);
 
 	pipe->resp.head.pos = 0;
 	pipe->resp.tail.pos = 0;
@@ -402,9 +359,7 @@ pipe_t* shmem_pipe_init(char const* name)
 	pipe->req.tail.pos = 0;
 
 	pipe->req.busy = 0;
-	pipe->req.n_blocked = 0;
 	pipe->resp.busy = 0;
-	pipe->resp.n_blocked = 0;
 
 	pipe->msg_id = 0;
 
@@ -434,14 +389,6 @@ pipe_t* shmem_pipe_open(char const* name)
 
 void shmem_pipe_close(pipe_t* pipe)
 {
-	pthread_mutex_destroy(&pipe->resp.cs);
-	pthread_mutex_destroy(&pipe->req.cs);
-
-	pthread_cond_destroy(&pipe->resp.head.cv);
-	pthread_cond_destroy(&pipe->resp.tail.cv);
-	pthread_cond_destroy(&pipe->req.head.cv);
-	pthread_cond_destroy(&pipe->req.tail.cv);
-
 	munmap(pipe, sizeof(pipe_t));
 }
 
