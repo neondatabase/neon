@@ -501,8 +501,14 @@ impl Tenant {
 
         // Sanity check: a timeline should have some content.
         anyhow::ensure!(
-            ancestor.is_some() ||
-                timeline.layers.read().unwrap().iter_historic_layers().next().is_some(),
+            ancestor.is_some()
+                || timeline
+                    .layers
+                    .read()
+                    .unwrap()
+                    .iter_historic_layers()
+                    .next()
+                    .is_some(),
             "Timeline has no ancestor and no layer files"
         );
 

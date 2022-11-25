@@ -37,9 +37,7 @@ pub(super) async fn upload_index_part<'a>(
             &index_part_path,
         )
         .await
-        .with_context(|| {
-            format!("Failed to upload index part for '{tenant_id} / {timeline_id}'")
-        })
+        .with_context(|| format!("Failed to upload index part for '{tenant_id} / {timeline_id}'"))
 }
 
 /// Attempts to upload given layer files.
@@ -88,7 +86,9 @@ pub(super) async fn upload_timeline_layer(
         // this is a silly state we would like to avoid
     }
 
-    let fs_size = usize::try_from(fs_size).with_context(|| format!("File {source_path:?} size {fs_size} could not be converted to usize"))?;
+    let fs_size = usize::try_from(fs_size).with_context(|| {
+        format!("File {source_path:?} size {fs_size} could not be converted to usize")
+    })?;
 
     storage
         .upload(Box::new(source_file), fs_size, &storage_path, None)

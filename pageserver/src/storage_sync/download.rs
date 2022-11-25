@@ -129,7 +129,6 @@ pub async fn download_layer_file<'a>(
     Ok(bytes_amount)
 }
 
-
 const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
 pub fn is_temp_download_file(path: &Path) -> bool {
@@ -236,14 +235,14 @@ pub async fn download_index_part(
         &mut index_part_download.download_stream,
         &mut index_part_bytes,
     )
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to download an index part into file '{}'",
-                index_part_path.display()
-            )
-        })
-        .map_err(DownloadError::Other)?;
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to download an index part into file '{}'",
+            index_part_path.display()
+        )
+    })
+    .map_err(DownloadError::Other)?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
         .with_context(|| {
