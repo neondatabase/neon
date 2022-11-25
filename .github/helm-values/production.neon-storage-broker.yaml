@@ -1,0 +1,54 @@
+# Helm chart values for neon-storage-broker
+podLabels:
+  neon_env: production
+  neon_service: storage-broker
+
+ingress:
+  enabled: true
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/healthcheck-path: /status
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/scheme: "internal"
+    alb.ingress.kubernetes.io/target-type: "ip"
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/backend-protocol-version: "GRPC"
+
+  hosts:
+    - host: storage-broker.neon.tech
+      paths:
+        - path: /
+          pathType: Prefix
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    selector:
+      release: kube-prometheus-stack
+
+extraManifests:
+  - apiVersion: operator.victoriametrics.com/v1beta1
+    kind: VMServiceScrape
+    metadata:
+      name: "{{ include \"neon-storage-broker.fullname\" . }}"
+      labels:
+        helm.sh/chart: neon-storage-broker-{{ .Chart.Version }}
+        app.kubernetes.io/name: neon-storage-broker
+        app.kubernetes.io/instance: neon-storage-broker
+        app.kubernetes.io/version: "{{ .Chart.AppVersion }}"
+        app.kubernetes.io/managed-by: Helm
+      namespace: "{{ .Release.Namespace }}"
+    spec:
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: "neon-storage-broker"
+      endpoints:
+        - port: broker
+          path: /metrics
+          interval: 10s
+          scrapeTimeout: 10s
+      namespaceSelector:
+        matchNames:
+          - "{{ .Release.Namespace }}"
+
