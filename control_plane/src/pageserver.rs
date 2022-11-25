@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::{io, result};
 
-use crate::connection::PgConnectionConfig;
 use anyhow::{bail, Context};
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
+use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
+use utils::auth::{Claims, Scope};
 use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
@@ -77,28 +78,22 @@ pub struct PageServerNode {
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv) -> PageServerNode {
+        let (host, port) = parse_host_port(&env.pageserver.listen_pg_addr)
+            .expect("Unable to parse listen_pg_addr");
+        let port = port.unwrap_or(5432);
         let password = if env.pageserver.auth_type == AuthType::NeonJWT {
-            &env.pageserver.auth_token
+            Some(env.pageserver.auth_token.clone())
         } else {
-            ""
+            None
         };
 
         Self {
-            pg_connection_config: Self::pageserver_connection_config(
-                password,
-                &env.pageserver.listen_pg_addr,
-            ),
+            pg_connection_config: PgConnectionConfig::new_host_port(host, port)
+                .set_password(password),
             env: env.clone(),
             http_client: Client::new(),
             http_base_url: format!("http://{}/v1", env.pageserver.listen_http_addr),
         }
-    }
-
-    /// Construct libpq connection string for connecting to the pageserver.
-    fn pageserver_connection_config(password: &str, listen_addr: &str) -> PgConnectionConfig {
-        format!("postgresql://no_user:{password}@{listen_addr}/no_db")
-            .parse()
-            .unwrap()
     }
 
     pub fn initialize(
@@ -259,11 +254,21 @@ impl PageServerNode {
             args.extend(["-c", config_override]);
         }
 
+        let envs = if self.env.pageserver.auth_type != AuthType::Trust {
+            // Generate a token to connect from the pageserver to a safekeeper
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+            vec![("ZENITH_AUTH_TOKEN".to_owned(), token)]
+        } else {
+            vec![]
+        };
         background_process::start_process(
             "pageserver",
             datadir,
             &self.env.pageserver_bin(),
             &args,
+            envs,
             background_process::InitialPidFile::Expect(&self.pid_file()),
             || match self.check_status() {
                 Ok(()) => Ok(true),

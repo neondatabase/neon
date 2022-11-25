@@ -19,7 +19,7 @@ use crate::{config::PageServerConf, tenant_mgr};
 use utils::{
     auth::JwtAuth,
     http::{
-        endpoint::{self, attach_openapi_ui, auth_middleware, check_permission},
+        endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
         json::{json_request, json_response},
         request::parse_request_param,
@@ -74,6 +74,12 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
     get_state(request).conf
 }
 
+fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
+    check_permission_with(request, |claims| {
+        crate::auth::check_permission(claims, tenant_id)
+    })
+}
+
 // Helper function to construct a TimelineInfo struct for a timeline
 fn build_timeline_info(
     tenant_state: TenantState,
@@ -102,7 +108,7 @@ fn build_timeline_info_common(
         let guard = timeline.last_received_wal.lock().unwrap();
         if let Some(info) = guard.as_ref() {
             (
-                Some(info.wal_source_connstr.clone()),
+                Some(format!("{:?}", info.wal_source_connconf)), // Password is hidden, but it's for statistics only.
                 Some(info.last_received_msg_lsn),
                 Some(info.last_received_msg_ts),
             )
@@ -169,6 +175,7 @@ fn build_timeline_info_common(
 
 // healthcheck handler
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
     let config = get_config(&request);
     json_response(StatusCode::OK, StatusResponse { id: config.id })
 }

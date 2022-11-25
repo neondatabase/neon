@@ -1,5 +1,7 @@
 //! Main entry point for the Page Server executable.
 
+use std::env::{var, VarError};
+use std::sync::Arc;
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
@@ -269,6 +271,23 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         }
     };
     info!("Using auth: {:#?}", conf.auth_type);
+
+    match var("ZENITH_AUTH_TOKEN") {
+        Ok(v) => {
+            info!("Loaded JWT token for authentication with Safekeeper");
+            pageserver::config::SAFEKEEPER_AUTH_TOKEN
+                .set(Arc::new(v))
+                .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
+        }
+        Err(VarError::NotPresent) => {
+            info!("No JWT token for authentication with Safekeeper detected");
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                "Failed to either load to detect non-present ZENITH_AUTH_TOKEN environment variable"
+            })
+        }
+    };
 
     let remote_storage = conf
         .remote_storage_config

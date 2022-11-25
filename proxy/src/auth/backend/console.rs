@@ -1,9 +1,9 @@
 //! Cloud API V2.
 
-use super::ConsoleReqExtra;
+use super::{AuthSuccess, ConsoleReqExtra};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
-    compute::{self, ComputeConnCfg},
+    compute,
     error::{io_error, UserFacingError},
     http, scram,
     stream::PqStream,
@@ -128,7 +128,7 @@ impl<'a> Api<'a> {
     pub(super) async fn handle_user(
         self,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<compute::NodeInfo> {
+    ) -> auth::Result<AuthSuccess<compute::ConnCfg>> {
         handle_user(client, &self, Self::get_auth_info, Self::wake_compute).await
     }
 
@@ -164,7 +164,7 @@ impl<'a> Api<'a> {
     }
 
     /// Wake up the compute node and return the corresponding connection info.
-    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg, WakeComputeError> {
+    pub(super) async fn wake_compute(&self) -> Result<compute::ConnCfg, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let req = self
             .endpoint
@@ -195,7 +195,7 @@ impl<'a> Api<'a> {
             Some(x) => x,
         };
 
-        let mut config = ComputeConnCfg::new();
+        let mut config = compute::ConnCfg::new();
         config
             .host(host)
             .port(port)
@@ -213,10 +213,10 @@ pub(super) async fn handle_user<'a, Endpoint, GetAuthInfo, WakeCompute>(
     endpoint: &'a Endpoint,
     get_auth_info: impl FnOnce(&'a Endpoint) -> GetAuthInfo,
     wake_compute: impl FnOnce(&'a Endpoint) -> WakeCompute,
-) -> auth::Result<compute::NodeInfo>
+) -> auth::Result<AuthSuccess<compute::ConnCfg>>
 where
     GetAuthInfo: Future<Output = Result<AuthInfo, GetAuthInfoError>>,
-    WakeCompute: Future<Output = Result<ComputeConnCfg, WakeComputeError>>,
+    WakeCompute: Future<Output = Result<compute::ConnCfg, WakeComputeError>>,
 {
     info!("fetching user's authentication info");
     let auth_info = get_auth_info(endpoint).await?;
@@ -243,9 +243,9 @@ where
         config.auth_keys(tokio_postgres::config::AuthKeys::ScramSha256(keys));
     }
 
-    Ok(compute::NodeInfo {
+    Ok(AuthSuccess {
         reported_auth_ok: false,
-        config,
+        value: config,
     })
 }
 

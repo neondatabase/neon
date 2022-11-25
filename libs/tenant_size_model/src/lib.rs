@@ -33,8 +33,8 @@ pub struct Segment {
     /// Logical size before this state
     start_size: u64,
 
-    /// Logical size at this state
-    pub end_size: u64,
+    /// Logical size at this state. Can be None in the last Segment of a branch.
+    pub end_size: Option<u64>,
 
     /// Indices to [`Storage::segments`]
     ///
@@ -115,7 +115,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             start_lsn: 0,
             end_lsn: 0,
             start_size: 0,
-            end_size: 0,
+            end_size: Some(0),
             children_after: Vec::new(),
         };
 
@@ -123,6 +123,39 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             segments: vec![init_segment],
             branches: HashMap::from([(initial_branch, 0)]),
         }
+    }
+
+    /// Advances the branch with a new point, at given LSN.
+    pub fn insert_point<Q: ?Sized>(
+        &mut self,
+        branch: &Q,
+        op: Cow<'static, str>,
+        lsn: u64,
+        size: Option<u64>,
+    ) where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq,
+    {
+        let lastseg_id = *self.branches.get(branch).unwrap();
+        let newseg_id = self.segments.len();
+        let lastseg = &mut self.segments[lastseg_id];
+
+        assert!(lsn > lastseg.end_lsn);
+
+        let newseg = Segment {
+            op,
+            parent: Some(lastseg_id),
+            start_lsn: lastseg.end_lsn,
+            end_lsn: lsn,
+            start_size: lastseg.end_size.unwrap(),
+            end_size: size,
+            children_after: Vec::new(),
+            needed: false,
+        };
+        lastseg.children_after.push(newseg_id);
+
+        self.segments.push(newseg);
+        *self.branches.get_mut(branch).expect("read already") = newseg_id;
     }
 
     /// Advances the branch with the named operation, by the relative LSN and logical size bytes.
@@ -145,8 +178,8 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             parent: Some(lastseg_id),
             start_lsn: lastseg.end_lsn,
             end_lsn: lastseg.end_lsn + lsn_bytes,
-            start_size: lastseg.end_size,
-            end_size: (lastseg.end_size as i64 + size_bytes) as u64,
+            start_size: lastseg.end_size.unwrap(),
+            end_size: Some((lastseg.end_size.unwrap() as i64 + size_bytes) as u64),
             children_after: Vec::new(),
             needed: false,
         };
@@ -321,7 +354,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
                 Some(SegmentSize {
                     seg_id,
                     method: SnapshotAfter,
-                    this_size: seg.end_size,
+                    this_size: seg.end_size.unwrap(),
                     children,
                 })
             } else {

@@ -661,6 +661,7 @@ components:
         - disk_consistent_lsn
         - awaits_download
         - state
+        - latest_gc_cutoff_lsn
       properties:
         timeline_id:
           type: string
@@ -705,6 +706,9 @@ components:
           type: boolean
         state:
           type: string
+        latest_gc_cutoff_lsn:
+          type: string
+          format: hex
 
         # These 'local' and 'remote' fields just duplicate some of the fields
         # above. They are kept for backwards-compatibility. They can be removed,

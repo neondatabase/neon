@@ -46,8 +46,8 @@ use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
-use crate::config::TIMELINE_UNINIT_MARK_SUFFIX;
 use crate::import_datadir;
+use crate::is_uninit_mark;
 use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
 use crate::storage_sync::create_remote_timeline_client;
@@ -1072,14 +1072,7 @@ impl Tenant {
                     .context("Cannot branch off the timeline that's not present in pageserver")?;
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
-                    // Wait for the WAL to arrive and be processed on the parent branch up
-                    // to the requested branch point. The repository code itself doesn't
-                    // require it, but if we start to receive WAL on the new timeline,
-                    // decoding the new WAL might need to look up previous pages, relation
-                    // sizes etc. and that would get confused if the previous page versions
-                    // are not in the repository yet.
                     *lsn = lsn.align();
-                    ancestor_timeline.wait_lsn(*lsn).await?;
 
                     let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                     if ancestor_ancestor_lsn > *lsn {
@@ -1091,6 +1084,14 @@ impl Tenant {
                             ancestor_ancestor_lsn,
                         );
                     }
+
+                    // Wait for the WAL to arrive and be processed on the parent branch up
+                    // to the requested branch point. The repository code itself doesn't
+                    // require it, but if we start to receive WAL on the new timeline,
+                    // decoding the new WAL might need to look up previous pages, relation
+                    // sizes etc. and that would get confused if the previous page versions
+                    // are not in the repository yet.
+                    ancestor_timeline.wait_lsn(*lsn).await?;
                 }
 
                 self.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
@@ -2167,15 +2168,6 @@ impl Tenant {
     }
 }
 
-fn is_uninit_mark(path: &Path) -> bool {
-    match path.file_name() {
-        Some(name) => name
-            .to_string_lossy()
-            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
-        None => false,
-    }
-}
-
 fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
     fs::remove_dir_all(&timeline_dir)
         .or_else(|e| {
@@ -2598,11 +2590,11 @@ pub mod harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::METADATA_FILE_NAME;
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::DEFAULT_PG_VERSION;
+    use crate::METADATA_FILE_NAME;
     use bytes::BytesMut;
     use hex_literal::hex;
     use once_cell::sync::Lazy;

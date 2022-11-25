@@ -39,6 +39,7 @@ pub fn start_etcd_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
         &etcd_data_dir,
         &etcd_broker.etcd_binary_path,
         &args,
+        [],
         background_process::InitialPidFile::Create(&pid_file_path),
         || {
             for broker_endpoint in &etcd_broker.broker_endpoints {

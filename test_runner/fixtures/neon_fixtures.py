@@ -420,8 +420,9 @@ class AuthKeys:
     pub: str
     priv: str
 
-    def generate_management_token(self) -> str:
-        token = jwt.encode({"scope": "pageserverapi"}, self.priv, algorithm="RS256")
+    def generate_token(self, *, scope: str, **token_data: str) -> str:
+        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="RS256")
+        # cast(Any, self.priv)
 
         # jwt.encode can return 'bytes' or 'str', depending on Python version or type
         # hinting or something (not sure what). If it returned 'bytes', convert it to 'str'
@@ -431,17 +432,14 @@ class AuthKeys:
 
         return token
 
+    def generate_pageserver_token(self) -> str:
+        return self.generate_token(scope="pageserverapi")
+
+    def generate_safekeeper_token(self) -> str:
+        return self.generate_token(scope="safekeeperdata")
+
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
-        token = jwt.encode(
-            {"scope": "tenant", "tenant_id": str(tenant_id)},
-            self.priv,
-            algorithm="RS256",
-        )
-
-        if isinstance(token, bytes):
-            token = token.decode()
-
-        return token
+        return self.generate_token(scope="tenant", tenant_id=str(tenant_id))
 
 
 class MockS3Server:
@@ -1761,6 +1759,8 @@ class NeonPageserver(PgProtocol):
             ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
             ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
             ".*Removing intermediate uninit mark file.*",
+            # FIXME: known race condition in TaskHandle: https://github.com/neondatabase/neon/issues/2885
+            ".*sender is dropped while join handle is still alive.*",
         ]
 
     def start(
@@ -2094,7 +2094,8 @@ class NeonProxy(PgProtocol):
 
     def start(self):
         """
-        Starts a proxy with option '--auth-backend postgres' and a postgres instance already provided though '--auth-endpoint <postgress-instance>'."
+        Starts a proxy with option '--auth-backend postgres' and a postgres instance
+        already provided though '--auth-endpoint <postgress-instance>'."
         """
         assert self._popen is None
         assert self.auth_endpoint is not None
@@ -2499,7 +2500,8 @@ class Safekeeper:
 
         # "replication=0" hacks psycopg not to send additional queries
         # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
+        token = self.env.auth_keys.generate_tenant_token(tenant_id)
+        connstr = f"host=localhost port={self.port.pg} password={token} replication=0 options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
 
         with closing(psycopg2.connect(connstr)) as conn:
             # server doesn't support transactions

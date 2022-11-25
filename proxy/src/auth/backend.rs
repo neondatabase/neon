@@ -12,7 +12,6 @@ use crate::{
     waiters::{self, Waiter, Waiters},
 };
 use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -34,45 +33,6 @@ where
 
 pub fn notify(psql_session_id: &str, msg: mgmt::ComputeReady) -> Result<(), waiters::NotifyError> {
     CPLANE_WAITERS.notify(psql_session_id, msg)
-}
-
-/// Compute node connection params provided by the cloud.
-/// Note how it implements serde traits, since we receive it over the wire.
-#[derive(Serialize, Deserialize, Default)]
-pub struct DatabaseInfo {
-    pub host: String,
-    pub port: u16,
-    pub dbname: String,
-    pub user: String,
-    pub password: Option<String>,
-}
-
-// Manually implement debug to omit personal and sensitive info.
-impl std::fmt::Debug for DatabaseInfo {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        fmt.debug_struct("DatabaseInfo")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .finish_non_exhaustive()
-    }
-}
-
-impl From<DatabaseInfo> for tokio_postgres::Config {
-    fn from(db_info: DatabaseInfo) -> Self {
-        let mut config = tokio_postgres::Config::new();
-
-        config
-            .host(&db_info.host)
-            .port(db_info.port)
-            .dbname(&db_info.dbname)
-            .user(&db_info.user);
-
-        if let Some(password) = db_info.password {
-            config.password(password);
-        }
-
-        config
-    }
 }
 
 /// Extra query params we'd like to pass to the console.
@@ -158,54 +118,107 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
     }
 }
 
+/// A product of successful authentication.
+pub struct AuthSuccess<T> {
+    /// Did we send [`pq_proto::BeMessage::AuthenticationOk`] to client?
+    pub reported_auth_ok: bool,
+    /// Something to be considered a positive result.
+    pub value: T,
+}
+
+impl<T> AuthSuccess<T> {
+    /// Very similar to [`std::option::Option::map`].
+    /// Maps [`AuthSuccess<T>`] to [`AuthSuccess<R>`] by applying
+    /// a function to a contained value.
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> AuthSuccess<R> {
+        AuthSuccess {
+            reported_auth_ok: self.reported_auth_ok,
+            value: f(self.value),
+        }
+    }
+}
+
+/// Info for establishing a connection to a compute node.
+/// This is what we get after auth succeeded, but not before!
+pub struct NodeInfo {
+    /// Project from [`auth::ClientCredentials`].
+    pub project: String,
+    /// Compute node connection params.
+    pub config: compute::ConnCfg,
+}
+
 impl BackendType<'_, ClientCredentials<'_>> {
+    /// Do something special if user didn't provide the `project` parameter.
+    async fn try_password_hack(
+        &mut self,
+        extra: &ConsoleReqExtra<'_>,
+        client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+    ) -> auth::Result<Option<AuthSuccess<NodeInfo>>> {
+        use BackendType::*;
+
+        // If there's no project so far, that entails that client doesn't
+        // support SNI or other means of passing the project name.
+        // We now expect to see a very specific payload in the place of password.
+        let fetch_magic_payload = async {
+            warn!("project name not specified, resorting to the password hack auth flow");
+            let payload = AuthFlow::new(client)
+                .begin(auth::PasswordHack)
+                .await?
+                .authenticate()
+                .await?;
+
+            info!(project = &payload.project, "received missing parameter");
+            auth::Result::Ok(payload)
+        };
+
+        // TODO: find a proper way to merge those very similar blocks.
+        let (mut config, payload) = match self {
+            Console(endpoint, creds) if creds.project.is_none() => {
+                let payload = fetch_magic_payload.await?;
+
+                let mut creds = creds.as_ref();
+                creds.project = Some(payload.project.as_str().into());
+                let config = console::Api::new(endpoint, extra, &creds)
+                    .wake_compute()
+                    .await?;
+
+                (config, payload)
+            }
+            Postgres(endpoint, creds) if creds.project.is_none() => {
+                let payload = fetch_magic_payload.await?;
+
+                let mut creds = creds.as_ref();
+                creds.project = Some(payload.project.as_str().into());
+                let config = postgres::Api::new(endpoint, &creds).wake_compute().await?;
+
+                (config, payload)
+            }
+            _ => return Ok(None),
+        };
+
+        config.password(payload.password);
+        Ok(Some(AuthSuccess {
+            reported_auth_ok: false,
+            value: NodeInfo {
+                project: payload.project,
+                config,
+            },
+        }))
+    }
+
     /// Authenticate the client via the requested backend, possibly using credentials.
     pub async fn authenticate(
         mut self,
         extra: &ConsoleReqExtra<'_>,
         client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> super::Result<compute::NodeInfo> {
+    ) -> auth::Result<AuthSuccess<NodeInfo>> {
         use BackendType::*;
 
-        if let Console(_, creds) | Postgres(_, creds) = &mut self {
-            // If there's no project so far, that entails that client doesn't
-            // support SNI or other means of passing the project name.
-            // We now expect to see a very specific payload in the place of password.
-            if creds.project().is_none() {
-                warn!("project name not specified, resorting to the password hack auth flow");
-
-                let payload = AuthFlow::new(client)
-                    .begin(auth::PasswordHack)
-                    .await?
-                    .authenticate()
-                    .await?;
-
-                // Finally we may finish the initialization of `creds`.
-                // TODO: add missing type safety to ClientCredentials.
-                info!(project = &payload.project, "received missing parameter");
-                creds.project = Some(payload.project.into());
-
-                let mut config = match &self {
-                    Console(endpoint, creds) => {
-                        console::Api::new(endpoint, extra, creds)
-                            .wake_compute()
-                            .await?
-                    }
-                    Postgres(endpoint, creds) => {
-                        postgres::Api::new(endpoint, creds).wake_compute().await?
-                    }
-                    _ => unreachable!("see the patterns above"),
-                };
-
-                // We should use a password from payload as well.
-                config.password(payload.password);
-
-                info!("user successfully authenticated (using the password hack)");
-                return Ok(compute::NodeInfo {
-                    reported_auth_ok: false,
-                    config,
-                });
-            }
+        // Handle cases when `project` is missing in `creds`.
+        // TODO: type safety: return `creds` with irrefutable `project`.
+        if let Some(res) = self.try_password_hack(extra, client).await? {
+            info!("user successfully authenticated (using the password hack)");
+            return Ok(res);
         }
 
         let res = match self {
@@ -215,22 +228,34 @@ impl BackendType<'_, ClientCredentials<'_>> {
                     project = creds.project(),
                     "performing authentication using the console"
                 );
+
+                assert!(creds.project.is_some());
                 console::Api::new(&endpoint, extra, &creds)
                     .handle_user(client)
-                    .await
+                    .await?
+                    .map(|config| NodeInfo {
+                        project: creds.project.unwrap().into_owned(),
+                        config,
+                    })
             }
             Postgres(endpoint, creds) => {
                 info!("performing mock authentication using a local postgres instance");
+
+                assert!(creds.project.is_some());
                 postgres::Api::new(&endpoint, &creds)
                     .handle_user(client)
-                    .await
+                    .await?
+                    .map(|config| NodeInfo {
+                        project: creds.project.unwrap().into_owned(),
+                        config,
+                    })
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
                 info!("performing link authentication");
-                link::handle_user(&url, client).await
+                link::handle_user(&url, client).await?
             }
-        }?;
+        };
 
         info!("user successfully authenticated");
         Ok(res)

@@ -33,7 +33,7 @@ use crate::tenant::{
     storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
 };
 
-use crate::config::{PageServerConf, METADATA_FILE_NAME};
+use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::BlockNumber;
@@ -42,6 +42,7 @@ use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::tenant_config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
 
+use postgres_connection::PgConnectionConfig;
 use postgres_ffi::to_pg_timestamp;
 use utils::{
     id::{TenantId, TimelineId},
@@ -56,6 +57,7 @@ use crate::task_mgr::TaskKind;
 use crate::walreceiver::{is_etcd_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
+use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use crate::{page_cache, storage_sync::index::LayerFileMetadata};
@@ -298,7 +300,7 @@ impl LogicalSize {
 }
 
 pub struct WalReceiverInfo {
-    pub wal_source_connstr: String,
+    pub wal_source_connconf: PgConnectionConfig,
     pub last_received_msg_lsn: Lsn,
     pub last_received_msg_ts: u128,
 }
@@ -880,6 +882,7 @@ impl Timeline {
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
+            crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
         );
     }
 

@@ -9,7 +9,6 @@
 
 mod background_process;
 pub mod compute;
-pub mod connection;
 pub mod etcd;
 pub mod local_env;
 pub mod pageserver;

@@ -12,6 +12,7 @@ use utils::{
     logging::LogFormat,
 };
 
+mod auth;
 pub mod broker;
 pub mod control_file;
 pub mod control_file_upgrade;

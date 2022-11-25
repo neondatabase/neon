@@ -1,3 +1,4 @@
+use super::{AuthSuccess, NodeInfo};
 use crate::{auth, compute, error::UserFacingError, stream::PqStream, waiters};
 use pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 use thiserror::Error;
@@ -49,7 +50,7 @@ pub fn new_psql_session_id() -> String {
 pub async fn handle_user(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<compute::NodeInfo> {
+) -> auth::Result<AuthSuccess<NodeInfo>> {
     let psql_session_id = new_psql_session_id();
     let span = info_span!("link", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
@@ -71,8 +72,22 @@ pub async fn handle_user(
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
-    Ok(compute::NodeInfo {
+    let mut config = compute::ConnCfg::new();
+    config
+        .host(&db_info.host)
+        .port(db_info.port)
+        .dbname(&db_info.dbname)
+        .user(&db_info.user);
+
+    if let Some(password) = db_info.password {
+        config.password(password);
+    }
+
+    Ok(AuthSuccess {
         reported_auth_ok: true,
-        config: db_info.into(),
+        value: NodeInfo {
+            project: db_info.project,
+            config,
+        },
     })
 }
