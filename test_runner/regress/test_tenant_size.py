@@ -44,8 +44,8 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     Operate on single branch reading the tenants size after each transaction.
     """
 
-    # gc and compaction is not wanted automatically
-    # the pitr_interval here is quite problematic, so we cannot really use it.
+    # Disable automatic gc and compaction.
+    # The pitr_interval here is quite problematic, so we cannot really use it.
     # it'd have to be calibrated per test executing env.
 
     # there was a bug which was hidden if the create table and first batch of
@@ -53,7 +53,7 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     # that there next_gc_cutoff could be smaller than initdb_lsn, which will
     # obviously lead to issues when calculating the size.
     gc_horizon = 0x30000
-    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
+    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
 
     env = neon_env_builder.init_start()
 
@@ -162,7 +162,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
 
     gc_horizon = 128 * 1024
 
-    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
+    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
 
     env = neon_env_builder.init_start()
 

@@ -1717,7 +1717,11 @@ pub mod harness {
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-            let tenant_conf = TenantConf::dummy_conf();
+            // Disable automatic GC and compaction to make the unit tests more deterministic.
+            // The tests perform them manually if needed.
+            let mut tenant_conf = TenantConf::dummy_conf();
+            tenant_conf.gc_period = Duration::ZERO;
+            tenant_conf.compaction_period = Duration::ZERO;
 
             let tenant_id = TenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;

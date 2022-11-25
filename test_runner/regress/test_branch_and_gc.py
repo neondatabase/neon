@@ -52,8 +52,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             # disable background GC
-            "gc_period": "10 m",
-            "gc_horizon": f"{10 * 1024 ** 3}",
+            "gc_period": "0s",
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{1024 ** 2}",
             # set the target size to be large to allow the image layer to cover the whole key space
@@ -127,8 +126,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             # disable background GC
-            "gc_period": "10 m",
-            "gc_horizon": f"{10 * 1024 ** 3}",
+            "gc_period": "0s",
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{1024 ** 2}",
             # set the target size to be large to allow the image layer to cover the whole key space
