@@ -239,6 +239,7 @@ pub use download::is_temp_download_file;
 pub use download::list_remote_timelines;
 use tracing::{info_span, Instrument};
 
+use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::ops::DerefMut;
@@ -494,6 +495,8 @@ impl std::fmt::Display for UploadOp {
     }
 }
 
+pub struct WaitScheduledUploadCompletedToken(HashSet<PathBuf>);
+
 impl RemoteTimelineClient {
     /// Initialize the upload queue for a remote storage that already received
     /// an index file upload, i.e., it's not empty.
@@ -667,7 +670,12 @@ impl RemoteTimelineClient {
     ///
     /// The deletion won't actually be performed, until all preceding
     /// upload operations have completed succesfully.
-    pub fn schedule_layer_file_deletion(self: &Arc<Self>, paths: &[PathBuf]) -> anyhow::Result<()> {
+    pub fn schedule_layer_file_deletion(
+        self: &Arc<Self>,
+        token: WaitScheduledUploadCompletedToken,
+    ) -> anyhow::Result<()> {
+        let paths = token.0;
+
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -676,7 +684,7 @@ impl RemoteTimelineClient {
         // NB: deleting layers doesn't affect the values stored in TimelineMetadata,
         //     so, we don't need update it.
 
-        for path in paths {
+        for path in paths.iter() {
             let relative_path = RelativePath::from_local_path(
                 &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
                 path,
@@ -694,7 +702,7 @@ impl RemoteTimelineClient {
         upload_queue.queued_operations.push_back(op);
 
         // schedule the actual deletions
-        for path in paths {
+        for path in paths.iter() {
             let op = UploadOp::Delete(RemoteOpFileKind::Layer, PathBuf::from(path));
             self.update_upload_queue_unfinished_metric(1, &op);
             upload_queue.queued_operations.push_back(op);
@@ -709,7 +717,7 @@ impl RemoteTimelineClient {
     ///
     /// Wait for all previously scheduled uploads/deletions to complete
     ///
-    pub async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
+    async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
         let (sender, mut receiver) = tokio::sync::watch::channel(());
         let barrier_op = UploadOp::Barrier(sender);
 
@@ -727,6 +735,17 @@ impl RemoteTimelineClient {
             anyhow::bail!("wait_completion aborted because upload queue was stopped");
         }
         Ok(())
+    }
+
+    pub async fn wait_scheduled_upload_completed(
+        self: &Arc<Self>,
+        maybe_uploading_layer_paths: HashSet<PathBuf>,
+    ) -> anyhow::Result<WaitScheduledUploadCompletedToken> {
+        // TODO we could be smarter about this to avoid head-of-line blocking.
+        self.wait_completion().await?;
+        Ok(WaitScheduledUploadCompletedToken(
+            maybe_uploading_layer_paths,
+        ))
     }
 
     ///
@@ -1127,8 +1146,8 @@ mod tests {
     }
 
     // Test scheduling
-    #[test]
-    fn upload_scheduling() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn upload_scheduling() -> anyhow::Result<()> {
         let harness = TenantHarness::create("upload_scheduling")?;
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
         std::fs::create_dir_all(&timeline_path)?;
@@ -1247,7 +1266,10 @@ mod tests {
             &timeline_path.join("baz"),
             &LayerFileMetadata::new(content_baz.len() as u64),
         )?;
-        client.schedule_layer_file_deletion(&[timeline_path.join("foo")])?;
+        let completion_token = client
+            .wait_scheduled_upload_completed([timeline_path.join("foo")].into())
+            .await?;
+        client.schedule_layer_file_deletion(completion_token)?;
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();

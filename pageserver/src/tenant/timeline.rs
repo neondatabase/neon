@@ -2221,37 +2221,65 @@ impl Timeline {
             layer_paths.pop().unwrap();
         }
 
+        // We need to wait for upload operations of layer_paths_to_delete to finish,
+        // because they expect the file on disk to be present.
+        // But the storage_sync module isn't very smart about waiting for that to happen.
+        // To avoid being head-of-line blocked by the `new_layer_paths` uploads that
+        // we schedule below, do the wait now. We know it's safe because the paths
+        // don't intersect.
+        let mut layer_paths_to_delete: HashSet<PathBuf> =
+            HashSet::with_capacity(deltas_to_compact.len());
+        for l in &deltas_to_compact {
+            if let Some(path) = l.local_path() {
+                layer_paths_to_delete.insert(path);
+            }
+        }
+        let mut new_layer_paths: HashSet<PathBuf> = HashSet::with_capacity(new_layers.len());
+        for l in &new_layers {
+            if let Some(path) = l.local_path() {
+                new_layer_paths.insert(path);
+            }
+        }
+        let intersection = layer_paths_to_delete.intersection(&new_layer_paths);
+        assert_eq!(
+            intersection.count(),
+            0,
+            "newly created layers must not overlap with layers to delete"
+        );
+        let remote_client_and_completion_token = if let Some(remote_client) = &self.remote_client {
+            Some((
+                remote_client,
+                tokio::runtime::Handle::current()
+                    .block_on(remote_client.wait_scheduled_upload_completed(layer_paths_to_delete))
+                    .context("wait for layer uploads to finish before deleting layers")?,
+            ))
+        } else {
+            None
+        };
+
+        // Make new layers visible
         let mut layers = self.layers.write().unwrap();
-        let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
             let new_delta_path = l.path();
-
             let metadata = new_delta_path.metadata()?;
-
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
                     &new_delta_path,
                     &LayerFileMetadata::new(metadata.len()),
                 )?;
             }
-
             // update the timeline's physical size
             self.metrics.current_physical_size_gauge.add(metadata.len());
-
-            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             layers.insert_historic(Arc::new(l));
         }
-
         // Now that we have reshuffled the data to set of new delta layers, we can
-        // delete the old ones
-        let mut layer_paths_to_delete = Vec::with_capacity(deltas_to_compact.len());
+        // delete the old ones.
         drop(all_keys_iter);
         for l in deltas_to_compact {
             if let Some(path) = l.local_path() {
                 self.metrics
                     .current_physical_size_gauge
                     .sub(path.metadata()?.len());
-                layer_paths_to_delete.push(path);
             }
             l.delete()?;
             layers.remove_historic(l);
@@ -2259,11 +2287,11 @@ impl Timeline {
         drop(layers);
 
         // Also schedule the deletions in remote storage
-        if let Some(remote_client) = &self.remote_client {
+        if let Some((remote_client, completion_token)) = remote_client_and_completion_token {
             // FIXME: This also uploads new index file. If
             // flush_frozen_layer() is doing this at the same time, do
             // we have a problem?
-            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
+            remote_client.schedule_layer_file_deletion(completion_token)?;
         }
 
         Ok(())
@@ -2511,16 +2539,35 @@ impl Timeline {
             layers_to_remove.push(Arc::clone(&l));
         }
 
+        let mut layer_paths_to_delete = HashSet::with_capacity(layers_to_remove.len());
+        for doomed_layer in &layers_to_remove {
+            if let Some(path) = doomed_layer.local_path() {
+                layer_paths_to_delete.insert(path);
+            }
+        }
+        // We need to wait for upload operations of layer_paths_to_delete to finish,
+        // because they expect the file on disk to be present.
+        // The storage_sync module only provides the barrier-like wait_completion()
+        // function, which makes us wait for _all_ ongoing operations.
+        let remote_client_and_completion_token = if let Some(remote_client) = &self.remote_client {
+            Some((
+                remote_client,
+                tokio::runtime::Handle::current()
+                    .block_on(remote_client.wait_scheduled_upload_completed(layer_paths_to_delete))
+                    .context("wait for layer uploads to finish before deleting GC'ed layers")?,
+            ))
+        } else {
+            None
+        };
+
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
-        let mut layer_paths_to_delete = Vec::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
             if let Some(path) = doomed_layer.local_path() {
                 self.metrics
                     .current_physical_size_gauge
                     .sub(path.metadata()?.len());
-                layer_paths_to_delete.push(path);
             }
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer);
@@ -2536,8 +2583,9 @@ impl Timeline {
             fail_point!("after-timeline-gc-removed-layers");
         }
 
-        if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
+        // Now e can schedule the delete operations
+        if let Some((remote_client, completion_token)) = remote_client_and_completion_token {
+            remote_client.schedule_layer_file_deletion(completion_token)?;
         }
 
         result.elapsed = now.elapsed()?;
