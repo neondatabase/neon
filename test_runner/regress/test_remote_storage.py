@@ -397,5 +397,93 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     # XXX force retry, currently we have to wait for exponential backoff
     time.sleep(10)
 
+# Test that we correctly handle timeline with layers stuck in upload queue
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_compaction_layer_deletion_race_with_layer_upload(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_remote_storage_backup_and_restore",
+    )
+
+    env = neon_env_builder.init_start()
+
+    # create tenant with config that will determinstically allow
+    # compaction and gc
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        conf={
+            # small checkpointing and compaction targets to ensure we generate many operations
+            "checkpoint_distance": f"{64 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{64 * 1024}",
+            # large horizon to avoid automatic GC (our assert on gc_result below relies on that)
+            "gc_horizon": f"{1024 ** 4}",
+            "gc_period": "1h",
+            # disable PITR so that GC considers just gc_horizon
+            "pitr_interval": "0s",
+        }
+    )
+
+    client = env.pageserver.http_client()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+
+    # make upload get stuck
+    client.configure_failpoints(("before-upload-layer", "return"))
+
+    def get_queued_count(file_kind, op_kind):
+        metrics = client.get_metrics()
+        matches = re.search(
+            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
+            metrics,
+            re.MULTILINE,
+        )
+        assert matches
+        return int(matches[1])
+
+    # create one level 0 file that will get stuck in the upload queue
+    pg.safe_psql_many(
+        [
+            "CREATE TABLE foo (a INTEGER, b text)",
+            "INSERT INTO foo SELECT g, CURRENT_TIMESTAMP FROM generate_series(1, 10000) g",
+        ]
+    )
+    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    client.timeline_checkpoint(tenant_id, timeline_id)
+
+    assert get_queued_count(file_kind="layer", op_kind="upload") > 0
+
+    timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    assert timeline_path.exists()
+    files_pre_compact = set(timeline_path.glob("*"))
+
+    # create another level 0 file, thereby triggering compaction
+    pg.safe_psql_many(
+        [
+            "INSERT INTO foo SELECT g, CURRENT_TIMESTAMP FROM generate_series(1, 10000) g",
+        ]
+    )
+    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    client.timeline_checkpoint(tenant_id, timeline_id)
+    files_post_compact = set(timeline_path.glob("*"))
+
+    assert set(files_pre_compact) != (files_post_compact), "compaction must have happened"
+    assert set(files_pre_compact).issubset(files_post_compact), "compaction must not delete files that are stuck in upload queue"
+
+    # unblock uploads, but block deletes so that we can assert that they still happen
+    assert get_queued_count(file_kind="layer", op_kind="delete") == 0
+    client.configure_failpoints(("before-delete-layer", "return"))
+    client.configure_failpoints(("before-upload-layer", "off"))
+    wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
+    # deletes will be performed as soon as the uploads are done
+    ## assertion 1
+    wait_until(3, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") != 0)
+    ## assertion 2
+    files_post_uploads_done = set(timeline_path.glob("*"))
+    assert (files_pre_compact - files_post_uploads_done) != set({}), "some files must have been deleted now, otherwise there were no deletes"
+    
+    client.configure_failpoints(("before-delete-layer", "off"))
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
