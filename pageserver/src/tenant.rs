@@ -893,10 +893,9 @@ impl Tenant {
         //    1. "Timeline has no ancestor and no layer files"
 
         for (timeline_id, local_metadata) in sorted_timelines {
-            // FIXME should we fail load of whole tenant if one timeline failed?
-            //   consider branch hierarchy. Maybe set one to broken and others to Paused or something
             self.load_local_timeline(timeline_id, local_metadata)
-                .await?;
+                .await
+                .with_context(|| format!("load local timeline {timeline_id}"))?;
         }
 
         // Start background operations and open the tenant for business.
