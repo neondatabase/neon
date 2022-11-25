@@ -76,7 +76,7 @@ QUERIES: Tuple[LabelledQuery, ...] = (
 )
 
 
-def run_psql(env: RemoteCompare, labelled_query: LabelledQuery) -> None:
+def run_psql(env: RemoteCompare, labelled_query: LabelledQuery, times: int) -> None:
     # prepare connstr:
     # - cut out password from connstr to pass it via env
     # - add options to connstr
@@ -90,9 +90,12 @@ def run_psql(env: RemoteCompare, labelled_query: LabelledQuery) -> None:
 
     label, query = labelled_query.label, labelled_query.query
 
-    log.info(f"Running query '{label}'")
-    with env.zenbenchmark.record_duration(label):
-        env.pg_bin.run_capture(["psql", connstr, "-c", query], env=environ)
+    log.info(f"Running query {label} {times} times")
+    for i in range(times):
+        run = i + 1
+        log.info(f"Run {run}/{times}")
+        with env.zenbenchmark.record_duration(f"{label}/{run}"):
+            env.pg_bin.run_capture(["psql", connstr, "-c", query], env=environ)
 
 
 @pytest.mark.parametrize("query", QUERIES)
@@ -105,4 +108,4 @@ def test_clickbench(query: LabelledQuery, remote_compare: RemoteCompare):
     The DB prepared manually in advance
     """
 
-    run_psql(remote_compare, query)
+    run_psql(remote_compare, query, times=3)
