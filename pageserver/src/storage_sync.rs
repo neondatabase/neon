@@ -811,7 +811,7 @@ impl RemoteTimelineClient {
                 "remote upload",
                 false,
                 async move {
-                    self_rc.perform_upload_task_or_stop(task).await;
+                    self_rc.perform_upload_task(task).await;
                     Ok(())
                 }
                 .instrument(info_span!(parent: None, "remote_upload", tenant = %self.tenant_id, timeline = %self.timeline_id, upload_task_id = %task_id)),
@@ -832,23 +832,25 @@ impl RemoteTimelineClient {
     /// The task can be shut down, however. That leads to stopping the whole
     /// queue.
     ///
-    async fn perform_upload_task_or_stop(self: &Arc<Self>, task: Arc<UploadTask>) {
-        tokio::select! {
-            _ = task_mgr::shutdown_watcher() => {
-                info!("received cancellation request while uploading");
+    async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
+        // Loop to retry until it completes.
+        loop {
+            // If we're requested to shut down, close up shop and exit.
+            //
+            // Note: We only check for the shutdown requests between retries, so
+            // if a shutdown request arrives while we're busy uploading, in the
+            // upload::upload:*() call below, we will wait not exit until it has
+            // finisheed. We probably could cancel the upload by simply dropping
+            // the Future, but we're not 100% sure if the remote storage library
+            // is cancellation safe, so we don't dare to do that. Hopefully, the
+            // upload finishes or times out soon enough.
+            if task_mgr::is_shutdown_requested() {
+                info!("upload task cancelled by shutdown request");
                 self.update_upload_queue_unfinished_metric(-1, &task.op);
                 self.stop();
-            },
-            _ = self.perform_upload_task(&task) => {
-                // done
-            },
-        }
-    }
+                return;
+            }
 
-    async fn perform_upload_task(self: &Arc<Self>, task: &UploadTask) {
-        // Loop to retry until it completes.
-        // Note: this might get cancelled by the caller, if the task is shutdown!
-        loop {
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref path, ref layer_metadata) => {
                     upload::upload_timeline_layer(&self.storage_impl, path, layer_metadata)
@@ -906,12 +908,15 @@ impl RemoteTimelineClient {
                         task.op, retries, e
                     );
 
-                    exponential_backoff(
-                        retries,
-                        DEFAULT_BASE_BACKOFF_SECONDS,
-                        DEFAULT_MAX_BACKOFF_SECONDS,
-                    )
-                    .await;
+                    // sleep until it's time to retry, or we're cancelled
+                    tokio::select! {
+                        _ = task_mgr::shutdown_watcher() => { },
+                        _ = exponential_backoff(
+                            retries,
+                            DEFAULT_BASE_BACKOFF_SECONDS,
+                            DEFAULT_MAX_BACKOFF_SECONDS,
+                        ) => { },
+                    };
                 }
             }
         }
