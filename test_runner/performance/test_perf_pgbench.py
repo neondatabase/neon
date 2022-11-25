@@ -88,7 +88,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
     env.zenbenchmark.record("scale", scale, "", MetricReport.TEST_PARAM)
 
     password = env.pg.default_options.get("password", None)
-    options = "-cstatement_timeout=1h " + env.pg.default_options.get("options", "")
+    options = "-cstatement_timeout=0 " + env.pg.default_options.get("options", "")
     # drop password from the connection string by passing password=None and set password separately
     connstr = env.pg.connstr(password=None, options=options)
 
