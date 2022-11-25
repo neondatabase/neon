@@ -528,7 +528,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         remote_storage: &GenericRemoteStorage,
-    ) -> anyhow::Result<Arc<Tenant>> {
+    ) -> Arc<Tenant> {
         // XXX: Attach should provide the config, especially during tenant migration.
         //      See https://github.com/neondatabase/neon/issues/1555
         let tenant_conf = TenantConfOpt::default();
@@ -564,7 +564,7 @@ impl Tenant {
                 Ok(())
             },
         );
-        Ok(tenant)
+        tenant
     }
 
     ///
@@ -734,9 +734,14 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         remote_storage: Option<GenericRemoteStorage>,
-    ) -> anyhow::Result<Arc<Tenant>> {
-        // FIXME: also go into Broken state if this fails
-        let tenant_conf = Self::load_tenant_config(conf, tenant_id)?;
+    ) -> Arc<Tenant> {
+        let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
+            Ok(conf) => conf,
+            Err(e) => {
+                error!("load tenant config failed: {}", e);
+                return Tenant::create_broken_tenant(conf, tenant_id);
+            }
+        };
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Tenant::new(
@@ -774,7 +779,7 @@ impl Tenant {
 
         info!("spawned load into background");
 
-        Ok(tenant)
+        tenant
     }
 
     ///

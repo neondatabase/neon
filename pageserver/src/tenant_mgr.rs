@@ -147,7 +147,7 @@ fn load_local_tenant(
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
         if let Some(remote_storage) = remote_storage {
-            Tenant::spawn_attach(conf, tenant_id, &remote_storage)?
+            Tenant::spawn_attach(conf, tenant_id, &remote_storage)
         } else {
             warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
             Tenant::create_broken_tenant(conf, tenant_id)
@@ -155,7 +155,7 @@ fn load_local_tenant(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, remote_storage)?
+        Tenant::spawn_load(conf, tenant_id, remote_storage)
     };
     Ok(Some(tenant))
 }
@@ -364,7 +364,7 @@ pub async fn attach_tenant(
             }
         }
         hash_map::Entry::Vacant(v) => {
-            let tenant = Tenant::spawn_attach(conf, tenant_id, remote_storage)?;
+            let tenant = Tenant::spawn_attach(conf, tenant_id, remote_storage);
             v.insert(tenant);
             Ok(())
         }
