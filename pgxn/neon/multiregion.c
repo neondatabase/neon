@@ -25,11 +25,6 @@
 #include "utils/varlena.h"
 #include "walproposer_utils.h"
 
-#define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag, \
-		(errmsg(NEON_TAG fmt, ## __VA_ARGS__), \
-		 errhidestmt(true), errhidecontext(true)))
-
 static XLogRecPtr	region_lsns[MAX_REGIONS];
 
 /*
