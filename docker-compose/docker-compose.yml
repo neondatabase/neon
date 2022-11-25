@@ -1,9 +1,67 @@
-version: '3'
+# This YAML can be run using either docker-compose (single node) or Docker Swarm (multiple nodes).
+# 
+# Run with docker-compose:
+#
+#   - To start this stack, change to the directory of this file and run:
+#
+#       docker compose up -d
+#
+#   - The compute node will be available on port 55433 (password is "cloud_admin"):
+#
+#       psql -p55433 -h localhost -U cloud_admin postgres
+#
+#   - To stop this stack, run:
+#
+#       docker compose down
+#
+# Run with Docker Swarm:
+#
+#   - Follow this tutorial to start a swarm: https://docs.docker.com/engine/swarm/swarm-tutorial/.
+#     All of following commands starting with "docker" must be run on the manager node.
+#
+#   - Create a private registry to store the compute image:
+#
+#       docker service create --name registry --publish published=5000,target=5000 registry:2
+#   
+#   - Build and push the compute image:
+#
+#       docker compose build
+#       docker compose push
+#
+#   - Start this stack in the swarm:
+#
+#       docker stack deploy --compose-file docker-compose.yml neon
+#
+#   - (Optional) By default, the services are spread across the nodes in an undeterministic manner.
+#     To control which node a service runs on, we need to place a constraint on it. Examples of such
+#     constraints are provided. Activate them by uncommenting the "deploy.placement.constraints"
+#     keys in the services. The neon-specific services are constrained based on node labels, so they
+#     will not be run until at least a node is assigned with the necessary label. For example,
+#     run the following command to label a node named "vm1" to run the pageserver:
+#
+#       docker node update --label-add has_pageserver=true vm1
+#
+#   - The compute node will be available on port 55433 of any node in the swarm
+#     (password is "cloud_admin"):
+#
+#       psql -p55433 -h <ip-of-any-node> -U cloud_admin postgres
+#
+#   - To stop this stack:
+#
+#       docker stack rm neon
+#
+version: '3.8'
+
+configs:
+  compute_spec:
+    file: ./compute_wrapper/var/db/postgres/specs/spec.json
+  compute_shell:
+    file: ./compute_wrapper/shell/compute.sh
 
 services:
   minio:
     restart: always
-    image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z
+    image: quay.io/minio/minio:RELEASE.2022-11-17T23-20-09Z
     ports:
       - 9000:9000
       - 9001:9001
@@ -11,6 +69,10 @@ services:
       - MINIO_ROOT_USER=minio
       - MINIO_ROOT_PASSWORD=password
     command: server /data --address :9000 --console-address ":9001"
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.role==manager
 
   minio_create_buckets:
     image: minio/mc
@@ -28,6 +90,9 @@ services:
          exit 0;"
     depends_on:
       - minio
+    deploy:
+      restart_policy:
+        condition: on-failure
 
   pageserver:
     restart: always
@@ -55,8 +120,12 @@ services:
     depends_on:
       - storage_broker
       - minio_create_buckets
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_pageserver==true
 
-  safekeeper1:
+  safekeeper1: &safekeeper
     restart: always
     image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
     environment:
@@ -66,6 +135,11 @@ services:
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
+    extra_hosts:
+      # While other services can connect to a safekeeper using its name, the safekeeper
+      # itself cannot resolve its own name (?!), hence cannot bind to the listen-pg 
+      # address. This line tricks the safekeeper to bind to 0.0.0.0.
+      - safekeeper1:0.0.0.0
     ports:
       #- 5454:5454 # pg protocol handler
       - 7676:7676 # http endpoints
@@ -85,10 +159,13 @@ services:
     depends_on:
       - storage_broker
       - minio_create_buckets
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper1==true
 
   safekeeper2:
-    restart: always
-    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
+    <<: *safekeeper
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper2:5454
       - SAFEKEEPER_ID=2
@@ -96,29 +173,16 @@ services:
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
-    ports:
-      #- 5454:5454 # pg protocol handler
-      - 7677:7676 # http endpoints
-    entrypoint:
-      - "/bin/sh"
-      - "-c"
-    command:
-      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
-                    --listen-http='0.0.0.0:7676'
-                    --id=$$SAFEKEEPER_ID
-                    --broker-endpoint=$$BROKER_ENDPOINT
-                    -D /data
-                    --remote-storage=\"{endpoint='http://minio:9000',
-                                        bucket_name='neon',
-                                        bucket_region='eu-north-1',
-                                        prefix_in_bucket='/safekeeper/'}\""
-    depends_on:
-      - storage_broker
-      - minio_create_buckets
+    extra_hosts:
+      - safekeeper2:0.0.0.0
+    ports: []
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper2==true
 
   safekeeper3:
-    restart: always
-    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
+    <<: *safekeeper
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper3:5454
       - SAFEKEEPER_ID=3
@@ -126,25 +190,13 @@ services:
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
-    ports:
-      #- 5454:5454 # pg protocol handler
-      - 7678:7676 # http endpoints
-    entrypoint:
-      - "/bin/sh"
-      - "-c"
-    command:
-      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
-                    --listen-http='0.0.0.0:7676'
-                    --id=$$SAFEKEEPER_ID
-                    --broker-endpoint=$$BROKER_ENDPOINT
-                    -D /data
-                    --remote-storage=\"{endpoint='http://minio:9000',
-                                        bucket_name='neon',
-                                        bucket_region='eu-north-1',
-                                        prefix_in_bucket='/safekeeper/'}\""
-    depends_on:
-      - storage_broker
-      - minio_create_buckets
+    extra_hosts:
+      - safekeeper3:0.0.0.0
+    ports: []
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper3==true
 
   storage_broker:
     restart: always
@@ -165,13 +217,17 @@ services:
         - TAG=${TAG:-latest}
         - http_proxy=$http_proxy
         - https_proxy=$https_proxy
+    image: localhost:5000/compute-node-v${PG_VERSION:-14}:${TAG:-latest}
     environment:
       - PG_VERSION=${PG_VERSION:-14}
       #- RUST_BACKTRACE=1
-    # Mount the test files directly, for faster editing cycle.
-    volumes:
-      - ./compute_wrapper/var/db/postgres/specs/:/var/db/postgres/specs/
-      - ./compute_wrapper/shell/:/shell/
+    # Mount these as configs instead of volumes so that it works correctly in swarm mode
+    configs:
+      - source: compute_spec
+        target: /var/db/postgres/specs/spec.json
+      - source: compute_shell
+        target: /shell/compute.sh
+        mode: 0555 # readable and executable
     ports:
       - 55433:55433 # pg protocol handler
       - 3080:3080 # http endpoints
@@ -182,6 +238,10 @@ services:
       - safekeeper2
       - safekeeper3
       - pageserver
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_compute==true
 
   compute_is_ready:
     image: postgres:latest
@@ -194,3 +254,8 @@ services:
          done"
     depends_on:
       - compute
+    deploy:
+      restart_policy:
+        # This can be 'none', which worked fine in swarm mode but would fail when
+        # running with docker-compose. 'on-failure' worked for both cases 
+        condition: on-failure
