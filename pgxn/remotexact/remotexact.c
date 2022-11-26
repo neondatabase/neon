@@ -67,6 +67,12 @@ typedef struct RWSetCollectionBuffer
 	StringInfoData writes;
 } RWSetCollectionBuffer;
 
+typedef enum {
+	REMOTE_RELKIND_INVALID,
+	REMOTE_RELKIND_TABLE,
+	REMOTE_RELKIND_INDEX,
+} RemoteRelkind;
+
 static RWSetCollectionBuffer *rwset_collection_buffer = NULL;
 
 PGconn	   *XactServerConn;
@@ -75,9 +81,10 @@ bool		Connected = false;
 static void init_rwset_collection_buffer(Oid dbid);
 static void rwset_add_region(int region);
 
-static void rx_collect_relation(int region, Oid dbid, Oid relid);
-static void rx_collect_page(int region, Oid dbid, Oid relid, BlockNumber blkno);
-static void rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumber tid);
+static void rx_collect_relation(int region, Oid dbid, Oid relid, char relkind);
+static void rx_collect_page(int region, Oid dbid, Oid relid, BlockNumber blkno, char relkind);
+static void rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumber tid, char relkind);
+static RemoteRelkind get_remote_relkind(char relkind);
 static void rx_collect_insert(Relation relation, HeapTuple newtuple);
 static void rx_collect_update(Relation relation, HeapTuple oldtuple, HeapTuple newtuple);
 static void rx_collect_delete(Relation relation, HeapTuple oldtuple);
@@ -157,25 +164,34 @@ rwset_add_region(int region)
 }
 
 static void
-rx_collect_relation(int region, Oid dbid, Oid relid)
+rx_collect_relation(int region, Oid dbid, Oid relid, char relkind)
 {
 	CollectedRelation *relation;
+	RemoteRelkind rrelkind = get_remote_relkind(relkind);
+
+	Assert(rrelkind != REMOTE_RELKIND_INVALID);
 
 	init_rwset_collection_buffer(dbid);
 
 	relation = get_collected_relation(relid, true);
 	relation->region = region;
-	relation->is_index = false;
-	relation->is_table_scan = true;
+	relation->is_index = rrelkind == REMOTE_RELKIND_INDEX;
+	relation->is_table_scan = rrelkind == REMOTE_RELKIND_TABLE;
 
 	rwset_add_region(region);
 }
 
 static void
-rx_collect_page(int region, Oid dbid, Oid relid, BlockNumber blkno)
+rx_collect_page(int region, Oid dbid, Oid relid, BlockNumber blkno, char relkind)
 {
 	CollectedRelation *relation;
 	StringInfo	buf = NULL;
+	RemoteRelkind rrelkind = get_remote_relkind(relkind);
+
+	Assert(rrelkind != REMOTE_RELKIND_INVALID);
+
+	if (rrelkind != REMOTE_RELKIND_INDEX)
+		return;
 
 	init_rwset_collection_buffer(dbid);
 
@@ -191,16 +207,19 @@ rx_collect_page(int region, Oid dbid, Oid relid, BlockNumber blkno)
 }
 
 static void
-rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumber offset)
+rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumber offset, char relkind)
 {
 	CollectedRelation *relation;
 	StringInfo	buf = NULL;
+	RemoteRelkind rrelkind = get_remote_relkind(relkind);
+
+	Assert(rrelkind == REMOTE_RELKIND_TABLE);
 
 	init_rwset_collection_buffer(dbid);
 
 	relation = get_collected_relation(relid, true);
 	relation->region = region;
-	relation->is_index = false;
+	relation->is_index = rrelkind == REMOTE_RELKIND_INDEX;
 	relation->nitems++;
 
 	buf = &relation->tuples;
@@ -208,6 +227,28 @@ rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumbe
 	pq_sendint16(buf, offset);
 
 	rwset_add_region(region);
+}
+
+static RemoteRelkind
+get_remote_relkind(char relkind)
+{
+	switch (relkind)
+	{
+		case RELKIND_RELATION:
+		case RELKIND_SEQUENCE:
+		case RELKIND_TOASTVALUE:
+			return REMOTE_RELKIND_TABLE; 
+		case RELKIND_INDEX:
+			return REMOTE_RELKIND_INDEX;
+		case RELKIND_VIEW:
+		case RELKIND_MATVIEW:
+		case RELKIND_COMPOSITE_TYPE:
+		case RELKIND_FOREIGN_TABLE:
+		case RELKIND_PARTITIONED_TABLE:
+		case RELKIND_PARTITIONED_INDEX:
+			return REMOTE_RELKIND_INVALID;
+	}
+	return REMOTE_RELKIND_INVALID;
 }
 
 static void
