@@ -219,7 +219,7 @@ rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumbe
 
 	relation = get_collected_relation(relid, true);
 	relation->region = region;
-	relation->is_index = rrelkind == REMOTE_RELKIND_INDEX;
+	relation->is_index = false;
 	relation->nitems++;
 
 	buf = &relation->tuples;
