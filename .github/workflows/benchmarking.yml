@@ -307,7 +307,7 @@ jobs:
     #
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
-
+    if: success() || failure()
     needs: [ pgbench-compare ]
 
     strategy:
