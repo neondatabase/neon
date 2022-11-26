@@ -15,19 +15,32 @@
 /* Make sure that massge header always fits in buffer */
 #define MESSAGE_DATA_ALIGNMENT sizeof(message_header_t)
 
+#if defined(USE_PAUSE) && defined(__x86_64__)
+#define RELEASE_CPU()  	__asm__ __volatile__(" rep; nop			\n");
+#else
 #define RELEASE_CPU()  sched_yield()
+#endif
+
+#define BUSY_WAIT_RESPONSES
 
 typedef struct {
 	uint32 id;    /* message id is used to identify responses */
 	uint32 size;  /* message size not including header */
 } message_header_t;
 
-typedef struct {
-	pthread_cond_t cv;  /* signaled when position is changed */
-	size_t         pos; /* position in ring buffer */
-} queue_pos_t;
-
 typedef atomic_bool latch_t;
+
+typedef struct {
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	int signaled;
+} event_t;
+
+typedef struct {
+	event_t        event; /* signaled when position is advanced */
+	size_t         pos; /* position in ring buffer */
+	size_t         n_blocked; /* number of threads waiting this position to be advanvced */
+} queue_pos_t;
 
 typedef struct {
 	latch_t cs;    /* queue critical section */
@@ -43,6 +56,49 @@ typedef struct pipe_t {
 	uint32  msg_id; /* generator of message ids, protected by request queue mutex */
 } pipe_t;
 
+
+static void event_init(event_t* event)
+{
+	pthread_mutexattr_t mutex_attr;
+	pthread_condattr_t   cond_attr;
+	pthread_mutexattr_init(&mutex_attr);
+	pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
+	pthread_condattr_init(&cond_attr);
+	pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+	pthread_mutex_init(&event->mutex, &mutex_attr);
+    pthread_cond_init(&event->cond, &cond_attr);
+	event->signaled = 0;
+    pthread_condattr_destroy(&cond_attr);
+    pthread_mutexattr_destroy(&mutex_attr);
+}
+
+static void event_destroy(event_t* event)
+{
+	pthread_mutex_destroy(&event->mutex);
+	pthread_cond_destroy(&event->cond);
+}
+
+static void event_reset(event_t* event)
+{
+	event->signaled = 0;
+}
+
+static void event_signal(event_t* event)
+{
+	pthread_mutex_lock(&event->mutex);
+	event->signaled = 1;
+	pthread_cond_broadcast(&event->cond);
+	pthread_mutex_unlock(&event->mutex);
+}
+
+
+static void event_wait(event_t* event)
+{
+	pthread_mutex_lock(&event->mutex);
+	while (!event->signaled)
+		pthread_cond_wait(&event->cond, &event->mutex);
+	pthread_mutex_unlock(&event->mutex);
+}
 
 static void latch_acquire(latch_t* latch)
 {
@@ -79,6 +135,23 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 					 : pipe->req.tail.pos - pipe->req.head.pos) - MESSAGE_DATA_ALIGNMENT;
 		if (available == 0)
 		{
+			/* Ring buffer is full: wait until consumer takes some requests */
+#ifndef BUSY_WAIT_RESPONSES
+			if (header_sent && pipe->req.head.n_blocked != 0)
+			{
+				pipe->req.head.n_blocked = 0;
+				event_signal(&pipe->req.head.event); /* notify receiver that head is advanced */
+			}
+			do
+			{
+				/* Wait until tail is advanced */
+				pipe->req.tail.n_blocked += 1;
+				event_reset(&pipe->req.tail.event);
+				latch_release(&pipe->req.cs);
+				event_wait(&pipe->req.tail.event);
+				latch_acquire(&pipe->req.cs);
+			} while (!header_sent && pipe->req.busy);
+#else
 			do
 			{
 				/* Wait until tail is advanced */
@@ -86,6 +159,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 				RELEASE_CPU();
 				latch_acquire(&pipe->req.cs);
 			} while (!header_sent && pipe->req.busy);
+#endif
 		}
 		else
 		{
@@ -125,6 +199,19 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 	/* Align position on header length */
 	pipe->req.head.pos = ALIGN(pipe->req.head.pos, MESSAGE_DATA_ALIGNMENT) % QUEUE_BUF_SIZE;
 
+	if (pipe->req.head.n_blocked != 0)
+	{
+		pipe->req.head.n_blocked = 0;
+		event_signal(&pipe->req.head.event); /* Notify receiver that head is advanced */
+	}
+#ifndef BUSY_WAIT_RESPONSES
+	if (pipe->req.tail.n_blocked != 0)
+	{
+		pipe->req.tail.n_blocked = 0;
+		event_signal(&pipe->req.tail.event); /* Wakeup other waiting sender */
+
+	}
+#endif
 	assert(pipe->req.busy);
 	pipe->req.busy = 0;
 
@@ -140,12 +227,27 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 			: QUEUE_BUF_SIZE - (pipe->resp.tail.pos - pipe->resp.head.pos);
 		if (available == 0)
 		{
+#ifndef BUSY_WAIT_RESPONSES
+			if (header_received && pipe->resp.tail.n_blocked != 0)
+			{
+				pipe->resp.tail.n_blocked = 0;
+				event_signal(&pipe->resp.tail.event); /* Notify sender that tail is advanced */
+			}
+#endif
 			do
 			{
 				/* wait until head is advanced */
+#ifndef BUSY_WAIT_RESPONSES
+				pipe->resp.head.n_blocked += 1;
+				event_reset(&pipe->resp.head.event);
+				latch_release(&pipe->resp.cs);
+				event_wait(&pipe->resp.head.event);
+				latch_acquire(&pipe->resp.cs);
+#else
 				latch_release(&pipe->resp.cs);
 				RELEASE_CPU();
 				latch_acquire(&pipe->resp.cs);
+#endif
 			} while (!header_received && pipe->resp.busy);
 		}
 		else
@@ -194,6 +296,19 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 	/* Align position on header length */
 	pipe->resp.tail.pos = ALIGN(pipe->resp.tail.pos, MESSAGE_DATA_ALIGNMENT) % QUEUE_BUF_SIZE;
 
+#ifndef BUSY_WAIT_RESPONSES
+	if (pipe->resp.tail.n_blocked != 0)
+	{
+		pipe->resp.tail.n_blocked = 0;
+		event_signal(&pipe->resp.tail.event); /* Notify sender that tail is advanced */
+	}
+	if (pipe->resp.head.n_blocked != 0)
+	{
+		pipe->resp.head.n_blocked = 0;
+		event_signal(&pipe->resp.head.event); /* Wakeup other threads waiting for their responses */
+	}
+#endif
+
 	assert(pipe->resp.busy);
 	pipe->resp.busy = 0;
 
@@ -217,9 +332,19 @@ void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg
 			: QUEUE_BUF_SIZE - (pipe->req.tail.pos - pipe->req.head.pos);
 		if (available == 0)
 		{
+#ifndef BUSY_WAIT_RESPONSES
+			if (header_received && pipe->req.tail.n_blocked != 0)
+			{
+				pipe->req.tail.n_blocked = 0;
+				event_signal(&pipe->req.tail.event); /* Notify sender that tail is advanced */
+			}
+#endif
 			/* wait until head is advanced */
+			pipe->req.head.n_blocked += 1;
+			event_reset(&pipe->req.head.event);
 			latch_release(&pipe->req.cs);
-			RELEASE_CPU();
+			/* Do not use busy loop here beause there may be no request from idle tenant for a long time */
+			event_wait(&pipe->req.head.event);
 			latch_acquire(&pipe->req.cs);
 		}
 		else
@@ -259,7 +384,13 @@ void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg
 	}
 	/* Align position on header length */
 	pipe->req.tail.pos = ALIGN(pipe->req.tail.pos, MESSAGE_DATA_ALIGNMENT) % QUEUE_BUF_SIZE;
-
+#ifndef BUSY_WAIT_RESPONSES
+	if (pipe->req.tail.n_blocked)
+	{
+		pipe->req.tail.n_blocked = 0;
+		event_signal(&pipe->req.tail.event); /* notify sender that tail is advanced */
+	}
+#endif
 	latch_release(&pipe->req.cs);
 }
 
@@ -278,10 +409,24 @@ void shmem_pipe_send_response(pipe_t* pipe, uint32 msg_id, char const* resp, siz
 					 : pipe->resp.tail.pos - pipe->resp.head.pos) - MESSAGE_DATA_ALIGNMENT;
 		if (available == 0)
 		{
-			/* wait untul tail is advanced */
+#ifndef BUSY_WAIT_RESPONSES
+			if (header_sent && pipe->resp.head.n_blocked != 0)
+			{
+				pipe->resp.head.n_blocked = 0;
+				event_signal(&pipe->resp.head.event); /* notify recevier that head is advanced */
+			}
+			/* wait until tail is advanced */
+			pipe->resp.tail.n_blocked += 1;
+			event_reset(&pipe->resp.tail.event);
+			latch_release(&pipe->resp.cs);
+			event_wait(&pipe->resp.tail.event);
+			latch_acquire(&pipe->resp.cs);
+#else
+			/* wait until tail is advanced */
 			latch_release(&pipe->resp.cs);
 			RELEASE_CPU();
 			latch_acquire(&pipe->resp.cs);
+#endif
 		}
 		else
 		{
@@ -319,7 +464,13 @@ void shmem_pipe_send_response(pipe_t* pipe, uint32 msg_id, char const* resp, siz
 	}
 	/* Align position on header length */
 	pipe->resp.head.pos = ALIGN(pipe->resp.head.pos, MESSAGE_DATA_ALIGNMENT) % QUEUE_BUF_SIZE;
-
+#ifndef BUSY_WAIT_RESPONSES
+	if (pipe->resp.head.n_blocked != 0)
+	{
+		pipe->resp.head.n_blocked = 0;
+		event_signal(&pipe->resp.head.event);  /* notify receiver that head is advanced */
+	}
+#endif
 	latch_release(&pipe->resp.cs);
 }
 
@@ -358,6 +509,18 @@ pipe_t* shmem_pipe_init(char const* name)
 	pipe->req.head.pos = 0;
 	pipe->req.tail.pos = 0;
 
+	pipe->resp.head.n_blocked = 0;
+	pipe->resp.tail.n_blocked = 0;
+	pipe->req.head.n_blocked = 0;
+	pipe->req.tail.n_blocked = 0;
+
+#ifndef BUSY_WAIT_RESPONSES
+	event_init(&pipe->resp.head.event);
+	event_init(&pipe->resp.tail.event);
+	event_init(&pipe->req.tail.event);
+#endif
+	event_init(&pipe->req.head.event);
+
 	pipe->req.busy = 0;
 	pipe->resp.busy = 0;
 
@@ -389,6 +552,12 @@ pipe_t* shmem_pipe_open(char const* name)
 
 void shmem_pipe_close(pipe_t* pipe)
 {
+#ifndef BUSY_WAIT_RESPONSES
+	event_destroy(&pipe->resp.head.event);
+	event_destroy(&pipe->resp.tail.event);
+	event_destroy(&pipe->req.tail.event);
+#endif
+	event_destroy(&pipe->req.head.event);
 	munmap(pipe, sizeof(pipe_t));
 }
 
