@@ -31,6 +31,8 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
     cur.execute("vacuum t")
     wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
+    cur.execute("set enable_seqscan_prefetch=off")
+
     with zenbenchmark.record_duration("update-no-prefetch"):
         cur.execute("update t set x=x+1")
 
@@ -42,8 +44,8 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
 
     cur.execute("drop table t")
     cur.execute("set enable_seqscan_prefetch=on")
-    cur.execute("set seqscan_prefetch_buffers=100")
-
+    cur.execute("set effective_io_concurrency=100")
+    cur.execute("set neon.readahead_buffer_size=256")
     cur.execute(f"create table t2(x integer) WITH (fillfactor={fillfactor})")
 
     with zenbenchmark.record_duration("insert-2"):
