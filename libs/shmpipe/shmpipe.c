@@ -22,7 +22,7 @@
 #endif
 
 #define BUSY_WAIT_RESPONSES
-#define MAX_SPIN_ITERATIONS 128
+#define MAX_SPIN_ITERATIONS 1024
 
 typedef struct {
 	uint32 id;    /* message id is used to identify responses */
