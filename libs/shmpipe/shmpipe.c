@@ -22,6 +22,7 @@
 #endif
 
 #define BUSY_WAIT_RESPONSES
+#define MAX_SPIN_ITERATIONS 128
 
 typedef struct {
 	uint32 id;    /* message id is used to identify responses */
@@ -321,6 +322,7 @@ void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg
 	int header_received = 0;
 	size_t req_size = sizeof req_hdr;
 	char* req  = NULL;
+	size_t n_spin_iters = 0;
 
 	latch_acquire(&pipe->req.cs);
 
@@ -340,12 +342,21 @@ void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg
 			}
 #endif
 			/* wait until head is advanced */
-			pipe->req.head.n_blocked += 1;
-			event_reset(&pipe->req.head.event);
-			latch_release(&pipe->req.cs);
-			/* Do not use busy loop here beause there may be no request from idle tenant for a long time */
-			event_wait(&pipe->req.head.event);
-			latch_acquire(&pipe->req.cs);
+			if (++n_spin_iters < MAX_SPIN_ITERATIONS)
+			{
+				/* Perform only limited number of busy loop iterations beause there may be no request from idle tenant for a long time */
+				latch_release(&pipe->req.cs);
+				RELEASE_CPU();
+				latch_acquire(&pipe->req.cs);
+			}
+			else
+			{
+				pipe->req.head.n_blocked += 1;
+				event_reset(&pipe->req.head.event);
+				latch_release(&pipe->req.cs);
+				event_wait(&pipe->req.head.event);
+				latch_acquire(&pipe->req.cs);
+			}
 		}
 		else
 		{
