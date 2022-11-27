@@ -19,7 +19,7 @@ use amplify_num::i256;
 use anyhow::Result;
 use num_traits::identities::{One, Zero};
 use num_traits::{Bounded, Num, Signed};
-use rstar::{Envelope, ParentNode, RTree, RTreeObject, RTreeNode, AABB};
+use rstar::{Envelope, ParentNode, RTree, RTreeNode, RTreeObject, AABB};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -248,12 +248,18 @@ impl LayerMap {
             [key, IntKey::from(max_lsn.0 as i128 - 1)],
         );
         let children = node.children();
-		/* For some reasons cloning this array is exteremely inefficient
+        /* For some reasons cloning this array is exteremely inefficient
         let mut children = node.children().to_vec();
         Envelope::sort_envelopes(1, &mut children); // sort children by LSN
-		*/
+        */
+        // Sort childred by LSN
+        let children = children.iter().sorted_by(|a, b| {
+            let ac = a.envelope().lower();
+            let bc = b.envelope().lower();
+            bc[1].partial_cmp(&ac[1]).unwrap() // sort in reverse order
+        });
         // Process children in LSN decreasing order
-        for child in children.iter().rev() {
+        for child in children {
             let envelope = child.envelope();
             if !envelope.intersects(&search_area) {
                 continue;
@@ -284,7 +290,7 @@ impl LayerMap {
                     if let Some(occurance) =
                         Self::find_latest_layer_recurs(key, min_lsn, max_lsn, parent, image_only)
                     {
-						debug_assert!(occurance.lsn_floor > min_lsn);
+                        debug_assert!(occurance.lsn_floor > min_lsn);
                         min_lsn = occurance.lsn_floor;
                         result = Some(occurance);
                     } else {
@@ -292,7 +298,7 @@ impl LayerMap {
                     }
                 }
             };
-			// recalculate search area using new min_lsn
+            // recalculate search area using new min_lsn
             search_area = AABB::from_corners(
                 [key, IntKey::from(min_lsn.0 as i128)],
                 [key, IntKey::from(max_lsn.0 as i128 - 1)],
@@ -408,7 +414,8 @@ impl LayerMap {
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
     fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
-        self.find_latest_layer(key, Lsn(lsn.0+1), true).map(|r| r.layer)
+        self.find_latest_layer(key, Lsn(lsn.0 + 1), true)
+            .map(|r| r.layer)
     }
 
     ///
