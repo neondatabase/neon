@@ -211,9 +211,8 @@ rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumbe
 {
 	CollectedRelation *relation;
 	StringInfo	buf = NULL;
-	RemoteRelkind rrelkind = get_remote_relkind(relkind);
 
-	Assert(rrelkind == REMOTE_RELKIND_TABLE);
+	Assert(get_remote_relkind(relkind) == REMOTE_RELKIND_TABLE);
 
 	init_rwset_collection_buffer(dbid);
 
