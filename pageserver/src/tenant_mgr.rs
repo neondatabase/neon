@@ -290,7 +290,7 @@ pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> an
     info!("timeline task shutdown completed");
     match get_tenant(tenant_id, true) {
         Ok(tenant) => {
-            tenant.delete_timeline(timeline_id)?;
+            tenant.delete_timeline(timeline_id).await?;
         }
         Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
     }

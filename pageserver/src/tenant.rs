@@ -1191,7 +1191,7 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub fn compaction_iteration(&self) -> anyhow::Result<()> {
+    pub async fn compaction_iteration(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot run compaction iteration on inactive tenant"
@@ -1201,16 +1201,21 @@ impl Tenant {
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
         // compaction runs.
-        let timelines = self.timelines.lock().unwrap();
-        let timelines_to_compact = timelines
-            .iter()
-            .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
-            .collect::<Vec<_>>();
-        drop(timelines);
+        let timelines_to_compact = {
+            let timelines = self.timelines.lock().unwrap();
+            let timelines_to_compact = timelines
+                .iter()
+                .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
+                .collect::<Vec<_>>();
+            drop(timelines);
+            timelines_to_compact
+        };
 
         for (timeline_id, timeline) in &timelines_to_compact {
-            let _entered = info_span!("compact_timeline", timeline = %timeline_id).entered();
-            timeline.compact()?;
+            timeline
+                .compact()
+                .instrument(info_span!("compact_timeline", timeline = %timeline_id))
+                .await?;
         }
 
         Ok(())
@@ -1244,42 +1249,87 @@ impl Tenant {
     }
 
     /// Removes timeline-related in-memory data
-    pub fn delete_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<()> {
-        // in order to be retriable detach needs to be idempotent
-        // (or at least to a point that each time the detach is called it can make progress)
-        let mut timelines = self.timelines.lock().unwrap();
+    pub async fn delete_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<()> {
+        // Transition the timeline into TimelineState::Paused.
+        // This should prevent new operations from starting.
+        let timeline = {
+            let mut timelines = self.timelines.lock().unwrap();
 
-        // Ensure that there are no child timelines **attached to that pageserver**,
-        // because detach removes files, which will break child branches
-        let children_exist = timelines
-            .iter()
-            .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+            // Ensure that there are no child timelines **attached to that pageserver**,
+            // because detach removes files, which will break child branches
+            let children_exist = timelines
+                .iter()
+                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
 
-        anyhow::ensure!(
-            !children_exist,
-            "Cannot delete timeline which has child timelines"
-        );
-        let timeline_entry = match timelines.entry(timeline_id) {
-            Entry::Occupied(e) => e,
-            Entry::Vacant(_) => bail!("timeline not found"),
+            anyhow::ensure!(
+                !children_exist,
+                "Cannot delete timeline which has child timelines"
+            );
+            let timeline_entry = match timelines.entry(timeline_id) {
+                Entry::Occupied(e) => e,
+                Entry::Vacant(_) => bail!("timeline not found"),
+            };
+
+            let timeline = Arc::clone(timeline_entry.get());
+            timeline.set_state(TimelineState::Paused);
+
+            drop(timelines);
+            timeline
         };
 
-        let timeline = timeline_entry.get();
-        timeline.set_state(TimelineState::Paused);
+        info!("waiting for layer_removal_cs.lock()");
+        // No timeout here, GC & Compaction should be responsive to the `TimelineState::Paused` change.
+        let layer_removal_guard = timeline.layer_removal_cs.lock().await;
+        info!("got layer_removal_cs.lock(), deleting layer files");
 
-        let layer_removal_guard = timeline.layer_removal_guard()?;
+        // NB: storage_sync upload tasks that reference these layers have been cancelled
+        //     by the caller.
 
         let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+        // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
+        // with some layers missing.
         std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
             format!(
                 "Failed to remove local timeline directory '{}'",
                 local_timeline_directory.display()
             )
         })?;
-        info!("detach removed files");
+        info!("finished deleting layer files, releasing layer_removal_cs.lock()");
 
         drop(layer_removal_guard);
-        timeline_entry.remove();
+
+        // Remove the timeline from the map.
+        let mut timelines = self.timelines.lock().unwrap();
+        let children_exist = timelines
+            .iter()
+            .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+        // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Paused`.
+        // We already deleted the layer files, so it's probably best to panic.
+        // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
+        if children_exist {
+            panic!("Timeline grew children while we removed layer files");
+        }
+        let removed_timeline = timelines.remove(&timeline_id);
+        if removed_timeline.is_none() {
+            // This can legitimately happen if there's a concurrent call to this function.
+            //   T1                                             T2
+            //   lock
+            //   unlock
+            //                                                  lock
+            //                                                  unlock
+            //                                                  remove files
+            //                                                  lock
+            //                                                  remove from map
+            //                                                  unlock
+            //                                                  return
+            //   remove files
+            //   lock
+            //   remove from map observes empty map
+            //   unlock
+            //   return
+            debug!("concurrent call to this function won the race");
+        }
+        drop(timelines);
 
         Ok(())
     }
@@ -1767,7 +1817,7 @@ impl Tenant {
                 );
             }
 
-            let result = timeline.gc()?;
+            let result = timeline.gc().await?;
             totals += result;
         }
 
@@ -3057,7 +3107,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced).await?;
-        tline.compact()?;
+        tline.compact().await?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
@@ -3065,7 +3115,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced).await?;
-        tline.compact()?;
+        tline.compact().await?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
@@ -3073,7 +3123,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced).await?;
-        tline.compact()?;
+        tline.compact().await?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
@@ -3081,7 +3131,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced).await?;
-        tline.compact()?;
+        tline.compact().await?;
 
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
@@ -3131,8 +3181,8 @@ mod tests {
 
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced).await?;
-            tline.compact()?;
-            tline.gc()?;
+            tline.compact().await?;
+            tline.gc().await?;
         }
 
         Ok(())
@@ -3203,8 +3253,8 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced).await?;
-            tline.compact()?;
-            tline.gc()?;
+            tline.compact().await?;
+            tline.gc().await?;
         }
 
         Ok(())
@@ -3286,8 +3336,8 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced).await?;
-            tline.compact()?;
-            tline.gc()?;
+            tline.compact().await?;
+            tline.gc().await?;
         }
 
         Ok(())

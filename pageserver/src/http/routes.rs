@@ -749,7 +749,10 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
     let timeline = tenant
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
-    timeline.compact().map_err(ApiError::InternalServerError)?;
+    timeline
+        .compact()
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }

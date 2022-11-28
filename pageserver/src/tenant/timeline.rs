@@ -148,7 +148,7 @@ pub struct Timeline {
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
     /// and [`Tenant::delete_timeline`].
-    layer_removal_cs: Mutex<()>,
+    pub(super) layer_removal_cs: tokio::sync::Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     pub latest_gc_cutoff_lsn: Rcu<Lsn>,
@@ -504,12 +504,12 @@ impl Timeline {
             CheckpointConfig::Forced => {
                 self.freeze_inmem_layer(false);
                 self.flush_frozen_layers_and_wait().await?;
-                self.compact()
+                self.compact().await
             }
         }
     }
 
-    pub fn compact(&self) -> anyhow::Result<()> {
+    pub async fn compact(&self) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
 
         // Last record Lsn could be zero in case the timelie was just created
@@ -552,7 +552,12 @@ impl Timeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
+        let _layer_removal_cs = self.layer_removal_cs.lock().await;
+        // Is the timeline being deleted?
+        let state = *self.state.borrow();
+        if state == TimelineState::Paused {
+            anyhow::bail!("timeline is paused: {:?}", state);
+        }
 
         let target_file_size = self.get_checkpoint_distance();
 
@@ -574,7 +579,7 @@ impl Timeline {
 
                 // 3. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size)?;
+                self.compact_level0(target_file_size).await?;
                 timer.stop_and_record();
             }
             Err(err) => {
@@ -776,7 +781,7 @@ impl Timeline {
             layer_flush_done_tx,
 
             write_lock: Mutex::new(()),
-            layer_removal_cs: Mutex::new(()),
+            layer_removal_cs: Default::default(),
 
             gc_info: RwLock::new(GcInfo {
                 retain_lsns: Vec::new(),
@@ -1206,12 +1211,6 @@ impl Timeline {
         info!("Done");
 
         Ok(())
-    }
-
-    pub(super) fn layer_removal_guard(&self) -> anyhow::Result<MutexGuard<()>> {
-        self.layer_removal_cs
-            .try_lock()
-            .map_err(|e| anyhow!("cannot lock compaction critical section {e}"))
     }
 
     fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn) {
@@ -1976,19 +1975,25 @@ impl Timeline {
 
         Ok(layer_paths_to_upload)
     }
+}
+#[derive(Default)]
+struct CompactLevel0Phase1Result {
+    new_layers: Vec<DeltaLayer>,
+    deltas_to_compact: Vec<Arc<dyn Layer>>,
+}
 
-    ///
-    /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
-    /// as Level 1 files.
-    ///
-    fn compact_level0(&self, target_file_size: u64) -> anyhow::Result<()> {
+impl Timeline {
+    async fn compact_level0_phase1(
+        &self,
+        target_file_size: u64,
+    ) -> anyhow::Result<CompactLevel0Phase1Result> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
         // Only compact if enough layers have accumulated.
         if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
-            return Ok(());
+            return Ok(Default::default());
         }
 
         // Gather the files to compact in this iteration.
@@ -2223,6 +2228,24 @@ impl Timeline {
             layer_paths.pop().unwrap();
         }
 
+        drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
+
+        Ok(CompactLevel0Phase1Result {
+            new_layers,
+            deltas_to_compact,
+        })
+    }
+
+    ///
+    /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
+    /// as Level 1 files.
+    ///
+    async fn compact_level0(&self, target_file_size: u64) -> anyhow::Result<()> {
+        let CompactLevel0Phase1Result {
+            new_layers,
+            deltas_to_compact,
+        } = self.compact_level0_phase1(target_file_size).await?;
+
         let mut layers = self.layers.write().unwrap();
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
@@ -2247,7 +2270,6 @@ impl Timeline {
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         let mut layer_paths_to_delete = Vec::with_capacity(deltas_to_compact.len());
-        drop(all_keys_iter);
         for l in deltas_to_compact {
             if let Some(path) = l.local_path() {
                 self.metrics
@@ -2357,25 +2379,43 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub(super) fn gc(&self) -> anyhow::Result<GcResult> {
-        let mut result: GcResult = GcResult::default();
-        let now = SystemTime::now();
-
+    pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
         fail_point!("before-timeline-gc");
 
-        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
+        let _layer_removal_cs = self.layer_removal_cs.lock().await;
+        // Is the timeline being deleted?
+        let state = *self.state.borrow();
+        if state == TimelineState::Paused {
+            anyhow::bail!("timeline is paused: {:?}", state);
+        }
 
-        let gc_info = self.gc_info.read().unwrap();
+        let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
+            let gc_info = self.gc_info.read().unwrap();
 
-        let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
-        let pitr_cutoff = gc_info.pitr_cutoff;
-        let retain_lsns = &gc_info.retain_lsns;
+            let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
+            let pitr_cutoff = gc_info.pitr_cutoff;
+            let retain_lsns = gc_info.retain_lsns.clone();
+            (horizon_cutoff, pitr_cutoff, retain_lsns)
+        };
 
         let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
 
-        let _enter =
-            info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff)
-                .entered();
+        self.gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
+            .instrument(
+                info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
+            )
+            .await
+    }
+
+    async fn gc_timeline(
+        &self,
+        horizon_cutoff: Lsn,
+        pitr_cutoff: Lsn,
+        retain_lsns: Vec<Lsn>,
+        new_gc_cutoff: Lsn,
+    ) -> anyhow::Result<GcResult> {
+        let now = SystemTime::now();
+        let mut result: GcResult = GcResult::default();
 
         // Nothing to GC. Return early.
         let latest_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
@@ -2460,7 +2500,7 @@ impl Timeline {
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
             // they are no longer needed. This might be complicated with long inheritance chains.
-            for retain_lsn in retain_lsns {
+            for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
