@@ -359,34 +359,36 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
 
     info!("Handling tenant attach {tenant_id}, local files allowed: {allow_local_files}");
 
-    if tenant_mgr::get_tenant(tenant_id, false).is_ok() {
-        return Err(ApiError::Conflict(format!(
-            "Tenant {tenant_id} is already present in pageserver's memory"
-        )));
-    }
+    let mut attaching_empty_tenant = false;
+    match tenant_mgr::get_tenant(tenant_id, false) {
+        Ok(tenant) => {
+            if tenant.list_timelines().is_empty() {
+                info!("Attaching to tenant {tenant_id} with zero timelines");
+                attaching_empty_tenant = true;
+                Ok(())
+            } else {
+                Err(ApiError::Conflict(format!(
+                    "Tenant {tenant_id} is already present locally"
+                )))
+            }
+        }
+        Err(_) => Ok(()),
+    }?;
 
     let state = get_state(&request);
     let conf = state.conf;
-    let remote_index = &state.remote_index;
 
-    if let Some(remote_storage) = state.remote_storage.as_ref() {
-        storage_sync::initialize_remote_index_entry(conf, remote_storage, remote_index, tenant_id)
-            .await
-            .with_context(|| {
-                format!("Failed to populate remote storage index for the tenant {tenant_id}")
-            })
-            .map_err(ApiError::InternalServerError)?;
+    let tenant_dir = conf.tenant_path(&tenant_id);
+    let local_files_exist = tenant_dir.exists();
+
+    if local_files_exist && !attaching_empty_tenant && !allow_local_files {
+        return Err(ApiError::Conflict(format!(
+            "Cannot attach: tenant {tenant_id} is not in memory, but has local files"
+        )));
     }
 
     let mut loaded_from_disk = false;
-    let tenant_dir = conf.tenant_path(&tenant_id);
-    if tenant_dir.exists() {
-        if !allow_local_files {
-            return Err(ApiError::Conflict(
-                "Cannot attach: tenant is not in memory, but has local files".to_string(),
-            ));
-        }
-
+    if local_files_exist {
         let tenant_ignore_marker = conf.tenant_ignore_mark_file_path(tenant_id);
         if tenant_ignore_marker.exists() {
             tokio::fs::remove_file(&tenant_ignore_marker)
@@ -402,7 +404,11 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         let (_, attach_data) = tenant_mgr::collect_timelines_for_tenant(conf, &tenant_dir)
             .with_context(|| format!("Failed to collect tenant {tenant_id} files"))
             .map_err(ApiError::InternalServerError)?;
-        let attached_tenant = tenant_mgr::attach_tenant(conf, remote_index, tenant_id, attach_data);
+
+        // XXX: defer initializing of the remote storage, before all external files validation is done
+        init_remote_storage_entry(state, tenant_id).await?;
+        let attached_tenant =
+            tenant_mgr::attach_tenant(conf, &state.remote_index, tenant_id, attach_data);
         if attached_tenant.current_state() == TenantState::Broken {
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Failed to attach tenant {tenant_id} that has local files, try ignoring and attaching the tenant again"
@@ -410,9 +416,11 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         } else {
             loaded_from_disk = true;
         }
+    } else {
+        init_remote_storage_entry(state, tenant_id).await?;
     }
 
-    let mut index_accessor = remote_index.write().await;
+    let mut index_accessor = state.remote_index.write().await;
     if let Some(tenant_entry) = index_accessor.tenant_entry_mut(&tenant_id) {
         if tenant_entry.has_in_progress_downloads() {
             return Err(ApiError::Conflict(format!(
@@ -421,6 +429,14 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         }
 
         for (timeline_id, remote_timeline) in tenant_entry.iter_mut() {
+            let new_timeline_directory = conf.timeline_path(timeline_id, &tenant_id);
+            tokio::fs::create_dir_all(&new_timeline_directory)
+                .await
+                .with_context(|| {
+                    format!("Failed to create new timeline directory {new_timeline_directory:?}")
+                })
+                .map_err(ApiError::InternalServerError)?;
+
             storage_sync::schedule_layer_download(tenant_id, *timeline_id);
             remote_timeline.awaits_download = true;
         }
@@ -431,6 +447,24 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     }
 
     json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn init_remote_storage_entry(state: &State, tenant_id: TenantId) -> Result<(), ApiError> {
+    if let Some(remote_storage) = state.remote_storage.as_ref() {
+        storage_sync::initialize_remote_index_entry(
+            state.conf,
+            remote_storage,
+            &state.remote_index,
+            tenant_id,
+        )
+        .await
+        .with_context(|| {
+            format!("Failed to populate remote storage index for the tenant {tenant_id}")
+        })
+        .map_err(ApiError::InternalServerError)
+    } else {
+        Ok(())
+    }
 }
 
 async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {

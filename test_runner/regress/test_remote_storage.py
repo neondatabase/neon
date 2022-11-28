@@ -66,6 +66,9 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.allowed_errors.append(".*Tenant download is already in progress.*")
     env.pageserver.allowed_errors.append(".*Failed to get local tenant state.*")
     env.pageserver.allowed_errors.append(".*No metadata file found in the timeline directory.*")
+    env.pageserver.allowed_errors.append(
+        ".*Failed to populate remote storage index for the tenant.*"
+    )
 
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
@@ -118,7 +121,9 @@ def test_remote_storage_backup_and_restore(
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
-    with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
+    with pytest.raises(
+        Exception, match=f"Failed to populate remote storage index for the tenant {tenant_id}"
+    ):
         client.tenant_attach(tenant_id)
 
     tenant_status = client.tenant_status(tenant_id)

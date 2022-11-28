@@ -35,6 +35,7 @@ use super::{
 // in case we failed to gather all index parts (due to an error)
 // Poisoned variant is returned.
 // When data is received succesfully without errors Present variant is used.
+#[derive(Debug)]
 pub enum TenantIndexParts {
     Poisoned {
         present: HashMap<TimelineId, IndexPart>,
@@ -123,15 +124,25 @@ pub(super) async fn gather_tenant_timelines_index_parts(
         .await
         .with_context(|| format!("Failed to list timeline sync ids for tenat {tenant_id}"))?;
 
-    match download_index_parts(conf, storage, timeline_sync_ids)
-        .await
-        .remove(&tenant_id)
-        .ok_or_else(|| anyhow::anyhow!("Missing tenant index parts. This is a bug."))?
-    {
-        TenantIndexParts::Poisoned { missing, .. } => {
-            anyhow::bail!("Failed to download index parts for all timelines. Missing {missing:?}")
+    if timeline_sync_ids.is_empty() {
+        info!("no timelines found on the remote storage for tenant {tenant_id}");
+        Ok(HashMap::new())
+    } else {
+        match download_index_parts(conf, storage, timeline_sync_ids)
+            .await
+            .remove(&tenant_id)
+        {
+            Some(TenantIndexParts::Poisoned { missing, .. }) => {
+                anyhow::bail!(
+                    "Failed to download index parts for all timelines. Missing {missing:?}"
+                )
+            }
+            Some(TenantIndexParts::Present(parts)) => Ok(parts),
+            None => {
+                info!("no remote index parts found on the remote storage for tenant {tenant_id}");
+                Ok(HashMap::new())
+            }
         }
-        TenantIndexParts::Present(parts) => Ok(parts),
     }
 }
 
@@ -441,7 +452,7 @@ async fn get_timeline_sync_ids(
         })?;
 
     if timelines.is_empty() {
-        anyhow::bail!("no timelines found on the remote storage")
+        return Ok(HashSet::new());
     }
 
     let mut sync_ids = HashSet::new();

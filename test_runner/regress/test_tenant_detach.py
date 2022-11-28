@@ -52,6 +52,7 @@ def test_tenant_detach_smoke(neon_simple_env: NeonEnv):
 
     # the error will be printed to the log too
     env.pageserver.allowed_errors.append(".*Tenant not found for id.*")
+    env.pageserver.allowed_errors.append('.*Conflict("Cannot attach.*')
 
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
@@ -106,10 +107,8 @@ def test_tenant_detach_smoke(neon_simple_env: NeonEnv):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 
 
-# TODO kb rename and fix the test style
-# @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.NOOP])
-def test_tenant_detach_zzz(
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3])
+def test_ignored_tenant_reattach(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
     neon_env_builder.enable_remote_storage(
@@ -117,36 +116,67 @@ def test_tenant_detach_zzz(
         test_name="test_remote_storage_backup_and_restore",
     )
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.append(
+        ".*as locally complete, while it doesnt exist in remote index.*"
+    )
+    env.pageserver.allowed_errors.append(
+        '.*Conflict\\("Cannot attach: tenant .*? is not in memory, but has local files.*'
+    )
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
-    tenant_dir = env.repo_dir / "tenants" / str(tenant_id)
+    ignored_tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_dir = env.repo_dir / "tenants" / str(ignored_tenant_id)
+    tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    tenants_before_ignore.sort()
+    timelines_before_ignore = [
+        timeline["timeline_id"]
+        for timeline in pageserver_http.timeline_list(tenant_id=ignored_tenant_id)
+    ]
+    files_before_ignore = [tenant_path for tenant_path in tenant_dir.glob("**/*")]
 
-    tenant_status_before_detach = pageserver_http.tenant_status(tenant_id=tenant_id)
-    timeline_info_before_detach = pageserver_http.timeline_detail(
-        tenant_id=tenant_id, timeline_id=timeline_id
-    )
-    files_before_detach = [tenant_path for tenant_path in tenant_dir.glob("**/*")]
-    files_before_detach.sort()
+    # ignore the tenant and veirfy it's not present in pageserver replies, with its files still on disk
+    pageserver_http.tenant_ignore(ignored_tenant_id)
 
-    pageserver_http.tenant_detach(tenant_id)
-
-    files_after_detach_with_retain = [tenant_path for tenant_path in tenant_dir.glob("**/*")]
-    files_after_detach_with_retain.sort()
+    files_after_ignore_with_retain = [tenant_path for tenant_path in tenant_dir.glob("**/*")]
+    new_files = set(files_after_ignore_with_retain) - set(files_before_ignore)
+    disappeared_files = set(files_before_ignore) - set(files_after_ignore_with_retain)
     assert (
-        files_before_detach == files_after_detach_with_retain
-    ), f"Expected after detach with retain to have exactly the same files, but missing {set(files_before_detach) - set(files_after_detach_with_retain)} and have extra {set(files_after_detach_with_retain) - set(files_before_detach)} files"
-
-    pageserver_http.tenant_attach(tenant_id=tenant_id)
-
-    tenant_status_after_reattach = pageserver_http.tenant_status(tenant_id=tenant_id)
+        len(disappeared_files) == 0
+    ), f"Tenant ignore should not remove files from disk, missing: {disappeared_files}"
     assert (
-        tenant_status_before_detach == tenant_status_after_reattach
-    ), f"Tenant after reattach expected to have status {tenant_status_before_detach}, but got {tenant_status_after_reattach}"
+        len(new_files) == 1
+    ), f"Only tenant ignore file should appear on disk but got: {new_files}"
 
-    timeline_info_after_reattach = pageserver_http.timeline_detail(
-        tenant_id=tenant_id, timeline_id=timeline_id
-    )
+    tenants_after_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    assert ignored_tenant_id not in tenants_after_ignore, "Ignored tenant should be missing"
+    assert len(tenants_after_ignore) + 1 == len(
+        tenants_before_ignore
+    ), "Only ignored tenant should be missing"
+
+    # ensure we cannot attach a timeline with local files on disk
+    with pytest.raises(
+        expected_exception=PageserverApiException,
+        match=f"Conflict: Cannot attach: tenant {ignored_tenant_id} is not in memory, but has local files",
+    ):
+        pageserver_http.tenant_attach(tenant_id=ignored_tenant_id)
+
+    # restart the pageserver to ensure we don't load the ignore timeline
+    env.pageserver.stop()
+    env.pageserver.start()
+    tenants_after_restart = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    tenants_after_restart.sort()
     assert (
-        timeline_info_before_detach == timeline_info_after_reattach
-    ), f"Tenant timeline after reattach expected to have info {timeline_info_before_detach}, but got {timeline_info_after_reattach}"
+        tenants_after_restart == tenants_after_ignore
+    ), "Ignored tenant should not be reloaded after pageserver restart"
+
+    # now, attach with the local files and expect it works
+    pageserver_http.tenant_attach(tenant_id=ignored_tenant_id, allow_local_files=True)
+    tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    tenants_after_attach.sort()
+    assert tenants_after_attach == tenants_before_ignore, "Should have all tenants back"
+
+    timelines_after_ignore = [
+        timeline["timeline_id"]
+        for timeline in pageserver_http.timeline_list(tenant_id=ignored_tenant_id)
+    ]
+    assert timelines_before_ignore == timelines_after_ignore, "Should have all timelines back"

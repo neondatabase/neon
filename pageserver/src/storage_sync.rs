@@ -624,10 +624,13 @@ pub async fn initialize_remote_index_entry(
     entry_id: TenantId,
 ) -> anyhow::Result<()> {
     let index_accessor = remote_index.read().await;
-    anyhow::ensure!(
-        index_accessor.tenant_entry(&entry_id).is_none(),
-        "Cannot populate remote index for already existing tenant entry {entry_id}"
-    );
+    if let Some(entry) = index_accessor.tenant_entry(&entry_id) {
+        anyhow::ensure!(
+            entry.is_empty(),
+            "Cannot populate remote index for already existing non-empty tenant entry {entry_id}"
+        );
+    }
+
     drop(index_accessor);
 
     let new_index_parts =
@@ -647,9 +650,13 @@ pub async fn initialize_remote_index_entry(
 
     let mut index_accessor = remote_index.write().await;
     let tenant_entry = match index_accessor.tenant_entry_mut(&entry_id) {
-        Some(_) => anyhow::bail!(
-            "Cannot initialize remote index entry for already existing entry {entry_id}"
-        ),
+        Some(entry) => {
+            anyhow::ensure!(
+                entry.is_empty(),
+                "Cannot initialize remote index entry for already existing non-empty entry {entry_id}"
+            );
+            entry
+        }
         None => index_accessor.add_tenant_entry(entry_id),
     };
 

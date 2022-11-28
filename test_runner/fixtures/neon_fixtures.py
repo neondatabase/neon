@@ -1111,12 +1111,20 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(new_tenant_id, str)
         return TenantId(new_tenant_id)
 
-    def tenant_attach(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach")
+    def tenant_attach(self, tenant_id: TenantId, allow_local_files: bool = False):
+        query = f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach"
+        if allow_local_files:
+            query += "?allow-local-files"
+
+        res = self.post(query)
         self.verbose_error(res)
 
     def tenant_detach(self, tenant_id: TenantId):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach")
+        self.verbose_error(res)
+
+    def tenant_ignore(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/ignore")
         self.verbose_error(res)
 
     def tenant_status(self, tenant_id: TenantId) -> Dict[Any, Any]:
