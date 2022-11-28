@@ -4749,7 +4749,6 @@ dependencies = [
  "serde",
  "stable_deref_trait",
  "syn",
- "time 0.3.15",
  "tokio",
  "tokio-util",
  "tracing",
