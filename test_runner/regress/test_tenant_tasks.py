@@ -11,13 +11,6 @@ def get_only_element(l):  # noqa: E741
 
 # Test that gc and compaction tenant tasks start and stop correctly
 def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
-    # The gc and compaction loops don't bother to watch for tenant state
-    # changes while sleeping, so we use small periods to make this test
-    # run faster. With default settings we'd have to wait longer for tasks
-    # to notice state changes and shut down.
-    # TODO fix this behavior in the pageserver
-    tenant_config = "{gc_period = '1 s', compaction_period = '1 s'}"
-    neon_env_builder.pageserver_config_override = f"tenant_config={tenant_config}"
     name = "test_tenant_tasks"
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
