@@ -202,9 +202,9 @@ def test_remote_storage_upload_queue_retries(
     tenant_id, timeline_id = env.neon_cli.create_tenant(
         conf={
             # small checkpointing and compaction targets to ensure we generate many operations
-            "checkpoint_distance": f"{32 * 1024}",
+            "checkpoint_distance": f"{128 * 1024}",
             "compaction_threshold": "1",
-            "compaction_target_size": f"{32 * 1024}",
+            "compaction_target_size": f"{128 * 1024}",
             # large horizon to avoid automatic GC (our assert on gc_result below relies on that)
             "gc_horizon": f"{1024 ** 4}",
             "gc_period": "1h",
