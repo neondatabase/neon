@@ -209,7 +209,14 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
 }
 
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
-    let mut filled_cmd = cmd.env_clear().env("RUST_BACKTRACE", "1");
+    // enable RUST_BACKTRACE if it's not configured already, but pass through
+    // RUST_BACKTRACE=full|0 or whatever
+    let backtrace_setting = std::env::var_os("RUST_BACKTRACE");
+    let backtrace_setting = backtrace_setting
+        .as_deref()
+        .unwrap_or_else(|| OsStr::new("1"));
+
+    let mut filled_cmd = cmd.env_clear().env("RUST_BACKTRACE", backtrace_setting);
 
     // Pass through these environment variables to the command
     for var in ["LLVM_PROFILE_FILE", "FAILPOINTS", "RUST_LOG"] {
