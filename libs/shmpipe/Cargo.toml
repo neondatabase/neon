@@ -6,3 +6,6 @@ description = "FFI bindings to libshmpipe"
 
 links = "shmpipe"
 build = "build.rs"
+
+[dependencies]
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
