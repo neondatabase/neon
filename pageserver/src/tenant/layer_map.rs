@@ -233,20 +233,37 @@ impl LayerMap {
     fn find_latest_layer(&self, key: Key, end_lsn: Lsn, image_only: bool) -> Option<SearchResult> {
         let root = self.historic_layers.root();
         let key = IntKey::from(key.to_i128());
-        Self::find_latest_layer_recurs(key, Lsn(0), end_lsn, root, image_only)
+        let mut min_lsn = Lsn(0);
+        let mut max_lsn = Lsn(0);
+        if let Some(layer) = Self::find_latest_layer_recurs(
+            key,
+            &mut min_lsn,
+            &mut max_lsn,
+            end_lsn,
+            root,
+            image_only,
+        ) {
+            Some(SearchResult {
+                layer,
+                lsn_floor: min_lsn,
+            })
+        } else {
+            None
+        }
     }
 
     fn find_latest_layer_recurs(
         key: IntKey,
-        mut min_lsn: Lsn,
-        max_lsn: Lsn,
+        min_lsn: &mut Lsn,
+        max_lsn: &mut Lsn,
+        end_lsn: Lsn,
         node: &ParentNode<LayerRTreeObject>,
         image_only: bool,
-    ) -> Option<SearchResult> {
-        let mut result: Option<SearchResult> = None;
+    ) -> Option<Arc<dyn Layer>> {
+        let mut result: Option<Arc<dyn Layer>> = None;
         let mut search_area = AABB::from_corners(
             [key, IntKey::from(min_lsn.0 as i128)],
-            [key, IntKey::from(max_lsn.0 as i128 - 1)],
+            [key, IntKey::from(end_lsn.0 as i128 - 1)],
         );
         let children = node.children();
         /* For some reasons cloning this array is exteremely inefficient
@@ -255,8 +272,8 @@ impl LayerMap {
         */
         // Sort childred by LSN
         let children = children.iter().sorted_by(|a, b| {
-            let ac = a.envelope().lower();
-            let bc = b.envelope().lower();
+            let ac = a.envelope().upper();
+            let bc = b.envelope().upper();
             bc[1].partial_cmp(&ac[1]).unwrap() // sort in reverse order
         });
         // Process children in LSN decreasing order
@@ -277,22 +294,21 @@ impl LayerMap {
                         key >= IntKey::from(key_range.start.to_i128())
                             && key < IntKey::from(key_range.end.to_i128())
                     );
-                    debug_assert!(lsn_range.start.0 <= max_lsn.0);
-                    if lsn_range.start.0 <= min_lsn.0 {
+                    debug_assert!(lsn_range.start.0 <= end_lsn.0);
+                    if min_lsn.0 < lsn_range.start.0 {
+                        *min_lsn = lsn_range.start;
+                    }
+                    if max_lsn.0 < lsn_range.end.0 {
+                        *max_lsn = lsn_range.end;
+                    } else {
                         continue;
                     }
-                    min_lsn = lsn_range.start;
-                    result = Some(SearchResult {
-                        layer: layer.clone(),
-                        lsn_floor: min_lsn,
-                    });
+                    result = Some(layer.clone());
                 }
                 RTreeNode::Parent(parent) => {
-                    if let Some(occurance) =
-                        Self::find_latest_layer_recurs(key, min_lsn, max_lsn, parent, image_only)
-                    {
-                        debug_assert!(occurance.lsn_floor > min_lsn);
-                        min_lsn = occurance.lsn_floor;
+                    if let Some(occurance) = Self::find_latest_layer_recurs(
+                        key, min_lsn, max_lsn, end_lsn, parent, image_only,
+                    ) {
                         result = Some(occurance);
                     } else {
                         continue;
@@ -302,7 +318,7 @@ impl LayerMap {
             // recalculate search area using new min_lsn
             search_area = AABB::from_corners(
                 [key, IntKey::from(min_lsn.0 as i128)],
-                [key, IntKey::from(max_lsn.0 as i128 - 1)],
+                [key, IntKey::from(end_lsn.0 as i128 - 1)],
             );
         }
         result
