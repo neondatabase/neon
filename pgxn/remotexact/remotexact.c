@@ -399,6 +399,7 @@ rx_execute_remote_xact(void)
 	HASH_SEQ_STATUS		status;
 	StringInfoData		buf, resp_buf;
 	int		read_len = 0;
+	int 	num_read_rels = 0;
 	int		committed;
 
 	if (rwset_collection_buffer == NULL)
@@ -422,6 +423,8 @@ rx_execute_remote_xact(void)
 	/* Cursor now points to where the length of the read section is stored */
 	buf.cursor = buf.len;
 	/* Read section length will be updated later */
+	pq_sendint32(&buf, 0);
+	/* Number of read relations will be updated later */
 	pq_sendint32(&buf, 0);
 
 	/* Assemble the read set */
@@ -459,10 +462,13 @@ rx_execute_remote_xact(void)
 		pq_sendbytes(&buf, items->data, items->len);
 
 		read_len += buf.len;
+		num_read_rels++;
 	}
 
 	/* Update the length of the read section */
 	*(int *) (buf.data + buf.cursor) = pg_hton32(read_len);
+	/* Update the number of the read relations sent */
+	*(int *)(buf.data + buf.cursor + sizeof(int)) = pg_hton32(num_read_rels);
 
 	pq_sendbytes(&buf, rwset_collection_buffer->writes.data, rwset_collection_buffer->writes.len);
 

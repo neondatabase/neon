@@ -32,8 +32,6 @@ typedef struct RWSetHeader
 typedef struct RWSetPage
 {
 	BlockNumber blkno;
-
-	dlist_node	node;
 } RWSetPage;
 
 /*
@@ -42,8 +40,6 @@ typedef struct RWSetPage
 typedef struct RWSetTuple
 {
 	ItemPointerData tid;
-
-	dlist_node	node;
 } RWSetTuple;
 
 /*
@@ -56,10 +52,10 @@ typedef struct RWSetRelation
 	int8		region;
 	XidCSN		csn;
 	bool		is_table_scan;
-	dlist_head	pages;
-	dlist_head	tuples;
-
-	dlist_node	node;
+	int			n_pages;
+	RWSetPage	*pages;
+	int 		n_tuples;
+	RWSetTuple	*tuples;
 } RWSetRelation;
 
 /*
@@ -67,11 +63,12 @@ typedef struct RWSetRelation
  */
 typedef struct RWSet
 {
-	MemoryContext context;
-	RWSetHeader header;
-	dlist_head	relations;
-	char	   *writes;
-	int			writes_len;
+	MemoryContext 	context;
+	RWSetHeader 	header;
+	int 			n_relations;
+	RWSetRelation	*relations;
+	char	   		*writes;
+	int				writes_len;
 } RWSet;
 
 extern RWSet *RWSetAllocate(void);

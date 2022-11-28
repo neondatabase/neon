@@ -28,7 +28,7 @@ void validate_index_scan(RWSetRelation *rw_rel)
     int nkeys = 0;
     ScanKey keys = NULL;
     int scan_flags = 0;
-    dlist_iter page_iter;
+    int i; 
     RWSetPage *page = NULL;
     Page index_page;
     XLogRecPtr page_lsn = InvalidXLogRecPtr;
@@ -43,11 +43,11 @@ void validate_index_scan(RWSetRelation *rw_rel)
     scan = (HeapScanDesc)heap_beginscan(rel, SnapshotAny, nkeys, keys, NULL,
                                         scan_flags);
 
-    // For each index page, check if the lsn has been updated. 
-    dlist_foreach(page_iter, &rw_rel->pages)
+    // For each index page, check if the lsn has been updated.
+    for (i = 0; i < rw_rel->n_pages; i++)
     {
-        page = dlist_container(RWSetPage, node, page_iter.cur);
-        
+        page = &(rw_rel->pages[i]);
+
         // Advance the hscan to specified block and lock the page for sharing.
         heap_getpageonly(scan, page->blkno);
         LockBuffer(scan->rs_cbuf, BUFFER_LOCK_SHARE);

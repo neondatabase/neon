@@ -19,7 +19,7 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 	bytea	   *bytes = PG_GETARG_BYTEA_P(0);
 	StringInfoData buf;
 	RWSet	   *rwset;
-	dlist_iter	rel_iter;
+	int i;
 
 	/*
 	 * Signify that this is a surrogate transaction. This
@@ -48,9 +48,9 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 	/*
 	 * Validate the read set
 	 */
-	dlist_foreach(rel_iter, &rwset->relations)
+	for (i = 0; i < rwset->n_relations; i++)
 	{
-		RWSetRelation *rel = dlist_container(RWSetRelation, node, rel_iter.cur);
+		RWSetRelation *rel = &(rwset->relations[i]);
 		int8 region = rel->region;
 
 		if (region != current_region)
