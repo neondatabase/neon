@@ -35,8 +35,9 @@ use utils::{
     http::endpoint,
     id::NodeId,
     logging::{self, LogFormat},
-    project_git_version, signals, tcp_listener,
+    project_git_version,
     sentry_init::init_sentry,
+    signals, tcp_listener,
 };
 
 const PID_FILE_NAME: &str = "safekeeper.pid";
@@ -58,7 +59,7 @@ fn main() -> anyhow::Result<()> {
 
     // Connect to sentry if sentry-url is provided.
     match arg_matches.get_one::<String>("sentry-url") {
-        Some(sentry_url) =>  init_sentry(sentry_url.as_ref(), "safekeeper"),
+        Some(sentry_url) => init_sentry(sentry_url.as_ref(), "safekeeper"),
         None => (),
     }
 

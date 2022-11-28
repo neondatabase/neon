@@ -26,9 +26,9 @@ use utils::{
     lock_file, logging,
     postgres_backend::AuthType,
     project_git_version,
+    sentry_init::init_sentry,
     signals::{self, Signal},
     tcp_listener,
-    sentry_init::init_sentry,
 };
 
 project_git_version!(GIT_VERSION);

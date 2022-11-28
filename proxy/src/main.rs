@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to sentry if sentry-url is provided.
     match arg_matches.get_one::<String>("sentry-url") {
-        Some(sentry_url) =>  init_sentry(sentry_url.as_ref(), "proxy"),
+        Some(sentry_url) => init_sentry(sentry_url.as_ref(), "proxy"),
         None => (),
     }
 

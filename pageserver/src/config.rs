@@ -348,9 +348,7 @@ impl PageServerConfigBuilder {
             listen_http_addr: self
                 .listen_http_addr
                 .ok_or(anyhow!("missing listen_http_addr"))?,
-            sentry_url: self
-                .sentry_url
-                .ok_or(anyhow!("missing sentry_url"))?,
+            sentry_url: self.sentry_url.ok_or(anyhow!("missing sentry_url"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow!("missing wait_lsn_timeout"))?,
@@ -379,7 +377,7 @@ impl PageServerConfigBuilder {
             profiling: self.profiling.ok_or(anyhow!("missing profiling"))?,
             // TenantConf is handled separately
             default_tenant_conf: TenantConf::default(),
-            broker_endpoints : self
+            broker_endpoints: self
                 .broker_endpoints
                 .ok_or(anyhow!("No broker endpoints provided"))?,
             broker_etcd_prefix: self
@@ -640,7 +638,7 @@ impl PageServerConf {
             id: NodeId(0),
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
-            sentry_url : "".to_string(),
+            sentry_url: "".to_string(),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
@@ -875,7 +873,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
-                sentry_url : "".to_string(),
+                sentry_url: "".to_string(),
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),

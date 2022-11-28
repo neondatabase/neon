@@ -46,8 +46,8 @@ pub mod tcp_listener;
 pub mod nonblock;
 
 // Default signal handling
-pub mod signals;
 pub mod sentry_init;
+pub mod signals;
 
 /// use with fail::cfg("$name", "return(2000)")
 #[macro_export]
