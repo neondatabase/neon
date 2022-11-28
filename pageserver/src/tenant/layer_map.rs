@@ -26,6 +26,7 @@ use std::ops::Range;
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 use std::sync::Arc;
 use utils::lsn::Lsn;
+use itertools::Itertools;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
