@@ -4,6 +4,7 @@
 import os
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    PageserverApiException,
     RemoteStorageKind,
     assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
@@ -271,26 +273,44 @@ def test_remote_storage_upload_queue_retries(
     # let all future operations queue up
     configure_storage_sync_failpoints("return")
 
-    # create more churn to generate all upload ops
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("c")
-    client.timeline_checkpoint(tenant_id, timeline_id)
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("d")
-    client.timeline_compact(tenant_id, timeline_id)
-    gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
-    print_gc_result(gc_result)
-    assert gc_result["layers_removed"] > 0
+    # Create more churn to generate all upload ops.
+    # The checkpoint / compact / gc ops will block because they call remote_client.wait_completion().
+    # So, run this in a differen thread.
+    churn_thread_result = [False]
 
-    # ensure that all operation types that can be in the upload queue have queued up
-    assert get_queued_count(file_kind="layer", op_kind="upload") > 0
-    assert get_queued_count(file_kind="index", op_kind="upload") >= 2
-    assert get_queued_count(file_kind="layer", op_kind="delete") > 0
+    def churn_while_failpoints_active(result):
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver("c")
+        client.timeline_checkpoint(tenant_id, timeline_id)
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver("d")
+        client.timeline_compact(tenant_id, timeline_id)
+        gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
+        print_gc_result(gc_result)
+        assert gc_result["layers_removed"] > 0
+        result[0] = True
 
-    # unblock all operations and wait for them to finish
+    churn_while_failpoints_active_thread = threading.Thread(
+        target=churn_while_failpoints_active, args=[churn_thread_result]
+    )
+    churn_while_failpoints_active_thread.start()
+
+    # wait for churn thread's data to get stuck in the upload queue
+    wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="upload") > 0)
+    wait_until(10, 0.1, lambda: get_queued_count(file_kind="index", op_kind="upload") >= 2)
+    wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="delete") > 0)
+
+    # unblock churn operations
     configure_storage_sync_failpoints("off")
 
+    # ... and wait for them to finish. Exponential back-off in upload queue, so, gracious timeouts.
     wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
     wait_until(30, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
     wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+
+    # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
+    # so, give it some time to wrap up.
+    churn_while_failpoints_active_thread.join(30)
+    assert not churn_while_failpoints_active_thread.is_alive()
+    assert churn_thread_result[0]
 
     # try a restore to verify that the uploads worked
     # XXX: should vary this test to selectively fail just layer uploads, index uploads, deletions
@@ -350,8 +370,19 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             "pitr_interval": "0s",
         }
     )
+    timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
 
     client = env.pageserver.http_client()
+
+    def get_queued_count(file_kind, op_kind):
+        metrics = client.get_metrics()
+        matches = re.search(
+            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
+            metrics,
+            re.MULTILINE,
+        )
+        assert matches
+        return int(matches[1])
 
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
 
@@ -364,32 +395,50 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         ]
     )
     wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
-    client.timeline_checkpoint(tenant_id, timeline_id)
 
-    timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    assert timeline_path.exists()
-    assert len(list(timeline_path.glob("*"))) >= 8
+    # Kick off a checkpoint operation.
+    # It will get stuck in remote_client.wait_completion(), since the select query will have
+    # generated layer upload ops already.
+    checkpoint_allowed_to_fail = threading.Event()
 
-    def get_queued_count(file_kind, op_kind):
-        metrics = client.get_metrics()
-        matches = re.search(
-            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
-            metrics,
-            re.MULTILINE,
-        )
-        assert matches
-        return int(matches[1])
+    def checkpoint_thread_fn():
+        try:
+            client.timeline_checkpoint(tenant_id, timeline_id)
+        except PageserverApiException:
+            assert (
+                checkpoint_allowed_to_fail.is_set()
+            ), "checkpoint op should only fail in response to timeline deletion"
 
-    assert get_queued_count(file_kind="index", op_kind="upload") > 0
+    checkpoint_thread = threading.Thread(target=checkpoint_thread_fn)
+    checkpoint_thread.start()
 
-    # timeline delete should work despite layer files stuck in upload
+    # Wait for stuck uploads. NB: if there were earlier layer flushes initiated during `INSERT INTO`,
+    # this will be their uploads. If there were none, it's the timeline_checkpoint()'s uploads.
+    def assert_compacted_and_uploads_queued():
+        assert timeline_path.exists()
+        assert len(list(timeline_path.glob("*"))) >= 8
+        assert get_queued_count(file_kind="index", op_kind="upload") > 0
+
+    wait_until(20, 0.1, assert_compacted_and_uploads_queued)
+
+    # Regardless, give checkpoint some time to block for good.
+    # Not strictly necessary, but might help uncover failure modes in the future.
+    time.sleep(2)
+
+    # Now delete the timeline. It should take priority over ongoing
+    # checkpoint operations. Hence, checkpoint is allowed to fail now.
     log.info("sending delete request")
+    checkpoint_allowed_to_fail.set()
     client.timeline_delete(tenant_id, timeline_id)
 
     assert not timeline_path.exists()
 
     # timeline deletion should kill ongoing uploads
     assert get_queued_count(file_kind="index", op_kind="upload") == 0
+
+    # timeline deletion should be unblocking checkpoint ops
+    checkpoint_thread.join(2.0)
+    assert not checkpoint_thread.is_alive()
 
     # Just to be sure, unblock ongoing uploads. If the previous assert was incorrect, or the prometheus metric broken,
     # this would likely generate some ERROR level log entries that the NeonEnvBuilder would detect

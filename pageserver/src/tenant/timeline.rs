@@ -2246,6 +2246,17 @@ impl Timeline {
             deltas_to_compact,
         } = self.compact_level0_phase1(target_file_size).await?;
 
+        // Before deleting any layers, we need to wait for their upload ops to finish.
+        // See storage_sync module level comment on consistency.
+        // Do it here because we don't want to hold self.layers.write() while waiting.
+        if let Some(remote_client) = &self.remote_client {
+            info!("waiting for upload ops to complete");
+            remote_client
+                .wait_completion()
+                .await
+                .context("wait for layer upload ops to complete")?;
+        }
+
         let mut layers = self.layers.write().unwrap();
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
@@ -2448,6 +2459,17 @@ impl Timeline {
         info!("GC starting");
 
         debug!("retain_lsns: {:?}", retain_lsns);
+
+        // Before deleting any layers, we need to wait for their upload ops to finish.
+        // See storage_sync module level comment on consistency.
+        // Do it here because we don't want to hold self.layers.write() while waiting.
+        if let Some(remote_client) = &self.remote_client {
+            info!("waiting for upload ops to complete");
+            remote_client
+                .wait_completion()
+                .await
+                .context("wait for layer upload ops to complete")?;
+        }
 
         let mut layers_to_remove = Vec::new();
 
