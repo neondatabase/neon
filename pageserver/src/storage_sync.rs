@@ -999,7 +999,8 @@ impl RemoteTimelineClient {
             UploadOp::UploadMetadata(_, _) => (RemoteOpFileKind::Index, RemoteOpKind::Upload),
             UploadOp::Delete(file_kind, _) => (*file_kind, RemoteOpKind::Delete),
             UploadOp::Barrier(_) => {
-                unreachable!("we execute barriers synchronously")
+                // we do not account these
+                return;
             }
         };
         REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS
