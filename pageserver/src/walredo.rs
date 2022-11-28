@@ -245,15 +245,15 @@ impl PostgresRedoManager {
         {
             let mut process_guard = self.process.lock().unwrap();
 
-			//
+            //
             // Launch the WAL redo process on first use
-			//
-			// TODO-1: it requires locking mutex oin each redo request. It will be better to launch process at
-			// PostgresRedoManage::new but then we should find a way to prevent laucnhing walredo process on
-			// bootsrap incation of pageserver, otherwise two initdb may confict with ah other.
-			//
-			// TODO-2: we are not reading stderr of walredo process right now and so not handling waredo errors.
-			//
+            //
+            // TODO-1: it requires locking mutex oin each redo request. It will be better to launch process at
+            // PostgresRedoManage::new but then we should find a way to prevent laucnhing walredo process on
+            // bootsrap incation of pageserver, otherwise two initdb may confict with ah other.
+            //
+            // TODO-2: we are not reading stderr of walredo process right now and so not handling waredo errors.
+            //
             if process_guard.is_none() {
                 let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
                 *process_guard = Some(p);
@@ -284,7 +284,7 @@ impl PostgresRedoManager {
         WAL_REDO_RECORDS_HISTOGRAM.observe(records.len() as f64);
         WAL_REDO_BYTES_HISTOGRAM.observe(writebuf.len() as f64);
 
-		let mut page = [0u8; BLCKSZ as usize];
+        let mut page = [0u8; BLCKSZ as usize];
         unsafe {
             shmem_pipe_process_request(
                 self.pipe,
@@ -293,7 +293,7 @@ impl PostgresRedoManager {
                 page.as_mut_ptr(),
             );
         }
-		WAL_REDO_TIME.observe(start_time.elapsed().as_secs_f64());
+        WAL_REDO_TIME.observe(start_time.elapsed().as_secs_f64());
         Ok(Bytes::copy_from_slice(&page))
     }
 
