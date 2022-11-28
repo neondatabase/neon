@@ -314,6 +314,7 @@ impl PageServerHandler {
 
             let copy_data_bytes = match msg? {
                 Some(FeMessage::CopyData(bytes)) => bytes,
+                Some(FeMessage::Terminate) => break,
                 Some(m) => {
                     bail!("unexpected message: {m:?} during COPY");
                 }
