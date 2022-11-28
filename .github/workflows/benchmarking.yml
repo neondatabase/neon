@@ -231,8 +231,8 @@ jobs:
     - name: Set database options
       if: matrix.platform == 'neon-captest-prefetch'
       run: |
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE main SET seqscan_prefetch_buffers=10"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE neondb SET enable_seqscan_prefetch=on"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE neondb SET seqscan_prefetch_buffers=10"
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
@@ -307,7 +307,7 @@ jobs:
     #
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
-
+    if: success() || failure()
     needs: [ pgbench-compare ]
 
     strategy:
