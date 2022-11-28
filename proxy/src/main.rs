@@ -28,6 +28,7 @@ use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use tracing::info;
 use utils::project_git_version;
+use utils::sentry_init::init_sentry;
 
 project_git_version!(GIT_VERSION);
 
@@ -40,24 +41,18 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _guard = sentry::init((
-        "https://0b4e22f1b09d47a8a0058d6d7eb87dcb@o1373725.ingest.sentry.io/4504220230483968",
-        sentry::ClientOptions {
-            release: sentry::release_name!(),
-            ..Default::default()
-        },
-    ));
-
-    sentry::configure_scope(|scope| {
-        scope.set_tag("process", "proxy");
-    });
-
     tracing_subscriber::fmt()
         .with_ansi(atty::is(atty::Stream::Stdout))
         .with_target(false)
         .init();
 
     let arg_matches = cli().get_matches();
+
+    // Connect to sentry if sentry-url is provided.
+    match arg_matches.get_one::<String>("sentry-url") {
+        Some(sentry_url) =>  init_sentry(sentry_url.as_ref(), "proxy"),
+        None => (),
+    }
 
     let tls_config = match (
         arg_matches.get_one::<String>("tls-key"),

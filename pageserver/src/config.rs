@@ -102,6 +102,9 @@ pub struct PageServerConf {
     /// Example (default): 127.0.0.1:9898
     pub listen_http_addr: String,
 
+    // The sentry URL for sending errors to during staging/production.
+    pub sentry_url: String,
+
     // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
     pub wait_lsn_timeout: Duration,
     // How long to wait for WAL redo to complete.
@@ -193,6 +196,8 @@ struct PageServerConfigBuilder {
 
     listen_http_addr: BuilderValue<String>,
 
+    sentry_url: BuilderValue<String>,
+
     wait_lsn_timeout: BuilderValue<Duration>,
     wal_redo_timeout: BuilderValue<Duration>,
 
@@ -229,6 +234,7 @@ impl Default for PageServerConfigBuilder {
         Self {
             listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
+            sentry_url: Set("".to_string()),
             wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
             wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
@@ -261,6 +267,10 @@ impl PageServerConfigBuilder {
 
     pub fn listen_http_addr(&mut self, listen_http_addr: String) {
         self.listen_http_addr = BuilderValue::Set(listen_http_addr)
+    }
+
+    pub fn sentry_url(&mut self, the_sentry_url: String) {
+        self.sentry_url = BuilderValue::Set(the_sentry_url)
     }
 
     pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
@@ -331,10 +341,6 @@ impl PageServerConfigBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
-        let broker_endpoints = self
-            .broker_endpoints
-            .ok_or(anyhow!("No broker endpoints provided"))?;
-
         Ok(PageServerConf {
             listen_pg_addr: self
                 .listen_pg_addr
@@ -342,6 +348,9 @@ impl PageServerConfigBuilder {
             listen_http_addr: self
                 .listen_http_addr
                 .ok_or(anyhow!("missing listen_http_addr"))?,
+            sentry_url: self
+                .sentry_url
+                .ok_or(anyhow!("missing sentry_url"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow!("missing wait_lsn_timeout"))?,
@@ -370,7 +379,9 @@ impl PageServerConfigBuilder {
             profiling: self.profiling.ok_or(anyhow!("missing profiling"))?,
             // TenantConf is handled separately
             default_tenant_conf: TenantConf::default(),
-            broker_endpoints,
+            broker_endpoints : self
+                .broker_endpoints
+                .ok_or(anyhow!("No broker endpoints provided"))?,
             broker_etcd_prefix: self
                 .broker_etcd_prefix
                 .ok_or(anyhow!("missing broker_etcd_prefix"))?,
@@ -529,6 +540,7 @@ impl PageServerConf {
                     let permits = NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
                     ConfigurableSemaphore::new(permits)
                 }),
+                "sentry_url" => builder.sentry_url(parse_toml_string(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -628,6 +640,7 @@ impl PageServerConf {
             id: NodeId(0),
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
+            sentry_url : "".to_string(),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
@@ -815,6 +828,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+                sentry_url: "".to_string(),
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
                 wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
@@ -861,6 +875,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
+                sentry_url : "".to_string(),
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),

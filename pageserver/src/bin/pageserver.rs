@@ -28,6 +28,7 @@ use utils::{
     project_git_version,
     signals::{self, Signal},
     tcp_listener,
+    sentry_init::init_sentry,
 };
 
 project_git_version!(GIT_VERSION);
@@ -52,18 +53,6 @@ fn version() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _guard = sentry::init((
-        "https://0a872afd470f42bf9f5cdfb851459ad6@o1373725.ingest.sentry.io/4504220031582208",
-        sentry::ClientOptions {
-            release: sentry::release_name!(),
-            ..Default::default()
-        },
-    ));
-
-    sentry::configure_scope(|scope| {
-        scope.set_tag("process", "pageserver");
-    });
-
     let arg_matches = cli().get_matches();
 
     if arg_matches.get_flag("enabled-features") {
@@ -96,6 +85,12 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+
+    // connect to sentry if sentry_url is available.
+    match conf.sentry_url.len() {
+        0 => (),
+        _ => init_sentry(conf.sentry_url.as_ref(), "pageserver"),
+    }
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {

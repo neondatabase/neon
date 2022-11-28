@@ -36,25 +36,15 @@ use utils::{
     id::NodeId,
     logging::{self, LogFormat},
     project_git_version, signals, tcp_listener,
+    sentry_init::init_sentry,
 };
 
 const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
+
 project_git_version!(GIT_VERSION);
 
 fn main() -> anyhow::Result<()> {
-    let _guard = sentry::init((
-        "https://66b1408cdcb44b1fb11a0bf136a8bb4c@o1373725.ingest.sentry.io/4504220229632000",
-        sentry::ClientOptions {
-            release: sentry::release_name!(),
-            ..Default::default()
-        },
-    ));
-
-    sentry::configure_scope(|scope| {
-        scope.set_tag("process", "safekeeper");
-    });
-
     let arg_matches = cli().get_matches();
 
     if let Some(addr) = arg_matches.get_one::<String>("dump-control-file") {
@@ -65,6 +55,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut conf = SafeKeeperConf::default();
+
+    // Connect to sentry if sentry-url is provided.
+    match arg_matches.get_one::<String>("sentry-url") {
+        Some(sentry_url) =>  init_sentry(sentry_url.as_ref(), "safekeeper"),
+        None => (),
+    }
 
     if let Some(dir) = arg_matches.get_one::<PathBuf>("datadir") {
         // change into the data directory.
