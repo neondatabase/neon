@@ -203,10 +203,18 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
-        // The actual process is launched lazily, on first request.
+        Self::multiprocess(conf, tenant_id, NonZeroUsize::new(1).unwrap())
+    }
 
+    /// Create a postgres redo manager with given number of maximum processes.
+    pub fn multiprocess(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        max_processes: NonZeroUsize,
+    ) -> PostgresRedoManager {
+        // The actual process is launched lazily, on first request.
         let h = WALREDO_RUNTIME.handle();
-        let (handle, fut) = tokio_postgres_redo(conf, tenant_id, h);
+        let (handle, fut) = tokio_postgres_redo(conf, tenant_id, h, max_processes);
         crate::task_mgr::spawn(
             h,
             crate::task_mgr::TaskKind::WalRedo,
@@ -579,6 +587,7 @@ fn tokio_postgres_redo(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     _handle: &tokio::runtime::Handle,
+    max_processes: NonZeroUsize,
 ) -> (
     Handle,
     impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
@@ -599,8 +608,6 @@ fn tokio_postgres_redo(
         tx: tx.clone(),
         feedback: feedback.clone(),
     };
-
-    let max_processes = NonZeroUsize::new(1).unwrap();
 
     let ipc = async move {
         while let Ok(first) = {
@@ -1702,6 +1709,7 @@ mod tests {
     use crate::repository::Key;
     use crate::{config::PageServerConf, walrecord::NeonWalRecord};
     use bytes::Bytes;
+    use std::num::NonZeroUsize;
     use std::str::FromStr;
     use utils::{id::TenantId, lsn::Lsn};
 
@@ -2067,7 +2075,8 @@ mod tests {
             let conf = Box::leak(Box::new(conf));
             let tenant_id = TenantId::generate();
 
-            let manager = PostgresRedoManager::new(conf, tenant_id);
+            let manager =
+                PostgresRedoManager::multiprocess(conf, tenant_id, NonZeroUsize::new(1).unwrap());
 
             Ok(RedoHarness {
                 _repo_dir: repo_dir,

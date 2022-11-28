@@ -31,7 +31,8 @@ fn redo_scenarios(c: &mut Criterion) {
     let conf = Box::leak(Box::new(conf));
     let tenant_id = TenantId::generate();
 
-    let manager = PostgresRedoManager::new(conf, tenant_id);
+    let manager =
+        PostgresRedoManager::multiprocess(conf, tenant_id, std::num::NonZeroUsize::new(4).unwrap());
 
     let manager = Arc::new(manager);
 
@@ -68,6 +69,9 @@ fn redo_scenarios(c: &mut Criterion) {
         );
     }
     drop(group);
+
+    let fut = pageserver::task_mgr::shutdown_tasks(None, Some(tenant_id), None);
+    pageserver::task_mgr::WALREDO_RUNTIME.block_on(fut);
 }
 
 /// Sets up `threads` number of requesters to `request_redo`, with the given input.
