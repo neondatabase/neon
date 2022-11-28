@@ -267,7 +267,7 @@ readahead_buffer_resize(int newsize, void *extra)
 				nfree = newsize;
 	PrefetchState *newPState;
 	Size 		newprfs_size = offsetof(PrefetchState, prf_buffer) + (
-		sizeof(PrefetchRequest) * readahead_buffer_size
+		sizeof(PrefetchRequest) * newsize
 	);
 	
 	/* don't try to re-initialize if we haven't initialized yet */
