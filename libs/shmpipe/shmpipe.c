@@ -1,3 +1,31 @@
+/*
+This implementation of shared memory pipe is used both from C code (pgxn/neon_walredo/walredoproc.c)
+and Rust code (pageserver/src/walredo). It provides many-producers-single-consumer communications.
+Multiple pageserver tasks needed to perform page reconstruction can send requests to walredo process and
+get results. Unlike native pipe implementation this communication is not placed in critical section.
+It means that multiple tasks can send there requests to walredo concurrently and then independently wait for responses.
+
+First of all I tried straightforward implementation using pthread interprocess mutex/condvars for synchronization.
+But performance is not good because of larger number of syscalls. This is why I have to replaced mutexes with latches implemented using spinlocks.
+But we can not use spinlocks while waiting for walredo requests because tenants can be idle and walredo process doesn't receive any request
+for a long time. For waiting request I am using event implemented using mutex/condvar.
+
+I have implemented two ways of waiting responses: using spinlocks (BUSY_WAIT_RESPONSES) and using wait event
+First one seems to be faster on Ketteq queries so I am using BUSY_WAIT_RESPONSES.
+
+There are also two implementations of busy loop waiting: PAUSE instruction (like Postgres spinlock does on x86) and sched_yield().
+Last one is performing syscall but on my tests provide better performance and less consumes CPU.
+
+This library can be build using "make" and installed using "make install" (requires root permissions because copy shared library to /usr/lib).
+Building, installation and integration with Rust may need to be completely rewritten - I just implemented the simplest solution.
+
+By doing "make shmpipe" you can build simplest benchmark for measuring shared pipe performance.
+You can specify different number of producers, for example to test shmpipe with 10 produces I use the following command:
+
+./shmpipe server 10 & (sleep 1 ; time ./shmpipe client 10)
+
+*/
+
 #include <sys/mman.h>
 #include <stdio.h>
 #include <string.h>

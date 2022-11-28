@@ -133,11 +133,17 @@ enter_seccomp_mode(void)
 
 		/* Memory allocation */
 		PG_SCMP_ALLOW(brk),
-#ifndef MALLOC_NO_MMAP
 		/* TODO: musl doesn't have mallopt */
+
+		/* Needed for malloc without MALLOC_NO_MMAP option and also for shmpipe */
 		PG_SCMP_ALLOW(mmap),
 		PG_SCMP_ALLOW(munmap),
-#endif
+
+		/* Shmpipe */
+		PG_SCMP_ALLOW(ftruncate),
+		PG_SCMP_ALLOW(futex),
+		PG_SCMP_ALLOW(sched_yield),
+
 		/*
 		 * getpid() is called on assertion failure, in ExceptionalCondition.
 		 * It's not really needed, but seems pointless to hide it either. The
