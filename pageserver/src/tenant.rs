@@ -1320,7 +1320,7 @@ impl Tenant {
             format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
         })?;
 
-        // Flush the new layer files to disk, before we mark the timelne as available to
+        // Flush the new layer files to disk, before we mark the timeline as available to
         // the outside world.
         //
         // Thus spawn flush loop manually and skip flush_loop setup in initialize_with_lock
