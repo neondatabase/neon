@@ -905,9 +905,11 @@ jobs:
           - target_region:  us-east-2
             target_cluster: dev-us-east-2-beta
             deploy_link_proxy: true
+            deploy_legacy_scram_proxy: true
           - target_region:  eu-west-1
             target_cluster: dev-eu-west-1-zeta
             deploy_link_proxy: false
+            deploy_legacy_scram_proxy: false
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -930,6 +932,12 @@ jobs:
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+
+      - name: Re-deploy legacy scram proxy
+        if: matrix.deploy_legacy_scram_proxy
+        run: |
+          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+          helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   deploy-proxy-prod-new:
     runs-on: prod
