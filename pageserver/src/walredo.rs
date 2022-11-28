@@ -22,6 +22,7 @@ use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::Serialize;
+use std::num::NonZeroUsize;
 use std::process::Stdio;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -592,12 +593,14 @@ fn tokio_postgres_redo(
     let capacity = expected_inflight + expected_pipelined;
     let (tx, rx) = flume::bounded::<Payload>(capacity);
 
-    let feedback = Arc::new(Feedback::new());
+    let feedback = Arc::new(Feedback::new(capacity));
 
     let handle = Handle {
         tx: tx.clone(),
         feedback: feedback.clone(),
     };
+
+    let max_processes = NonZeroUsize::new(1).unwrap();
 
     let ipc = async move {
         while let Ok(first) = {
@@ -631,6 +634,7 @@ fn tokio_postgres_redo(
             loop {
                 // simple control loop for handling number of processes which takes in as inputs:
                 //
+                // - `notify_full` from the Handle when the queue might be at the limit
                 // - `notify_not_full` from the Handle which is signalled on every time something
                 //   was pushed to the queue
                 // - `notify_empty` from walredo tasks, which they signal every next request
@@ -639,7 +643,7 @@ fn tokio_postgres_redo(
                 // this works only at the proof of concept level for scaling up.
 
                 match control
-                    .iteration(&feedback, &mut watcher, first.is_some())
+                    .iteration(&feedback, &mut watcher, first.is_some(), &max_processes)
                     .await
                 {
                     std::ops::ControlFlow::Break(()) => break,
@@ -684,6 +688,7 @@ fn tokio_postgres_redo(
 struct Control {
     js: tokio::task::JoinSet<()>,
     cancel: CancellationToken,
+    downsized_at_limit: bool,
     successive_empty: usize,
 }
 
@@ -697,6 +702,7 @@ impl Control {
         feedback: &Arc<Feedback>,
         watcher: &mut std::pin::Pin<&mut F>,
         have_first: bool,
+        max_processes: &NonZeroUsize,
     ) -> std::ops::ControlFlow<(), bool>
     where
         F: std::future::Future,
@@ -705,8 +711,51 @@ impl Control {
 
         let check_not_empty = self.successive_empty > 0;
 
+        let check_full = !self.js.is_empty()
+            && self.js.len() < max_processes.get()
+            && !self.cancel.is_cancelled();
+
         tokio::select! {
+            // preconditions:
+            // - we are under the limit but have one
+            // - we haven't been cancelled
+            _ = feedback.notify_full.notified(), if check_full => {
+                if self.downsized_at_limit {
+                    // we most likely had been pinged earlier during heavy load that the
+                    // channel is full. however, we have been disabled once the limit was
+                    // reached, so we are only now getting this old notification, so just
+                    // clear it but don't start any process since we just downsized.
+                    self.downsized_at_limit = false;
+                    return Continue(false);
+                }
+
+                self.successive_empty = 0;
+
+                // similar to downscaling this will be notified when the buffer is full but
+                // can react to it by spawning many
+
+                let mut forgotten_permits = 0;
+                while let Ok(permit) = feedback.downsize.try_acquire() {
+                    permit.forget();
+                    forgotten_permits += 1;
+                }
+
+                if forgotten_permits > 0 {
+                    warn!(forgotten_permits, "this should really have a test case for it, but we just forgot permits while adding a new process");
+                }
+
+                Continue(true)
+            },
             _ = feedback.notify_not_empty.notified(), if check_not_empty => {
+                self.successive_empty = 0;
+                Continue(false)
+            },
+            _ = feedback.notify_empty.notified(), if self.js.len() > 1 => {
+                self.downsized_at_limit |= self.js.len() >= max_processes.get();
+                // let one exit
+                // TODO: this lets many since all of them will notify at same time ...
+                // could debounce to some tick rate?
+                feedback.downsize.add_permits(1);
                 self.successive_empty = 0;
                 Continue(false)
             },
@@ -823,16 +872,20 @@ async fn launch_walredo(
 }
 
 struct Feedback {
+    capacity: usize,
     waiting_work: AtomicUsize,
+    notify_full: tokio::sync::Notify,
     notify_not_empty: tokio::sync::Notify,
     notify_empty: tokio::sync::Notify,
     downsize: tokio::sync::Semaphore,
 }
 
 impl Feedback {
-    fn new() -> Self {
+    fn new(outer_capacity: usize) -> Self {
         Feedback {
+            capacity: outer_capacity,
             waiting_work: AtomicUsize::default(),
+            notify_full: tokio::sync::Notify::default(),
             notify_not_empty: tokio::sync::Notify::default(),
             notify_empty: tokio::sync::Notify::default(),
             downsize: tokio::sync::Semaphore::new(0),
@@ -841,8 +894,15 @@ impl Feedback {
 
     fn inc_waiting_work(&self) {
         let ordering = std::sync::atomic::Ordering::Relaxed;
-        self.waiting_work.fetch_add(1, ordering);
-        self.notify_not_empty.notify_one();
+        let now = self.waiting_work.fetch_add(1, ordering);
+
+        // because of relaxed atomics, we can see the increments and decrements in whatever order,
+        // the count will sometimes be wrapped around
+        if now == self.capacity - 1 {
+            self.notify_full.notify_one();
+        } else {
+            self.notify_not_empty.notify_one();
+        }
     }
 
     fn dec_waiting_work(&self) {
@@ -1798,19 +1858,21 @@ mod tests {
     async fn scale_down_to_zero_breaks() {
         use super::{Control, Feedback};
         use futures::future::pending;
+        use std::num::NonZeroUsize;
         use std::ops::ControlFlow::*;
         use std::sync::Arc;
         use tokio::sync::Notify;
         // this was a bug in early implementation, that the control loop would just hang
-        let feedback = Arc::new(Feedback::new());
+        let feedback = Arc::new(Feedback::new(4));
         let watcher = pending::<()>();
         tokio::pin!(watcher);
 
         let mut control = Control::default();
+        let max_processes = NonZeroUsize::new(1).unwrap();
         let mut initial = Some(());
 
         let ret = control
-            .iteration(&feedback, &mut watcher, initial.is_some())
+            .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
             .await;
 
         // because we have the initial, we should always start it first
@@ -1832,7 +1894,7 @@ mod tests {
         feedback.notify_empty.notify_one();
 
         let ret = control
-            .iteration(&feedback, &mut watcher, initial.is_some())
+            .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
             .await;
 
         assert_eq!(Continue(false), ret);
@@ -1841,7 +1903,7 @@ mod tests {
         // should_downsize forgets the one permit on returning true
         while !feedback.should_downsize() {
             let ret = control
-                .iteration(&feedback, &mut watcher, initial.is_some())
+                .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
                 .await;
 
             assert_eq!(Continue(false), ret);
@@ -1851,7 +1913,7 @@ mod tests {
         fake_walredo.notify_one();
 
         let ret = control
-            .iteration(&feedback, &mut watcher, initial.is_some())
+            .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
             .await;
 
         // this return logic could be complicated, but the js.join_next() will return instantly when
@@ -1863,7 +1925,7 @@ mod tests {
         );
 
         let ret = control
-            .iteration(&feedback, &mut watcher, initial.is_some())
+            .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
             .await;
 
         assert_eq!(
@@ -1871,6 +1933,103 @@ mod tests {
             ret,
             "Need to break out of the control loop to start waiting a new first item"
         );
+    }
+
+    #[tokio::test]
+    async fn scale_up_and_down() {
+        use super::{Control, Feedback};
+        use futures::future::pending;
+        use std::num::NonZeroUsize;
+        use std::ops::ControlFlow::*;
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let feedback = Arc::new(Feedback::new(4));
+        let watcher = pending::<()>();
+        tokio::pin!(watcher);
+
+        let mut control = Control::default();
+        let max_processes = NonZeroUsize::new(4).unwrap();
+        let mut initial = Some(());
+
+        let ret = control
+            .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
+            .await;
+
+        assert_eq!(Continue(true), ret);
+        initial.take();
+
+        let mut fakes = Vec::new();
+
+        loop {
+            assert!(fakes.len() < max_processes.get());
+            let fake_walredo = Arc::new(Notify::new());
+
+            control.js.spawn({
+                let fake_walredo = fake_walredo.to_owned();
+                async move {
+                    fake_walredo.notified().await;
+                }
+            });
+
+            fakes.push(fake_walredo);
+
+            if fakes.len() == max_processes.get() {
+                // since the event is deactivated when max processes is reached, the next iteration
+                // just sleeps
+                break;
+            }
+
+            // then we get a flurry of requests
+
+            feedback.notify_full.notify_one();
+            // there are no other notifications in stable overload situation
+
+            let ret = control
+                .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
+                .await;
+
+            match ret {
+                // spawn more
+                Continue(true) => continue,
+                other => unreachable!("unexpected during scale up: {other:?}"),
+            }
+        }
+
+        println!("scaled up");
+
+        assert_eq!(fakes.len(), max_processes.get());
+
+        // generate one event since we cannot have these created for us by normal queue reads
+        feedback.notify_empty.notify_one();
+
+        loop {
+            let ret = control
+                .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
+                .await;
+
+            if feedback.should_downsize() {
+                assert_eq!(Continue(false), ret);
+                let fake = fakes
+                    .pop()
+                    .expect("there should not be more downsizing than there are processes");
+                fake.notify_one();
+            } else if fakes.is_empty() {
+                // this is a continue, because the process hasn't yet shown up from js.join_next()
+                assert_eq!(Continue(false), ret);
+                break;
+            } else {
+                // maybe more signals are needed to downsize
+                // (a notification is already sent by should_downsize)
+            }
+        }
+
+        let ret = control
+            .iteration(&feedback, &mut watcher, initial.is_some(), &max_processes)
+            .await;
+
+        // finally we should exit as all processes have exited and scaled down.
+        assert_eq!(Break(()), ret);
     }
 
     #[allow(clippy::octal_escapes)]
