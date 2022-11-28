@@ -23,9 +23,11 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::Serialize;
 use std::process::Stdio;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn};
@@ -587,9 +589,15 @@ fn tokio_postgres_redo(
     // with 4 processes it might mean that only one of them is actually busy.
     let expected_pipelined = 4;
 
-    let (tx, rx) = flume::bounded::<Payload>(expected_inflight);
+    let capacity = expected_inflight + expected_pipelined;
+    let (tx, rx) = flume::bounded::<Payload>(capacity);
 
-    let handle = Handle { tx: tx.clone() };
+    let feedback = Arc::new(Feedback::new());
+
+    let handle = Handle {
+        tx: tx.clone(),
+        feedback: feedback.clone(),
+    };
 
     let ipc = async move {
         while let Ok(first) = {
@@ -608,20 +616,58 @@ fn tokio_postgres_redo(
                 }
             }
         } {
-            let child = launch_walredo(conf, tenant_id, first.0.pg_version).await?;
+            let pg_version = first.0.pg_version;
+
             let watcher = crate::task_mgr::shutdown_watcher();
+            tokio::pin!(watcher);
 
-            let fut = walredo_rpc(
-                child,
-                tx.clone(),
-                rx.clone(),
-                expected_pipelined,
-                Some(first),
-                watcher,
-            )
-            .in_current_span();
+            let mut first = Some(first);
 
-            fut.await;
+            // counter to keep walredo paths unique, but also reuse them
+            let mut nth_tenant_process = 0;
+
+            let mut control = Control::default();
+
+            loop {
+                // simple control loop for handling number of processes which takes in as inputs:
+                //
+                // - `notify_not_full` from the Handle which is signalled on every time something
+                //   was pushed to the queue
+                // - `notify_empty` from walredo tasks, which they signal every next request
+                //   timeout
+                //
+                // this works only at the proof of concept level for scaling up.
+
+                match control
+                    .iteration(&feedback, &mut watcher, first.is_some())
+                    .await
+                {
+                    std::ops::ControlFlow::Break(()) => break,
+                    std::ops::ControlFlow::Continue(true) => {
+                        // TODO(control): this is probably an issue that we "halt" the control loop
+                        // for the duration of the launching.
+                        let child =
+                            launch_walredo(conf, tenant_id, pg_version, nth_tenant_process).await?;
+
+                        nth_tenant_process += 1;
+
+                        let fut = walredo_rpc(
+                            child,
+                            tx.clone(),
+                            rx.clone(),
+                            expected_pipelined,
+                            first.take(),
+                            control.cancel.clone(),
+                            feedback.clone(),
+                        )
+                        .in_current_span();
+
+                        control.js.spawn(fut);
+                        info!("now running with {} processes", control.js.len());
+                    }
+                    std::ops::ControlFlow::Continue(false) => {}
+                }
+            }
         }
 
         Ok(())
@@ -631,14 +677,93 @@ fn tokio_postgres_redo(
     (handle, ipc)
 }
 
+/// Proof of concept lockless multiprocess control loop.
+///
+/// Scales up too fast, and scales up and down too fast.
+#[derive(Default)]
+struct Control {
+    js: tokio::task::JoinSet<()>,
+    cancel: CancellationToken,
+    successive_empty: usize,
+}
+
+impl Control {
+    /// Do a control loop iteration.
+    ///
+    /// Returns a break value when control loop should be stopped, Continue(true) when new process
+    /// should be spawned and Continue(false) normally.
+    async fn iteration<F>(
+        &mut self,
+        feedback: &Arc<Feedback>,
+        watcher: &mut std::pin::Pin<&mut F>,
+        have_first: bool,
+    ) -> std::ops::ControlFlow<(), bool>
+    where
+        F: std::future::Future,
+    {
+        use std::ops::ControlFlow::*;
+
+        let check_not_empty = self.successive_empty > 0;
+
+        tokio::select! {
+            _ = feedback.notify_not_empty.notified(), if check_not_empty => {
+                self.successive_empty = 0;
+                Continue(false)
+            },
+            _ = feedback.notify_empty.notified(), if self.js.len() == 1 => {
+                self.successive_empty += 1;
+                if self.successive_empty > 5 {
+                    // if we have been idle for 5 timeouts, then we might as well kill the
+                    // last process and go to awaiting for the next work in this task.
+                    feedback.downsize.add_permits(1);
+                }
+                Continue(false)
+            },
+            exited = self.js.join_next() => {
+                match exited {
+                    Some(Ok(())) => {
+                        // normal, logging happens in walredo_rpc
+                        Continue(false)
+                    },
+                    Some(Err(e)) => {
+                        // hook should had printed already
+                        warn!("walredo task panicked: {e}");
+                        Continue(false)
+                    },
+                    None => {
+                        if self.cancel.is_cancelled() {
+                            // on shutdown, now the children have all exited, so should we.
+                            Break(())
+                        } else if have_first {
+                            // we are yet to launch our first process
+                            Continue(true)
+                        } else {
+                            debug!("all wal redo processes have been stopped, waiting for the next redo request before launching new process");
+                            Break(())
+                        }
+                    }
+                }
+            }
+            _ = watcher, if !self.cancel.is_cancelled() => {
+                // we don't need to watch our cancellation/shutdown because the tasks do,
+                // however we do need the guidance for the scale up
+                self.cancel.cancel();
+                Continue(false)
+            }
+        }
+    }
+}
+
 #[instrument(skip(conf, tenant_id))]
 async fn launch_walredo(
     conf: &PageServerConf,
     tenant_id: TenantId,
     pg_version: u32,
+    nth_tenant_process: usize,
 ) -> anyhow::Result<tokio::process::Child> {
     let datadir = path_with_suffix_extension(
-        conf.tenant_path(&tenant_id).join("wal-redo-datadir"),
+        conf.tenant_path(&tenant_id)
+            .join(format!("wal-redo-datadir-{nth_tenant_process}")),
         TEMP_FILE_SUFFIX,
     );
 
@@ -697,16 +822,57 @@ async fn launch_walredo(
         .context("postgres --wal-redo command failed to start")
 }
 
-async fn walredo_rpc<F>(
+struct Feedback {
+    waiting_work: AtomicUsize,
+    notify_not_empty: tokio::sync::Notify,
+    notify_empty: tokio::sync::Notify,
+    downsize: tokio::sync::Semaphore,
+}
+
+impl Feedback {
+    fn new() -> Self {
+        Feedback {
+            waiting_work: AtomicUsize::default(),
+            notify_not_empty: tokio::sync::Notify::default(),
+            notify_empty: tokio::sync::Notify::default(),
+            downsize: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    fn inc_waiting_work(&self) {
+        let ordering = std::sync::atomic::Ordering::Relaxed;
+        self.waiting_work.fetch_add(1, ordering);
+        self.notify_not_empty.notify_one();
+    }
+
+    fn dec_waiting_work(&self) {
+        let ordering = std::sync::atomic::Ordering::Relaxed;
+        self.waiting_work.fetch_sub(1, ordering);
+    }
+
+    fn should_downsize(&self) -> bool {
+        if let Ok(permit) = self.downsize.try_acquire() {
+            // this downsizing permit has now been "used", more permits need to be
+            // added by the controller to downsize later processes
+            permit.forget();
+            true
+        } else {
+            self.notify_empty.notify_one();
+            false
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn walredo_rpc(
     mut child: tokio::process::Child,
     work_tx: flume::Sender<Payload>,
     work_rx: flume::Receiver<Payload>,
     expected_inflight: usize,
     initial: Option<Payload>,
-    shutdown: F,
-) where
-    F: std::future::Future<Output = ()>,
-{
+    cancel: CancellationToken,
+    feedback: Arc<Feedback>,
+) {
     let pid = child
         .id()
         .expect("pid is present before killing the process");
@@ -750,11 +916,10 @@ async fn walredo_rpc<F>(
 
     let (inter_tx, inter_rx) = tokio::sync::mpsc::channel(expected_inflight);
 
-    let stdin_task = stdin_task(stdin, work_tx, work_rx, inter_tx, initial);
+    let stdin_task = stdin_task(stdin, work_tx, work_rx, inter_tx, initial, feedback);
 
     let stdin_task = async {
         tokio::pin!(stdin_task);
-        tokio::pin!(shutdown);
 
         // because stdin and stdout are interconnected with a channel to faciliate
         // pipelining, we don't need to cancel all of the tasks, just the "feeder" task.
@@ -763,7 +928,7 @@ async fn walredo_rpc<F>(
         // down all tasks after finishing the in-flight work"
         tokio::select! {
             ret = &mut stdin_task => ret,
-            _ = &mut shutdown => {
+            _ = cancel.cancelled() => {
                 // instead of cancelling all of the tasks at once by:
                 //
                 // Err("tenant shutdown, cancelling walredo work")
@@ -840,6 +1005,11 @@ async fn walredo_rpc<F>(
                 error!("failed to wait for child process to exit: {e}");
             }
         }
+
+        // FIXME: now that the child has exited, we could bulldoze the pgdatadir
+        // this would be sensible at least in multiprocess > 1 situation, making
+        // startup times faster
+
         info!("task exiting");
     }
     .instrument(info_span!("wal-redo", pid))
@@ -865,6 +1035,7 @@ async fn stdin_task<AW>(
     work_rx: flume::Receiver<Payload>,
     inter_tx: tokio::sync::mpsc::Sender<IntermediatePayload>,
     mut initial: Option<Payload>,
+    feedback: Arc<Feedback>,
 ) -> Result<(), StdinTaskError>
 where
     AW: tokio::io::AsyncWrite + Unpin,
@@ -886,6 +1057,8 @@ where
         // without vectoring, use full buffer
         1024 * 64
     });
+
+    let work_timeout = Duration::from_secs(1);
 
     loop {
         let ((request, response), reservation) = {
@@ -913,13 +1086,28 @@ where
             let next = initial.take();
             let next = if next.is_none() {
                 // shutdown is handled outside of this task
-                work_rx.recv_async().await.ok()
+                match tokio::time::timeout(work_timeout, work_rx.recv_async()).await {
+                    Ok(m) => m.ok(),
+                    Err(_timeout) => {
+                        // we are in a good place to exit, so do it
+                        if feedback.should_downsize() {
+                            // returning None here will exit from the task, and so we can teardown
+                            // this process
+                            None
+                        } else {
+                            continue;
+                        }
+                    }
+                }
             } else {
                 next
             };
 
             match next {
-                Some(t) => (t, reservation),
+                Some(t) => {
+                    feedback.dec_waiting_work();
+                    (t, reservation)
+                }
                 None => {
                     // the Handle or the request queue sender have been dropped; return Ok(()) to keep
                     // processing any of already pipelined requests.
@@ -1325,6 +1513,7 @@ impl Request {
 #[derive(Clone)]
 struct Handle {
     tx: flume::Sender<Payload>,
+    feedback: Arc<Feedback>,
 }
 
 impl Handle {
@@ -1334,6 +1523,8 @@ impl Handle {
         self.tx
             .send((request, result_tx))
             .map_err(|_| anyhow::anyhow!("Failed to communicate with the walredo task"))?;
+
+        self.feedback.inc_waiting_work();
 
         result_rx
             .recv()
@@ -1601,6 +1792,85 @@ mod tests {
 
     fn bogus_deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + std::time::Duration::from_secs(2)
+    }
+
+    #[tokio::test]
+    async fn scale_down_to_zero_breaks() {
+        use super::{Control, Feedback};
+        use futures::future::pending;
+        use std::ops::ControlFlow::*;
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+        // this was a bug in early implementation, that the control loop would just hang
+        let feedback = Arc::new(Feedback::new());
+        let watcher = pending::<()>();
+        tokio::pin!(watcher);
+
+        let mut control = Control::default();
+        let mut initial = Some(());
+
+        let ret = control
+            .iteration(&feedback, &mut watcher, initial.is_some())
+            .await;
+
+        // because we have the initial, we should always start it first
+        assert_eq!(Continue(true), ret);
+        initial.take();
+
+        let fake_walredo = Arc::new(Notify::new());
+
+        control.js.spawn({
+            let fake_walredo = fake_walredo.to_owned();
+            async move {
+                fake_walredo.notified().await;
+            }
+        });
+
+        // after spawning there's no progress until some activated event comes (in this case, only
+        // empty, or joinset events)
+        feedback.notify_not_empty.notify_one();
+        feedback.notify_empty.notify_one();
+
+        let ret = control
+            .iteration(&feedback, &mut watcher, initial.is_some())
+            .await;
+
+        assert_eq!(Continue(false), ret);
+
+        // the downsizing should eventually happen as the empty notifications keep coming
+        // should_downsize forgets the one permit on returning true
+        while !feedback.should_downsize() {
+            let ret = control
+                .iteration(&feedback, &mut watcher, initial.is_some())
+                .await;
+
+            assert_eq!(Continue(false), ret);
+        }
+
+        // next round should have this exiting, leading to exiting from the loop
+        fake_walredo.notify_one();
+
+        let ret = control
+            .iteration(&feedback, &mut watcher, initial.is_some())
+            .await;
+
+        // this return logic could be complicated, but the js.join_next() will return instantly when
+        // all tasks have exited
+        assert_eq!(
+            Continue(false),
+            ret,
+            "first one after exit will be Continue(false)"
+        );
+
+        let ret = control
+            .iteration(&feedback, &mut watcher, initial.is_some())
+            .await;
+
+        assert_eq!(
+            Break(()),
+            ret,
+            "Need to break out of the control loop to start waiting a new first item"
+        );
     }
 
     #[allow(clippy::octal_escapes)]
