@@ -1,7 +1,11 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Generate code to deterministic location to make finding it easier.
-    tonic_build::configure()
-        .out_dir("proto/") // put generated code to proto/
-        .compile(&["proto/broker.proto"], &["proto/"])?;
+    // Generate rust code from .proto protobuf.
+    //
+    // Note: we previously tried to use deterministic location at proto/ for
+    // easy location, but apparently interference with cachepot sometimes fails
+    // the build then. Anyway, per cargo docs build script shouldn't output to
+    // anywhere but $OUT_DIR.
+    tonic_build::compile_protos("proto/broker.proto")
+        .unwrap_or_else(|e| panic!("failed to compile protos {:?}", e));
     Ok(())
 }
