@@ -84,7 +84,7 @@ async fn compaction_loop(tenant_id: TenantId) {
 
             // Run compaction
             let mut sleep_duration = tenant.get_compaction_period();
-            if let Err(e) = tenant.compaction_iteration() {
+            if let Err(e) = tenant.compaction_iteration().await {
                 sleep_duration = wait_duration;
                 error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
             }

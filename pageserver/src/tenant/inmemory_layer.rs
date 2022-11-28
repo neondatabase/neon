@@ -10,9 +10,11 @@ use crate::tenant::blob_io::{BlobCursor, BlobWriter};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::tenant::ephemeral_file::EphemeralFile;
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{
+    DropNotify, Layer, ValueReconstructResult, ValueReconstructState,
+};
 use crate::walrecord;
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -172,8 +174,8 @@ impl Layer for InMemoryLayer {
 
     /// Nothing to do here. When you drop the last reference to the layer, it will
     /// be deallocated.
-    fn delete(&self) -> Result<()> {
-        bail!("can't delete an InMemoryLayer")
+    fn drop_notify(&self) -> DropNotify {
+        panic!("can't delete an InMemoryLayer")
     }
 
     fn is_incremental(&self) -> bool {

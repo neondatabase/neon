@@ -26,7 +26,9 @@ use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::filename::{ImageFileName, PathOrConf};
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{
+    DropNotify, Layer, ValueReconstructResult, ValueReconstructState,
+};
 use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
@@ -34,7 +36,6 @@ use bytes::Bytes;
 use hex;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::io::Write;
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
@@ -117,6 +118,8 @@ pub struct ImageLayerInner {
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
+
+    drop_watch: Option<DropNotify>,
 }
 
 impl Layer for ImageLayer {
@@ -184,10 +187,13 @@ impl Layer for ImageLayer {
         todo!();
     }
 
-    fn delete(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
+    fn drop_notify(&self) -> DropNotify {
+        let mut inner = self.inner.write().unwrap();
+
+        inner
+            .drop_watch
+            .get_or_insert_with(|| DropNotify::new())
+            .clone()
     }
 
     fn is_incremental(&self) -> bool {
@@ -351,6 +357,7 @@ impl ImageLayer {
                 file: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
+                drop_watch: None,
             }),
         }
     }
@@ -378,6 +385,7 @@ impl ImageLayer {
                 loaded: false,
                 index_start_blk: 0,
                 index_root_blk: 0,
+                drop_watch: None,
             }),
         })
     }
@@ -532,6 +540,7 @@ impl ImageLayerWriterInner {
                 file: None,
                 index_start_blk,
                 index_root_blk,
+                drop_watch: None,
             }),
         };
 

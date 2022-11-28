@@ -145,9 +145,31 @@ pub trait Layer: Send + Sync {
         panic!("Not implemented")
     }
 
-    /// Permanently remove this layer from disk.
-    fn delete(&self) -> Result<()>;
+    fn drop_notify(&self) -> DropNotify;
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
+}
+
+#[derive(Clone)]
+pub struct DropNotify(std::sync::Arc<tokio::sync::Notify>);
+
+impl DropNotify {
+    pub fn new() -> Self {
+        DropNotify(std::sync::Arc::new(tokio::sync::Notify::new()))
+    }
+
+    pub async fn dropped(&self) {
+        self.0.notified().await
+    }
+
+    pub fn notify_waiters(&self) {
+        self.0.notify_waiters();
+    }
+}
+
+impl Drop for DropNotify {
+    fn drop(&mut self) {
+        self.0.notify_waiters();
+    }
 }

@@ -30,14 +30,15 @@ use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::filename::{DeltaFileName, PathOrConf};
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{
+    DropNotify, Layer, ValueReconstructResult, ValueReconstructState,
+};
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
@@ -191,6 +192,8 @@ pub struct DeltaLayerInner {
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
+
+    drop_watch: Option<DropNotify>,
 }
 
 impl Layer for DeltaLayer {
@@ -327,10 +330,13 @@ impl Layer for DeltaLayer {
         }
     }
 
-    fn delete(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
+    fn drop_notify(&self) -> DropNotify {
+        let mut inner = self.inner.write().unwrap();
+
+        inner
+            .drop_watch
+            .get_or_insert_with(|| DropNotify::new())
+            .clone()
     }
 
     fn is_incremental(&self) -> bool {
@@ -551,6 +557,7 @@ impl DeltaLayer {
                 file: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
+                drop_watch: None,
             }),
         }
     }
@@ -578,6 +585,7 @@ impl DeltaLayer {
                 file: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
+                drop_watch: None,
             }),
         })
     }
@@ -743,6 +751,7 @@ impl DeltaLayerWriterInner {
                 file: None,
                 index_start_blk,
                 index_root_blk,
+                drop_watch: None,
             }),
         };
 

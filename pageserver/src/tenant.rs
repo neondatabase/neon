@@ -1191,7 +1191,7 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub fn compaction_iteration(&self) -> anyhow::Result<()> {
+    pub async fn compaction_iteration(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot run compaction iteration on inactive tenant"
@@ -1201,16 +1201,19 @@ impl Tenant {
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
         // compaction runs.
-        let timelines = self.timelines.lock().unwrap();
-        let timelines_to_compact = timelines
-            .iter()
-            .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
-            .collect::<Vec<_>>();
-        drop(timelines);
+        let timelines_to_compact = {
+            let timelines = self.timelines.lock().unwrap();
+            timelines
+                .iter()
+                .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
+                .collect::<Vec<_>>()
+        };
 
         for (timeline_id, timeline) in &timelines_to_compact {
-            let _entered = info_span!("compact_timeline", timeline = %timeline_id).entered();
-            timeline.compact()?;
+            timeline
+                .compact()
+                .instrument(info_span!("compact_timeline", timeline = %timeline_id))
+                .await?;
         }
 
         Ok(())
@@ -1267,7 +1270,8 @@ impl Tenant {
         let timeline = timeline_entry.get();
         timeline.set_state(TimelineState::Paused);
 
-        let layer_removal_guard = timeline.layer_removal_guard()?;
+        // FIXME: Wait for all tasks, including GC and compaction, that are working on the
+        // timeline, to finish.
 
         let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
         std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
@@ -1278,7 +1282,6 @@ impl Tenant {
         })?;
         info!("detach removed files");
 
-        drop(layer_removal_guard);
         timeline_entry.remove();
 
         Ok(())
@@ -1767,7 +1770,7 @@ impl Tenant {
                 );
             }
 
-            let result = timeline.gc()?;
+            let result = timeline.gc().await?;
             totals += result;
         }
 
@@ -3057,7 +3060,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced).await?;
-        tline.compact()?;
+        tline.compact().await?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
@@ -3065,7 +3068,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced).await?;
-        tline.compact()?;
+        tline.compact().await?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
@@ -3073,7 +3076,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced).await?;
-        tline.compact()?;
+        tline.compact().await?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
@@ -3081,7 +3084,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced).await?;
-        tline.compact()?;
+        tline.compact().await?;
 
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
@@ -3131,8 +3134,8 @@ mod tests {
 
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced).await?;
-            tline.compact()?;
-            tline.gc()?;
+            tline.compact().await?;
+            tline.gc().await?;
         }
 
         Ok(())
@@ -3203,8 +3206,8 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced).await?;
-            tline.compact()?;
-            tline.gc()?;
+            tline.compact().await?;
+            tline.gc().await?;
         }
 
         Ok(())
@@ -3286,8 +3289,8 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced).await?;
-            tline.compact()?;
-            tline.gc()?;
+            tline.compact().await?;
+            tline.gc().await?;
         }
 
         Ok(())
