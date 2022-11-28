@@ -15,8 +15,7 @@ This RFC describes how to rewrite a runtime in a more RAII fashion, fixing part 
 Before we start, some synchronisation primitives should be proposed.
 
 1. In our code, there're multiple places where we use `tokio::watch::{Sender, Receiver}` with type `()`. It's hard to track down whether we're just waiting for the drop, for a signal or both from the sender. To make it clear, a couple of wrappers are needed:
-    - `SignalSender` / `SignalWatcher`: wait only for proper signals and `panic!` when it receives `RecvError`.
-    - `DropSender` / `DropWatcher`: wait only for `RecvError` and don't have any function in the interface to signal.
+    - `DropSender` / `DropWatcher`: wait only for `RecvError` and don't have any function in the interface to signal. [Good example](https://github.com/neondatabase/neon/blob/main/libs/utils/src/simple_rcu.rs#L78).
     - Non-generic `Sender` / `Receiver` wrappers for both drops and signals.
 2. For the control flow proposal, we'll need an object that can control the looped task's control flow: loop it, pause it, make manual iteration, cancel and wait for a task to finish. We'll call it the `LoopedTaskOperator` / `LoopedTaskController` pair. Every operation panics if the `LoopedTaskController` is dropped earlier than `LoopedTaskControlFlow`.
 
@@ -32,6 +31,14 @@ Before we start, some synchronisation primitives should be proposed.
         Break,
     }
 
+    /// Errors of `LoopedTaskController`
+    enum LoopedTaskError {
+        /// Operator was dropped. Similar to `watch::RecvError`
+        OperatorDropped,
+        /// Break was sent before.
+        RecvBreak,
+    }
+
     impl LoopedTaskOperator {
         /// Get the current state and mark it as read. If the state is read,
         /// then `LoopedTaskOperator` doesn't get an update.
@@ -40,21 +47,18 @@ Before we start, some synchronisation primitives should be proposed.
 
     impl LoopedTaskController {
         /// Continue the execution after each iteration. Sends the `Continue` state.
-        /// Panics when `LoopedTaskOperator` is dropped.
-        pub fn continue(&mut self);
+        pub fn continue(&mut self) -> Result<(), LoopedTaskError>;
 
         /// Continue the execution after iteration. Sends the `Continue`, but after
         /// `LoopedTaskOperator` gets the state, it is atomically exchanged for unread
         /// `Pause`.
-        /// Panics when `LoopedTaskOperator` is dropped.
-        pub fn continue_once(&mut self);
+        pub fn continue_once(&mut self) -> Result<(), LoopedTaskError>;
 
         /// Pause the iteration. Sends the `Pause` state.
-        /// Panics when `LoopedTaskOperator` is dropped.
-        pub fn pause(&mut self);
+        pub fn pause(&mut self) -> Result<(), LoopedTaskError>;
 
         /// Break the iteration. Sends the `Break` state.
-        /// Panics when `LoopedTaskOperator` is dropped.
+        /// After that, other functions do not take effect.
         pub fn break(&mut self);
 
         /// Wait for the task to finish. It's considered finished when `LoopedTaskOperator`
@@ -63,6 +67,19 @@ Before we start, some synchronisation primitives should be proposed.
     }
 
     pub fn looped_task_channel() -> (LoopedTaskOperator, LoopedTaskController);
+    ```
+
+3. Sleeping in looped tasks requires to wait for duration. Currently, we can be interrupted only if we receive cancellation. But after this RFC, this could be after any control flow message from `LoopedTaskController`. We need another `DurationWaiter` that is able to wait for some duration and be interrupted multiple times, still saving the progress.
+
+    ```rust
+    impl DurationWaiter {
+        /// Creates new `DurationWaiter`. Countdown starts right away
+        pub fn new(duration: Duration) -> Self;
+
+        /// Waits for count down to end. If interrupted, internal countdown
+        /// is not interrupted!
+        pub async fn wait(&mut self);
+    }
     ```
 
 ## States and transitions in `TenantState`
@@ -120,7 +137,7 @@ The idea is to have the following tenant API:
 ```rust
 /// Gets the alive tenant from the in-memory data, then applies the specified
 /// function. Returns error if there is no tenant in memory or the tenant is not
-/// ready to launch the closure.
+/// ready to launch the closure. It's expected to be short.
 pub fn with_tenant<F, O>(tenant_id: TenantId, func: F) -> anyhow::Result<O>
 where
     F: FnOnce(TenantSyncRef) -> O {}
@@ -196,7 +213,7 @@ After we introduced the `with_tenant` functions, there are a bunch of closures r
 In this specific RFC:
 
 1. We use a `StateKeeper` / `StateSubscriber` / `StateHider` primitive to ensure all closures are gone, and running closures can't tell the difference.
-2. It's proposed to run only non-cancellable short-living closures and check in the code reviews that the closure won't run for a long time. This should be easy to spot. Moreover: _all of the current code does not use long-running functions inside tenants_, even when GC or compaction is run.
+2. It's proposed to run only non-cancellable closures and check in the code reviews that the closure won't run for a long time without proper reason. This should be easy to spot. Moreover: _all of the current code does not use long-running functions inside tenants_, even when GC or compaction is run.
 3. To cancel GC and compaction, we could use the `LoopedTaskOperator` / `LoopedTaskController` pair. After they finish iteration, they check whether they should stop, and we wait for this to happen. Also, we can receive commands to pause, continue and continue the loop once.
 
 ## `TimelineAccessor`
@@ -217,7 +234,7 @@ Tasks runtime is basically the same as just running the closures, but this closu
 
 1. Associated kind of task, `tenant_id` and `timeline_id`.
 2. Name of the task.
-3. Bool variable showing should we panic until the shutdown of the process or catch unwind?
+3. Bool variable `shutdown_process_on_error` showing should we panic until the shutdown of the process or catch unwind?
 
 The only really interesting property is 1. The join handles received from spawning the closure in runtime are being put in the global `HashMap` under a `Mutex`, and these tags allow us to select the tasks to shut down and to wait for completion. This leads to the global state linear time access under a mutex and hurts performance.
 
@@ -227,3 +244,103 @@ It appears we don't need this selector; we need a great design where join handle
 2. The background tasks attached to the tenant or timeline are joined by the tenant or timeline itself when the drop ends. This is done by using `LoopedTaskOperator` / `LoopedTaskController` interface.
 3. For cancellation, we should only use the `LoopedTaskOperator` / `LoopedTaskController` in proper tasks. It behaves as `JoinGuard` with the possibility from another side to check whether we should stop.
 4. After that, it's perfectly possible to run `spawn_blocking` tasks!
+
+## Pseudocode
+
+Creating a tenant:
+
+```rust
+// Creating an infant tenant
+let tenant = Tenant::new(...);
+
+// This is not possible right now!
+// TenantAccessor::new(tenant)
+
+// Makes tenant `Loading` or `Downloading`
+tenant.start_loading()
+
+let accessor = TenantAccessor::new(tenant);
+
+// Storing accessor somewhere...
+let tenant_id = store_my_tenant_pls!(accessor);
+```
+
+Tenant cancellation:
+
+```rust
+struct Tenant {
+    gc_control: LoopedTaskController,
+    compaction_control: LoopedTaskController,
+    drop_sender: DropSender,
+    // ...
+}
+
+impl Drop for Tenant {
+    // Note: no task_mgr!
+    fn drop(&mut self) {
+        // ...
+        BACKGROUND_RUNTIME.spawn(move || {
+            gc_control.break();
+            compaction_control.break();
+
+            gc_control.wait().await;
+            compaction_control.wait().await;
+
+            drop(drop_sender);
+            info("tenant drop finished")
+        })
+    }
+}
+```
+
+Working with a tenant. GC example:
+
+```rust
+'iteration loop {
+    trace!("waking up");
+    with_tenant(tenant_id, |tenant| {
+        // Assuming async closures are present
+        // Note the sleep outside the closure!
+        let sleep_duration = tenant_mgr::with_tenant_async(tenant_id, async move |tenant| {
+            let gc_period = tenant.get_gc_period();
+            let gc_horizon = tenant.get_gc_horizon();
+            let mut sleep_duration = gc_period;
+            if gc_horizon > 0 {
+                if let Err(e) =
+                    tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false).await
+                {
+                    sleep_duration = wait_duration;
+                    error!("Gc failed, retrying in {:?}: {e:#}", sleep_duration);
+                }
+            }
+            sleep_duration
+        })
+        .await?;
+
+        let waiter = DurationWaiter::new(sleep_duration);
+        'sleep loop {
+            tokio::select! {
+                state = self.control_flow.get_state() => {
+                    match state {
+                        LoopedTaskControlFlow::Continue => continue 'sleep,
+                        LoopedTaskControlFlow::Pause => 'pause loop {
+                            match self.control_flow.get_state() {
+                                LoopedTaskControlFlow::Continue => continue 'sleep,
+                                // The thing is it's possible to have `Pause` state here
+                                // again, because we were fast enough to have transitions
+                                // Pause -> Continue -> Pause. But, it could be fixed by
+                                // the third loop if needed, though it's better to write
+                                // operator code in a such way we won't get this state twice.
+                                LoopedTaskControlFlow::Pause => continue 'pause,
+                                LoopedTaskControlFlow::Break => break 'iteration,
+                            }
+                        }
+                        LoopedTaskControlFlow::Break => break 'iteration,
+                    }
+                },
+                _ = waiter.wait() => break 'sleep,
+            }
+        }
+    })
+}
+```
