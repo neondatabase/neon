@@ -212,9 +212,8 @@ After we introduced the `with_tenant` functions, there are a bunch of closures r
 
 In this specific RFC:
 
-1. We use a `StateKeeper` / `StateSubscriber` / `StateHider` primitive to ensure all closures are gone, and running closures can't tell the difference.
-2. It's proposed to run only non-cancellable closures and check in the code reviews that the closure won't run for a long time without proper reason. This should be easy to spot. Moreover: _all of the current code does not use long-running functions inside tenants_, even when GC or compaction is run.
-3. To cancel GC and compaction, we could use the `LoopedTaskOperator` / `LoopedTaskController` pair. After they finish iteration, they check whether they should stop, and we wait for this to happen. Also, we can receive commands to pause, continue and continue the loop once.
+1. It's proposed to run only non-cancellable closures and check in the code reviews that the closure won't run for a long time without proper reason. This should be easy to spot. Moreover: _all of the current code does not use long-running functions inside tenants_, even when GC or compaction is run.
+2. To cancel GC and compaction, we could use the `LoopedTaskOperator` / `LoopedTaskController` pair. After they finish iteration, they check whether they should stop, and we wait for this to happen. Also, we can receive commands to pause, continue and continue the loop once.
 
 ## `TimelineAccessor`
 
