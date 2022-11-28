@@ -17,6 +17,7 @@ use crate::tenant::storage_layer::Layer;
 use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use amplify_num::i256;
 use anyhow::Result;
+use itertools::Itertools;
 use num_traits::identities::{One, Zero};
 use num_traits::{Bounded, Num, Signed};
 use rstar::{Envelope, ParentNode, RTree, RTreeNode, RTreeObject, AABB};
@@ -26,7 +27,6 @@ use std::ops::Range;
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 use std::sync::Arc;
 use utils::lsn::Lsn;
-use itertools::Itertools;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
