@@ -1761,6 +1761,13 @@ class NeonPageserver(PgProtocol):
             ".*Removing intermediate uninit mark file.*",
             # FIXME: known race condition in TaskHandle: https://github.com/neondatabase/neon/issues/2885
             ".*sender is dropped while join handle is still alive.*",
+            # Tenant::delete_timeline() can cause any of the four following errors.
+            # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
+            ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
+            ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
+            ".*gc_loop.*Gc failed, retrying in.*timeline is paused: Paused",  # When gc checks timeline state after acquiring layer_removal_cs
+            ".*compaction_loop.*Compaction failed, retrying in.*timeline is paused: Paused",  # When compaction checks timeline state after acquiring layer_removal_cs
+            ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
         ]
 
     def start(

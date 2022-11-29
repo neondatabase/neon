@@ -217,21 +217,13 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.allowed_errors.append(
         ".*marking .* as locally complete, while it doesnt exist in remote index.*"
     )
-    env.pageserver.allowed_errors.append(".*Tenant .* has no timelines directory.*")
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
+    env.pageserver.allowed_errors.append(
+        ".*could not load tenant.*Failed to list timelines directory.*"
+    )
 
     client = env.pageserver.http_client()
 
-    tenant_without_timelines_dir = env.initial_tenant
-    log.info(
-        f"Tenant {tenant_without_timelines_dir} becomes broken: it abnormally looses tenants/ directory and is expected to be completely ignored when pageserver restarts"
-    )
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
-
     tenant_with_empty_timelines_dir = client.tenant_create()
-    log.info(
-        f"Tenant {tenant_with_empty_timelines_dir} gets all of its timelines deleted: still should be functional"
-    )
     temp_timelines = client.timeline_list(tenant_with_empty_timelines_dir)
     for temp_timeline in temp_timelines:
         client.timeline_delete(
@@ -250,27 +242,23 @@ def test_pageserver_with_empty_tenants(
     # Trigger timeline reinitialization after pageserver restart
     env.postgres.stop_all()
     env.pageserver.stop()
+
+    tenant_without_timelines_dir = env.initial_tenant
+    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
+
     env.pageserver.start()
 
     client = env.pageserver.http_client()
     tenants = client.tenant_list()
 
-    assert (
-        len(tenants) == 2
-    ), "Pageserver should attach only tenants with empty or not existing timelines/ dir on restart"
+    assert len(tenants) == 2
 
     [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
-    assert (
-        broken_tenant
-    ), f"A broken tenant {tenant_without_timelines_dir} should exists in the tenant list"
     assert (
         broken_tenant["state"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
     assert (
-        loaded_tenant
-    ), f"Tenant {tenant_with_empty_timelines_dir} should be loaded as the only one with tenants/ directory"
-    assert loaded_tenant["state"] == {
-        "Active": {"background_jobs_running": False}
-    }, "Empty tenant should be loaded and ready for timeline creation"
+        loaded_tenant["state"] == "Active"
+    ), "Tenant {tenant_with_empty_timelines_dir} with empty timelines dir should be active and ready for timeline creation"

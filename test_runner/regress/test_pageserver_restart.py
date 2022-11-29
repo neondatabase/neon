@@ -56,9 +56,24 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
 
-    # Stop the page server by force, and restart it
+    # Restart the server again, but delay the loading of tenants, and test what the
+    # pageserver does if a compute node connects and sends a request for the tenant
+    # while it's still in Loading state. (It waits for the loading to finish, and then
+    # processes the request.)
     env.pageserver.stop()
-    env.pageserver.start()
+    env.pageserver.start(extra_env_vars={"FAILPOINTS": "before-loading-tenant=return(5000)"})
+
+    # Check that it's in Loading state
+    client = env.pageserver.http_client()
+    tenant_status = client.tenant_status(env.initial_tenant)
+    log.info("Tenant status : %s", tenant_status)
+    assert tenant_status["state"] == "Loading"
+
+    # Try to read. This waits until the loading finishes, and then return normally.
+    pg_conn = pg.connect()
+    cur = pg_conn.cursor()
+    cur.execute("SELECT count(*) FROM foo")
+    assert cur.fetchone() == (100000,)
 
 
 # Test that repeatedly kills and restarts the page server, while the

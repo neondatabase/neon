@@ -2156,6 +2156,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pageserver_api",
+ "pin-project-lite",
  "postgres",
  "postgres-protocol",
  "postgres-types",

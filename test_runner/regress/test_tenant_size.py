@@ -1,13 +1,7 @@
-import time
 from typing import List, Tuple
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-    PageserverApiException,
-    wait_for_last_flush_lsn,
-)
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
 
 
@@ -256,22 +250,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     assert size_after == size_after_thinning_branch
 
     # teardown, delete branches, and the size should be going down
-    deleted = False
-    for _ in range(10):
-        try:
-            http_client.timeline_delete(tenant_id, first_branch_timeline_id)
-            deleted = True
-            break
-        except PageserverApiException as e:
-            # compaction is ok but just retry if this fails; related to #2442
-            if "cannot lock compaction critical section" in str(e):
-                # also ignore it in the log
-                env.pageserver.allowed_errors.append(".*cannot lock compaction critical section.*")
-                time.sleep(1)
-                continue
-            raise
-
-    assert deleted
+    http_client.timeline_delete(tenant_id, first_branch_timeline_id)
 
     size_after_deleting_first = http_client.tenant_size(tenant_id)
     assert size_after_deleting_first < size_after_thinning_branch

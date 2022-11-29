@@ -1,9 +1,8 @@
 use metrics::core::{AtomicU64, GenericCounter};
 use metrics::{
-    register_gauge_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
-    GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge,
-    UIntGaugeVec,
+    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
+    register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec, Histogram, HistogramVec,
+    IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use utils::id::{TenantId, TimelineId};
@@ -200,63 +199,59 @@ pub static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
         .expect("failed to define a metric")
 });
 
-pub static REMAINING_SYNC_ITEMS: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
-        "pageserver_remote_storage_remaining_sync_items",
-        "Number of storage sync items left in the queue"
+// remote storage metrics
+
+pub static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_remote_upload_queue_unfinished_tasks",
+        "Number of tasks in the upload queue that are not finished yet.",
+        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
     )
-    .expect("failed to register pageserver remote storage remaining sync items int gauge")
+    .expect("failed to define a metric")
 });
 
-pub static IMAGE_SYNC_TIME: Lazy<GaugeVec> = Lazy::new(|| {
-    register_gauge_vec!(
-        "pageserver_remote_storage_image_sync_duration",
-        "Time spent to synchronize (up/download) a whole pageserver image",
-        &["tenant_id", "timeline_id"],
-    )
-    .expect("failed to register per-timeline pageserver image sync time vec")
-});
+#[derive(Debug, Clone, Copy)]
+pub enum RemoteOpKind {
+    Upload,
+    Download,
+    Delete,
+}
+impl RemoteOpKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Upload => "upload",
+            Self::Download => "download",
+            Self::Delete => "delete",
+        }
+    }
+}
 
-pub static IMAGE_SYNC_OPERATION_KINDS: &[&str] = &["upload", "download", "delete"];
-pub static IMAGE_SYNC_STATUS: &[&str] = &["success", "failure", "abort"];
+#[derive(Debug, Clone, Copy)]
+pub enum RemoteOpFileKind {
+    Layer,
+    Index,
+}
+impl RemoteOpFileKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Layer => "layer",
+            Self::Index => "index",
+        }
+    }
+}
 
-pub static IMAGE_SYNC_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_remote_storage_image_sync_count",
-        "Number of synchronization operations executed for pageserver images. \
-        Grouped by tenant, timeline, operation_kind and status",
-        &["tenant_id", "timeline_id", "operation_kind", "status"]
-    )
-    .expect("failed to register pageserver image sync count vec")
-});
+pub static REMOTE_OPERATION_KINDS: &[&str] = &["upload", "download", "delete"];
+pub static REMOTE_OPERATION_FILE_KINDS: &[&str] = &["layer", "index"];
+pub static REMOTE_OPERATION_STATUSES: &[&str] = &["success", "failure"];
 
-pub static IMAGE_SYNC_TIME_HISTOGRAM: Lazy<HistogramVec> = Lazy::new(|| {
+pub static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
-        "pageserver_remote_storage_image_sync_seconds",
-        "Time took to synchronize (download or upload) a whole pageserver image. \
-        Grouped by operation_kind and status",
-        &["operation_kind", "status"],
-        vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 3.0, 10.0, 20.0]
+        "pageserver_remote_operation_seconds",
+        "Time spent on remote storage operations. \
+        Grouped by tenant, timeline, operation_kind and status",
+        &["tenant_id", "timeline_id", "file_kind", "op_kind", "status"]
     )
-    .expect("failed to register pageserver image sync time histogram vec")
-});
-
-pub static REMOTE_INDEX_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_remote_storage_remote_index_uploads_total",
-        "Number of remote index uploads",
-        &["tenant_id", "timeline_id"],
-    )
-    .expect("failed to register pageserver remote index upload vec")
-});
-
-pub static NO_LAYERS_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_remote_storage_no_layers_uploads_total",
-        "Number of skipped uploads due to no layers",
-        &["tenant_id", "timeline_id"],
-    )
-    .expect("failed to register pageserver no layers upload vec")
+    .expect("failed to define a metric")
 });
 
 pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -473,16 +468,90 @@ impl Drop for TimelineMetrics {
             let _ = SMGR_QUERY_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
         }
 
-        for op in IMAGE_SYNC_OPERATION_KINDS {
-            for status in IMAGE_SYNC_STATUS {
-                let _ = IMAGE_SYNC_COUNT.remove_label_values(&[tenant_id, timeline_id, op, status]);
+        let _ = REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS.remove_label_values(&[tenant_id, timeline_id]);
+        for file_kind in REMOTE_OPERATION_FILE_KINDS {
+            for op in REMOTE_OPERATION_KINDS {
+                for status in REMOTE_OPERATION_STATUSES {
+                    let _ = REMOTE_OPERATION_TIME.remove_label_values(&[
+                        tenant_id,
+                        timeline_id,
+                        file_kind,
+                        op,
+                        status,
+                    ]);
+                }
             }
         }
-
-        let _ = IMAGE_SYNC_TIME.remove_label_values(&[tenant_id, timeline_id]);
     }
 }
 
 pub fn remove_tenant_metrics(tenant_id: &TenantId) {
     let _ = STORAGE_TIME.remove_label_values(&["gc", &tenant_id.to_string(), "-"]);
+}
+
+use futures::Future;
+use pin_project_lite::pin_project;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Instant;
+
+/// Wrapper future that measures the time spent by a remote storage operation,
+/// and records the time and success/failure as a prometheus metric.
+pub trait MeasureRemoteOp: Sized {
+    fn measure_remote_op(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        file_kind: RemoteOpFileKind,
+        op: RemoteOpKind,
+    ) -> MeasuredRemoteOp<Self> {
+        let start = Instant::now();
+        MeasuredRemoteOp {
+            inner: self,
+            tenant_id,
+            timeline_id,
+            file_kind,
+            op,
+            start,
+        }
+    }
+}
+
+impl<T: Sized> MeasureRemoteOp for T {}
+
+pin_project! {
+    pub struct MeasuredRemoteOp<F>
+    {
+        #[pin]
+        inner: F,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        file_kind: RemoteOpFileKind,
+        op: RemoteOpKind,
+        start: Instant,
+    }
+}
+
+impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
+    type Output = Result<O, E>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        let poll_result = this.inner.poll(cx);
+        if let Poll::Ready(ref res) = poll_result {
+            let duration = this.start.elapsed();
+            let status = if res.is_ok() { &"success" } else { &"failure" };
+            REMOTE_OPERATION_TIME
+                .get_metric_with_label_values(&[
+                    &this.tenant_id.to_string(),
+                    &this.timeline_id.to_string(),
+                    this.file_kind.as_str(),
+                    this.op.as_str(),
+                    status,
+                ])
+                .unwrap()
+                .observe(duration.as_secs_f64());
+        }
+        poll_result
+    }
 }

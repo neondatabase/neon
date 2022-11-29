@@ -365,10 +365,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.append(
-        ".*Redownloading locally existing .* due to size mismatch.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*Downloaded layer exists already but layer file metadata mismatches.*"
+        ".*removing local file .* because it has unexpected length.*"
     )
 
     # FIXME: Are these expected?
