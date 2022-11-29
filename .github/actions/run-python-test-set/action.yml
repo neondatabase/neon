@@ -109,6 +109,9 @@ runs:
         export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
         export DEFAULT_PG_VERSION=${DEFAULT_PG_VERSION:-14}
 
+        # Tell pytest-github-actions-annotate-failures that we are running in GitHub Actions
+        export GITHUB_ACTIONS=true
+
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
         fi
