@@ -18,7 +18,7 @@ async-stream = "0.3"
 async-trait = "0.1"
 byteorder = "1.4.3"
 bytes = "1.0.1"
-chrono = { version = "0.4.23", default-features = false, features = ["clock"] }
+chrono = { version = "0.4.23", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.0", features = ["string"] }
 close_fds = "0.3.2"
 const_format = "0.2.21"
@@ -45,7 +45,7 @@ regex = "1.4.5"
 rstar = "0.9.3"
 scopeguard = "1.1.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1.0", features = ["raw_value"] }
 serde_with = "2.0"
 signal-hook = "0.3.10"
 svg_fmt = "0.4.1"
@@ -69,6 +69,7 @@ storage_broker = { version = "0.1", path = "../storage_broker" }
 tenant_size_model = { path = "../libs/tenant_size_model" }
 utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
+reqwest = "0.11.13"
 
 [dev-dependencies]
 criterion = "0.4"

@@ -1,5 +1,6 @@
 mod auth;
 pub mod basebackup;
+pub mod billing_metrics;
 pub mod config;
 pub mod http;
 pub mod import_datadir;

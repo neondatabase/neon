@@ -203,6 +203,9 @@ pub enum TaskKind {
 
     // task that handles attaching a tenant
     Attach,
+
+    // task that handhes metrics collection
+    MetricsCollection,
 }
 
 #[derive(Default)]

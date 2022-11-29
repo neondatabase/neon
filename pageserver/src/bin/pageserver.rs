@@ -310,6 +310,26 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 Ok(())
             },
         );
+
+        if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
+            task_mgr::spawn(
+                MGMT_REQUEST_RUNTIME.handle(),
+                TaskKind::MetricsCollection,
+                None,
+                None,
+                "consumption metrics collection",
+                true,
+                async move {
+                    pageserver::billing_metrics::collect_metrics(
+                        metric_collection_endpoint,
+                        conf.metric_collection_interval,
+                    )
+                    .instrument(info_span!("metrics_collection"))
+                    .await?;
+                    Ok(())
+                },
+            );
+        }
     }
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
