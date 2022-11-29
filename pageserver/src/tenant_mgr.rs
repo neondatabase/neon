@@ -420,7 +420,10 @@ pub fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<
         .get(&tenant_id)
         .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
     if active_only && !tenant.is_active() {
-        anyhow::bail!("Tenant {tenant_id} is not active")
+        anyhow::bail!(
+            "Tenant {tenant_id} is not active. Current state: {:?}",
+            tenant.current_state()
+        )
     } else {
         Ok(Arc::clone(tenant))
     }

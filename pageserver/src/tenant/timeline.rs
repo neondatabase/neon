@@ -14,7 +14,7 @@ use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::{Deref, Range};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -501,7 +501,7 @@ impl Timeline {
     pub fn compact(&self) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
 
-        // Last record Lsn could be zero in case the timelie was just created
+        // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
             return Ok(());
@@ -909,7 +909,7 @@ impl Timeline {
                         imgfilename, self.timeline_id, disk_consistent_lsn
                     );
 
-                    rename_to_backup(direntry.path())?;
+                    rename_to_backup(&direntry.path())?;
                     continue;
                 }
 
@@ -933,7 +933,7 @@ impl Timeline {
                         deltafilename, self.timeline_id, disk_consistent_lsn
                     );
 
-                    rename_to_backup(direntry.path())?;
+                    rename_to_backup(&direntry.path())?;
                     continue;
                 }
 
@@ -2463,12 +2463,12 @@ impl<'a> TimelineWriter<'a> {
 
 /// Add a suffix to a layer file's name: .{num}.old
 /// Uses the first available num (starts at 0)
-fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
+fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     let filename = path
         .file_name()
         .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
         .to_string_lossy();
-    let mut new_path = path.clone();
+    let mut new_path = path.to_owned();
 
     for i in 0u32.. {
         new_path.set_file_name(format!("{}.{}.old", filename, i));
