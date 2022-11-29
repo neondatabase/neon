@@ -11,7 +11,6 @@
 
 #include "postgres.h"
 
-#include "lib/ilist.h"
 #include "lib/stringinfo.h"
 #include "storage/block.h"
 #include "storage/itemptr.h"

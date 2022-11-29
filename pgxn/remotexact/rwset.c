@@ -54,7 +54,6 @@ void
 RWSetDecode(RWSet *rwset, StringInfo msg)
 {
 	int			read_set_len;
-	int			num_rels;
 	int			consumed = 0;
 	int			num_rels_received = 0;
 	int			prev_cursor;
@@ -62,7 +61,7 @@ RWSetDecode(RWSet *rwset, StringInfo msg)
 	decode_header(rwset, msg);
 
 	read_set_len = pq_getmsgint(msg, 4);
-	num_rels = pq_getmsgint(msg, 4);
+	rwset->n_relations = pq_getmsgint(msg, 4);
 
 	// Allocate relations based on number of relations expected.
 	rwset->relations = alloc_relations(rwset);
@@ -88,10 +87,10 @@ RWSetDecode(RWSet *rwset, StringInfo msg)
 		ereport(ERROR,
 				errmsg("length of read set (%d) is corrupted", read_set_len),
 				errdetail("length of decoded read set: %d", consumed));
-	if(num_rels != num_rels_received)
+	if(rwset->n_relations != num_rels_received)
           ereport(ERROR,
               errmsg("number of read relations (%d) does not match relations "
-                     "received", num_rels),
+                     "received", rwset->n_relations),
               errdetail("number of relations received: %d", num_rels_received));
 
 	rwset->writes_len = msg->len - msg->cursor;
