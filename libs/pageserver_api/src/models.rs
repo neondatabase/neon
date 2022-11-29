@@ -23,7 +23,7 @@ pub enum TenantState {
     Active,
     /// A tenant is recognized by pageserver, but it is being detached or the
     /// system is being shut down.
-    Paused,
+    Stopping,
     /// A tenant is recognized by the pageserver, but can no longer be used for
     /// any operations, because it failed to be activated.
     Broken,
@@ -35,7 +35,7 @@ impl TenantState {
             Self::Loading => true,
             Self::Attaching => true,
             Self::Active => false,
-            Self::Paused => false,
+            Self::Stopping => false,
             Self::Broken => false,
         }
     }
@@ -53,7 +53,7 @@ pub enum TimelineState {
     Suspended,
     /// A timeline is recognized by pageserver, but not yet ready to operate and not allowed to
     /// automatically become Active after certain events: only a management call can change this status.
-    Paused,
+    Stopping,
     /// A timeline is recognized by the pageserver, but can no longer be used for
     /// any operations, because it failed to be activated.
     Broken,

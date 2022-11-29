@@ -214,7 +214,7 @@ async fn connection_manager_loop_step(
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
-                                TimelineState::Broken | TimelineState::Paused | TimelineState::Suspended => return ControlFlow::Continue(new_state),
+                                TimelineState::Broken | TimelineState::Stopping | TimelineState::Suspended => return ControlFlow::Continue(new_state),
                             }
                         }
                         Err(_sender_dropped_error) => return ControlFlow::Break(()),

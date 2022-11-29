@@ -1248,7 +1248,7 @@ impl Tenant {
 
     /// Removes timeline-related in-memory data
     pub async fn delete_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<()> {
-        // Transition the timeline into TimelineState::Paused.
+        // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
@@ -1269,14 +1269,14 @@ impl Tenant {
             };
 
             let timeline = Arc::clone(timeline_entry.get());
-            timeline.set_state(TimelineState::Paused);
+            timeline.set_state(TimelineState::Stopping);
 
             drop(timelines);
             timeline
         };
 
         info!("waiting for layer_removal_cs.lock()");
-        // No timeout here, GC & Compaction should be responsive to the `TimelineState::Paused` change.
+        // No timeout here, GC & Compaction should be responsive to the `TimelineState::Stopping` change.
         let layer_removal_guard = timeline.layer_removal_cs.lock().await;
         info!("got layer_removal_cs.lock(), deleting layer files");
 
@@ -1301,7 +1301,7 @@ impl Tenant {
         let children_exist = timelines
             .iter()
             .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
-        // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Paused`.
+        // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
         // We already deleted the layer files, so it's probably best to panic.
         // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
         if children_exist {
@@ -1355,10 +1355,10 @@ impl Tenant {
                         "Could not activate tenant because it is in broken state"
                     ));
                 }
-                TenantState::Paused => {
+                TenantState::Stopping => {
                     // The tenant was detached, or system shutdown was requested, while we were
                     // loading or attaching the tenant.
-                    info!("Tenant is already in Paused state, skipping activation");
+                    info!("Tenant is already in Stopping state, skipping activation");
                 }
                 TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Active;
@@ -1384,16 +1384,16 @@ impl Tenant {
         result
     }
 
-    /// Change tenant status to paused, to mark that it is being shut down
-    pub fn set_paused(&self) {
+    /// Change tenant status to Stopping, to mark that it is being shut down
+    pub fn set_stopping(&self) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Active | TenantState::Loading | TenantState::Attaching => {
-                    *current_state = TenantState::Paused;
+                    *current_state = TenantState::Stopping;
 
                     // FIXME: If the tenant is still Loading or Attaching, new timelines
                     // might be created after this. That's harmless, as the Timelines
-                    // won't be accessible to anyone, when the Tenant is in Paused
+                    // won't be accessible to anyone, when the Tenant is in Stopping
                     // state.
                     let timelines_accessor = self.timelines.lock().unwrap();
                     let not_broken_timelines = timelines_accessor
@@ -1404,12 +1404,12 @@ impl Tenant {
                     }
                 }
                 TenantState::Broken => {
-                    info!("Cannot set tenant to Paused state, it is already in Broken state");
+                    info!("Cannot set tenant to Stopping state, it is already in Broken state");
                 }
-                TenantState::Paused => {
+                TenantState::Stopping => {
                     // The tenant was detached, or system shutdown was requested, while we were
                     // loading or attaching the tenant.
-                    info!("Tenant is already in Paused state");
+                    info!("Tenant is already in Stopping state");
                 }
             }
         });
@@ -1430,10 +1430,10 @@ impl Tenant {
                     // This shouldn't happen either
                     warn!("Tenant is already broken");
                 }
-                TenantState::Paused => {
+                TenantState::Stopping => {
                     // This shouldn't happen either
                     *current_state = TenantState::Broken;
-                    warn!("Marking Paused tenant as Broken");
+                    warn!("Marking Stopping tenant as Broken");
                 }
                 TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Broken;
@@ -1458,7 +1458,7 @@ impl Tenant {
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
-                TenantState::Broken | TenantState::Paused => {
+                TenantState::Broken | TenantState::Stopping => {
                     // There's no chance the tenant can transition back into ::Active
                     anyhow::bail!(
                         "Tenant {} will not become active. Current state: {:?}",
