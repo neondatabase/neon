@@ -13,6 +13,6 @@ pub fn init_sentry(maybe_sentry_url: Option<&String>, process_name: &str) {
             });
             ()
         }
-        None => ()
+        None => (),
     }
 }
