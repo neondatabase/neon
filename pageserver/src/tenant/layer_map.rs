@@ -235,21 +235,11 @@ impl LayerMap {
         let key = IntKey::from(key.to_i128());
         let mut min_lsn = Lsn(0);
         let mut max_lsn = Lsn(0);
-        if let Some(layer) = Self::find_latest_layer_recurs(
-            key,
-            &mut min_lsn,
-            &mut max_lsn,
-            end_lsn,
-            root,
-            image_only,
-        ) {
-            Some(SearchResult {
+        Self::find_latest_layer_recurs(key, &mut min_lsn, &mut max_lsn, end_lsn, root, image_only)
+            .map(|layer| SearchResult {
                 layer,
                 lsn_floor: min_lsn,
             })
-        } else {
-            None
-        }
     }
 
     fn find_latest_layer_recurs(
