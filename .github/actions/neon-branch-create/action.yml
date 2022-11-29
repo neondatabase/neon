@@ -29,11 +29,9 @@ runs:
         case "${ENVIRONMENT}" in
           dev)
             API_HOST=console.dev.neon.tech
-            REGION_ID=${REGION_ID:-eu-west-1}
             ;;
           staging)
             API_HOST=console.stage.neon.tech
-            REGION_ID=${REGION_ID:-us-east-1}
             ;;
           *)
             echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
@@ -42,10 +40,8 @@ runs:
         esac
 
         echo "api_host=${API_HOST}" >> $GITHUB_OUTPUT
-        echo "region_id=${REGION_ID}" >> $GITHUB_OUTPUT
       env:
         ENVIRONMENT: ${{ inputs.environment }}
-        REGION_ID: ${{ inputs.region_id }}
 
     - name: Create New Branch
       id: create-branch

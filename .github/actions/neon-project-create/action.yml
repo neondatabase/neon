@@ -33,7 +33,7 @@ runs:
             ;;
           staging)
             API_HOST=console.stage.neon.tech
-            REGION_ID=${REGION_ID:-us-east-1}
+            REGION_ID=${REGION_ID:-us-east-2}
             ;;
           *)
             echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
