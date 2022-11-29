@@ -173,6 +173,7 @@ fn build_timeline_info_common(
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
     let info = TimelineInfo {
+        region_id: timeline.region_id,
         tenant_id: timeline.tenant_id,
         timeline_id: timeline.timeline_id,
         ancestor_timeline_id,

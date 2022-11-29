@@ -198,6 +198,8 @@ pub struct TenantInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
     #[serde_as(as = "DisplayFromStr")]
+    pub region_id: RegionId, // Remotexact
+    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
