@@ -11,7 +11,6 @@ pub fn init_sentry(maybe_sentry_url: Option<&String>, process_name: &str) {
             sentry::configure_scope(|scope| {
                 scope.set_tag("process", process_name);
             });
-            ()
         }
         None => (),
     }
