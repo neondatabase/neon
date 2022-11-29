@@ -197,7 +197,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 			if (!header_sent)
 			{
 				assert(!pipe->req.busy);
-				req_hdr.id = ++pipe->msg_id; /* protected by req.mutex */
+				req_hdr.id = ++pipe->msg_id; /* protected by pipe->req.cs */
 				req_hdr.size = req_size;
 				assert(tail >= MESSAGE_DATA_ALIGNMENT);
 				memcpy(&pipe->req.data[pipe->req.head.pos], &req_hdr, sizeof req_hdr);
