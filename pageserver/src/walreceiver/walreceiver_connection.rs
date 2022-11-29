@@ -26,14 +26,13 @@ use crate::{
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
     tenant::{Timeline, WalReceiverInfo},
-    tenant_mgr,
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::lsn::Lsn;
 
 /// Status of the connection.
 #[derive(Debug, Clone)]
@@ -140,10 +139,6 @@ pub async fn handle_walreceiver_connection(
         warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
         return Ok(());
     }
-
-    let tenant_id = timeline.tenant_id;
-    let timeline_id = timeline.timeline_id;
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -293,19 +288,8 @@ pub async fn handle_walreceiver_connection(
         })?;
 
         if let Some(last_lsn) = status_update {
-            let remote_index = tenant.get_remote_index();
-            let timeline_remote_consistent_lsn = remote_index
-                .read()
-                .await
-                // here we either do not have this timeline in remote index
-                // or there were no checkpoints for it yet
-                .timeline_entry(&TenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                })
-                .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
-                // no checkpoint was uploaded
-                .unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn =
+                timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);

@@ -604,13 +604,7 @@ components:
         id:
           type: string
         state:
-            oneOf:
-              - type: string
-              - type: object
-                properties:
-                  background_jobs_running:
-                    type: boolean
-
+          type: string
         current_physical_size:
           type: integer
         has_in_progress_downloads:

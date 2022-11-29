@@ -189,7 +189,7 @@ impl Value {
 ///
 /// Result of performing GC
 ///
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Debug)]
 pub struct GcResult {
     pub layers_total: u64,
     pub layers_needed_by_cutoff: u64,

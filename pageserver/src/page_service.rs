@@ -25,6 +25,7 @@ use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::pin;
 use tokio_util::io::StreamReader;
 use tokio_util::io::SyncIoBridge;
@@ -47,7 +48,7 @@ use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::profiling::profpoint_start;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::tenant::Timeline;
+use crate::tenant::{Tenant, Timeline};
 use crate::tenant_mgr;
 use crate::trace::Tracer;
 use crate::CheckpointConfig;
@@ -279,7 +280,7 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         // Make request tracer if needed
-        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+        let tenant = get_active_tenant_with_timeout(tenant_id).await?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
             let path = tenant
@@ -291,7 +292,7 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timeline = tenant.get_timeline(timeline_id, true)?;
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -377,7 +378,7 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+        let tenant = get_active_tenant_with_timeout(tenant_id).await?;
         let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
@@ -432,7 +433,7 @@ impl PageServerHandler {
     ) -> anyhow::Result<()> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
         ensure!(timeline.get_last_record_lsn() == start_lsn);
 
         // TODO leave clean state on error. For now you can use detach to clean
@@ -625,7 +626,7 @@ impl PageServerHandler {
         full_backup: bool,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
@@ -767,7 +768,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let timeline_id = TimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenant_id))?;
-            let timeline = get_local_timeline(tenant_id, timeline_id)?;
+            let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
@@ -890,7 +891,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+            let tenant = get_active_tenant_with_timeout(tenant_id).await?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
@@ -934,8 +935,28 @@ impl postgres_backend_async::Handler for PageServerHandler {
     }
 }
 
-fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
-    tenant_mgr::get_tenant(tenant_id, true)
+/// Get active tenant.
+///
+/// If the tenant is Loading, waits for it to become Active, for up to 30 s. That
+/// ensures that queries don't fail immediately after pageserver startup, because
+/// all tenants are still loading.
+async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> Result<Arc<Tenant>> {
+    let tenant = tenant_mgr::get_tenant(tenant_id, false)?;
+    match tokio::time::timeout(Duration::from_secs(30), tenant.wait_to_become_active()).await {
+        Ok(wait_result) => wait_result
+            // no .context(), the error message is good enough and some tests depend on it
+            .map(move |()| tenant),
+        Err(_) => anyhow::bail!("Timeout waiting for tenant {tenant_id} to become Active"),
+    }
+}
+
+/// Shorthand for getting a reference to a Timeline of an Active tenant.
+async fn get_active_timeline_with_timeout(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<Arc<Timeline>> {
+    get_active_tenant_with_timeout(tenant_id)
+        .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
 }
 

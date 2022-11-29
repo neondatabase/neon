@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::TENANT_TASK_EVENTS;
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr;
+use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use crate::tenant_mgr;
 use tracing::*;
@@ -72,7 +73,7 @@ async fn compaction_loop(tenant_id: TenantId) {
                 sleep_duration = Duration::from_secs(10);
             } else {
                 // Run compaction
-                if let Err(e) = tenant.compaction_iteration() {
+                if let Err(e) = tenant.compaction_iteration().await {
                     sleep_duration = wait_duration;
                     error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
                 }
@@ -164,7 +165,7 @@ async fn wait_for_active_tenant(
     };
 
     // if the tenant has a proper status already, no need to wait for anything
-    if tenant.should_run_tasks() {
+    if tenant.current_state() == TenantState::Active {
         ControlFlow::Continue(tenant)
     } else {
         let mut tenant_state_updates = tenant.subscribe_for_state_updates();
@@ -173,14 +174,12 @@ async fn wait_for_active_tenant(
                 Ok(()) => {
                     let new_state = *tenant_state_updates.borrow();
                     match new_state {
-                        TenantState::Active {
-                            background_jobs_running: true,
-                        } => {
-                            debug!("Tenant state changed to active with background jobs enabled, continuing the task loop");
+                        TenantState::Active => {
+                            debug!("Tenant state changed to active, continuing the task loop");
                             return ControlFlow::Continue(tenant);
                         }
                         state => {
-                            debug!("Not running the task loop, tenant is not active with background jobs enabled: {state:?}");
+                            debug!("Not running the task loop, tenant is not active: {state:?}");
                             continue;
                         }
                     }

@@ -48,6 +48,8 @@ pub mod nonblock;
 // Default signal handling
 pub mod signals;
 
+pub mod fs_ext;
+
 /// use with fail::cfg("$name", "return(2000)")
 #[macro_export]
 macro_rules! failpoint_sleep_millis_async {

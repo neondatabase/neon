@@ -15,10 +15,12 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*No timelines to attach received.*",
-            ".*Failed to process timeline dir contents.*",
             ".*Failed to load delta layer.*",
-            ".*Timeline .* was not found.*",
+            ".*could not find data for key.*",
+            ".*is not active. Current state: Broken.*",
+            ".*will not become active. Current state: Broken.*",
+            ".*failed to load metadata.*",
+            ".*could not load tenant.*load local timeline.*",
         ]
     )
 
@@ -77,16 +79,20 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # But all others are broken
 
     # First timeline would not get loaded into pageserver due to corrupt metadata file
-    with pytest.raises(Exception, match=f"Timeline {tenant1}/{timeline1} was not found") as err:
+    with pytest.raises(
+        Exception, match=f"Tenant {tenant1} will not become active. Current state: Broken"
+    ) as err:
         pg1.start()
     log.info(
         f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}"
     )
 
-    # Second timeline has no ancestors, only the metadata file and no layer files
-    # We don't have the remote storage enabled, which means timeline is in an incorrect state,
-    # it's not loaded at all
-    with pytest.raises(Exception, match=f"Timeline {tenant2}/{timeline2} was not found") as err:
+    # Second timeline has no ancestors, only the metadata file and no layer files.
+    # That is checked explicitly in the pageserver, and causes the tenant to be marked
+    # as broken.
+    with pytest.raises(
+        Exception, match=f"Tenant {tenant2} will not become active. Current state: Broken"
+    ) as err:
         pg2.start()
     log.info(f"As expected, compute startup failed for timeline with missing layers: {err}")
 

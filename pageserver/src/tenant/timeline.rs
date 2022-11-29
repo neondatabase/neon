@@ -15,10 +15,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::storage_sync::index::{IndexPart, RelativePath};
+use crate::storage_sync::RemoteTimelineClient;
 use crate::tenant::{
     delta_layer::{DeltaLayer, DeltaLayerWriter},
     ephemeral_file::is_ephemeral_file,
@@ -51,17 +53,14 @@ use utils::{
 
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
-use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::walreceiver::{is_etcd_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
-use crate::{
-    page_cache,
-    storage_sync::{self, index::LayerFileMetadata},
-};
+use crate::{is_temporary, task_mgr};
+use crate::{page_cache, storage_sync::index::LayerFileMetadata};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -87,6 +86,13 @@ pub struct Timeline {
 
     // WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
+
+    /// Remote storage client.
+    ///
+    /// If Some, use it to upload all newly created layers to the remote storage,
+    /// and keep remote metadata file in sync. In the future, also use it to download
+    /// layer files on-demand.
+    pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -120,9 +126,6 @@ pub struct Timeline {
     // Metrics
     metrics: TimelineMetrics,
 
-    /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
-    upload_layers: AtomicBool,
-
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
@@ -145,7 +148,7 @@ pub struct Timeline {
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
     /// and [`Tenant::delete_timeline`].
-    layer_removal_cs: Mutex<()>,
+    pub(super) layer_removal_cs: tokio::sync::Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     pub latest_gc_cutoff_lsn: Rcu<Lsn>,
@@ -409,6 +412,14 @@ impl Timeline {
         self.disk_consistent_lsn.load()
     }
 
+    pub fn get_remote_consistent_lsn(&self) -> Option<Lsn> {
+        if let Some(remote_client) = &self.remote_client {
+            remote_client.last_uploaded_consistent_lsn()
+        } else {
+            None
+        }
+    }
+
     /// Get the physical size of the timeline at the latest LSN
     pub fn get_physical_size(&self) -> u64 {
         self.metrics.current_physical_size_gauge.get()
@@ -493,12 +504,12 @@ impl Timeline {
             CheckpointConfig::Forced => {
                 self.freeze_inmem_layer(false);
                 self.flush_frozen_layers_and_wait().await?;
-                self.compact()
+                self.compact().await
             }
         }
     }
 
-    pub fn compact(&self) -> anyhow::Result<()> {
+    pub async fn compact(&self) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
 
         // Last record Lsn could be zero in case the timeline was just created
@@ -541,7 +552,12 @@ impl Timeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
+        let _layer_removal_cs = self.layer_removal_cs.lock().await;
+        // Is the timeline being deleted?
+        let state = *self.state.borrow();
+        if state == TimelineState::Paused {
+            anyhow::bail!("timeline is paused: {:?}", state);
+        }
 
         let target_file_size = self.get_checkpoint_distance();
 
@@ -555,20 +571,15 @@ impl Timeline {
                 // 2. Create new image layers for partitions that have been modified
                 // "enough".
                 let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
-                if !layer_paths_to_upload.is_empty()
-                    && self.upload_layers.load(atomic::Ordering::Relaxed)
-                {
-                    storage_sync::schedule_layer_upload(
-                        self.tenant_id,
-                        self.timeline_id,
-                        layer_paths_to_upload,
-                        None,
-                    );
+                if let Some(remote_client) = &self.remote_client {
+                    for (path, layer_metadata) in layer_paths_to_upload {
+                        remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
+                    }
                 }
 
                 // 3. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size)?;
+                self.compact_level0(target_file_size).await?;
                 timer.stop_and_record();
             }
             Err(err) => {
@@ -728,7 +739,7 @@ impl Timeline {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        upload_layers: bool,
+        remote_client: Option<RemoteTimelineClient>,
         pg_version: u32,
     ) -> Self {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -747,6 +758,8 @@ impl Timeline {
 
             walredo_mgr,
 
+            remote_client: remote_client.map(Arc::new),
+
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
             last_record_lsn: SeqWait::new(RecordLsn {
                 last: disk_consistent_lsn,
@@ -762,15 +775,13 @@ impl Timeline {
 
             metrics: TimelineMetrics::new(&tenant_id, &timeline_id),
 
-            upload_layers: AtomicBool::new(upload_layers),
-
             flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
 
             layer_flush_start_tx,
             layer_flush_done_tx,
 
             write_lock: Mutex::new(()),
-            layer_removal_cs: Mutex::new(()),
+            layer_removal_cs: Default::default(),
 
             gc_info: RwLock::new(GcInfo {
                 retain_lsns: Vec::new(),
@@ -898,6 +909,7 @@ impl Timeline {
 
         for direntry in fs::read_dir(timeline_path)? {
             let direntry = direntry?;
+            let direntry_path = direntry.path();
             let fname = direntry.file_name();
             let fname = fname.to_string_lossy();
 
@@ -909,7 +921,7 @@ impl Timeline {
                         imgfilename, self.timeline_id, disk_consistent_lsn
                     );
 
-                    rename_to_backup(&direntry.path())?;
+                    rename_to_backup(&direntry_path)?;
                     continue;
                 }
 
@@ -933,7 +945,7 @@ impl Timeline {
                         deltafilename, self.timeline_id, disk_consistent_lsn
                     );
 
-                    rename_to_backup(&direntry.path())?;
+                    rename_to_backup(&direntry_path)?;
                     continue;
                 }
 
@@ -946,10 +958,23 @@ impl Timeline {
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
+            } else if crate::storage_sync::is_temp_download_file(&direntry_path) {
+                info!(
+                    "skipping temp download file, reconcile_with_remote will resume / clean up: {}",
+                    fname
+                );
             } else if is_ephemeral_file(&fname) {
                 // Delete any old ephemeral files
                 trace!("deleting old ephemeral file in timeline dir: {}", fname);
-                fs::remove_file(direntry.path())?;
+                fs::remove_file(&direntry_path)?;
+            } else if is_temporary(&direntry_path) {
+                info!("removing temp timeline file at {}", direntry_path.display());
+                fs::remove_file(&direntry_path).with_context(|| {
+                    format!(
+                        "failed to remove temp download file at {}",
+                        direntry_path.display()
+                    )
+                })?;
             } else {
                 warn!("unrecognized filename in timeline dir: {}", fname);
             }
@@ -970,10 +995,222 @@ impl Timeline {
         Ok(())
     }
 
-    pub(super) fn layer_removal_guard(&self) -> anyhow::Result<MutexGuard<()>> {
-        self.layer_removal_cs
-            .try_lock()
-            .map_err(|e| anyhow!("cannot lock compaction critical section {e}"))
+    async fn download_missing(
+        &self,
+        index_part: &IndexPart,
+        remote_client: &RemoteTimelineClient,
+        mut local_filenames: HashSet<PathBuf>,
+        up_to_date_disk_consistent_lsn: Lsn,
+    ) -> anyhow::Result<HashSet<PathBuf>> {
+        let mut remote_filenames: HashSet<PathBuf> = HashSet::new();
+        for fname in index_part.timeline_layers.iter() {
+            remote_filenames.insert(fname.to_local_path(&PathBuf::from("")));
+        }
+
+        // Are there any local files that exist, with a size that doesn't match
+        // with the size stored in the remote index file?
+        // If so, rename_to_backup those files so that we re-download them later.
+        local_filenames.retain(|path| {
+            let layer_metadata = index_part
+                .layer_metadata
+                .get(&RelativePath::from_filename(path))
+                .map(LayerFileMetadata::from)
+                .unwrap_or(LayerFileMetadata::MISSING);
+
+            if let Some(remote_size) = layer_metadata.file_size() {
+                let local_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id).join(&path);
+                match local_path.metadata() {
+                    Ok(metadata) => {
+                        let local_size = metadata.len();
+
+                        if local_size != remote_size {
+                            warn!("removing local file \"{}\" because it has unexpected length {}; length in remote index is {}",
+                                  path.display(),
+                                  local_size,
+                                  remote_size);
+                            if let Err(err) = rename_to_backup(&local_path) {
+                                error!("could not rename file \"{}\": {:?}",
+                                       local_path.display(), err);
+                            }
+                            self.metrics.current_physical_size_gauge.sub(local_size);
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    Err(err) => {
+                        error!("could not get size of local file \"{}\": {:?}", path.display(), err);
+                        true
+                    }
+                }
+            } else {
+                true
+            }
+        });
+
+        // Are we missing some files that are present in remote storage?
+        // Download them now.
+        // TODO Downloading many files this way is not efficient.
+        //     Better to use FuturesUnordered. Maybe keep as is because:
+        //    a) inplace download is a throw-away code, on-demand patch doesnt need that
+        //    b) typical case now is that there is nothing to sync, this downloads a lot
+        //       1) if there was another pageserver that came and generated new files
+        //       2) during attach of a timeline with big history which we currently do not do
+        for path in remote_filenames.difference(&local_filenames) {
+            let fname = path.to_str().unwrap();
+            info!("remote layer file {fname} does not exist locally");
+
+            let layer_metadata = index_part
+                .layer_metadata
+                .get(&RelativePath::from_filename(path))
+                .map(LayerFileMetadata::from)
+                .unwrap_or(LayerFileMetadata::MISSING);
+
+            if let Some(imgfilename) = ImageFileName::parse_str(fname) {
+                if imgfilename.lsn > up_to_date_disk_consistent_lsn {
+                    warn!(
+                        "found future image layer {} on timeline {} remote_consistent_lsn is {}",
+                        imgfilename, self.timeline_id, up_to_date_disk_consistent_lsn
+                    );
+                    continue;
+                }
+
+                trace!("downloading image file: {}", file = path.display());
+                let sz = remote_client
+                    .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
+                    .await
+                    .context("download image layer")?;
+                trace!("done");
+
+                let image_layer =
+                    ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
+
+                self.layers
+                    .write()
+                    .unwrap()
+                    .insert_historic(Arc::new(image_layer));
+                self.metrics.current_physical_size_gauge.add(sz);
+            } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
+                // Create a DeltaLayer struct for each delta file.
+                // The end-LSN is exclusive, while disk_consistent_lsn is
+                // inclusive. For example, if disk_consistent_lsn is 100, it is
+                // OK for a delta layer to have end LSN 101, but if the end LSN
+                // is 102, then it might not have been fully flushed to disk
+                // before crash.
+                if deltafilename.lsn_range.end > up_to_date_disk_consistent_lsn + 1 {
+                    warn!(
+                        "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
+                        deltafilename, self.timeline_id, up_to_date_disk_consistent_lsn
+                    );
+                    continue;
+                }
+
+                trace!("downloading image file: {}", file = path.display());
+                let sz = remote_client
+                    .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
+                    .await
+                    .context("download delta layer")?;
+                trace!("done");
+
+                let delta_layer =
+                    DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
+
+                self.layers
+                    .write()
+                    .unwrap()
+                    .insert_historic(Arc::new(delta_layer));
+                self.metrics.current_physical_size_gauge.add(sz);
+            } else {
+                bail!("unexpected layer filename in remote storage: {}", fname);
+            }
+        }
+
+        // now these are local only filenames
+        let local_only_filenames = local_filenames
+            .difference(&remote_filenames)
+            .cloned()
+            .collect();
+        Ok(local_only_filenames)
+    }
+
+    ///
+    /// This function will synchronize local data with what we have in remote storage.
+    /// 1. It will download missing layer files.
+    /// 2. It will update local metadata if remote one has greater `disk_consistent_lsn`.
+    /// 3. It will upload files that are missing on the remote
+    /// 4. It will update index file on the remote accordingly
+    /// TODO may be a bit cleaner to do things based on populated remote client,
+    ///     and then do things based on its upload_queue.latest_files
+    ///
+    /// This is used during tenant attach. The layer map must have been loaded
+    /// with local filesystem contents already.
+    ///
+    /// The caller should provide IndexPart if it exists on the remote storage. If it's None,
+    /// we assume that it is missing on the remote storage, which means that we initialized
+    /// a timeline and then restarted before successful upload was performed
+    ///
+    #[instrument(skip(self, index_part, up_to_date_metadata))]
+    pub async fn reconcile_with_remote(
+        &self,
+        up_to_date_metadata: &TimelineMetadata,
+        index_part: Option<&IndexPart>,
+    ) -> anyhow::Result<()> {
+        info!("starting");
+        let remote_client = self
+            .remote_client
+            .as_ref()
+            .ok_or_else(|| anyhow!("cannot download without remote storage"))?;
+
+        let disk_consistent_lsn = up_to_date_metadata.disk_consistent_lsn();
+
+        // Build a map of local layers for quick lookups
+        let mut local_filenames: HashSet<PathBuf> = HashSet::new();
+        for layer in self.layers.read().unwrap().iter_historic_layers() {
+            local_filenames.insert(layer.filename());
+        }
+
+        let local_only_filenames = match index_part {
+            Some(index_part) => {
+                info!(
+                    "initializing upload queue from remote index with {} layer files",
+                    index_part.timeline_layers.len()
+                );
+                remote_client.init_upload_queue(index_part)?;
+                let local_only_filenames = self
+                    .download_missing(
+                        index_part,
+                        remote_client,
+                        local_filenames,
+                        disk_consistent_lsn,
+                    )
+                    .await?;
+                local_only_filenames
+            }
+            None => {
+                info!("initializing upload queue as empty");
+                remote_client.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
+                local_filenames
+            }
+        };
+
+        // Are there local files that don't exist remotely? Schedule uploads for them
+        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        for fname in &local_only_filenames {
+            let absolute = timeline_path.join(fname);
+            let sz = absolute
+                .metadata()
+                .with_context(|| format!("failed to get file {} metadata", fname.display()))?
+                .len();
+            info!("scheduling {} for upload", fname.display());
+            remote_client.schedule_layer_file_upload(&absolute, &LayerFileMetadata::new(sz))?;
+        }
+        if !local_only_filenames.is_empty() {
+            remote_client.schedule_index_upload(up_to_date_metadata)?;
+        }
+
+        info!("Done");
+
+        Ok(())
     }
 
     fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn) {
@@ -1475,7 +1712,8 @@ impl Timeline {
         // After crash, we will restart WAL streaming and processing from that point.
         if disk_consistent_lsn != old_disk_consistent_lsn {
             assert!(disk_consistent_lsn > old_disk_consistent_lsn);
-            self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)?;
+            self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)
+                .context("update_metadata_file")?;
             // Also update the in-memory copy
             self.disk_consistent_lsn.store(disk_consistent_lsn);
         }
@@ -1530,15 +1768,18 @@ impl Timeline {
             self.tenant_id,
             &metadata,
             false,
-        )?;
+        )
+        .context("save_metadata")?;
 
-        if self.can_upload_layers() {
-            storage_sync::schedule_layer_upload(
-                self.tenant_id,
-                self.timeline_id,
-                layer_paths_to_upload,
-                Some(metadata),
-            );
+        if let Some(remote_client) = &self.remote_client {
+            for (path, layer_metadata) in layer_paths_to_upload {
+                remote_client
+                    .schedule_layer_file_upload(&path, &layer_metadata)
+                    .context("schedule_layer_file_upload")?;
+            }
+            remote_client
+                .schedule_index_upload(&metadata)
+                .context("schedule_layer_file_upload")?;
         }
 
         Ok(())
@@ -1734,19 +1975,25 @@ impl Timeline {
 
         Ok(layer_paths_to_upload)
     }
+}
+#[derive(Default)]
+struct CompactLevel0Phase1Result {
+    new_layers: Vec<DeltaLayer>,
+    deltas_to_compact: Vec<Arc<dyn Layer>>,
+}
 
-    ///
-    /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
-    /// as Level 1 files.
-    ///
-    fn compact_level0(&self, target_file_size: u64) -> anyhow::Result<()> {
+impl Timeline {
+    async fn compact_level0_phase1(
+        &self,
+        target_file_size: u64,
+    ) -> anyhow::Result<CompactLevel0Phase1Result> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
         // Only compact if enough layers have accumulated.
         if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
-            return Ok(());
+            return Ok(Default::default());
         }
 
         // Gather the files to compact in this iteration.
@@ -1981,12 +2228,48 @@ impl Timeline {
             layer_paths.pop().unwrap();
         }
 
+        drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
+
+        Ok(CompactLevel0Phase1Result {
+            new_layers,
+            deltas_to_compact,
+        })
+    }
+
+    ///
+    /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
+    /// as Level 1 files.
+    ///
+    async fn compact_level0(&self, target_file_size: u64) -> anyhow::Result<()> {
+        let CompactLevel0Phase1Result {
+            new_layers,
+            deltas_to_compact,
+        } = self.compact_level0_phase1(target_file_size).await?;
+
+        // Before deleting any layers, we need to wait for their upload ops to finish.
+        // See storage_sync module level comment on consistency.
+        // Do it here because we don't want to hold self.layers.write() while waiting.
+        if let Some(remote_client) = &self.remote_client {
+            info!("waiting for upload ops to complete");
+            remote_client
+                .wait_completion()
+                .await
+                .context("wait for layer upload ops to complete")?;
+        }
+
         let mut layers = self.layers.write().unwrap();
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
             let new_delta_path = l.path();
 
             let metadata = new_delta_path.metadata()?;
+
+            if let Some(remote_client) = &self.remote_client {
+                remote_client.schedule_layer_file_upload(
+                    &new_delta_path,
+                    &LayerFileMetadata::new(metadata.len()),
+                )?;
+            }
 
             // update the timeline's physical size
             self.metrics.current_physical_size_gauge.add(metadata.len());
@@ -1997,32 +2280,22 @@ impl Timeline {
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
-        let mut layer_paths_do_delete = HashSet::with_capacity(deltas_to_compact.len());
-        drop(all_keys_iter);
+        let mut layer_paths_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
             if let Some(path) = l.local_path() {
                 self.metrics
                     .current_physical_size_gauge
                     .sub(path.metadata()?.len());
-                layer_paths_do_delete.insert(path);
+                layer_paths_to_delete.push(path);
             }
             l.delete()?;
             layers.remove_historic(l);
         }
         drop(layers);
 
-        if self.can_upload_layers() {
-            storage_sync::schedule_layer_upload(
-                self.tenant_id,
-                self.timeline_id,
-                new_layer_paths,
-                None,
-            );
-            storage_sync::schedule_layer_delete(
-                self.tenant_id,
-                self.timeline_id,
-                layer_paths_do_delete,
-            );
+        // Also schedule the deletions in remote storage
+        if let Some(remote_client) = &self.remote_client {
+            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
         }
 
         Ok(())
@@ -2114,25 +2387,43 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub(super) fn gc(&self) -> anyhow::Result<GcResult> {
-        let mut result: GcResult = GcResult::default();
-        let now = SystemTime::now();
-
+    pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
         fail_point!("before-timeline-gc");
 
-        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
+        let _layer_removal_cs = self.layer_removal_cs.lock().await;
+        // Is the timeline being deleted?
+        let state = *self.state.borrow();
+        if state == TimelineState::Paused {
+            anyhow::bail!("timeline is paused: {:?}", state);
+        }
 
-        let gc_info = self.gc_info.read().unwrap();
+        let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
+            let gc_info = self.gc_info.read().unwrap();
 
-        let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
-        let pitr_cutoff = gc_info.pitr_cutoff;
-        let retain_lsns = &gc_info.retain_lsns;
+            let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
+            let pitr_cutoff = gc_info.pitr_cutoff;
+            let retain_lsns = gc_info.retain_lsns.clone();
+            (horizon_cutoff, pitr_cutoff, retain_lsns)
+        };
 
         let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
 
-        let _enter =
-            info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff)
-                .entered();
+        self.gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
+            .instrument(
+                info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
+            )
+            .await
+    }
+
+    async fn gc_timeline(
+        &self,
+        horizon_cutoff: Lsn,
+        pitr_cutoff: Lsn,
+        retain_lsns: Vec<Lsn>,
+        new_gc_cutoff: Lsn,
+    ) -> anyhow::Result<GcResult> {
+        let now = SystemTime::now();
+        let mut result: GcResult = GcResult::default();
 
         // Nothing to GC. Return early.
         let latest_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
@@ -2165,6 +2456,17 @@ impl Timeline {
         info!("GC starting");
 
         debug!("retain_lsns: {:?}", retain_lsns);
+
+        // Before deleting any layers, we need to wait for their upload ops to finish.
+        // See storage_sync module level comment on consistency.
+        // Do it here because we don't want to hold self.layers.write() while waiting.
+        if let Some(remote_client) = &self.remote_client {
+            info!("waiting for upload ops to complete");
+            remote_client
+                .wait_completion()
+                .await
+                .context("wait for layer upload ops to complete")?;
+        }
 
         let mut layers_to_remove = Vec::new();
 
@@ -2217,7 +2519,7 @@ impl Timeline {
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
             // they are no longer needed. This might be complicated with long inheritance chains.
-            for retain_lsn in retain_lsns {
+            for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
@@ -2273,13 +2575,13 @@ impl Timeline {
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
-        let mut layer_paths_to_delete = HashSet::with_capacity(layers_to_remove.len());
+        let mut layer_paths_to_delete = Vec::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
             if let Some(path) = doomed_layer.local_path() {
                 self.metrics
                     .current_physical_size_gauge
                     .sub(path.metadata()?.len());
-                layer_paths_to_delete.insert(path);
+                layer_paths_to_delete.push(path);
             }
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer);
@@ -2295,12 +2597,8 @@ impl Timeline {
             fail_point!("after-timeline-gc-removed-layers");
         }
 
-        if self.can_upload_layers() {
-            storage_sync::schedule_layer_delete(
-                self.tenant_id,
-                self.timeline_id,
-                layer_paths_to_delete,
-            );
+        if let Some(remote_client) = &self.remote_client {
+            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
         }
 
         result.elapsed = now.elapsed()?;
@@ -2380,11 +2678,6 @@ impl Timeline {
                 Ok(img)
             }
         }
-    }
-
-    fn can_upload_layers(&self) -> bool {
-        self.upload_layers.load(atomic::Ordering::Relaxed)
-            && self.current_state() != TimelineState::Broken
     }
 }
 

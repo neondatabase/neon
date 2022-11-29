@@ -34,16 +34,10 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         for t in timelines:
             client.timeline_delete(tenant, t)
 
-    def assert_active_without_jobs(tenant):
-        assert get_state(tenant) == {"Active": {"background_jobs_running": False}}
-
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline(name, tenant_id=tenant)
     pg = env.postgres.create_start(name, tenant_id=tenant)
-    assert get_state(tenant) == {
-        "Active": {"background_jobs_running": True}
-    }, "Pageserver should activate a tenant and start background jobs if timelines are loaded"
 
     # Stop compute
     pg.stop()
@@ -52,7 +46,6 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     for tenant_info in client.tenant_list():
         tenant_id = TenantId(tenant_info["id"])
         delete_all_timelines(tenant_id)
-        wait_until(10, 0.2, lambda: assert_active_without_jobs(tenant_id))
 
     # Assert that all tasks finish quickly after tenant is detached
     assert get_metric_value('pageserver_tenant_task_events{event="start"}') > 0

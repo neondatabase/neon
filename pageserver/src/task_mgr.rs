@@ -197,8 +197,8 @@ pub enum TaskKind {
     // Task that flushes frozen in-memory layers to disk
     LayerFlushTask,
 
-    // Task that manages the remote upload queue
-    StorageSync,
+    // Task that uploads a file to remote storage
+    RemoteUploadTask,
 
     // task that handles the initial downloading of all tenants
     InitialLoad,
