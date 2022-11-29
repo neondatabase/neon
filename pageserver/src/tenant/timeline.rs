@@ -555,8 +555,8 @@ impl Timeline {
         let _layer_removal_cs = self.layer_removal_cs.lock().await;
         // Is the timeline being deleted?
         let state = *self.state.borrow();
-        if state == TimelineState::Paused {
-            anyhow::bail!("timeline is paused: {:?}", state);
+        if state == TimelineState::Stopping {
+            anyhow::bail!("timeline is Stopping");
         }
 
         let target_file_size = self.get_checkpoint_distance();
@@ -668,8 +668,8 @@ impl Timeline {
             (TimelineState::Broken, _) => {
                 error!("Ignoring state update {new_state:?} for broken tenant");
             }
-            (TimelineState::Paused, TimelineState::Active) => {
-                debug!("Not activating a paused timeline");
+            (TimelineState::Stopping, TimelineState::Active) => {
+                debug!("Not activating a Stopping timeline");
             }
             (_, new_state) => {
                 self.state.send_replace(new_state);
@@ -1251,7 +1251,7 @@ impl Timeline {
                                         match new_state {
                                             // we're running this job for active timelines only
                                             TimelineState::Active => continue,
-                                            TimelineState::Broken | TimelineState::Paused | TimelineState::Suspended => return Some(new_state),
+                                            TimelineState::Broken | TimelineState::Stopping | TimelineState::Suspended => return Some(new_state),
                                         }
                                     }
                                     Err(_sender_dropped_error) => return None,
@@ -2393,8 +2393,8 @@ impl Timeline {
         let _layer_removal_cs = self.layer_removal_cs.lock().await;
         // Is the timeline being deleted?
         let state = *self.state.borrow();
-        if state == TimelineState::Paused {
-            anyhow::bail!("timeline is paused: {:?}", state);
+        if state == TimelineState::Stopping {
+            anyhow::bail!("timeline is Stopping");
         }
 
         let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
