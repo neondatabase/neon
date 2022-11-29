@@ -12,7 +12,6 @@ testing = ["fail/failpoints"]
 profiling = ["pprof"]
 
 [dependencies]
-sentry = "0.29.0"
 amplify_num = { git = "https://github.com/hlinnaka/rust-amplify.git", branch = "unsigned-int-perf" }
 anyhow = { version = "1.0", features = ["backtrace"] }
 async-stream = "0.3"

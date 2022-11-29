@@ -78,6 +78,9 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
 
+    let sentry_url = arg_matches.get_one::<String>("sentry-url");
+    init_sentry(sentry_url, "pageserver");
+
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,
         ControlFlow::Break(()) => {
@@ -85,12 +88,6 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
-
-    // connect to sentry if sentry_url is available.
-    match conf.sentry_url.len() {
-        0 => (),
-        _ => init_sentry(conf.sentry_url.as_ref(), "pageserver"),
-    }
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {

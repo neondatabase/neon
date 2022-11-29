@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sentry = "0.29.0"
 anyhow = "1.0"
 async-trait = "0.1"
 byteorder = "1.4.3"

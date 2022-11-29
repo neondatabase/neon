@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sentry = "0.29.0"
 anyhow = "1.0"
 atty = "0.2.14"
 base64 = "0.13.0"

@@ -57,11 +57,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut conf = SafeKeeperConf::default();
 
-    // Connect to sentry if sentry-url is provided.
-    match arg_matches.get_one::<String>("sentry-url") {
-        Some(sentry_url) => init_sentry(sentry_url.as_ref(), "safekeeper"),
-        None => (),
-    }
+    let sentry_url = arg_matches.get_one::<String>("sentry-url");
+    init_sentry(sentry_url, "safekeeper");
 
     if let Some(dir) = arg_matches.get_one::<PathBuf>("datadir") {
         // change into the data directory.
