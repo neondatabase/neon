@@ -429,6 +429,13 @@ fn cli() -> Command {
                 .long("log-format")
                 .help("Format for logging, either 'plain' or 'json'")
         )
+        .arg(
+            Arg::new("sentry-url")
+                .short('s')
+                .long("sentry-url")
+                .alias("sentry")
+                .help("Sentry url for error reporting"),
+        )
 }
 
 #[test]

@@ -410,6 +410,13 @@ fn cli() -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Show enabled compile time features"),
         )
+        .arg(
+            Arg::new("sentry-url")
+                .short('s')
+                .long("sentry-url")
+                .alias("sentry")
+                .help("Sentry url for error reporting"),
+        )
 }
 
 #[test]

@@ -183,6 +183,13 @@ fn cli() -> clap::Command {
                 .alias("ssl-cert") // backwards compatibility
                 .help("path to TLS cert for client postgres connections"),
         )
+        .arg(
+            Arg::new("sentry-url")
+                .short('s')
+                .long("sentry-url")
+                .alias("sentry")
+                .help("Sentry url for error reporting"),
+        )
 }
 
 #[test]
