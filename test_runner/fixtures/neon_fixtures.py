@@ -2528,6 +2528,7 @@ class SafekeeperTimelineStatus:
     acceptor_epoch: int
     pg_version: int
     flush_lsn: Lsn
+    commit_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
     remote_consistent_lsn: Lsn
@@ -2577,6 +2578,7 @@ class SafekeeperHttpClient(requests.Session):
             acceptor_epoch=resj["acceptor_state"]["epoch"],
             pg_version=resj["pg_info"]["pg_version"],
             flush_lsn=Lsn(resj["flush_lsn"]),
+            commit_lsn=Lsn(resj["commit_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
             remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
