@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to sentry if sentry-url is provided.
     let sentry_url = arg_matches.get_one::<String>("sentry-url");
-    init_sentry(sentry_url, "proxy");
+    let _guard = init_sentry(sentry_url, "proxy");
 
     let tls_config = match (
         arg_matches.get_one::<String>("tls-key"),
