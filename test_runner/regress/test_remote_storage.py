@@ -93,8 +93,8 @@ def test_remote_storage_backup_and_restore(
         # run checkpoint manually to be sure that data landed in remote storage
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
-        log.info(f"waiting for checkpoint {checkpoint_number} upload")
         # wait until pageserver successfully uploaded a checkpoint to remote storage
+        log.info(f"waiting for checkpoint {checkpoint_number} upload")
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 

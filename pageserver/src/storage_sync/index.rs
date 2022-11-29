@@ -335,7 +335,8 @@ impl LayerFileMetadata {
     }
 }
 
-/// Part of the remote index, corresponding to a certain timeline.
+/// In-memory representation of an `index_part.json` file
+///
 /// Contains the data about all files in the timeline, present remotely and its metadata.
 ///
 /// This type needs to be backwards and forwards compatible. When changing the fields,
@@ -366,8 +367,11 @@ pub struct IndexPart {
     #[serde(default)]
     layer_metadata: HashMap<RelativePath, IndexLayerMetadata>,
 
+    // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
+    // It's duplicated here for convenience.
     #[serde_as(as = "DisplayFromStr")]
     disk_consistent_lsn: Lsn,
+
     metadata_bytes: Vec<u8>,
 }
 

@@ -157,12 +157,14 @@ struct TimelineUninitMark {
 }
 
 impl UninitializedTimeline<'_> {
-    /// Ensures timeline data is valid, loads it into pageserver's memory and removes uninit mark file on success.
+    /// Ensures timeline data is valid, loads it into pageserver's memory and removes
+    /// uninit mark file on success.
     pub fn initialize(self) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         self.initialize_with_lock(&mut timelines, true)
     }
 
+    /// Like `initialize`, but the caller is already holding lock on Tenant::timelines.
     fn initialize_with_lock(
         mut self,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
@@ -350,8 +352,6 @@ impl Drop for TimelineUninitMark {
     }
 }
 
-/// A repository corresponds to one .neon directory. One repository holds multiple
-/// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
     pub fn tenant_id(&self) -> TenantId {
         self.tenant_id
@@ -617,7 +617,7 @@ impl Tenant {
                 local_timeline_directory.display()
             )
         })?;
-        info!("detach removed files");
+        info!("finished deleting layer files, releasing layer_removal_cs.lock()");
 
         drop(layer_removal_guard);
         timeline_entry.remove();
