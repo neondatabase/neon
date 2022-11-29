@@ -16,6 +16,7 @@ publish = false
 ahash = { version = "0.7", features = ["std"] }
 anyhow = { version = "1", features = ["backtrace", "std"] }
 bytes = { version = "1", features = ["serde", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "iana-time-zone", "serde", "std", "winapi"] }
 clap = { version = "4", features = ["color", "derive", "error-context", "help", "std", "string", "suggestions", "usage"] }
 crossbeam-utils = { version = "0.8", features = ["once_cell", "std"] }
 either = { version = "1", features = ["use_std"] }
@@ -36,9 +37,10 @@ prost = { version = "0.11", features = ["prost-derive", "std"] }
 rand = { version = "0.8", features = ["alloc", "getrandom", "libc", "rand_chacha", "rand_hc", "small_rng", "std", "std_rng"] }
 regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
 regex-syntax = { version = "0.6", features = ["unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
-reqwest = { version = "0.11", default-features = false, features = ["__rustls", "__tls", "blocking", "default-tls", "hyper-rustls", "hyper-tls", "json", "native-tls-crate", "rustls", "rustls-pemfile", "rustls-tls", "rustls-tls-webpki-roots", "serde_json", "tokio-native-tls", "tokio-rustls", "webpki-roots"] }
+reqwest = { version = "0.11", features = ["__rustls", "__tls", "blocking", "default-tls", "hyper-rustls", "hyper-tls", "json", "native-tls-crate", "rustls", "rustls-pemfile", "rustls-tls", "rustls-tls-webpki-roots", "serde_json", "tokio-native-tls", "tokio-rustls", "webpki-roots"] }
 scopeguard = { version = "1", features = ["use_std"] }
 serde = { version = "1", features = ["alloc", "derive", "serde_derive", "std"] }
+serde_json = { version = "1", features = ["raw_value", "std"] }
 socket2 = { version = "0.4", default-features = false, features = ["all"] }
 stable_deref_trait = { version = "1", features = ["alloc", "std"] }
 tokio = { version = "1", features = ["bytes", "fs", "io-std", "io-util", "libc", "macros", "memchr", "mio", "net", "num_cpus", "once_cell", "process", "rt", "rt-multi-thread", "signal-hook-registry", "socket2", "sync", "time", "tokio-macros"] }

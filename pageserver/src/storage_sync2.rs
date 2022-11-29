@@ -517,6 +517,10 @@ impl RemoteTimelineClient {
         self.metrics.remote_physical_size_gauge().set(size);
     }
 
+    pub fn get_remote_physical_size(&self) -> u64 {
+        self.metrics.remote_physical_size_gauge().get()
+    }
+
     //
     // Download operations.
     //

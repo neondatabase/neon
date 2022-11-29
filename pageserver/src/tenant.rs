@@ -700,6 +700,22 @@ impl Tenant {
         Ok(())
     }
 
+    /// get size of all remote timelines
+    ///
+    /// This function relies on the index_part instead of listing the remote storage
+    ///
+    pub async fn get_remote_size(&self) -> anyhow::Result<u64> {
+        let mut size = 0;
+
+        for timeline in self.list_timelines().iter() {
+            if let Some(remote_client) = &timeline.remote_client {
+                size += remote_client.get_remote_physical_size();
+            }
+        }
+
+        Ok(size)
+    }
+
     #[instrument(skip(self, index_part, remote_metadata, remote_storage), fields(timeline_id=%timeline_id))]
     async fn load_remote_timeline(
         &self,
