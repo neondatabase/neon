@@ -1,6 +1,9 @@
 use sentry::ClientInitGuard;
 
-pub fn init_sentry(maybe_sentry_url: Option<&String>, process_name: &str) -> Option<ClientInitGuard> {
+pub fn init_sentry(
+    maybe_sentry_url: Option<&String>,
+    process_name: &str,
+) -> Option<ClientInitGuard> {
     return match maybe_sentry_url {
         Some(sentry_url) => {
             let _guard = sentry::init((
@@ -16,5 +19,5 @@ pub fn init_sentry(maybe_sentry_url: Option<&String>, process_name: &str) -> Opt
             Some(_guard)
         }
         None => None,
-    }
+    };
 }
