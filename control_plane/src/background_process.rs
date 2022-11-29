@@ -209,8 +209,8 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
 }
 
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
-    // enable RUST_BACKTRACE if it's not configured already, but pass through
-    // RUST_BACKTRACE=full|0 or whatever
+    // If RUST_BACKTRACE is set, pass it through. But if it's not set, default
+    // to RUST_BACKTRACE=1.
     let backtrace_setting = std::env::var_os("RUST_BACKTRACE");
     let backtrace_setting = backtrace_setting
         .as_deref()
