@@ -61,6 +61,7 @@ pub fn start_process<
     envs: EI,
     initial_pid_file: InitialPidFile,
     process_status_check: F,
+    allow_recording: bool,
 ) -> anyhow::Result<Child>
 where
     F: Fn() -> anyhow::Result<bool>,
@@ -78,13 +79,38 @@ where
         format!("Could not reuse {process_name} log file {log_path:?} for writing stderr")
     })?;
 
-    let mut command = Command::new(command);
+    let file_name = command
+        .file_name()
+        .expect("cannot start a program without file name");
+    let record = allow_recording && should_record(file_name);
+
+    let mut command = if record {
+        let mut cmd = Command::new("rr");
+        cmd.arg("record").arg("--wait").arg(command);
+
+        // don't put any envs in yet, because fill_rust_env_vars will clear them
+        cmd
+    } else {
+        Command::new(command)
+    };
+
     let background_command = command
         .stdout(process_log_file)
         .stderr(same_file_for_stderr)
         .args(args);
     let filled_cmd = fill_aws_secrets_vars(fill_rust_env_vars(background_command));
     filled_cmd.envs(envs);
+
+    if record {
+        // we need to give these directions to rr, otherwise it will write to /tmp/rr which can
+        // make the recordings difficult to find.
+        if let Some(val) = std::env::var_os("HOME") {
+            filled_cmd.env("HOME", val);
+        }
+        if let Some(val) = std::env::var_os("XDG_DATA_HOME") {
+            filled_cmd.env("XDG_DATA_HOME", val);
+        }
+    }
 
     let mut spawned_process = filled_cmd.spawn().with_context(|| {
         format!("Could not spawn {process_name}, see console output and log files for details.")
@@ -95,25 +121,31 @@ where
             .with_context(|| format!("Subprocess {process_name} has invalid pid {pid}"))?,
     );
 
-    let pid_file_to_check = match initial_pid_file {
-        InitialPidFile::Create(target_pid_file_path) => {
-            match lock_file::create_lock_file(target_pid_file_path, pid.to_string()) {
-                lock_file::LockCreationResult::Created { .. } => {
-                    // We use "lock" file here only to create the pid file. The lock on the pidfile will be dropped as soon
-                    // as this CLI invocation exits, so it's a bit useless, but doesn't any harm either.
+    let pid_file_to_check = if !record {
+        match initial_pid_file {
+            InitialPidFile::Create(target_pid_file_path) => {
+                match lock_file::create_lock_file(target_pid_file_path, pid.to_string()) {
+                    lock_file::LockCreationResult::Created { .. } => {
+                        // We use "lock" file here only to create the pid file. The lock on the pidfile will be dropped as soon
+                        // as this CLI invocation exits, so it's a bit useless, but doesn't any harm either.
+                    }
+                    lock_file::LockCreationResult::AlreadyLocked { .. } => {
+                        anyhow::bail!("Cannot write pid file for {process_name} at path {target_pid_file_path:?}: file is already locked by another process")
+                    }
+                    lock_file::LockCreationResult::CreationFailed(e) => {
+                        return Err(e.context(format!(
+                            "Failed to create pid file for {process_name} at path {target_pid_file_path:?}"
+                        )))
+                    }
                 }
-                lock_file::LockCreationResult::AlreadyLocked { .. } => {
-                    anyhow::bail!("Cannot write pid file for {process_name} at path {target_pid_file_path:?}: file is already locked by another process")
-                }
-                lock_file::LockCreationResult::CreationFailed(e) => {
-                    return Err(e.context(format!(
-                    "Failed to create pid file for {process_name} at path {target_pid_file_path:?}"
-                )))
-                }
+                None
             }
-            None
+            InitialPidFile::Expect(pid_file_path) => Some(pid_file_path),
         }
-        InitialPidFile::Expect(pid_file_path) => Some(pid_file_path),
+    } else {
+        // when recording we will only have access to rr's pid, not the actual program it runs, so
+        // we cannot check the pidfile contents.
+        None
     };
 
     for retries in 0..RETRIES {
@@ -145,6 +177,16 @@ where
     }
     println!();
     anyhow::bail!("{process_name} did not start in {RETRY_UNTIL_SECS} seconds");
+}
+
+fn should_record(command: &OsStr) -> bool {
+    match std::env::var("NEON_LOCAL_RECORD_COMMANDS") {
+        Ok(s) => s.split(',').map(|csv| csv.trim()).any(|csv| csv == command),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("NEON_LOCAL_RECORD_COMMANDS cannot be converted to string");
+        }
+        Err(std::env::VarError::NotPresent) => false,
+    }
 }
 
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
