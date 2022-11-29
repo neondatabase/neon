@@ -223,18 +223,30 @@ fn large_layer_map(c: &mut Criterion) {
     // TODO consider compressing these files
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
 
+    // We'll query the midpoint of each image layer at LSN right before the image
+    // layer. This way we get a somewhat uniform coverage of both the lsn and key
+    // space.
+    let queries: Vec<(Key, Lsn)> = layer_map.iter_historic_layers().filter_map(|l| {
+        if l.is_incremental() {
+            None
+        } else {
+            let kr = l.get_key_range();
+            let lr = l.get_lsn_range();
+
+            let mid_key = kr.start;  // TODO maybe actually find the midpoint
+            let lsn_before = Lsn(lr.start.0 - 1);
+
+            Some((mid_key, lsn_before))
+        }
+    }).collect();
+
+    println!("num queries: {}", queries.len());
+
     c.bench_function("search_real_map", |b| {
         b.iter(|| {
-            let result = layer_map.search(
-                // Just an arbitrary point
-                //
-                // TODO Instead, query right before the midpoint of each image layer.
-                //      It's the simplest way to query the entire keyspace uniformly.
-                Key::from_hex("000000067F000080000009E014000001B011").unwrap(),
-                // This LSN is higher than any of the LSNs in the tree
-                Lsn::from_str("D0/80208AE1").unwrap(),
-            );
-            result.unwrap();
+            for q in queries.clone().into_iter() {
+                layer_map.search(q.0, q.1).unwrap();
+            }
         });
     });
 }
