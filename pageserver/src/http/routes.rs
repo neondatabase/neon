@@ -577,7 +577,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::InternalServerError)?;
+    let tenant = tenant_mgr::get_tenant(tenant_id, true).map_err(ApiError::InternalServerError)?;
 
     // this can be long operation, it currently is not backed by any request coalescing or similar
     let inputs = tenant
