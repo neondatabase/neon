@@ -260,6 +260,7 @@ impl LayerMap {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn find_latest_layer_recurs(
         key: IntKey,
         min_lsn: &mut Lsn,
