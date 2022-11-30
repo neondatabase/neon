@@ -29,11 +29,11 @@ runs:
         case "${ENVIRONMENT}" in
           dev)
             API_HOST=console.dev.neon.tech
-            REGION_ID=${REGION_ID:-eu-west-1}
+            REGION_ID=${REGION_ID:-aws-eu-west-1}
             ;;
           staging)
             API_HOST=console.stage.neon.tech
-            REGION_ID=${REGION_ID:-us-east-2}
+            REGION_ID=${REGION_ID:-aws-us-east-2}
             ;;
           *)
             echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
@@ -61,7 +61,6 @@ runs:
           --data "{
             \"project\": {
               \"name\": \"Created by actions/neon-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
-              \"platform_id\": \"aws\",
               \"region_id\": \"${REGION_ID}\",
               \"settings\": { }
             }
