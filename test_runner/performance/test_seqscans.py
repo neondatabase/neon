@@ -36,7 +36,7 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
 def test_seqscans(env: PgCompare, scale: int, rows: int, iters: int, workers: int):
     rows = scale * rows
 
-    with closing(env.pg.connect()) as conn:
+    with closing(env.pg.connect(options="-cstatement_timeout=0")) as conn:
         with conn.cursor() as cur:
             cur.execute("drop table if exists t;")
             cur.execute("create table t (i integer);")

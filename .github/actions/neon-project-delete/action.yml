@@ -6,7 +6,7 @@ inputs:
     desctiption: 'Neon API key'
     required: true
   environment:
-    desctiption: 'dev (aka captest) or stage'
+    desctiption: 'dev (aka captest) or staging'
     required: true
   project_id:
     desctiption: 'ID of the Project to delete'
@@ -37,17 +37,17 @@ runs:
         ENVIRONMENT: ${{ inputs.environment }}
 
     - name: Delete Neon Project
+      # Do not try to delete a project if .github/actions/neon-project-create failed before
+      if: ${{ inputs.project_id != '' }}
       shell: bash -euxo pipefail {0}
       run: |
-        # Allow PROJECT_ID to be empty/null for cases when .github/actions/neon-project-create failed
-        if [ -n "${PROJECT_ID}" ]; then
-          curl -X "POST" \
-            "https://${API_HOST}/api/v1/projects/${PROJECT_ID}/delete" \
-            --fail \
-            --header "Accept: application/json" \
-            --header "Content-Type: application/json" \
-            --header "Authorization: Bearer ${API_KEY}"
-        fi
+        curl \
+          "https://${API_HOST}/api/v2/projects/${PROJECT_ID}" \
+          --fail \
+          --request DELETE \
+          --header "Accept: application/json" \
+          --header "Content-Type: application/json" \
+          --header "Authorization: Bearer ${API_KEY}"
       env:
         API_KEY: ${{ inputs.api_key }}
         PROJECT_ID: ${{ inputs.project_id }}

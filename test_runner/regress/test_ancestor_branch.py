@@ -11,16 +11,12 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
-    # Extend compaction_period and gc_period to disable background compaction and gc.
+    # Override defaults: 4M checkpoint_distance, disable background compaction and gc.
     tenant, _ = env.neon_cli.create_tenant(
         conf={
-            "gc_period": "10 m",
-            "gc_horizon": "1048576",
             "checkpoint_distance": "4194304",
-            "compaction_period": "10 m",
-            "compaction_threshold": "2",
-            "compaction_target_size": "4194304",
+            "gc_period": "0s",
+            "compaction_period": "0s",
         }
     )
 

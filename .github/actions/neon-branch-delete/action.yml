@@ -1,0 +1,79 @@
+name: 'Delete Branch'
+description: 'Delete Branch using API'
+
+inputs:
+  api_key:
+    desctiption: 'Neon API key'
+    required: true
+  environment:
+    desctiption: 'dev (aka captest) or staging'
+    required: true
+  project_id:
+    desctiption: 'ID of the Project which should be deleted'
+    required: true
+  branch_id:
+    desctiption: 'ID of the branch to delete'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Parse Input
+      id: parse-input
+      shell: bash -euxo pipefail {0}
+      run: |
+        case "${ENVIRONMENT}" in
+          dev)
+            API_HOST=console.dev.neon.tech
+            ;;
+          staging)
+            API_HOST=console.stage.neon.tech
+            ;;
+          *)
+            echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
+            exit 1
+            ;;
+        esac
+
+        echo "api_host=${API_HOST}" >> $GITHUB_OUTPUT
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+
+    - name: Delete Branch
+      # Do not try to delete a branch if .github/actions/neon-project-create
+      # or .github/actions/neon-branch-create failed before
+      if: ${{ inputs.project_id != '' && inputs.branch_id != '' }}
+      shell: bash -euxo pipefail {0}
+      run: |
+        for i in $(seq 1 10); do
+          deleted_branch=$(curl \
+            "https://${API_HOST}/api/v2/projects/${PROJECT_ID}/branches/${BRANCH_ID}" \
+            --request DELETE \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${API_KEY}"
+            )
+
+          if [ -z "${deleted_branch}" ]; then
+            sleep 1
+            continue
+          fi
+
+          branch_id=$(echo $deleted_branch | jq --raw-output '.branch.id')
+          if [ "${branch_id}" == "null" ]; then
+            sleep 1
+            continue
+          fi
+
+          break
+        done
+
+        if [ -z "${branch_id}" ] || [ "${branch_id}" == "null" ]; then
+          echo 2>&1 "Failed to delete branch after 10 attempts, the latest response was: ${deleted_branch}"
+          exit 1
+        fi
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        PROJECT_ID: ${{ inputs.project_id }}
+        BRANCH_ID: ${{ inputs.branch_id }}
+        API_HOST: ${{ steps.parse-input.outputs.api_host }}

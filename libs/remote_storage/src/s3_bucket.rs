@@ -4,27 +4,36 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
+use std::env::var;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
-use rusoto_core::{
-    credential::{InstanceMetadataProvider, StaticProvider},
-    HttpClient, Region, RusotoError,
+use aws_config::{
+    environment::credentials::EnvironmentVariableCredentialsProvider, imds,
+    imds::credentials::ImdsCredentialsProvider, meta::credentials::provide_credentials_fn,
 };
-use rusoto_s3::{
-    DeleteObjectRequest, GetObjectError, GetObjectRequest, ListObjectsV2Request, PutObjectRequest,
-    S3Client, StreamingBody, S3,
+use aws_sdk_s3::{
+    config::Config,
+    error::{GetObjectError, GetObjectErrorKind},
+    types::{ByteStream, SdkError},
+    Client, Endpoint, Region,
 };
+use aws_smithy_http::body::SdkBody;
+use aws_types::credentials::{CredentialsError, ProvideCredentials};
+use hyper::Body;
 use tokio::{io, sync::Semaphore};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
+use super::StorageMetadata;
 use crate::{
     strip_path_prefix, Download, DownloadError, RemoteObjectId, RemoteStorage, S3Config,
     REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
-use super::StorageMetadata;
+const DEFAULT_IMDS_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) mod metrics {
     use metrics::{register_int_counter_vec, IntCounterVec};
@@ -116,7 +125,7 @@ fn download_destination(
 /// AWS S3 storage.
 pub struct S3Bucket {
     workdir: PathBuf,
-    client: S3Client,
+    client: Client,
     bucket_name: String,
     prefix_in_bucket: Option<String>,
     // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
@@ -125,6 +134,12 @@ pub struct S3Bucket {
     concurrency_limiter: Semaphore,
 }
 
+#[derive(Default)]
+struct GetObjectRequest {
+    bucket: String,
+    key: String,
+    range: Option<String>,
+}
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config, workdir: PathBuf) -> anyhow::Result<Self> {
@@ -132,43 +147,40 @@ impl S3Bucket {
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
         );
-        let region = match aws_config.endpoint.clone() {
-            Some(custom_endpoint) => Region::Custom {
-                name: aws_config.bucket_region.clone(),
-                endpoint: custom_endpoint,
-            },
-            None => aws_config
-                .bucket_region
-                .parse::<Region>()
-                .context("Failed to parse the s3 region from config")?,
-        };
-        let request_dispatcher = HttpClient::new().context("Failed to create S3 http client")?;
+        let mut config_builder = Config::builder()
+            .region(Region::new(aws_config.bucket_region.clone()))
+            .credentials_provider(provide_credentials_fn(|| async {
+                match var("AWS_ACCESS_KEY_ID").is_ok() && var("AWS_SECRET_ACCESS_KEY").is_ok() {
+                    true => {
+                        EnvironmentVariableCredentialsProvider::new()
+                            .provide_credentials()
+                            .await
+                    }
+                    false => {
+                        let imds_client = imds::Client::builder()
+                            .connect_timeout(DEFAULT_IMDS_TIMEOUT)
+                            .read_timeout(DEFAULT_IMDS_TIMEOUT)
+                            .build()
+                            .await
+                            .map_err(CredentialsError::unhandled)?;
+                        ImdsCredentialsProvider::builder()
+                            .imds_client(imds_client)
+                            .build()
+                            .provide_credentials()
+                            .await
+                    }
+                }
+            }));
 
-        let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok();
-        let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
-        // session token is used when authorizing through sso
-        // which is typically the case when testing locally on developer machine
-        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
-
-        let client = if access_key_id.is_none() && secret_access_key.is_none() {
-            debug!("Using IAM-based AWS access");
-            S3Client::new_with(request_dispatcher, InstanceMetadataProvider::new(), region)
-        } else {
-            debug!(
-                "Using credentials-based AWS access. Session token is set: {}",
-                session_token.is_some()
+        if let Some(custom_endpoint) = aws_config.endpoint.clone() {
+            let endpoint = Endpoint::immutable(
+                custom_endpoint
+                    .parse()
+                    .expect("Failed to parse S3 custom endpoint"),
             );
-            S3Client::new_with(
-                request_dispatcher,
-                StaticProvider::new(
-                    access_key_id.unwrap_or_default(),
-                    secret_access_key.unwrap_or_default(),
-                    session_token,
-                    None,
-                ),
-                region,
-            )
-        };
+            config_builder.set_endpoint_resolver(Some(Arc::new(endpoint)));
+        }
+        let client = Client::from_conf(config_builder.build());
 
         let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
             let mut prefix = prefix;
@@ -182,7 +194,6 @@ impl S3Bucket {
             }
             prefix
         });
-
         Ok(Self {
             client,
             workdir,
@@ -202,20 +213,33 @@ impl S3Bucket {
 
         metrics::inc_get_object();
 
-        match self.client.get_object(request).await {
-            Ok(object_output) => match object_output.body {
-                None => {
-                    metrics::inc_get_object_fail();
-                    Err(DownloadError::Other(anyhow::anyhow!(
-                        "Got no body for the S3 object given"
-                    )))
-                }
-                Some(body) => Ok(Download {
-                    metadata: object_output.metadata.map(StorageMetadata),
-                    download_stream: Box::pin(io::BufReader::new(body.into_async_read())),
-                }),
-            },
-            Err(RusotoError::Service(GetObjectError::NoSuchKey(_))) => Err(DownloadError::NotFound),
+        let get_object = self
+            .client
+            .get_object()
+            .bucket(request.bucket)
+            .key(request.key)
+            .set_range(request.range)
+            .send()
+            .await;
+
+        match get_object {
+            Ok(object_output) => {
+                let metadata = object_output.metadata().cloned().map(StorageMetadata);
+                Ok(Download {
+                    metadata,
+                    download_stream: Box::pin(io::BufReader::new(
+                        object_output.body.into_async_read(),
+                    )),
+                })
+            }
+            Err(SdkError::ServiceError {
+                err:
+                    GetObjectError {
+                        kind: GetObjectErrorKind::NoSuchKey(..),
+                        ..
+                    },
+                ..
+            }) => Err(DownloadError::NotFound),
             Err(e) => {
                 metrics::inc_get_object_fail();
                 Err(DownloadError::Other(anyhow::anyhow!(
@@ -261,12 +285,11 @@ impl RemoteStorage for S3Bucket {
 
             let fetch_response = self
                 .client
-                .list_objects_v2(ListObjectsV2Request {
-                    bucket: self.bucket_name.clone(),
-                    prefix: self.prefix_in_bucket.clone(),
-                    continuation_token,
-                    ..ListObjectsV2Request::default()
-                })
+                .list_objects_v2()
+                .bucket(self.bucket_name.clone())
+                .set_prefix(self.prefix_in_bucket.clone())
+                .set_continuation_token(continuation_token)
+                .send()
                 .await
                 .map_err(|e| {
                     metrics::inc_list_objects_fail();
@@ -322,13 +345,12 @@ impl RemoteStorage for S3Bucket {
 
             let fetch_response = self
                 .client
-                .list_objects_v2(ListObjectsV2Request {
-                    bucket: self.bucket_name.clone(),
-                    prefix: list_prefix.clone(),
-                    continuation_token,
-                    delimiter: Some(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()),
-                    ..ListObjectsV2Request::default()
-                })
+                .list_objects_v2()
+                .bucket(self.bucket_name.clone())
+                .set_prefix(list_prefix.clone())
+                .set_continuation_token(continuation_token)
+                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
+                .send()
                 .await
                 .map_err(|e| {
                     metrics::inc_list_objects_fail();
@@ -366,17 +388,18 @@ impl RemoteStorage for S3Bucket {
             .context("Concurrency limiter semaphore got closed during S3 upload")?;
 
         metrics::inc_put_object();
+
+        let body = Body::wrap_stream(ReaderStream::new(from));
+        let bytes_stream = ByteStream::new(SdkBody::from(body));
+
         self.client
-            .put_object(PutObjectRequest {
-                body: Some(StreamingBody::new_with_size(
-                    ReaderStream::new(from),
-                    from_size_bytes,
-                )),
-                bucket: self.bucket_name.clone(),
-                key: to.0.to_owned(),
-                metadata: metadata.map(|m| m.0),
-                ..PutObjectRequest::default()
-            })
+            .put_object()
+            .bucket(self.bucket_name.clone())
+            .key(to.0.to_owned())
+            .set_metadata(metadata.map(|m| m.0))
+            .content_length(from_size_bytes.try_into()?)
+            .body(bytes_stream)
+            .send()
             .await
             .map_err(|e| {
                 metrics::inc_put_object_fail();
@@ -412,7 +435,6 @@ impl RemoteStorage for S3Bucket {
             bucket: self.bucket_name.clone(),
             key: from.0.to_owned(),
             range,
-            ..GetObjectRequest::default()
         })
         .await
     }
@@ -427,11 +449,10 @@ impl RemoteStorage for S3Bucket {
         metrics::inc_delete_object();
 
         self.client
-            .delete_object(DeleteObjectRequest {
-                bucket: self.bucket_name.clone(),
-                key: remote_object_id.0.to_owned(),
-                ..DeleteObjectRequest::default()
-            })
+            .delete_object()
+            .bucket(self.bucket_name.clone())
+            .key(remote_object_id.0.to_owned())
+            .send()
             .await
             .map_err(|e| {
                 metrics::inc_delete_object_fail();
@@ -600,7 +621,7 @@ mod tests {
     fn dummy_storage(workdir: PathBuf) -> S3Bucket {
         S3Bucket {
             workdir,
-            client: S3Client::new("us-east-1".parse().unwrap()),
+            client: Client::new(&aws_config::SdkConfig::builder().build()),
             bucket_name: "dummy-bucket".to_string(),
             prefix_in_bucket: Some("dummy_prefix/".to_string()),
             concurrency_limiter: Semaphore::new(1),

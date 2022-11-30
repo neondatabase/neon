@@ -1761,6 +1761,13 @@ class NeonPageserver(PgProtocol):
             ".*Removing intermediate uninit mark file.*",
             # FIXME: known race condition in TaskHandle: https://github.com/neondatabase/neon/issues/2885
             ".*sender is dropped while join handle is still alive.*",
+            # Tenant::delete_timeline() can cause any of the four following errors.
+            # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
+            ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
+            ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
+            ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
+            ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
+            ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
         ]
 
     def start(
@@ -2528,6 +2535,7 @@ class SafekeeperTimelineStatus:
     acceptor_epoch: int
     pg_version: int
     flush_lsn: Lsn
+    commit_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
     remote_consistent_lsn: Lsn
@@ -2577,6 +2585,7 @@ class SafekeeperHttpClient(requests.Session):
             acceptor_epoch=resj["acceptor_state"]["epoch"],
             pg_version=resj["pg_info"]["pg_version"],
             flush_lsn=Lsn(resj["flush_lsn"]),
+            commit_lsn=Lsn(resj["commit_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
             remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),

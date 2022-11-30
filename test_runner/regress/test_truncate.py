@@ -16,8 +16,9 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     # by image layer generation. So adjust default parameters to make it happen more frequently.
     tenant, _ = env.neon_cli.create_tenant(
         conf={
-            "gc_period": "100 m",
-            "gc_horizon": "1048576",
+            # disable automatic GC
+            "gc_period": "0s",
+            # Compact and create images aggressively
             "checkpoint_distance": "1000000",
             "compaction_period": "1 s",
             "compaction_threshold": "3",
