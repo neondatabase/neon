@@ -125,6 +125,13 @@ pub const TEMP_FILE_SUFFIX: &str = "___temp";
 /// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
 pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 
+/// A marker file to prevent pageserver from loading a certain tenant on restart.
+/// Different from [`TIMELINE_UNINIT_MARK_SUFFIX`] due to semantics of the corresponding
+/// `ignore` management API command, that expects the ignored tenant to be properly loaded
+/// into pageserver's memory before being ignored.
+/// Full path: `tenants/<tenant_id>/___ignored_tenant`.
+pub const IGNORED_TENANT_FILE_NAME: &str = "___ignored_tenant";
+
 pub fn is_temporary(path: &Path) -> bool {
     match path.file_name() {
         Some(name) => name.to_string_lossy().ends_with(TEMP_FILE_SUFFIX),

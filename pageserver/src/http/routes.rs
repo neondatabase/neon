@@ -349,13 +349,13 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
 
     if let Some(remote_storage) = &state.remote_storage {
         // FIXME: distinguish between "Tenant already exists" and other errors
-        tenant_mgr::attach_tenant(state.conf, tenant_id, remote_storage)
+        tenant_mgr::attach_tenant(state.conf, tenant_id, remote_storage.clone())
             .instrument(info_span!("tenant_attach", tenant = %tenant_id))
             .await
             .map_err(ApiError::InternalServerError)?;
     } else {
         return Err(ApiError::BadRequest(anyhow!(
-            "attach_tenant is possible because pageserver was configured without remote storage"
+            "attach_tenant is not possible because pageserver was configured without remote storage"
         )));
     }
 
@@ -388,6 +388,35 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await
         // FIXME: Errors from `detach_tenant` can be caused by both both user and internal errors.
+        // Replace this with better handling once the error type permits it.
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let state = get_state(&request);
+    tenant_mgr::load_tenant(state.conf, tenant_id, state.remote_storage.clone())
+        .instrument(info_span!("load", tenant = %tenant_id))
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn tenant_ignore_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let state = get_state(&request);
+    let conf = state.conf;
+    tenant_mgr::ignore_tenant(conf, tenant_id)
+        .instrument(info_span!("ignore_tenant", tenant = %tenant_id))
+        .await
+        // FIXME: Errors from `ignore_tenant` can be caused by both both user and internal errors.
         // Replace this with better handling once the error type permits it.
         .map_err(ApiError::InternalServerError)?;
 
@@ -833,6 +862,8 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)
         .post("/v1/tenant/:tenant_id/detach", tenant_detach_handler)
+        .post("/v1/tenant/:tenant_id/load", tenant_load_handler)
+        .post("/v1/tenant/:tenant_id/ignore", tenant_ignore_handler)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,
