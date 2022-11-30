@@ -185,3 +185,61 @@ validate_table_scan(RWSetRelation *rw_rel)
     table_endscan(scan);
     table_close(rel, AccessShareLock);
 }
+
+void
+validate_tuple_scan(RWSetRelation *rw_rel)
+{
+    Oid             relid = rw_rel->relid;
+    XidCSN          read_csn = rw_rel->csn;
+    Relation        rel;
+    int             i;
+    Snapshot        snapshot = GetActiveSnapshot();
+	HeapTupleData   htup;
+    Buffer          buf = InvalidBuffer;
+    bool            valid = false;
+
+    // This function must only be called for table scans in current_region.
+    Assert(rw_rel->region == current_region);
+    Assert(!rw_rel->is_table_scan && !rw_rel->is_index);
+
+    rel = table_open(relid, AccessShareLock);
+
+    for (i = 0; i < rw_rel->n_tuples; i++)
+    {
+        htup.t_self = rw_rel->tuples[i].tid;
+
+        /* By default, keep_buffer = false to ensure that we don't keep the
+         * buffer around when the tuple is not valid. Any tuple that is not
+         * active should fail validation.
+         */
+#if PG_VERSION_NUM >= 150000
+        valid = heap_fetch(rel, snapshot, &htup, &buf, false);
+#else
+        valid = heap_fetch(rel, snapshot, &htup, &buf);
+#endif
+
+        if (valid)
+        {
+            /* The tuple is currently valid, we still need to ensure that it
+             * was the same tuple that we read at the remote region. We can
+             * do this by making sure that the xact that wrote this tuple
+             * committed at or before the read_csn.
+             */
+            TransactionId xmin = HeapTupleHeaderGetRawXmin(htup.t_data);
+            if (TransactionIdIsValid(xmin) &&
+                CSNLogGetCSNByXid(current_region, xmin) > read_csn)
+                valid = false;
+            
+
+            ReleaseBuffer(buf);
+        }
+
+        if (!valid)
+            ereport(ERROR,
+                (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                errmsg("read out-of-date tuple data from a remote partition")));
+    }
+
+
+    table_close(rel, AccessShareLock);
+}

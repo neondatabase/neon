@@ -458,9 +458,13 @@ rx_execute_remote_xact(void)
 		pq_sendbyte(&buf, region);
 		pq_sendint64(&buf, csn);
 		pq_sendbyte(&buf, is_table_scan);
-		pq_sendint32(&buf, nitems);
-		pq_sendbytes(&buf, items->data, items->len);
-
+		/* Skip sending the tuples if a relation is a table scan. */
+		if (!is_table_scan) {
+			pq_sendint32(&buf, nitems);
+			pq_sendbytes(&buf, items->data, items->len);
+		} else {
+			pq_sendint32(&buf, 0);
+		}
 		read_len += buf.len;
 		num_read_rels++;
 	}

@@ -7,11 +7,93 @@
 #include "miscadmin.h"
 #include "lib/stringinfo.h"
 #include "rwset.h"
+#include "storage/block.h"
 #include "storage/proc.h"
 #include "validate.h"
 
 PG_FUNCTION_INFO_V1(validate_and_apply_xact);
 PG_FUNCTION_INFO_V1(lsn_snapshot);
+
+static int relation_comparator(const void *p1, const void *p2)
+{
+	RWSetRelation r1 = *(const RWSetRelation *)p1;
+	RWSetRelation r2 = *(const RWSetRelation *)p2;
+
+	// The initial sort order is based on regions.
+	if (r1.region < r2.region)
+		return -1;
+	else if (r1.region > r2.region)
+		return 1;
+
+	/* Both RWSetRelations belong to the same region.
+	 * We prioritize in the following order:
+	 * 		1. Table scans.
+	 * 		2. Index scans.
+	 * 		3. Tuple scans.
+	 */
+	if (r1.is_table_scan && !r2.is_table_scan)
+		return -1;
+	else if (!r1.is_table_scan && r2.is_table_scan)
+		return 1;
+	else if (r1.is_index && !r2.is_index)
+		return -1;
+	else if (!r1.is_index && r2.is_index)
+		return 1;
+
+	// Both RWSetRelations are scans of the same type.
+	Assert((r1.is_table_scan == r2.is_table_scan) && 
+			(r1.is_index == r2.is_index));
+
+	if (r1.relid < r2.relid)
+		return -1;
+	else if (r1.relid > r2.relid)
+		return 1;
+
+	/* 
+	 * Ideally, this should never happend because the sender will never send
+	 * two different objects for the same relid and relkind.
+	 */
+	return 0;
+}
+
+static int page_comparator(const void *p1, const void *p2)
+{
+	RWSetPage page1 = *(const RWSetPage *)p1;
+	RWSetPage page2 = *(const RWSetPage *)p2;
+
+	if (page1.blkno < page2.blkno)
+		return -1;
+	else if (page1.blkno > page2.blkno)
+		return 1;
+	/* Ideally, we should not get the same page twice. */
+	return 0;
+}
+
+static int tuple_comparator(const void *p1, const void *p2)
+{
+	RWSetTuple t1 = *(const RWSetTuple *)p1;
+	RWSetTuple t2 = *(const RWSetTuple *)p2;
+
+	BlockNumber b1 = BlockIdGetBlockNumber(&(t1.tid.ip_blkid));
+	BlockNumber b2 = BlockIdGetBlockNumber(&(t2.tid.ip_blkid));
+
+
+	if (b1 < b2)
+		return -1;
+	else if (b1 > b2)
+		return 1;
+	
+	/* Both tuples belong to the same block. */
+	Assert(b1 == b2);
+
+	if (t1.tid.ip_posid < t2.tid.ip_posid)
+		return -1;
+	else if (t1.tid.ip_posid > t2.tid.ip_posid)
+		return 1;
+
+	/* Ideally, we should not get the same tuple twice. */
+	return 0;
+}
 
 Datum
 validate_and_apply_xact(PG_FUNCTION_ARGS)
@@ -28,7 +110,7 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 	is_surrogate = true;
 
 	/*
-	 * Decode the buffer into a rwset
+	 * Decode the buffer into a rwset and sort the relations.
 	 */
 	rwset = RWSetAllocate();
 	buf.data = VARDATA(bytes);
@@ -36,6 +118,8 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 	buf.maxlen = buf.len;
 	buf.cursor = 0;
 	RWSetDecode(rwset, &buf);
+	pg_qsort(rwset->relations, rwset->n_relations, sizeof(RWSetRelation), 
+			relation_comparator);
 
 	/* 
 	 * Mark the xact as remote before starting validation by setting the
@@ -55,17 +139,20 @@ validate_and_apply_xact(PG_FUNCTION_ARGS)
 
 		if (region != current_region)
 			continue;
-
-		/* TODO(pooja): Better organize this code in the following order:
-		 * 1. Index scan
-		 * 2. Tuple scans
-		 * 3. Table scan
-		 */
 		
-		if (rel->is_index && !rel->is_table_scan)
+		/* Prioritize validation on the basis of granularity. */
+		if (rel->is_table_scan)
+			validate_table_scan(rel);
+		else if (rel->is_index)
+		{
+			pg_qsort(rel->pages, rel->n_pages, sizeof(RWSetPage), page_comparator);
 			validate_index_scan(rel);
-		else if (!rel->is_index && rel->is_table_scan)
-			validate_table_scan(rel); 
+		} 
+		else 
+		{
+			pg_qsort(rel->tuples, rel->n_tuples, sizeof(RWSetTuple), tuple_comparator);
+			validate_tuple_scan(rel);
+		}
 	}
 
 	/*
