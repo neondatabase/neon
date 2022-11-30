@@ -1780,6 +1780,10 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 												  &request_lsn);
 			slot = GetPrfSlot(ring_index);
 		}
+		else
+		{
+			entry = NULL;
+		}
 
 		Assert(slot->my_ring_index == ring_index);
 		Assert(MyPState->ring_last <= ring_index &&
