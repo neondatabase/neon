@@ -182,23 +182,44 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
     layer_map
 }
 
+/// Construct a layer map query pattern for benchmarks
+fn uniform_query_pattern(layer_map: &LayerMap) -> Vec<(Key, Lsn)> {
+    // For each image layer we query one of the pages contained, at LSN right
+    // before the image layer was created. This gives us a somewhat uniform
+    // coverage of both the lsn and key space because image layers have
+    // approximately equal sizes and cover approximately equal WAL since
+    // last image.
+    layer_map
+        .iter_historic_layers()
+        .filter_map(|l| {
+            if l.is_incremental() {
+                None
+            } else {
+                let kr = l.get_key_range();
+                let lr = l.get_lsn_range();
+
+                let key_inside = kr.start.next();
+                let lsn_before = Lsn(lr.start.0 - 1);
+
+                Some((key_inside, lsn_before))
+            }
+        })
+        .collect()
+}
+
 fn large_layer_map(c: &mut Criterion) {
     // A list of layer filenames, extracted from our performance test environment, from
     // a project where we have run pgbench many timmes. The pgbench database was initialized
     // between each test run.
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
+    let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
+    // Test with uniform query pattern
     c.bench_function("search", |b| {
         b.iter(|| {
-            let result = layer_map.search(
-                // Just an arbitrary point
-                //
-                // TODO do better.
-                Key::from_hex("000000067F000080000009E014000001B011").unwrap(),
-                // This LSN is higher than any of the LSNs in the tree
-                Lsn::from_str("D0/80208AE1").unwrap(),
-            );
-            result.unwrap();
+            for q in queries.clone().into_iter() {
+                layer_map.search(q.0, q.1).unwrap();
+            }
         });
     });
 
@@ -222,29 +243,9 @@ fn large_layer_map(c: &mut Criterion) {
     //
     // TODO consider compressing these files
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
+    let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
-    // For each image layer we query one of the pages contained, at LSN right
-    // before the image layer was created. This way we get a somewhat uniform
-    // coverage of both the lsn and key space.
-    let queries: Vec<(Key, Lsn)> = layer_map
-        .iter_historic_layers()
-        .filter_map(|l| {
-            if l.is_incremental() {
-                None
-            } else {
-                let kr = l.get_key_range();
-                let lr = l.get_lsn_range();
-
-                let key_inside = kr.start.next();
-                let lsn_before = Lsn(lr.start.0 - 1);
-
-                Some((key_inside, lsn_before))
-            }
-        })
-        .collect();
-
-    println!("num queries: {}", queries.len());
-
+    // Test with uniform query pattern
     c.bench_function("search_real_map", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
