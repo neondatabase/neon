@@ -254,5 +254,34 @@ fn bench_from_real_project(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_from_captest_env, bench_from_real_project);
+// Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
+fn bench_sequential(c: &mut Criterion) {
+    let mut layer_map = LayerMap::default();
+    for i in 0..100_000 {
+        // % 100 => 17 sec (very bad, should be way under 1 sec. 20x room for improvement)
+        // % 1000 => 1.6 sec
+        // % 10_000 =>
+        // TODO try inserting a super-wide layer in between every 10
+        let i32 = (i as u32) % 100;
+        let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
+        let layer = DummyImage {
+            key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
+            lsn: Lsn(10 * i),
+        };
+        layer_map.insert_historic(Arc::new(layer));
+    }
+
+    let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
+
+    // Test with uniform query pattern
+    c.bench_function("sequential_uniform_queries", |b| {
+        b.iter(|| {
+            for q in queries.clone().into_iter() {
+                layer_map.search(q.0, q.1).unwrap();
+            }
+        });
+    });
+}
+
+criterion_group!(benches, bench_sequential);
 criterion_main!(benches);
