@@ -7,7 +7,7 @@ pub fn init_sentry(
     return match maybe_sentry_url {
         Some(sentry_url) => {
             let _guard = sentry::init((
-                sentry_url.as_str().to_string(),
+                sentry_url.to_string(),
                 sentry::ClientOptions {
                     release: sentry::release_name!(),
                     ..Default::default()
