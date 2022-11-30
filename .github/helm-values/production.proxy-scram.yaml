@@ -2,6 +2,7 @@ settings:
   authBackend: "console"
   authEndpoint: "http://console-release.local/management/api/v2"
   domain: "*.cloud.neon.tech"
+  sentryURL: "{{ SENTRY_URL_PROXY }}"
 
 podLabels:
   zenith_service: proxy-scram
