@@ -235,19 +235,39 @@ impl LayerMap {
         let key = IntKey::from(key.to_i128());
         let mut min_lsn = Lsn(0);
         let mut max_lsn = Lsn(0);
-        Self::find_latest_layer_recurs(key, &mut min_lsn, &mut max_lsn, end_lsn, root, image_only)
-            .map(|layer| SearchResult {
+        let mut image_lsn = Lsn(1);
+        let mut done = false;
+        Self::find_latest_layer_recurs(
+            key,
+            &mut min_lsn,
+            &mut max_lsn,
+            &mut image_lsn,
+            end_lsn,
+            root,
+            &mut done,
+            image_only,
+        )
+        .map(|layer| {
+            let is_incremental = layer.is_incremental();
+            SearchResult {
                 layer,
-                lsn_floor: min_lsn,
-            })
+                lsn_floor: if is_incremental {
+                    std::cmp::max(image_lsn, min_lsn)
+                } else {
+                    min_lsn
+                },
+            }
+        })
     }
 
     fn find_latest_layer_recurs(
         key: IntKey,
         min_lsn: &mut Lsn,
         max_lsn: &mut Lsn,
+        image_lsn: &mut Lsn,
         end_lsn: Lsn,
         node: &ParentNode<LayerRTreeObject>,
+        done: &mut bool,
         image_only: bool,
     ) -> Option<Arc<dyn Layer>> {
         let mut result: Option<Arc<dyn Layer>> = None;
@@ -284,24 +304,38 @@ impl LayerMap {
                         key >= IntKey::from(key_range.start.to_i128())
                             && key < IntKey::from(key_range.end.to_i128())
                     );
-                    debug_assert!(lsn_range.start.0 <= end_lsn.0);
-                    if min_lsn.0 < lsn_range.start.0 {
+                    debug_assert!(lsn_range.start <= end_lsn);
+                    if !layer.is_incremental() && lsn_range.end.0 >= end_lsn.0 {
+                        // found exact match
+                        assert!(lsn_range.end == end_lsn);
+                        *done = true;
                         *min_lsn = lsn_range.start;
+                        return Some(layer.clone());
                     }
                     if max_lsn.0 < lsn_range.end.0 {
                         *max_lsn = lsn_range.end;
+                        if !layer.is_incremental() {
+                            *image_lsn = lsn_range.end;
+                        }
+                        if min_lsn.0 < lsn_range.start.0 {
+                            *min_lsn = lsn_range.start;
+                        }
+                        result = Some(layer.clone());
                     } else {
+                        if !layer.is_incremental() && *image_lsn < lsn_range.end {
+                            *image_lsn = lsn_range.end;
+                        }
                         continue;
                     }
-                    result = Some(layer.clone());
                 }
                 RTreeNode::Parent(parent) => {
                     if let Some(occurance) = Self::find_latest_layer_recurs(
-                        key, min_lsn, max_lsn, end_lsn, parent, image_only,
+                        key, min_lsn, max_lsn, image_lsn, end_lsn, parent, done, image_only,
                     ) {
                         result = Some(occurance);
-                    } else {
-                        continue;
+                        if *done {
+                            return result;
+                        }
                     }
                 }
             };
