@@ -223,22 +223,25 @@ fn large_layer_map(c: &mut Criterion) {
     // TODO consider compressing these files
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
 
-    // We'll query the midpoint of each image layer at LSN right before the image
-    // layer. This way we get a somewhat uniform coverage of both the lsn and key
-    // space.
-    let queries: Vec<(Key, Lsn)> = layer_map.iter_historic_layers().filter_map(|l| {
-        if l.is_incremental() {
-            None
-        } else {
-            let kr = l.get_key_range();
-            let lr = l.get_lsn_range();
+    // For each image layer we query one of the pages contained, at LSN right
+    // before the image layer was created. This way we get a somewhat uniform
+    // coverage of both the lsn and key space.
+    let queries: Vec<(Key, Lsn)> = layer_map
+        .iter_historic_layers()
+        .filter_map(|l| {
+            if l.is_incremental() {
+                None
+            } else {
+                let kr = l.get_key_range();
+                let lr = l.get_lsn_range();
 
-            let mid_key = kr.start;  // TODO maybe actually find the midpoint
-            let lsn_before = Lsn(lr.start.0 - 1);
+                let key_inside = kr.start.next();
+                let lsn_before = Lsn(lr.start.0 - 1);
 
-            Some((mid_key, lsn_before))
-        }
-    }).collect();
+                Some((key_inside, lsn_before))
+            }
+        })
+        .collect();
 
     println!("num queries: {}", queries.len());
 
