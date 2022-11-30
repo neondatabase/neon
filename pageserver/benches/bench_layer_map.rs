@@ -207,15 +207,16 @@ fn uniform_query_pattern(layer_map: &LayerMap) -> Vec<(Key, Lsn)> {
         .collect()
 }
 
-fn large_layer_map(c: &mut Criterion) {
-    // A list of layer filenames, extracted from our performance test environment, from
-    // a project where we have run pgbench many timmes. The pgbench database was initialized
-    // between each test run.
+// Benchmark using metadata extracted from our performance test environment, from
+// a project where we have run pgbench many timmes. The pgbench database was initialized
+// between each test run.
+fn bench_from_captest_env(c: &mut Criterion) {
+    // TODO consider compressing this file
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
     // Test with uniform query pattern
-    c.bench_function("search", |b| {
+    c.bench_function("captest_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1).unwrap();
@@ -224,7 +225,7 @@ fn large_layer_map(c: &mut Criterion) {
     });
 
     // test with a key that corresponds to the RelDir entry. See pgdatadir_mapping.rs.
-    c.bench_function("search_rel_dir", |b| {
+    c.bench_function("captest_rel_dir_query", |b| {
         b.iter(|| {
             let result = layer_map.search(
                 Key::from_hex("000000067F00008000000000000000000001").unwrap(),
@@ -234,19 +235,18 @@ fn large_layer_map(c: &mut Criterion) {
             result.unwrap();
         });
     });
+}
 
-    // TODO I don't think I'm using criterion right. Should I keep adding to the
-    //      same function?
 
-    // A list of layer filenames, extracted from a real project that was taknig
-    // too long processing layer map queries.
-    //
-    // TODO consider compressing these files
+// Benchmark using metadata extracted from a real project that was taknig
+// too long processing layer map queries.
+fn bench_from_real_project(c: &mut Criterion) {
+    // TODO consider compressing this file
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
     // Test with uniform query pattern
-    c.bench_function("search_real_map", |b| {
+    c.bench_function("real_map_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1).unwrap();
@@ -255,5 +255,5 @@ fn large_layer_map(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, large_layer_map);
+criterion_group!(benches, bench_from_captest_env, bench_from_real_project);
 criterion_main!(benches);
