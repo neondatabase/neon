@@ -237,7 +237,6 @@ fn bench_from_captest_env(c: &mut Criterion) {
     });
 }
 
-
 // Benchmark using metadata extracted from a real project that was taknig
 // too long processing layer map queries.
 fn bench_from_real_project(c: &mut Criterion) {
