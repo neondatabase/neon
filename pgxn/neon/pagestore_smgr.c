@@ -1782,6 +1782,13 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		}
 		else
 		{
+			/*
+			 * Empty our reference to the prefetch buffer's hash entry.
+			 * When we wait for prefetches, the entry reference is invalidated by 
+			 * potential updates to the hash, and when we reconnect to the 
+			 * pageserver the prefetch we're waiting for may be dropped,
+			 * in which case we need to retry and take the branch above.
+			 */
 			entry = NULL;
 		}
 
