@@ -280,32 +280,49 @@ fn bench_sequential(c: &mut Criterion) {
             lsn: Lsn(i),
         };
         layer_map.insert_historic(Arc::new(layer));
-        stlm.insert(10 * i32, 10 * i32 + 1);
     }
+    println!("Finished layer map init in {:?}", now.elapsed());
 
-    // Manually measure runtime without criterion because criterion
-    // has a minimum sample size of 10 and I don't want to run it 10 times.
-    println!("Finished init in {:?}", now.elapsed());
+    let now = Instant::now();
+    for i in 0..100_000 {
+        // TODO try inserting a super-wide layer in between every 10 to reflect
+        //      what often happens with L1 layers that include non-rel changes.
+        //      Maybe do that as a separate test.
+        let i32 = (i as u32) % 100;
+        let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
+        let layer = DummyImage {
+            key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
+            lsn: Lsn(i),
+        };
+        stlm.insert(10 * i32, 10 * i32 + 1, i as u32, format!("Layer {}", i));
+    }
+    println!("Finished persistent segment tree init in {:?}", now.elapsed());
 
     // Choose 100 uniformly random queries
     let rng = &mut StdRng::seed_from_u64(1);
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map)
-        .choose_multiple(rng, 1)
+        .choose_multiple(rng, 100)
         .copied()
         .collect();
 
     // Define and name the benchmark function
-    c.bench_function("sequential_uniform_queries", |b| {
-        // Run the search queries
+    let mut group = c.benchmark_group("sequential_uniform_queries");
+    group.bench_function("current_code", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1).unwrap();
             }
         });
     });
+    group.bench_function("persistent_segment_tree", |b| {
+        b.iter(|| {
+            for q in queries.clone().into_iter() {
+                stlm.query(q.0.field6, q.1.0 as u32);
+            }
+        });
+    });
+    group.finish();
 }
 
-criterion_group!(group_1, bench_from_captest_env);
-criterion_group!(group_2, bench_from_real_project);
 criterion_group!(group_3, bench_sequential);
-criterion_main!(group_1, group_2, group_3);
+criterion_main!(group_3);

@@ -1,11 +1,12 @@
 use persistent_range_query::naive::{IndexableKey, NaiveVecStorage};
 use persistent_range_query::ops::SameElementsInitializer;
-use persistent_range_query::segment_tree::{MidpointableKey, PersistentSegmentTree};
+use persistent_range_query::segment_tree::{MidpointableKey, PersistentSegmentTree, PersistentSegmentTreeVersion};
 use persistent_range_query::{
     LazyRangeInitializer, PersistentVecStorage, RangeModification, RangeQueryResult,
     VecReadableVersion,
 };
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -194,26 +195,54 @@ impl LazyRangeInitializer<LayerMapInformation, PageIndex> for SameElementsInitia
     }
 }
 
+type Head = PersistentSegmentTree<LayerMapModification, SameElementsInitializer<()>, PageIndex>;
+type Version = PersistentSegmentTreeVersion<LayerMapModification, SameElementsInitializer<()>, PageIndex>;
+
 pub struct STLM {
-    s: PersistentVecStorage<LayerMapModification, SameElementsInitializer<()>, PageIndex>,
+    head: Head,
+    historic: BTreeMap<u32, Version>,
 }
 
+/// Layer map (good enough for benchmarks) implemented using persistent segment tree
 impl STLM {
     pub fn new() -> Self {
         STLM {
-            s: PersistentVecStorage::new(
+            head: PersistentSegmentTree::new(
                 PageIndex(0)..PageIndex(100),
                 SameElementsInitializer::new(()),
             ),
+            historic: BTreeMap::default(),
         }
     }
 
-    pub fn insert(key_begin: i32, key_end: i32) {
-        s.modify(
+    pub fn insert(self: &mut Self, key_begin: u32, key_end: u32, lsn: u32, value: String) {
+        self.head.modify(
             &(PageIndex(key_begin)..PageIndex(key_end)),
-            &LayerMapModification::add_image_layer("Img0..70"),
+            &LayerMapModification::add_image_layer(value),
         );
+        self.historic.insert(lsn, self.head.freeze());
     }
+
+    pub fn query(self: &Self, key: u32, lsn: u32) -> Option<String> {
+        let version = self.historic.range(0..=lsn).rev().next()?.1;
+        let info = version.get(&(PageIndex(key)..PageIndex(key + 1)));
+        info.last_image_layer.map(|s| s.clone())
+    }
+}
+
+fn test_stlm() {
+    let mut stlm = STLM::new();
+    stlm.insert(0, 5, 100, "layer 1".to_string());
+    stlm.insert(3, 9, 110, "layer 2".to_string());
+
+    dbg!(stlm.query(1, 105));
+    dbg!(stlm.query(4, 105));
+    dbg!(stlm.query(4, 115));
+}
+
+#[test]
+fn test_stlm_() {
+    test_stlm()
 }
 
 fn test_layer_map<
