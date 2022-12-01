@@ -18,27 +18,26 @@ use utils::lsn::Lsn;
 /// A part of the filesystem path, that needs a root to become a path again.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct RelativePath(String);
+pub struct RelativePath(PathBuf);
 
 impl RelativePath {
-    /// Attempts to strip off the base from path, producing a relative path or an error.
-    pub fn from_local_path(timeline_path: &Path, path: &Path) -> anyhow::Result<RelativePath> {
-        let relative = path.strip_prefix(timeline_path).with_context(|| {
-            format!(
-                "path '{}' is not relative to base '{}'",
-                path.display(),
-                timeline_path.display()
-            )
+    pub fn new(relative_path: &Path) -> Self {
+        debug_assert!(
+            relative_path.is_relative(),
+            "Path {relative_path:?} is not relative"
+        );
+        Self(relative_path.to_path_buf())
+    }
+
+    pub fn strip_base_path(base_path: &Path, full_path: &Path) -> anyhow::Result<Self> {
+        let relative = full_path.strip_prefix(base_path).with_context(|| {
+            format!("path {full_path:?} is not relative to base {base_path:?}",)
         })?;
-        Ok(Self::from_filename(relative))
+        Ok(Self::new(relative))
     }
 
-    pub fn from_filename(path: &Path) -> RelativePath {
-        RelativePath(path.to_string_lossy().to_string())
-    }
-
-    pub fn to_local_path(&self, timeline_path: &Path) -> PathBuf {
-        timeline_path.join(&self.0)
+    pub fn to_local_path(&self, base_path: &Path) -> PathBuf {
+        base_path.join(&self.0)
     }
 }
 
@@ -199,8 +198,8 @@ mod tests {
 
         let expected = IndexPart {
             version: 0,
-            timeline_layers: [RelativePath("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".to_owned())].into_iter().collect(),
-            missing_layers: Some([RelativePath("not_a_real_layer_but_adding_coverage".to_owned())].into_iter().collect()),
+            timeline_layers: HashSet::from([RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))]),
+            missing_layers: Some(HashSet::from([RelativePath(PathBuf::from("not_a_real_layer_but_adding_coverage"))])),
             layer_metadata: HashMap::default(),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: [113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
@@ -227,13 +226,13 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: [RelativePath("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".to_owned())].into_iter().collect(),
-            missing_layers: Some([RelativePath("not_a_real_layer_but_adding_coverage".to_owned())].into_iter().collect()),
+            timeline_layers: HashSet::from([RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))]),
+            missing_layers: Some(HashSet::from([RelativePath(PathBuf::from("not_a_real_layer_but_adding_coverage"))])),
             layer_metadata: HashMap::from([
-                (RelativePath("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".to_owned()), IndexLayerMetadata {
+                (RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9")), IndexLayerMetadata {
                     file_size: Some(25600000),
                 }),
-                (RelativePath("not_a_real_layer_but_adding_coverage".to_owned()), IndexLayerMetadata {
+                (RelativePath(PathBuf::from("not_a_real_layer_but_adding_coverage")), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: Some(9007199254741001),
@@ -263,12 +262,12 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: [RelativePath("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".to_owned())].into_iter().collect(),
+            timeline_layers: [RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))].into_iter().collect(),
             layer_metadata: HashMap::from([
-                (RelativePath("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".to_owned()), IndexLayerMetadata {
+                (RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9")), IndexLayerMetadata {
                     file_size: Some(25600000),
                 }),
-                (RelativePath("not_a_real_layer_but_adding_coverage".to_owned()), IndexLayerMetadata {
+                (RelativePath(PathBuf::from("not_a_real_layer_but_adding_coverage")), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: Some(9007199254741001),
