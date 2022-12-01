@@ -34,6 +34,7 @@ pub mod sock_split;
 pub mod logging;
 
 pub mod lock_file;
+pub mod pid_file;
 
 // Misc
 pub mod accum;

@@ -324,7 +324,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
             pg_version,
         )
         .unwrap_or_else(|e| {
-            eprintln!("pageserver init failed: {e}");
+            eprintln!("pageserver init failed: {e:?}");
             exit(1);
         });
 
