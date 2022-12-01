@@ -27,3 +27,4 @@ postgres_connection = { path = "../libs/postgres_connection" }
 safekeeper_api = { path = "../libs/safekeeper_api" }
 utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
+scopeguard = "1.1.0"

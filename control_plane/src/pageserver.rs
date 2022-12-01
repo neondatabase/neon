@@ -22,6 +22,7 @@ use utils::{
     postgres_backend::AuthType,
 };
 
+use crate::background_process::stop_process;
 use crate::{background_process, local_env::LocalEnv};
 
 #[derive(Error, Debug)]
@@ -150,7 +151,7 @@ impl PageServerNode {
             init_config_overrides.push("auth_validation_public_key_path='auth_public_key.pem'");
         }
 
-        let mut pageserver_process = self
+        let pageserver_process = self
             .start_node(&init_config_overrides, &self.env.base_data_dir, true)
             .with_context(|| {
                 format!(
@@ -158,40 +159,31 @@ impl PageServerNode {
                     self.env.pageserver.id,
                 )
             })?;
+        let pageserver_process = scopeguard::guard(pageserver_process, |mut pageserver_process| {
+            // stop_process() assumes that someone is wait()ing for the child process to exit.
+            // For the regular case (neon_local start), that's PID 1 because `neon_local start` exits
+            // after it has started the pageserver.
+            // But for initialize(), we created the process and we're still alive.
+            // So, kick of a wait() thread so that stop_process() so that eventually
+            // stop_process() will observe ESRCH when it (repeatedly) tries to `kill` the process.
+            let wait_thread = std::thread::spawn(move || pageserver_process.wait());
+            match stop_process(false, "pageserver", &self.pid_file()) {
+                Ok(()) => {
+                    let st = wait_thread.join();
+                    println!("Stopped pageserver process; status: {st:?}")
+                }
+                Err(e) => eprintln!("Failed to stop pageserver process: {e:#}"),
+            }
+        });
 
         let init_result = self
             .try_init_timeline(create_tenant, initial_timeline_id, pg_version)
-            .context("Failed to create initial tenant and timeline for pageserver");
-        match &init_result {
-            Ok(initial_timeline_id) => {
-                println!("Successfully initialized timeline {initial_timeline_id}")
-            }
-            Err(e) => eprintln!("{e:#}"),
-        }
-        match pageserver_process.kill() {
-            Err(e) => {
-                eprintln!(
-                    "Failed to stop pageserver {} process with pid {}: {e:#}",
-                    self.env.pageserver.id,
-                    pageserver_process.id(),
-                )
-            }
-            Ok(()) => {
-                println!(
-                    "Stopped pageserver {} process with pid {}",
-                    self.env.pageserver.id,
-                    pageserver_process.id(),
-                );
-                // cleanup after pageserver startup, since we do not call regular `stop_process` during init
-                let pid_file = self.pid_file();
-                if let Err(e) = fs::remove_file(&pid_file) {
-                    if e.kind() != io::ErrorKind::NotFound {
-                        eprintln!("Failed to remove pid file {pid_file:?} after stopping the process: {e:#}");
-                    }
-                }
-            }
-        }
-        init_result
+            .context("Failed to create initial tenant and timeline for pageserver")?;
+        println!("Successfully initialized timeline {init_result}");
+
+        drop(pageserver_process);
+
+        Ok(init_result)
     }
 
     fn try_init_timeline(

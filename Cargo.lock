@@ -933,6 +933,7 @@ dependencies = [
  "regex",
  "reqwest",
  "safekeeper_api",
+ "scopeguard",
  "serde",
  "serde_with",
  "tar",
