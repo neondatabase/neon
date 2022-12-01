@@ -147,6 +147,22 @@ where
     anyhow::bail!("{process_name} did not start in {RETRY_UNTIL_SECS} seconds");
 }
 
+/// Send SIGTERM to child process
+pub fn send_stop_child_process(child: &std::process::Child) -> anyhow::Result<()> {
+    let pid = child.id();
+    match kill(
+        nix::unistd::Pid::from_raw(pid.try_into().unwrap()),
+        Signal::SIGTERM,
+    ) {
+        Ok(()) => Ok(()),
+        Err(Errno::ESRCH) => {
+            println!("child process with pid {pid} does not exist");
+            Ok(())
+        }
+        Err(e) => anyhow::bail!("Failed to send signal to child process with pid {pid}: {e}"),
+    }
+}
+
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
 pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> anyhow::Result<()> {
     if !pid_file.exists() {
@@ -179,11 +195,6 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
         match process_has_stopped(pid) {
             Ok(true) => {
                 println!("\n{process_name} stopped");
-                if let Err(e) = fs::remove_file(pid_file) {
-                    if e.kind() != io::ErrorKind::NotFound {
-                        eprintln!("Failed to remove pid file {pid_file:?} after stopping the process: {e:#}");
-                    }
-                }
                 return Ok(());
             }
             Ok(false) => {
