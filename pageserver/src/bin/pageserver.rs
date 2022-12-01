@@ -78,8 +78,10 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
 
-    let sentry_url = arg_matches.get_one::<String>("sentry-url");
-    let _guard = init_sentry(sentry_url, "pageserver");
+    // initialize sentry if sentry-url is provided
+    let _sentry_guard = arg_matches
+        .get_one::<String>("sentry-url")
+        .map(|url| init_sentry(url.as_str(), "pageserver"));
 
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,

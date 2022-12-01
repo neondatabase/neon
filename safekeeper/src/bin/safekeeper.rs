@@ -57,8 +57,10 @@ fn main() -> anyhow::Result<()> {
 
     let mut conf = SafeKeeperConf::default();
 
-    let sentry_url = arg_matches.get_one::<String>("sentry-url");
-    let _guard = init_sentry(sentry_url, "safekeeper");
+    // initialize sentry if sentry-url is provided
+    let _sentry_guard = arg_matches
+        .get_one::<String>("sentry-url")
+        .map(|url| init_sentry(url.as_str(), "pageserver"));
 
     if let Some(dir) = arg_matches.get_one::<PathBuf>("datadir") {
         // change into the data directory.
