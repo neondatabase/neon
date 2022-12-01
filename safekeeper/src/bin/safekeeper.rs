@@ -4,7 +4,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, Command};
 use const_format::formatcp;
-use nix::unistd::Pid;
 use remote_storage::RemoteStorageConfig;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
@@ -15,7 +14,7 @@ use tokio::sync::mpsc;
 use toml_edit::Document;
 use tracing::*;
 use url::{ParseError, Url};
-use utils::lock_file;
+use utils::pid_file;
 
 use metrics::set_build_info_metric;
 use safekeeper::broker;
@@ -147,28 +146,13 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
 
     // Prevent running multiple safekeepers on the same directory
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
-    let lock_file = match lock_file::create_lock_file(&lock_file_path, Pid::this().to_string()) {
-        lock_file::LockCreationResult::Created {
-            new_lock_contents,
-            file,
-        } => {
-            info!("Created lock file at {lock_file_path:?} with contenst {new_lock_contents}");
-            file
-        }
-        lock_file::LockCreationResult::AlreadyLocked {
-            existing_lock_contents,
-        } => anyhow::bail!(
-            "Could not lock pid file; safekeeper is already running in {:?} with PID {}",
-            conf.workdir,
-            existing_lock_contents
-        ),
-        lock_file::LockCreationResult::CreationFailed(e) => {
-            return Err(e.context(format!("Failed to create lock file at {lock_file_path:?}")))
-        }
-    };
+    let lock_file =
+        pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
+    info!("Claimed pid file at {lock_file_path:?}");
+
     // ensure that the lock file is held even if the main thread of the process is panics
     // we need to release the lock file only when the current process is gone
-    let _ = Box::leak(Box::new(lock_file));
+    std::mem::forget(lock_file);
 
     // Set or read our ID.
     set_id(&mut conf, given_id)?;

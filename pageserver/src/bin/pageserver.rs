@@ -7,7 +7,6 @@ use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
-use nix::unistd::Pid;
 use tracing::*;
 
 use metrics::set_build_info_metric;
@@ -23,7 +22,7 @@ use pageserver::{
 use remote_storage::GenericRemoteStorage;
 use utils::{
     auth::JwtAuth,
-    lock_file, logging,
+    logging,
     postgres_backend::AuthType,
     project_git_version,
     sentry_init::{init_sentry, release_name},
@@ -220,28 +219,13 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     }
 
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
-    let lock_file = match lock_file::create_lock_file(&lock_file_path, Pid::this().to_string()) {
-        lock_file::LockCreationResult::Created {
-            new_lock_contents,
-            file,
-        } => {
-            info!("Created lock file at {lock_file_path:?} with contenst {new_lock_contents}");
-            file
-        }
-        lock_file::LockCreationResult::AlreadyLocked {
-            existing_lock_contents,
-        } => anyhow::bail!(
-            "Could not lock pid file; pageserver is already running in {:?} with PID {}",
-            conf.workdir,
-            existing_lock_contents
-        ),
-        lock_file::LockCreationResult::CreationFailed(e) => {
-            return Err(e.context(format!("Failed to create lock file at {lock_file_path:?}")))
-        }
-    };
+    let lock_file =
+        utils::pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
+    info!("Claimed pid file at {lock_file_path:?}");
+
     // ensure that the lock file is held even if the main thread of the process is panics
     // we need to release the lock file only when the current process is gone
-    let _ = Box::leak(Box::new(lock_file));
+    std::mem::forget(lock_file);
 
     // TODO: Check that it looks like a valid repository before going further
 
