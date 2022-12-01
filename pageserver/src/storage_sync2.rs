@@ -612,7 +612,7 @@ impl RemoteTimelineClient {
             "file size not initialized in metadata"
         );
 
-        let relative_path = RelativePath::from_local_path(
+        let relative_path = RelativePath::strip_base_path(
             &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
             path,
         )?;
@@ -644,7 +644,7 @@ impl RemoteTimelineClient {
         // Convert the paths into RelativePaths, and gather other information we need.
         let mut relative_paths = Vec::with_capacity(paths.len());
         for path in paths {
-            relative_paths.push(RelativePath::from_local_path(
+            relative_paths.push(RelativePath::strip_base_path(
                 &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
                 path,
             )?);
