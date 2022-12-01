@@ -183,10 +183,6 @@ impl PageServerNode {
             self.env.pageserver.id,
             pageserver_process.id(),
         );
-        ensure!(
-            self.pid_file().exists(),
-            "pageserver pid file was not removed after init process exited"
-        );
         init_result
     }
 
