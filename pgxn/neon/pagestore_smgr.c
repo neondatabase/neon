@@ -1102,7 +1102,7 @@ PageIsEmptyHeapPage(char *buffer)
 }
 
 static void
-neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer)
+neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
 {
 	XLogRecPtr	lsn = PageGetLSN(buffer);
 
@@ -1116,7 +1116,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 	 * correctness, the non-logged updates are not critical. But we want to
 	 * have a reasonably up-to-date VM and FSM in the page server.
 	 */
-	if (forknum == FSM_FORKNUM && !RecoveryInProgress())
+	if ((force || forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM) && !RecoveryInProgress())
 	{
 		/* FSM is never WAL-logged and we don't care. */
 		XLogRecPtr	recptr;
@@ -1125,30 +1125,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 		XLogFlush(recptr);
 		lsn = recptr;
 		ereport(SmgrTrace,
-				(errmsg("FSM page %u of relation %u/%u/%u.%u was force logged. Evicted at lsn=%X/%X",
-						blocknum,
-						reln->smgr_rnode.node.spcNode,
-						reln->smgr_rnode.node.dbNode,
-						reln->smgr_rnode.node.relNode,
-						forknum, LSN_FORMAT_ARGS(lsn))));
-	}
-	else if (forknum == VISIBILITYMAP_FORKNUM && !RecoveryInProgress())
-	{
-		/*
-		 * Always WAL-log vm. We should never miss clearing visibility map
-		 * bits.
-		 *
-		 * TODO Is it too bad for performance? Hopefully we do not evict
-		 * actively used vm too often.
-		 */
-		XLogRecPtr	recptr;
-
-		recptr = log_newpage_copy(&reln->smgr_rnode.node, forknum, blocknum, buffer, false);
-		XLogFlush(recptr);
-		lsn = recptr;
-
-		ereport(SmgrTrace,
-				(errmsg("Visibilitymap page %u of relation %u/%u/%u.%u was force logged at lsn=%X/%X",
+				(errmsg("Page %u of relation %u/%u/%u.%u was force logged. Evicted at lsn=%X/%X",
 						blocknum,
 						reln->smgr_rnode.node.spcNode,
 						reln->smgr_rnode.node.dbNode,
@@ -1543,6 +1520,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			char *buffer, bool skipFsync)
 {
 	XLogRecPtr	lsn;
+	BlockNumber	n_blocks = 0;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1582,7 +1560,16 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 					 errhint("This limit is defined by neon.max_cluster_size GUC")));
 	}
 
-	neon_wallog_page(reln, forkNum, blkno, buffer);
+	/*
+	 * Usually Postgres doesn't extend relation on more than one page
+	 * (leaving holes). But this rule is violated in PG-15 where CreateAndCopyRelationData
+	 * call smgrextend for destination relation n using size of source relation
+	 */
+	get_cached_relsize(reln->smgr_rnode.node, forkNum, &n_blocks);
+	while (n_blocks < blkno)
+		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
+
+	neon_wallog_page(reln, forkNum, blkno, buffer, false);
 	set_cached_relsize(reln->smgr_rnode.node, forkNum, blkno + 1);
 
 	lsn = PageGetLSN(buffer);
@@ -2010,7 +1997,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	neon_wallog_page(reln, forknum, blocknum, buffer);
+	neon_wallog_page(reln, forknum, blocknum, buffer, false);
 
 	lsn = PageGetLSN(buffer);
 	elog(SmgrTrace, "smgrwrite called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
