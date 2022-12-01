@@ -60,6 +60,7 @@ RUN set -e \
         libseccomp-dev \
         openssl \
         ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \
     && chown -R neon:neon /data
@@ -84,6 +85,11 @@ RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
        -c "pg_distrib_dir='/usr/local/'" \
        -c "listen_pg_addr='0.0.0.0:6400'" \
        -c "listen_http_addr='0.0.0.0:9898'"
+
+RUN curl https://dl.min.io/client/mc/release/linux-amd64/mc \
+         --create-dirs \
+         -o /usr/bin/mc \
+    && chmod +x /usr/bin/mc
 
 VOLUME ["/data"]
 USER neon
