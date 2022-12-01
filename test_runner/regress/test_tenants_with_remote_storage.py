@@ -230,7 +230,6 @@ def test_tenant_upgrades_index_json_from_v0(
         "timeline_layers":[
             "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"
         ],
-        "missing_layers":[],
         "disk_consistent_lsn":"0/16960E8",
         "metadata_bytes":[]
     }"""
@@ -316,7 +315,6 @@ def test_tenant_upgrades_index_json_from_v0(
     # make sure the file has been upgraded back to how it started
     index_part = local_fs_index_part(env, tenant_id, timeline_id)
     assert index_part["version"] == orig_index_part["version"]
-    assert index_part["missing_layers"] == orig_index_part["missing_layers"]
 
     # expect one more layer because of the forced checkpoint
     assert len(index_part["timeline_layers"]) == len(orig_index_part["timeline_layers"]) + 1
