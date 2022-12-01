@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::config::PageServerConf;
 use crate::storage_sync::index::LayerFileMetadata;
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, GenericRemoteStorage, RelativePath};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
@@ -36,7 +36,7 @@ pub async fn download_layer_file<'a>(
 ) -> anyhow::Result<u64> {
     let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
 
-    let local_path = path.to_local_path(&timeline_path);
+    let local_path = path.to_full_path(&timeline_path);
 
     let layer_storage_path = storage.remote_object_id(&local_path).with_context(|| {
         format!(
@@ -175,7 +175,7 @@ pub async fn list_remote_timelines<'a>(
     let mut part_downloads = FuturesUnordered::new();
 
     for timeline_remote_storage_key in timelines {
-        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
+        let object_name = object_name(&timeline_remote_storage_key).ok_or_else(|| {
             anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
         })?;
 
@@ -254,4 +254,49 @@ pub async fn download_index_part(
         .map_err(DownloadError::Other)?;
 
     Ok(index_part)
+}
+
+// Needed to retrieve last component for RemoteObjectId.
+// In other words a file name
+/// Turn a/b/c or a/b/c/ into c
+fn object_name(path: &RelativePath) -> Option<&str> {
+    // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
+    // see https://github.com/rust-lang/rust/issues/88674
+    if self.0.len() == 1 && self.0.chars().next().unwrap() == REMOTE_STORAGE_PREFIX_SEPARATOR {
+        return None;
+    }
+
+    if self.0.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+        self.0.rsplit(REMOTE_STORAGE_PREFIX_SEPARATOR).nth(1)
+    } else {
+        self.0
+            .rsplit_once(REMOTE_STORAGE_PREFIX_SEPARATOR)
+            .map(|(_, last)| last)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use remote_storage::RelativePath;
+
+    use super::*;
+
+    #[test]
+    fn object_name() {
+        let k = RelativePath("a/b/c".to_owned());
+        assert_eq!(object_name(&k), Some("c"));
+
+        let k = RelativePath("a/b/c/".to_owned());
+        assert_eq!(object_name(&k), Some("c"));
+
+        let k = RelativePath("a/".to_owned());
+        assert_eq!(object_name(&k), Some("a"));
+
+        // XXX is it impossible to have an empty key?
+        let k = RelativePath("".to_owned());
+        assert_eq!(object_name(&k), None);
+
+        let k = RelativePath("/".to_owned());
+        assert_eq!(object_name(&k), None);
+    }
 }

@@ -10,7 +10,7 @@ mod s3_bucket;
 
 use std::{
     collections::HashMap,
-    fmt::{Debug, Display},
+    fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
     ops::Deref,
     path::{Path, PathBuf},
@@ -41,44 +41,28 @@ pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct RemoteObjectId(String);
+/// A part of the filesystem path, that needs a root to become a path again.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RelativePath(PathBuf);
 
-///
-/// A key that refers to an object in remote storage. It works much like a Path,
-/// but it's a separate datatype so that you don't accidentally mix local paths
-/// and remote keys.
-///
-impl RemoteObjectId {
-    // Needed to retrieve last component for RemoteObjectId.
-    // In other words a file name
-    /// Turn a/b/c or a/b/c/ into c
-    pub fn object_name(&self) -> Option<&str> {
-        // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
-        // see https://github.com/rust-lang/rust/issues/88674
-        if self.0.len() == 1 && self.0.chars().next().unwrap() == REMOTE_STORAGE_PREFIX_SEPARATOR {
-            return None;
-        }
-
-        if self.0.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
-            self.0.rsplit(REMOTE_STORAGE_PREFIX_SEPARATOR).nth(1)
-        } else {
-            self.0
-                .rsplit_once(REMOTE_STORAGE_PREFIX_SEPARATOR)
-                .map(|(_, last)| last)
-        }
+impl RelativePath {
+    pub fn new(relative_path: &Path) -> Self {
+        debug_assert!(
+            relative_path.is_relative(),
+            "Path {relative_path:?} is not relative"
+        );
+        Self(relative_path.to_path_buf())
     }
-}
 
-impl Debug for RemoteObjectId {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        Debug::fmt(&self.0, fmt)
+    pub fn strip_base_path(base_path: &Path, full_path: &Path) -> anyhow::Result<Self> {
+        let relative = full_path.strip_prefix(base_path).with_context(|| {
+            format!("path {full_path:?} is not relative to base {base_path:?}",)
+        })?;
+        Ok(Self::new(relative))
     }
-}
 
-impl Display for RemoteObjectId {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, fmt)
+    pub fn to_full_path(&self, base_path: &Path) -> PathBuf {
+        base_path.join(&self.0)
     }
 }
 
@@ -87,14 +71,8 @@ impl Display for RemoteObjectId {
 /// providing basic CRUD operations for storage files.
 #[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync + 'static {
-    /// Attempts to derive the storage path out of the local path, if the latter is correct.
-    fn remote_object_id(&self, local_path: &Path) -> anyhow::Result<RemoteObjectId>;
-
-    /// Gets the download path of the given storage file.
-    fn local_path(&self, remote_object_id: &RemoteObjectId) -> anyhow::Result<PathBuf>;
-
     /// Lists all items the storage has right now.
-    async fn list(&self) -> anyhow::Result<Vec<RemoteObjectId>>;
+    async fn list(&self) -> anyhow::Result<Vec<RelativePath>>;
 
     /// Lists all top level subdirectories for a given prefix
     /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
@@ -102,34 +80,34 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// so this method doesnt need to.
     async fn list_prefixes(
         &self,
-        prefix: Option<&RemoteObjectId>,
-    ) -> anyhow::Result<Vec<RemoteObjectId>>;
+        prefix: Option<&RelativePath>,
+    ) -> anyhow::Result<Vec<RelativePath>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
         &self,
-        from: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
+        data: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
-        from_size_bytes: usize,
-        to: &RemoteObjectId,
+        data_size_bytes: usize,
+        to: &RelativePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()>;
 
     /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
-    async fn download(&self, from: &RemoteObjectId) -> Result<Download, DownloadError>;
+    async fn download(&self, from: &RelativePath) -> Result<Download, DownloadError>;
 
     /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
     async fn download_byte_range(
         &self,
-        from: &RemoteObjectId,
+        from: &RelativePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
     ) -> Result<Download, DownloadError>;
 
-    async fn delete(&self, path: &RemoteObjectId) -> anyhow::Result<()>;
+    async fn delete(&self, path: &RelativePath) -> anyhow::Result<()>;
 
     /// Downcast to LocalFs implementation. For tests.
     fn as_local(&self) -> Option<&LocalFs> {
@@ -196,18 +174,17 @@ impl Deref for GenericRemoteStorage {
 
 impl GenericRemoteStorage {
     pub fn from_config(
-        working_directory: PathBuf,
         storage_config: &RemoteStorageConfig,
     ) -> anyhow::Result<GenericRemoteStorage> {
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => {
                 info!("Using fs root '{}' as a remote storage", root.display());
-                GenericRemoteStorage::LocalFs(LocalFs::new(root.clone(), working_directory)?)
+                GenericRemoteStorage::LocalFs(LocalFs::new(root.clone())?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
                 info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
-                GenericRemoteStorage::AwsS3(Arc::new(S3Bucket::new(s3_config, working_directory)?))
+                GenericRemoteStorage::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
             }
         })
     }
@@ -221,23 +198,12 @@ impl GenericRemoteStorage {
         &self,
         from: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>,
         from_size_bytes: usize,
-        from_path: &Path,
+        to: &RelativePath,
     ) -> anyhow::Result<()> {
-        let target_storage_path = self.remote_object_id(from_path).with_context(|| {
-            format!(
-                "Failed to get the storage path for source local path '{}'",
-                from_path.display()
-            )
-        })?;
-
-        self.upload(from, from_size_bytes, &target_storage_path, None)
+        self.upload(from, from_size_bytes, to, None)
             .await
             .with_context(|| {
-                format!(
-                    "Failed to upload from '{}' to storage path '{:?}'",
-                    from_path.display(),
-                    target_storage_path
-                )
+                format!("Failed to upload data of length {from_size_bytes} to storage path {to:?}")
             })
     }
 
@@ -246,24 +212,11 @@ impl GenericRemoteStorage {
     pub async fn download_storage_object(
         &self,
         byte_range: Option<(u64, Option<u64>)>,
-        to_path: &Path,
+        from: &RelativePath,
     ) -> Result<Download, DownloadError> {
-        let remote_object_path = self
-            .remote_object_id(to_path)
-            .with_context(|| {
-                format!(
-                    "Failed to get the storage path for target local path '{}'",
-                    to_path.display()
-                )
-            })
-            .map_err(DownloadError::BadInput)?;
-
         match byte_range {
-            Some((start, end)) => {
-                self.download_byte_range(&remote_object_path, start, end)
-                    .await
-            }
-            None => self.download(&remote_object_path).await,
+            Some((start, end)) => self.download_byte_range(from, start, end).await,
+            None => self.download(from).await,
         }
     }
 }
@@ -272,23 +225,6 @@ impl GenericRemoteStorage {
 /// Immutable, cannot be changed once the file is created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageMetadata(HashMap<String, String>);
-
-fn strip_path_prefix<'a>(prefix: &'a Path, path: &'a Path) -> anyhow::Result<&'a Path> {
-    if prefix == path {
-        anyhow::bail!(
-            "Prefix and the path are equal, cannot strip: '{}'",
-            prefix.display()
-        )
-    } else {
-        path.strip_prefix(prefix).with_context(|| {
-            format!(
-                "Path '{}' is not prefixed with '{}'",
-                path.display(),
-                prefix.display(),
-            )
-        })
-    }
-}
 
 /// External backup storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,28 +362,4 @@ fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
         .as_str()
         .with_context(|| format!("configure option {name} is not a string"))?;
     Ok(s.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn object_name() {
-        let k = RemoteObjectId("a/b/c".to_owned());
-        assert_eq!(k.object_name(), Some("c"));
-
-        let k = RemoteObjectId("a/b/c/".to_owned());
-        assert_eq!(k.object_name(), Some("c"));
-
-        let k = RemoteObjectId("a/".to_owned());
-        assert_eq!(k.object_name(), Some("a"));
-
-        // XXX is it impossible to have an empty key?
-        let k = RemoteObjectId("".to_owned());
-        assert_eq!(k.object_name(), None);
-
-        let k = RemoteObjectId("/".to_owned());
-        assert_eq!(k.object_name(), None);
-    }
 }
