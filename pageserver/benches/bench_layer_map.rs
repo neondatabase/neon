@@ -2,6 +2,7 @@ use anyhow::Result;
 use pageserver::repository::{Key, Value};
 use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
+use pageserver::tenant::segment_tree_layer_map::STLM;
 use pageserver::tenant::storage_layer::Layer;
 use pageserver::tenant::storage_layer::ValueReconstructResult;
 use pageserver::tenant::storage_layer::ValueReconstructState;
@@ -259,6 +260,7 @@ fn bench_from_real_project(c: &mut Criterion) {
 // Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
 fn bench_sequential(c: &mut Criterion) {
     let mut layer_map = LayerMap::default();
+    let mut stlm = STLM::new();
 
     // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
     //
@@ -275,9 +277,10 @@ fn bench_sequential(c: &mut Criterion) {
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
         let layer = DummyImage {
             key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
-            lsn: Lsn(10 * i),
+            lsn: Lsn(i),
         };
         layer_map.insert_historic(Arc::new(layer));
+        stlm.insert(10 * i32, 10 * i32 + 1);
     }
 
     // Manually measure runtime without criterion because criterion

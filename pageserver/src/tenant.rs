@@ -80,6 +80,7 @@ pub mod filename;
 mod image_layer;
 mod inmemory_layer;
 pub mod layer_map;
+pub mod segment_tree_layer_map;
 
 pub mod metadata;
 mod par_fsync;

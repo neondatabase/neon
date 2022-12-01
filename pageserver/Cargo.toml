@@ -59,6 +59,7 @@ tracing = "0.1.36"
 url = "2"
 walkdir = "2.3.2"
 
+persistent_range_query = { path = "../libs/persistent_range_query" }
 etcd_broker = { path = "../libs/etcd_broker" }
 metrics = { path = "../libs/metrics" }
 pageserver_api = { path = "../libs/pageserver_api" }

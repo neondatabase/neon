@@ -2334,6 +2334,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pageserver_api",
+ "persistent_range_query",
  "pin-project-lite",
  "postgres",
  "postgres-protocol",
