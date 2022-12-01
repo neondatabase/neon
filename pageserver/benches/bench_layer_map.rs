@@ -5,6 +5,7 @@ use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
 use pageserver::tenant::storage_layer::ValueReconstructResult;
 use pageserver::tenant::storage_layer::ValueReconstructState;
+use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -12,6 +13,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -254,5 +256,53 @@ fn bench_from_real_project(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_from_captest_env, bench_from_real_project);
-criterion_main!(benches);
+// Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
+fn bench_sequential(c: &mut Criterion) {
+    let mut layer_map = LayerMap::default();
+
+    // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
+    //
+    // TODO This code is pretty slow and runs even if we're only running other
+    //      benchmarks. It needs to be somewhere else, but it's not clear where.
+    //      Putting it inside the `bench_function` closure is not a solution
+    //      because then it runs multiple times during warmup.
+    let now = Instant::now();
+    for i in 0..100_000 {
+        // TODO try inserting a super-wide layer in between every 10 to reflect
+        //      what often happens with L1 layers that include non-rel changes.
+        //      Maybe do that as a separate test.
+        let i32 = (i as u32) % 100;
+        let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
+        let layer = DummyImage {
+            key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
+            lsn: Lsn(10 * i),
+        };
+        layer_map.insert_historic(Arc::new(layer));
+    }
+
+    // Manually measure runtime without criterion because criterion
+    // has a minimum sample size of 10 and I don't want to run it 10 times.
+    println!("Finished init in {:?}", now.elapsed());
+
+    // Choose 100 uniformly random queries
+    let rng = &mut StdRng::seed_from_u64(1);
+    let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map)
+        .choose_multiple(rng, 1)
+        .copied()
+        .collect();
+
+    // Define and name the benchmark function
+    c.bench_function("sequential_uniform_queries", |b| {
+        // Run the search queries
+        b.iter(|| {
+            for q in queries.clone().into_iter() {
+                layer_map.search(q.0, q.1).unwrap();
+            }
+        });
+    });
+}
+
+criterion_group!(group_1, bench_from_captest_env);
+criterion_group!(group_2, bench_from_real_project);
+criterion_group!(group_3, bench_sequential);
+criterion_main!(group_1, group_2, group_3);
