@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
     // initialize sentry if sentry-url is provided
     let _sentry_guard = arg_matches
         .get_one::<String>("sentry-url")
-        .map(|url| init_sentry(url.as_str(), "pageserver"));
+        .map(|url| init_sentry(url.as_str(), "safekeper"));
 
     if let Some(dir) = arg_matches.get_one::<PathBuf>("datadir") {
         // change into the data directory.
