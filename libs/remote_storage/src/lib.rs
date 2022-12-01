@@ -42,7 +42,9 @@ pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
 /// A part of the filesystem path, that needs a root to become a path again.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub struct RelativePath(PathBuf);
 
 impl RelativePath {
@@ -63,6 +65,10 @@ impl RelativePath {
 
     pub fn to_full_path(&self, base_path: &Path) -> PathBuf {
         base_path.join(&self.0)
+    }
+
+    pub fn object_name(&self) -> Option<&str> {
+        self.0.file_name().and_then(|os_str| os_str.to_str())
     }
 }
 
@@ -362,4 +368,28 @@ fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
         .as_str()
         .with_context(|| format!("configure option {name} is not a string"))?;
     Ok(s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_object_name() {
+        let k = RelativePath::new(Path::new("a/b/c"));
+        assert_eq!(k.object_name(), Some("c"));
+
+        let k = RelativePath::new(Path::new("a/b/c/"));
+        assert_eq!(k.object_name(), Some("c"));
+
+        let k = RelativePath::new(Path::new("a/"));
+        assert_eq!(k.object_name(), Some("a"));
+
+        // XXX is it impossible to have an empty key?
+        let k = RelativePath::new(Path::new(""));
+        assert_eq!(k.object_name(), None);
+
+        let k = RelativePath::new(Path::new("/"));
+        assert_eq!(k.object_name(), None);
+    }
 }

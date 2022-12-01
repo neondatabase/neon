@@ -201,8 +201,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::ensure;
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use anyhow::{ensure, Context};
+use remote_storage::{DownloadError, GenericRemoteStorage, RelativePath};
 use tokio::runtime::Runtime;
 use tracing::{info, warn};
 use tracing::{info_span, Instrument};
@@ -510,15 +510,13 @@ impl RemoteTimelineClient {
     /// On success, returns the size of the downloaded file.
     pub async fn download_layer_file(
         &self,
-        path: &RemotePath,
+        remote_path: &RemotePath,
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
         let downloaded_size = download::download_layer_file(
             self.conf,
             &self.storage_impl,
-            self.tenant_id,
-            self.timeline_id,
-            path,
+            remote_path,
             layer_metadata,
         )
         .measure_remote_op(
@@ -536,13 +534,13 @@ impl RemoteTimelineClient {
             let new_metadata = LayerFileMetadata::new(downloaded_size);
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
-            if let Some(upgraded) = upload_queue.latest_files.get_mut(path) {
+            if let Some(upgraded) = upload_queue.latest_files.get_mut(remote_path) {
                 upgraded.merge(&new_metadata);
             } else {
                 // The file should exist, since we just downloaded it.
                 warn!(
                     "downloaded file {:?} not found in local copy of the index file",
-                    path
+                    remote_path
                 );
             }
         }
@@ -619,7 +617,7 @@ impl RemoteTimelineClient {
 
         upload_queue
             .latest_files
-            .insert(relative_path, layer_metadata.clone());
+            .insert(to_remote_path(self.conf, path)?, layer_metadata.clone());
 
         let op = UploadOp::UploadLayer(PathBuf::from(path), layer_metadata.clone());
         self.update_upload_queue_unfinished_metric(1, &op);
@@ -648,6 +646,7 @@ impl RemoteTimelineClient {
                 &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
                 path,
             )?);
+            relative_paths.push(to_remote_path(self.conf, path)?);
         }
 
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
@@ -838,14 +837,19 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref path, ref layer_metadata) => {
-                    upload::upload_timeline_layer(&self.storage_impl, path, layer_metadata)
-                        .measure_remote_op(
-                            self.tenant_id,
-                            self.timeline_id,
-                            RemoteOpFileKind::Layer,
-                            RemoteOpKind::Upload,
-                        )
-                        .await
+                    upload::upload_timeline_layer(
+                        self.conf,
+                        &self.storage_impl,
+                        path,
+                        layer_metadata,
+                    )
+                    .measure_remote_op(
+                        self.tenant_id,
+                        self.timeline_id,
+                        RemoteOpFileKind::Layer,
+                        RemoteOpKind::Upload,
+                    )
+                    .await
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
                     upload::upload_index_part(
@@ -864,7 +868,7 @@ impl RemoteTimelineClient {
                     .await
                 }
                 UploadOp::Delete(metric_file_kind, ref path) => {
-                    delete::delete_layer(&self.storage_impl, path)
+                    delete::delete_layer(self.conf, &self.storage_impl, path)
                         .measure_remote_op(
                             self.tenant_id,
                             self.timeline_id,
@@ -1064,6 +1068,11 @@ pub fn create_remote_timeline_client(
     })
 }
 
+fn to_remote_path(conf: &'static PageServerConf, path: &Path) -> anyhow::Result<RelativePath> {
+    RelativePath::strip_base_path(&conf.workdir, path)
+        .context("Failed to derive remote path for the storage path")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,7 +1106,7 @@ mod tests {
         let xx = PathBuf::from("");
         let mut avec: Vec<String> = a
             .iter()
-            .map(|x| x.to_local_path(&xx).to_string_lossy().into())
+            .map(|x| x.to_full_path(&xx).to_string_lossy().into())
             .collect();
         avec.sort();
 
@@ -1169,8 +1178,7 @@ mod tests {
 
         println!("workdir: {}", harness.conf.workdir.display());
 
-        let storage_impl =
-            GenericRemoteStorage::from_config(harness.conf.workdir.clone(), &storage_config)?;
+        let storage_impl = GenericRemoteStorage::from_config(&storage_config)?;
         let client = Arc::new(RemoteTimelineClient {
             conf: harness.conf,
             runtime,

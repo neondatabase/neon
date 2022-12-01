@@ -2,12 +2,9 @@
 //! Able to restore itself from the storage index parts, that are located in every timeline's remote directory and contain all data about
 //! remote timeline layers and its metadata.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-};
+use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Ok};
+use remote_storage::RelativePath;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
@@ -104,7 +101,7 @@ pub struct IndexPart {
     pub timeline_layers: HashSet<RemotePath>,
 
     /// FIXME: unused field. This should be removed, but that changes the on-disk format,
-    /// so we need to make sure we're backwards- (and maybe forwards-) compatible
+    /// so we need to make sure we're backwards-` (and maybe forwards-) compatible
     /// First pass is to move it to Optional and the next would be its removal
     missing_layers: Option<HashSet<RemotePath>>,
 
@@ -187,6 +184,8 @@ fn separate_paths_and_metadata(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]

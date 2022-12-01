@@ -29,21 +29,10 @@ async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Er
 pub async fn download_layer_file<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    path: &'a RemotePath,
+    remote_path: &'a RemotePath,
     layer_metadata: &'a LayerFileMetadata,
 ) -> anyhow::Result<u64> {
-    let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
-
-    let local_path = path.to_full_path(&timeline_path);
-
-    let layer_storage_path = storage.remote_object_id(&local_path).with_context(|| {
-        format!(
-            "Failed to get the layer storage path for local path '{}'",
-            local_path.display()
-        )
-    })?;
+    let local_path = remote_path.to_full_path(&conf.workdir);
 
     // Perform a rename inspired by durable_rename from file_utils.c.
     // The sequence:
@@ -64,18 +53,13 @@ pub async fn download_layer_file<'a>(
             temp_file_path.display()
         )
     })?;
-    let mut download = storage
-        .download(&layer_storage_path)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to open a download stream for layer with remote storage path '{layer_storage_path:?}'"
-            )
-        })?;
-    let bytes_amount = tokio::io::copy(&mut download.download_stream, &mut destination_file).await.with_context(|| {
+    let mut download = storage.download(remote_path).await.with_context(|| {
         format!(
-            "Failed to download layer with remote storage path '{layer_storage_path:?}' into file '{}'", temp_file_path.display()
+            "Failed to open a download stream for layer with remote storage path '{remote_path:?}'"
         )
+    })?;
+    let bytes_amount = tokio::io::copy(&mut download.download_stream, &mut destination_file).await.with_context(|| {
+        format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
     })?;
 
     // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
@@ -151,12 +135,7 @@ pub async fn list_remote_timelines<'a>(
     tenant_id: TenantId,
 ) -> anyhow::Result<Vec<(TimelineId, IndexPart)>> {
     let tenant_path = conf.timelines_path(&tenant_id);
-    let tenant_storage_path = storage.remote_object_id(&tenant_path).with_context(|| {
-        format!(
-            "Failed to get tenant storage path for local path '{}'",
-            tenant_path.display()
-        )
-    })?;
+    let tenant_storage_path = super::to_remote_path(conf, &tenant_path)?;
 
     let timelines = storage
         .list_prefixes(Some(&tenant_storage_path))
@@ -175,7 +154,7 @@ pub async fn list_remote_timelines<'a>(
     let mut part_downloads = FuturesUnordered::new();
 
     for timeline_remote_storage_key in timelines {
-        let object_name = object_name(&timeline_remote_storage_key).ok_or_else(|| {
+        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
             anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
         })?;
 
@@ -218,15 +197,8 @@ pub async fn download_index_part(
     let index_part_path = conf
         .metadata_path(timeline_id, tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
-    let part_storage_path = storage
-        .remote_object_id(&index_part_path)
-        .with_context(|| {
-            format!(
-                "Failed to get the index part storage path for local path '{}'",
-                index_part_path.display()
-            )
-        })
-        .map_err(DownloadError::BadInput)?;
+    let part_storage_path =
+        super::to_remote_path(conf, &index_part_path).map_err(DownloadError::BadInput)?;
 
     let mut index_part_download = storage.download(&part_storage_path).await?;
 
@@ -236,67 +208,14 @@ pub async fn download_index_part(
         &mut index_part_bytes,
     )
     .await
-    .with_context(|| {
-        format!(
-            "Failed to download an index part into file '{}'",
-            index_part_path.display()
-        )
-    })
+    .with_context(|| format!("Failed to download an index part into file {index_part_path:?}"))
     .map_err(DownloadError::Other)?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
         .with_context(|| {
-            format!(
-                "Failed to deserialize index part file into file '{}'",
-                index_part_path.display()
-            )
+            format!("Failed to deserialize index part file into file {index_part_path:?}")
         })
         .map_err(DownloadError::Other)?;
 
     Ok(index_part)
-}
-
-// Needed to retrieve last component for RemoteObjectId.
-// In other words a file name
-/// Turn a/b/c or a/b/c/ into c
-fn object_name(path: &RelativePath) -> Option<&str> {
-    // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
-    // see https://github.com/rust-lang/rust/issues/88674
-    if self.0.len() == 1 && self.0.chars().next().unwrap() == REMOTE_STORAGE_PREFIX_SEPARATOR {
-        return None;
-    }
-
-    if self.0.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
-        self.0.rsplit(REMOTE_STORAGE_PREFIX_SEPARATOR).nth(1)
-    } else {
-        self.0
-            .rsplit_once(REMOTE_STORAGE_PREFIX_SEPARATOR)
-            .map(|(_, last)| last)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use remote_storage::RelativePath;
-
-    use super::*;
-
-    #[test]
-    fn object_name() {
-        let k = RelativePath("a/b/c".to_owned());
-        assert_eq!(object_name(&k), Some("c"));
-
-        let k = RelativePath("a/b/c/".to_owned());
-        assert_eq!(object_name(&k), Some("c"));
-
-        let k = RelativePath("a/".to_owned());
-        assert_eq!(object_name(&k), Some("a"));
-
-        // XXX is it impossible to have an empty key?
-        let k = RelativePath("".to_owned());
-        assert_eq!(object_name(&k), None);
-
-        let k = RelativePath("/".to_owned());
-        assert_eq!(object_name(&k), None);
-    }
 }
