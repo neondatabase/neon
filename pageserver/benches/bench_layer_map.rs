@@ -285,10 +285,10 @@ fn bench_sequential(c: &mut Criterion) {
     println!("Finished init in {:?}", now.elapsed());
 
     // Choose 100 uniformly random queries
-    let mut rng = &mut StdRng::seed_from_u64(1);
+    let rng = &mut StdRng::seed_from_u64(1);
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map)
         .choose_multiple(rng, 1)
-        .map(|x| x.clone())
+        .copied()
         .collect();
 
     // Define and name the benchmark function
