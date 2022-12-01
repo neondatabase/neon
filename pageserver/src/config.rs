@@ -5,7 +5,7 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use remote_storage::RemoteStorageConfig;
+use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
@@ -454,6 +454,21 @@ impl PageServerConf {
     pub fn metadata_path(&self, timeline_id: TimelineId, tenant_id: TenantId) -> PathBuf {
         self.timeline_path(&timeline_id, &tenant_id)
             .join(METADATA_FILE_NAME)
+    }
+
+    /// Layers on the remote stoage are stored with paths, relative to the workdir.
+    /// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
+    ///
+    /// Errors if the path provided does not start from pageserver's workdir.
+    pub fn remote_layer_path(&self, local_layer_path: &Path) -> anyhow::Result<RemotePath> {
+        RemotePath::strip_base_path(&self.workdir, local_layer_path).with_context(|| {
+            format!("Failed to derive remote layer path for the local path {local_layer_path:?}")
+        })
+    }
+
+    /// Turns storage remote path of a layer into its local path.
+    pub fn local_layer_path(&self, remote_layer_path: &RemotePath) -> PathBuf {
+        remote_layer_path.to_full_path(&self.workdir)
     }
 
     //

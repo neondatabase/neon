@@ -7,17 +7,17 @@ use remote_storage::GenericRemoteStorage;
 
 use crate::config::PageServerConf;
 
-pub(super) async fn delete_layer(
+pub(super) async fn delete_layer<'a>(
     conf: &'static PageServerConf,
-    storage: &GenericRemoteStorage,
-    local_layer_path: &Path,
+    storage: &'a GenericRemoteStorage,
+    local_layer_path: &'a Path,
 ) -> anyhow::Result<()> {
     fail::fail_point!("before-delete-layer", |_| {
         anyhow::bail!("failpoint before-delete-layer")
     });
     debug!("Deleting layer from remote storage: {local_layer_path:?}",);
 
-    let path_to_delete = super::to_remote_path(conf, local_layer_path)?;
+    let path_to_delete = conf.remote_layer_path(local_layer_path)?;
 
     // XXX: If the deletion fails because the object already didn't exist,
     // it would be good to just issue a warning but consider it success.

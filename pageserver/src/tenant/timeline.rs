@@ -1011,15 +1011,21 @@ impl Timeline {
         //       1) if there was another pageserver that came and generated new files
         //       2) during attach of a timeline with big history which we currently do not do
         let mut local_only_layers = local_layers;
-        for remote_layer_path in &index_part.timeline_layers {
-            let local_layer_path = remote_layer_path.to_full_path(&self.conf.workdir);
+        let timeline_dir = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        for remote_layer_name in &index_part.timeline_layers {
+            let local_layer_path = timeline_dir.join(remote_layer_name);
             local_only_layers.remove(&local_layer_path);
 
             let remote_layer_metadata = index_part
                 .layer_metadata
-                .get(remote_layer_path)
+                .get(remote_layer_name)
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
+
+            let remote_layer_path = self
+                .conf
+                .remote_layer_path(&local_layer_path)
+                .expect("local_layer_path received from the same conf that provided a workdir");
 
             if local_layer_path.exists() {
                 let mut already_downloaded = true;
@@ -1071,7 +1077,7 @@ impl Timeline {
 
                 trace!("downloading image file: {remote_layer_path:?}");
                 let downloaded_size = remote_client
-                    .download_layer_file(remote_layer_path, &remote_layer_metadata)
+                    .download_layer_file(&remote_layer_path, &remote_layer_metadata)
                     .await
                     .with_context(|| {
                         format!("failed to download image layer from path {remote_layer_path:?}")
@@ -1105,7 +1111,7 @@ impl Timeline {
 
                 trace!("downloading delta file: {remote_layer_path:?}");
                 let sz = remote_client
-                    .download_layer_file(remote_layer_path, &remote_layer_metadata)
+                    .download_layer_file(&remote_layer_path, &remote_layer_metadata)
                     .await
                     .with_context(|| {
                         format!("failed to download delta layer from path {remote_layer_path:?}")

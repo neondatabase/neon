@@ -8,7 +8,7 @@
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
 use anyhow::{bail, Context, Result};
-use remote_storage::RelativePath;
+use remote_storage::RemotePath;
 
 use std::io::{self, Seek, SeekFrom};
 use std::pin::Pin;
@@ -549,8 +549,7 @@ impl WalReader {
 
         // Try to open remote file, if remote reads are enabled
         if self.enable_remote_read {
-            let remote_wal_file_path =
-                RelativePath::strip_base_path(&self.workdir, &wal_file_path)?;
+            let remote_wal_file_path = RemotePath::strip_base_path(&self.workdir, &wal_file_path)?;
             return read_object(&remote_wal_file_path, xlogoff as u64).await;
         }
 

@@ -41,13 +41,13 @@ pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
-/// A part of the filesystem path, that needs a root to become a path again.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct RelativePath(PathBuf);
+/// Path on the remote storage, relative to some inner prefix.
+/// The prefix is an implementation detail, that allows representing local paths
+/// as the remote ones, stripping the local storage prefix away.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RemotePath(PathBuf);
 
-impl RelativePath {
+impl RemotePath {
     pub fn new(relative_path: &Path) -> Self {
         debug_assert!(
             relative_path.is_relative(),
@@ -78,16 +78,13 @@ impl RelativePath {
 #[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync + 'static {
     /// Lists all items the storage has right now.
-    async fn list(&self) -> anyhow::Result<Vec<RelativePath>>;
+    async fn list(&self) -> anyhow::Result<Vec<RemotePath>>;
 
     /// Lists all top level subdirectories for a given prefix
     /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
     /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
     /// so this method doesnt need to.
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RelativePath>,
-    ) -> anyhow::Result<Vec<RelativePath>>;
+    async fn list_prefixes(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -96,24 +93,24 @@ pub trait RemoteStorage: Send + Sync + 'static {
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,
-        to: &RelativePath,
+        to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()>;
 
     /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
-    async fn download(&self, from: &RelativePath) -> Result<Download, DownloadError>;
+    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError>;
 
     /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
     async fn download_byte_range(
         &self,
-        from: &RelativePath,
+        from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
     ) -> Result<Download, DownloadError>;
 
-    async fn delete(&self, path: &RelativePath) -> anyhow::Result<()>;
+    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
 
     /// Downcast to LocalFs implementation. For tests.
     fn as_local(&self) -> Option<&LocalFs> {
@@ -204,7 +201,7 @@ impl GenericRemoteStorage {
         &self,
         from: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>,
         from_size_bytes: usize,
-        to: &RelativePath,
+        to: &RemotePath,
     ) -> anyhow::Result<()> {
         self.upload(from, from_size_bytes, to, None)
             .await
@@ -218,7 +215,7 @@ impl GenericRemoteStorage {
     pub async fn download_storage_object(
         &self,
         byte_range: Option<(u64, Option<u64>)>,
-        from: &RelativePath,
+        from: &RemotePath,
     ) -> Result<Download, DownloadError> {
         match byte_range {
             Some((start, end)) => self.download_byte_range(from, start, end).await,
@@ -376,20 +373,17 @@ mod tests {
 
     #[test]
     fn test_object_name() {
-        let k = RelativePath::new(Path::new("a/b/c"));
+        let k = RemotePath::new(Path::new("a/b/c"));
         assert_eq!(k.object_name(), Some("c"));
 
-        let k = RelativePath::new(Path::new("a/b/c/"));
+        let k = RemotePath::new(Path::new("a/b/c/"));
         assert_eq!(k.object_name(), Some("c"));
 
-        let k = RelativePath::new(Path::new("a/"));
+        let k = RemotePath::new(Path::new("a/"));
         assert_eq!(k.object_name(), Some("a"));
 
         // XXX is it impossible to have an empty key?
-        let k = RelativePath::new(Path::new(""));
-        assert_eq!(k.object_name(), None);
-
-        let k = RelativePath::new(Path::new("/"));
+        let k = RemotePath::new(Path::new(""));
         assert_eq!(k.object_name(), None);
     }
 }

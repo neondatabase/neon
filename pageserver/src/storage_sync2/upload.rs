@@ -30,7 +30,7 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_path = conf
         .metadata_path(timeline_id, tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
-    let storage_path = super::to_remote_path(conf, &index_part_path)?;
+    let storage_path = conf.remote_layer_path(&index_part_path)?;
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &storage_path)
         .await
@@ -41,16 +41,16 @@ pub(super) async fn upload_index_part<'a>(
 /// No extra checks for overlapping files is made and any files that are already present remotely will be overwritten, if submitted during the upload.
 ///
 /// On an error, bumps the retries count and reschedules the entire task.
-pub(super) async fn upload_timeline_layer(
+pub(super) async fn upload_timeline_layer<'a>(
     conf: &'static PageServerConf,
-    storage: &GenericRemoteStorage,
-    source_path: &Path,
-    known_metadata: &LayerFileMetadata,
+    storage: &'a GenericRemoteStorage,
+    source_path: &'a Path,
+    known_metadata: &'a LayerFileMetadata,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
     });
-    let storage_path = super::to_remote_path(conf, source_path)?;
+    let storage_path = conf.remote_layer_path(source_path)?;
 
     let source_file = fs::File::open(&source_path)
         .await

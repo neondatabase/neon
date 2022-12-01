@@ -13,7 +13,7 @@ use std::time::Duration;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
-use remote_storage::{GenericRemoteStorage, RelativePath};
+use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::fs::File;
 use tokio::runtime::Builder;
 
@@ -383,7 +383,7 @@ async fn backup_single_segment(
     workspace_dir: &Path,
 ) -> Result<()> {
     let segment_file_name = seg.file_path(timeline_dir)?;
-    let remote_segment_file = RelativePath::strip_base_path(workspace_dir, &segment_file_name)?;
+    let remote_segment_file = RemotePath::strip_base_path(workspace_dir, &segment_file_name)?;
 
     backup_object(&segment_file_name, &remote_segment_file, seg.size()).await?;
     debug!("Backup of {} done", segment_file_name.display());
@@ -436,7 +436,7 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
-async fn backup_object(source_file: &Path, target_file: &RelativePath, size: usize) -> Result<()> {
+async fn backup_object(source_file: &Path, target_file: &RemotePath, size: usize) -> Result<()> {
     let storage = REMOTE_STORAGE
         .get()
         .expect("failed to get remote storage")
@@ -456,7 +456,7 @@ async fn backup_object(source_file: &Path, target_file: &RelativePath, size: usi
 }
 
 pub async fn read_object(
-    file_path: &RelativePath,
+    file_path: &RemotePath,
     offset: u64,
 ) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead>>> {
     let storage = REMOTE_STORAGE

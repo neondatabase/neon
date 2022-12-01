@@ -28,7 +28,7 @@ use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    Download, DownloadError, RelativePath, RemoteStorage, S3Config, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Download, DownloadError, RemotePath, RemoteStorage, S3Config, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 const DEFAULT_IMDS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -96,28 +96,6 @@ pub(super) mod metrics {
             .with_label_values(&["list_objects"])
             .inc();
     }
-}
-
-fn download_destination(
-    id: &RemoteObjectId,
-    workdir: &Path,
-    prefix_to_strip: Option<&str>,
-) -> PathBuf {
-    let path_without_prefix = match prefix_to_strip {
-        Some(prefix) => id.0.strip_prefix(prefix).unwrap_or_else(|| {
-            panic!(
-                "Could not strip prefix '{}' from S3 object key '{}'",
-                prefix, id.0
-            )
-        }),
-        None => &id.0,
-    };
-
-    workdir.join(
-        path_without_prefix
-            .split(REMOTE_STORAGE_PREFIX_SEPARATOR)
-            .collect::<PathBuf>(),
-    )
 }
 
 /// AWS S3 storage.
@@ -199,7 +177,7 @@ impl S3Bucket {
         })
     }
 
-    fn s3_object_to_relative_path(&self, key: &str) -> RelativePath {
+    fn s3_object_to_relative_path(&self, key: &str) -> RemotePath {
         let relative_path =
             match key.strip_prefix(self.prefix_in_bucket.as_deref().unwrap_or_default()) {
                 Some(stripped) => stripped,
@@ -210,14 +188,14 @@ impl S3Bucket {
                     key, self.prefix_in_bucket
                 ),
             };
-        RelativePath(
+        RemotePath(
             relative_path
                 .split(REMOTE_STORAGE_PREFIX_SEPARATOR)
                 .collect(),
         )
     }
 
-    fn relative_path_to_s3_object(&self, path: &RelativePath) -> String {
+    fn relative_path_to_s3_object(&self, path: &RemotePath) -> String {
         let mut full_path = self.prefix_in_bucket.clone().unwrap_or_default();
         for segment in path.0.iter() {
             full_path.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
@@ -275,7 +253,7 @@ impl S3Bucket {
 
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
-    async fn list(&self) -> anyhow::Result<Vec<RelativePath>> {
+    async fn list(&self) -> anyhow::Result<Vec<RemotePath>> {
         let mut document_keys = Vec::new();
 
         let mut continuation_token = None;
@@ -319,10 +297,7 @@ impl RemoteStorage for S3Bucket {
 
     /// See the doc for `RemoteStorage::list_prefixes`
     /// Note: it wont include empty "directories"
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RelativePath>,
-    ) -> anyhow::Result<Vec<RelativePath>> {
+    async fn list_prefixes(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
             .map(|p| self.relative_path_to_s3_object(p))
@@ -383,7 +358,7 @@ impl RemoteStorage for S3Bucket {
         &self,
         from: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
         from_size_bytes: usize,
-        to: &RelativePath,
+        to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
         let _guard = self
@@ -413,7 +388,7 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
-    async fn download(&self, from: &RelativePath) -> Result<Download, DownloadError> {
+    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
         self.download_object(GetObjectRequest {
             bucket: self.bucket_name.clone(),
             key: self.relative_path_to_s3_object(from),
@@ -424,7 +399,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn download_byte_range(
         &self,
-        from: &RelativePath,
+        from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
     ) -> Result<Download, DownloadError> {
@@ -444,7 +419,7 @@ impl RemoteStorage for S3Bucket {
         .await
     }
 
-    async fn delete(&self, remote_object_id: &RelativePath) -> anyhow::Result<()> {
+    async fn delete(&self, remote_object_id: &RemotePath) -> anyhow::Result<()> {
         let _guard = self
             .concurrency_limiter
             .acquire()

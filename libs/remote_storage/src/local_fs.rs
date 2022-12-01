@@ -19,7 +19,7 @@ use tokio::{
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 
-use crate::{Download, DownloadError, RelativePath};
+use crate::{Download, DownloadError, RemotePath};
 
 use super::{RemoteStorage, StorageMetadata};
 
@@ -73,22 +73,19 @@ impl LocalFs {
 
 #[async_trait::async_trait]
 impl RemoteStorage for LocalFs {
-    async fn list(&self) -> anyhow::Result<Vec<RelativePath>> {
+    async fn list(&self) -> anyhow::Result<Vec<RemotePath>> {
         Ok(get_all_files(&self.storage_root, true)
             .await?
             .into_iter()
             .map(|path| {
-                RelativePath::new(path.strip_prefix(&self.storage_root).expect(
+                RemotePath::new(path.strip_prefix(&self.storage_root).expect(
                     "We list files for storage root, hence should be able to remote the prefix",
                 ))
             })
             .collect())
     }
 
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RelativePath>,
-    ) -> anyhow::Result<Vec<RelativePath>> {
+    async fn list_prefixes(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         let path = match prefix {
             Some(prefix) => Cow::Owned(prefix.to_full_path(&self.storage_root)),
             None => Cow::Borrowed(&self.storage_root),
@@ -97,7 +94,7 @@ impl RemoteStorage for LocalFs {
             .await?
             .into_iter()
             .map(|path| {
-                RelativePath::new(path.strip_prefix(&self.storage_root).expect(
+                RemotePath::new(path.strip_prefix(&self.storage_root).expect(
                     "We list files for storage root, hence should be able to remote the prefix",
                 ))
             })
@@ -108,7 +105,7 @@ impl RemoteStorage for LocalFs {
         &self,
         data: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
         data_size_bytes: usize,
-        to: &RelativePath,
+        to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
         let target_file_path = to.to_full_path(&self.storage_root);
@@ -190,7 +187,7 @@ impl RemoteStorage for LocalFs {
         Ok(())
     }
 
-    async fn download(&self, from: &RelativePath) -> Result<Download, DownloadError> {
+    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
         let target_path = from.to_full_path(&self.storage_root);
         if file_exists(&target_path).map_err(DownloadError::BadInput)? {
             let source = io::BufReader::new(
@@ -219,7 +216,7 @@ impl RemoteStorage for LocalFs {
 
     async fn download_byte_range(
         &self,
-        from: &RelativePath,
+        from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
     ) -> Result<Download, DownloadError> {
@@ -268,7 +265,7 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete(&self, from: &RelativePath) -> anyhow::Result<()> {
+    async fn delete(&self, from: &RemotePath) -> anyhow::Result<()> {
         let file_path = from.to_full_path(&self.storage_root);
         if file_path.exists() && file_path.is_file() {
             Ok(fs::remove_file(file_path).await?)
@@ -365,7 +362,7 @@ mod fs_tests {
         storage: &LocalFs,
         #[allow(clippy::ptr_arg)]
         // have to use &PathBuf due to `storage.local_path` parameter requirements
-        remote_storage_path: &RelativePath,
+        remote_storage_path: &RemotePath,
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
         let mut download = storage
@@ -411,7 +408,7 @@ mod fs_tests {
     async fn upload_file_negatives() -> anyhow::Result<()> {
         let storage = create_storage()?;
 
-        let id = RelativePath::new(Path::new("dummy"));
+        let id = RemotePath::new(Path::new("dummy"));
         let content = std::io::Cursor::new(b"12345");
 
         // Check that you get an error if the size parameter doesn't match the actual
@@ -453,7 +450,7 @@ mod fs_tests {
         );
 
         let non_existing_path = "somewhere/else";
-        match storage.download(&RelativePath::new(Path::new(non_existing_path))).await {
+        match storage.download(&RemotePath::new(Path::new(non_existing_path))).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -645,7 +642,7 @@ mod fs_tests {
         storage: &LocalFs,
         name: &str,
         metadata: Option<StorageMetadata>,
-    ) -> anyhow::Result<RelativePath> {
+    ) -> anyhow::Result<RemotePath> {
         let from_path = storage
             .storage_root
             .join("timelines")
@@ -653,7 +650,7 @@ mod fs_tests {
             .join(name);
         let (file, size) = create_file_for_upload(&from_path, &dummy_contents(name)).await?;
 
-        let relative_path = RelativePath::strip_base_path(&storage.storage_root, &from_path)?;
+        let relative_path = RemotePath::strip_base_path(&storage.storage_root, &from_path)?;
 
         storage
             .upload(Box::new(file), size, &relative_path, metadata)
@@ -683,7 +680,7 @@ mod fs_tests {
         format!("contents for {name}")
     }
 
-    async fn list_files_sorted(storage: &LocalFs) -> anyhow::Result<Vec<RelativePath>> {
+    async fn list_files_sorted(storage: &LocalFs) -> anyhow::Result<Vec<RemotePath>> {
         let mut files = storage.list().await?;
         files.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(files)
