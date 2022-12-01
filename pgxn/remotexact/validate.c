@@ -194,7 +194,7 @@ validate_tuple_scan(RWSetRelation *rw_rel)
     Relation        rel;
     int             i;
     Snapshot        snapshot = GetActiveSnapshot();
-	HeapTupleData   htup;
+    HeapTupleData   htup;
     Buffer          buf = InvalidBuffer;
     bool            valid = false;
 

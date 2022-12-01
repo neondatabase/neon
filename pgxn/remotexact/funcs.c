@@ -74,9 +74,10 @@ static int tuple_comparator(const void *p1, const void *p2)
 	RWSetTuple t1 = *(const RWSetTuple *)p1;
 	RWSetTuple t2 = *(const RWSetTuple *)p2;
 
-	BlockNumber b1 = BlockIdGetBlockNumber(&(t1.tid.ip_blkid));
-	BlockNumber b2 = BlockIdGetBlockNumber(&(t2.tid.ip_blkid));
-
+	BlockNumber b1 = ItemPointerGetBlockNumber(&(t1.tid));
+	BlockNumber b2 = ItemPointerGetBlockNumber(&(t2.tid));
+	OffsetNumber o1 = ItemPointerGetOffsetNumber(&(t1.tid));
+	OffsetNumber o2 = ItemPointerGetOffsetNumber(&(t2.tid));
 
 	if (b1 < b2)
 		return -1;
@@ -86,9 +87,9 @@ static int tuple_comparator(const void *p1, const void *p2)
 	/* Both tuples belong to the same block. */
 	Assert(b1 == b2);
 
-	if (t1.tid.ip_posid < t2.tid.ip_posid)
+	if (o1 < o2)
 		return -1;
-	else if (t1.tid.ip_posid > t2.tid.ip_posid)
+	else if (o1 > o2)
 		return 1;
 
 	/* Ideally, we should not get the same tuple twice. */
