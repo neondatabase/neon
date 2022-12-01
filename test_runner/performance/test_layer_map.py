@@ -12,12 +12,12 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     n_iters = 10
     n_records = 100000
 
-    # We want to have a lot of lot of layer files to exercise the layer map. Make
-    # gc_horizon and checkpoint_distance very small, so that we get a lot of small layer files.
+    # We want to have a lot of lot of layer files to exercise the layer map. Disable
+    # GC, and make checkpoint_distance very small, so that we get a lot of small layer
+    # files.
     tenant, _ = env.neon_cli.create_tenant(
         conf={
-            "gc_period": "100 m",
-            "gc_horizon": "1048576",
+            "gc_period": "0s",
             "checkpoint_distance": "8192",
             "compaction_period": "1 s",
             "compaction_threshold": "1",

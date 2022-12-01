@@ -49,11 +49,16 @@ pub enum InitialPidFile<'t> {
 }
 
 /// Start a background child process using the parameters given.
-pub fn start_process<F, S: AsRef<OsStr>>(
+pub fn start_process<
+    F,
+    S: AsRef<OsStr>,
+    EI: IntoIterator<Item = (String, String)>, // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
+>(
     process_name: &str,
     datadir: &Path,
     command: &Path,
     args: &[S],
+    envs: EI,
     initial_pid_file: InitialPidFile,
     process_status_check: F,
 ) -> anyhow::Result<Child>
@@ -79,6 +84,7 @@ where
         .stderr(same_file_for_stderr)
         .args(args);
     let filled_cmd = fill_aws_secrets_vars(fill_rust_env_vars(background_command));
+    filled_cmd.envs(envs);
 
     let mut spawned_process = filled_cmd.spawn().with_context(|| {
         format!("Could not spawn {process_name}, see console output and log files for details.")
@@ -141,6 +147,22 @@ where
     anyhow::bail!("{process_name} did not start in {RETRY_UNTIL_SECS} seconds");
 }
 
+/// Send SIGTERM to child process
+pub fn send_stop_child_process(child: &std::process::Child) -> anyhow::Result<()> {
+    let pid = child.id();
+    match kill(
+        nix::unistd::Pid::from_raw(pid.try_into().unwrap()),
+        Signal::SIGTERM,
+    ) {
+        Ok(()) => Ok(()),
+        Err(Errno::ESRCH) => {
+            println!("child process with pid {pid} does not exist");
+            Ok(())
+        }
+        Err(e) => anyhow::bail!("Failed to send signal to child process with pid {pid}: {e}"),
+    }
+}
+
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
 pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> anyhow::Result<()> {
     if !pid_file.exists() {
@@ -173,11 +195,6 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
         match process_has_stopped(pid) {
             Ok(true) => {
                 println!("\n{process_name} stopped");
-                if let Err(e) = fs::remove_file(pid_file) {
-                    if e.kind() != io::ErrorKind::NotFound {
-                        eprintln!("Failed to remove pid file {pid_file:?} after stopping the process: {e:#}");
-                    }
-                }
                 return Ok(());
             }
             Ok(false) => {
@@ -203,7 +220,14 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
 }
 
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
-    let mut filled_cmd = cmd.env_clear().env("RUST_BACKTRACE", "1");
+    // If RUST_BACKTRACE is set, pass it through. But if it's not set, default
+    // to RUST_BACKTRACE=1.
+    let backtrace_setting = std::env::var_os("RUST_BACKTRACE");
+    let backtrace_setting = backtrace_setting
+        .as_deref()
+        .unwrap_or_else(|| OsStr::new("1"));
+
+    let mut filled_cmd = cmd.env_clear().env("RUST_BACKTRACE", backtrace_setting);
 
     // Pass through these environment variables to the command
     for var in ["LLVM_PROFILE_FILE", "FAILPOINTS", "RUST_LOG"] {

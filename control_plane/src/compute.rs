@@ -322,6 +322,9 @@ impl PostgresNode {
         conf.append("shared_preload_libraries", "neon");
         conf.append_line("");
         conf.append("neon.pageserver_connstring", &pageserver_connstr);
+        if let AuthType::NeonJWT = auth_type {
+            conf.append("neon.safekeeper_token_env", "$ZENITH_AUTH_TOKEN");
+        }
         conf.append("neon.tenant_id", &self.tenant_id.to_string());
         conf.append("neon.timeline_id", &self.timeline_id.to_string());
         if let Some(lsn) = self.lsn {

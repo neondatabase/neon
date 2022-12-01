@@ -32,8 +32,8 @@ runs:
           exit 2
         fi
 
-    - name: Calculate key
-      id: calculate-key
+    - name: Calculate variables
+      id: calculate-vars
       shell: bash -euxo pipefail {0}
       run: |
         # TODO: for manually triggered workflows (via workflow_dispatch) we need to have a separate key
@@ -41,13 +41,21 @@ runs:
         pr_number=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH" || true)
         if [ "${pr_number}" != "null" ]; then
           key=pr-${pr_number}
-        elif [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+        elif [ "${GITHUB_REF_NAME}" = "main" ]; then
           # Shortcut for a special branch
           key=main
+        elif [ "${GITHUB_REF_NAME}" = "release" ]; then
+          # Shortcut for a special branch
+          key=release
         else
-          key=branch-$(echo ${GITHUB_REF#refs/heads/} | tr -c "[:alnum:]._-" "-")
+          key=branch-$(printf "${GITHUB_REF_NAME}" | tr -c "[:alnum:]._-" "-")
         fi
         echo "KEY=${key}" >> $GITHUB_OUTPUT
+
+        # Sanitize test selection to remove `/` and any other special characters
+        # Use printf instead of echo to avoid having `\n` at the end of the string
+        test_selection=$(printf "${{ inputs.test_selection }}" | tr -c "[:alnum:]._-" "-" )
+        echo "TEST_SELECTION=${test_selection}" >> $GITHUB_OUTPUT
 
     - uses: actions/setup-java@v3
       if: ${{ inputs.action == 'generate' }}
@@ -74,10 +82,11 @@ runs:
     - name: Upload Allure results
       if: ${{ inputs.action == 'store' }}
       env:
-        REPORT_PREFIX: reports/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
-        RAW_PREFIX: reports-raw/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
+        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
+        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
         TEST_OUTPUT: /tmp/test_output
         BUCKET: neon-github-public-dev
+        TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       shell: bash -euxo pipefail {0}
       run: |
         # Add metadata
@@ -98,7 +107,7 @@ runs:
           BUILD_TYPE=${{ inputs.build_type }}
         EOF
 
-        ARCHIVE="${GITHUB_RUN_ID}-${{ inputs.test_selection }}-${GITHUB_RUN_ATTEMPT}-$(date +%s).tar.zst"
+        ARCHIVE="${GITHUB_RUN_ID}-${TEST_SELECTION}-${GITHUB_RUN_ATTEMPT}-$(date +%s).tar.zst"
         ZSTD_NBTHREADS=0
 
         tar -C ${TEST_OUTPUT}/allure/results -cf ${ARCHIVE} --zstd .
@@ -109,8 +118,9 @@ runs:
       if: ${{ inputs.action == 'generate' }}
       shell: bash -euxo pipefail {0}
       env:
-        LOCK_FILE: reports/${{ steps.calculate-key.outputs.KEY }}/lock.txt
+        LOCK_FILE: reports/${{ steps.calculate-vars.outputs.KEY }}/lock.txt
         BUCKET: neon-github-public-dev
+        TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       run: |
         LOCK_TIMEOUT=300 # seconds
 
@@ -123,12 +133,12 @@ runs:
             fi
             sleep 1
           done
-          echo "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ inputs.test_selection }}" > lock.txt
+          echo "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TEST_SELECTION}" > lock.txt
           aws s3 mv --only-show-errors lock.txt "s3://${BUCKET}/${LOCK_FILE}"
 
           # A double-check that exactly WE have acquired the lock
           aws s3 cp --only-show-errors "s3://${BUCKET}/${LOCK_FILE}" ./lock.txt
-          if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ inputs.test_selection }}" ]; then
+          if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TEST_SELECTION}" ]; then
             break
           fi
         done
@@ -137,8 +147,8 @@ runs:
       if: ${{ inputs.action == 'generate' }}
       id: generate-report
       env:
-        REPORT_PREFIX: reports/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
-        RAW_PREFIX: reports-raw/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
+        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
+        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
         TEST_OUTPUT: /tmp/test_output
         BUCKET: neon-github-public-dev
       shell: bash -euxo pipefail {0}
@@ -192,12 +202,13 @@ runs:
       if: ${{ inputs.action == 'generate' && always() }}
       shell: bash -euxo pipefail {0}
       env:
-        LOCK_FILE: reports/${{ steps.calculate-key.outputs.KEY }}/lock.txt
+        LOCK_FILE: reports/${{ steps.calculate-vars.outputs.KEY }}/lock.txt
         BUCKET: neon-github-public-dev
+        TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       run: |
         aws s3 cp --only-show-errors "s3://${BUCKET}/${LOCK_FILE}" ./lock.txt || exit 0
 
-        if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ inputs.test_selection }}" ]; then
+        if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TEST_SELECTION}" ]; then
           aws s3 rm "s3://${BUCKET}/${LOCK_FILE}"
         fi
 

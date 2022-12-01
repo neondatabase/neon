@@ -51,6 +51,7 @@ pub struct TenantConf {
     // This parameter determines L1 layer file size.
     pub compaction_target_size: u64,
     // How often to check if there's compaction work to be done.
+    // Duration::ZERO means automatic compaction is disabled.
     #[serde(with = "humantime_serde")]
     pub compaction_period: Duration,
     // Level0 delta layer threshold for compaction.
@@ -61,6 +62,7 @@ pub struct TenantConf {
     // Page versions older than this are garbage collected away.
     pub gc_horizon: u64,
     // Interval at which garbage collection is triggered.
+    // Duration::ZERO means automatic GC is disabled
     #[serde(with = "humantime_serde")]
     pub gc_period: Duration,
     // Delta layer churn threshold to create L1 image layers.

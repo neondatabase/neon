@@ -15,19 +15,37 @@ use bytes::{BufMut, Bytes, BytesMut};
 /// A state of a tenant in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TenantState {
-    /// Tenant is fully operational, its background jobs might be running or not.
-    Active { background_jobs_running: bool },
-    /// A tenant is recognized by pageserver, but not yet ready to operate:
-    /// e.g. not present locally and being downloaded or being read into memory from the file system.
-    Paused,
-    /// A tenant is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    // This tenant is being loaded from local disk
+    Loading,
+    // This tenant is being downloaded from cloud storage.
+    Attaching,
+    /// Tenant is fully operational
+    Active,
+    /// A tenant is recognized by pageserver, but it is being detached or the
+    /// system is being shut down.
+    Stopping,
+    /// A tenant is recognized by the pageserver, but can no longer be used for
+    /// any operations, because it failed to be activated.
     Broken,
+}
+
+impl TenantState {
+    pub fn has_in_progress_downloads(&self) -> bool {
+        match self {
+            Self::Loading => true,
+            Self::Attaching => true,
+            Self::Active => false,
+            Self::Stopping => false,
+            Self::Broken => false,
+        }
+    }
 }
 
 /// A state of a timeline in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TimelineState {
-    /// Timeline is fully operational, its background jobs are running.
+    /// Timeline is fully operational. If the containing Tenant is Active, the timeline's
+    /// background jobs are running otherwise they will be launched when the tenant is activated.
     Active,
     /// A timeline is recognized by pageserver, but not yet ready to operate.
     /// The status indicates, that the timeline could eventually go back to Active automatically:
@@ -35,8 +53,9 @@ pub enum TimelineState {
     Suspended,
     /// A timeline is recognized by pageserver, but not yet ready to operate and not allowed to
     /// automatically become Active after certain events: only a management call can change this status.
-    Paused,
-    /// A timeline is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    Stopping,
+    /// A timeline is recognized by the pageserver, but can no longer be used for
+    /// any operations, because it failed to be activated.
     Broken,
 }
 
@@ -168,6 +187,8 @@ pub struct TimelineInfo {
     pub latest_gc_cutoff_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
@@ -180,8 +201,6 @@ pub struct TimelineInfo {
     pub last_received_msg_ts: Option<u128>,
     pub pg_version: u32,
 
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub remote_consistent_lsn: Option<Lsn>,
     pub awaits_download: bool,
 
     pub state: TimelineState,

@@ -1,5 +1,7 @@
 //! Main entry point for the Page Server executable.
 
+use std::env::{var, VarError};
+use std::sync::Arc;
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
@@ -270,6 +272,23 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
+    match var("ZENITH_AUTH_TOKEN") {
+        Ok(v) => {
+            info!("Loaded JWT token for authentication with Safekeeper");
+            pageserver::config::SAFEKEEPER_AUTH_TOKEN
+                .set(Arc::new(v))
+                .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
+        }
+        Err(VarError::NotPresent) => {
+            info!("No JWT token for authentication with Safekeeper detected");
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                "Failed to either load to detect non-present ZENITH_AUTH_TOKEN environment variable"
+            })
+        }
+    };
+
     let remote_storage = conf
         .remote_storage_config
         .as_ref()
@@ -278,7 +297,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         })
         .transpose()
         .context("Failed to init generic remote storage")?;
-    let remote_index = {
+    {
         let _rt_guard = BACKGROUND_RUNTIME.enter();
         tenant_mgr::init_tenant_mgr(conf, remote_storage.clone())?
     };
@@ -290,7 +309,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, auth.clone(), remote_index, remote_storage)?;
+        let router = http::make_router(conf, auth.clone(), remote_storage)?;
         let service =
             utils::http::RouterService::new(router.build().map_err(|err| anyhow!(err))?).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?

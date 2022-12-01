@@ -80,6 +80,7 @@ bool		am_wal_proposer;
 
 char	   *neon_timeline_walproposer = NULL;
 char	   *neon_tenant_walproposer = NULL;
+char	   *neon_safekeeper_token_walproposer = NULL;
 
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
@@ -509,11 +510,25 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 		safekeeper[n_safekeepers].state = SS_OFFLINE;
 		safekeeper[n_safekeepers].conn = NULL;
 
-		/*
-		 * Set conninfo to empty. We'll fill it out once later, in
-		 * `ResetConnection` as needed
-		 */
-		safekeeper[n_safekeepers].conninfo[0] = '\0';
+		{
+			Safekeeper *sk = &safekeeper[n_safekeepers];
+			int written = 0;
+
+			if (neon_safekeeper_token_walproposer != NULL) {
+				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
+								   "host=%s port=%s password=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+								   sk->host, sk->port, neon_safekeeper_token_walproposer, neon_timeline_walproposer,
+								   neon_tenant_walproposer);
+			} else {
+				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
+								   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+								   sk->host, sk->port, neon_timeline_walproposer, neon_tenant_walproposer);
+			}
+
+			if (written > MAXCONNINFO || written < 0)
+				elog(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
+		}
+
 		initStringInfo(&safekeeper[n_safekeepers].outbuf);
 		safekeeper[n_safekeepers].xlogreader = XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
 		if (safekeeper[n_safekeepers].xlogreader == NULL)
@@ -684,31 +699,7 @@ ResetConnection(Safekeeper *sk)
 
 	/*
 	 * Try to establish new connection
-	 *
-	 * If the connection information hasn't been filled out, we need to do
-	 * that here.
 	 */
-	if (sk->conninfo[0] == '\0')
-	{
-		int			written = 0;
-
-		written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-						   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-						   sk->host, sk->port, neon_timeline_walproposer, neon_tenant_walproposer);
-
-		/*
-		 * currently connection string is not that long, but once we pass
-		 * something like jwt we might overflow the buffer,
-		 */
-
-		/*
-		 * so it is better to be defensive and check that everything aligns
-		 * well
-		 */
-		if (written > MAXCONNINFO || written < 0)
-			elog(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
-	}
-
 	sk->conn = walprop_connect_start((char *) &sk->conninfo);
 
 	/*
@@ -729,12 +720,13 @@ ResetConnection(Safekeeper *sk)
 		 * According to libpq docs:
 		 *   "If the result is CONNECTION_BAD, the connection attempt has already failed,
 		 *    typically because of invalid connection parameters."
-		 * We should report this failure.
+		 * We should report this failure. Do not print the exact `conninfo` as it may
+		 * contain e.g. password. The error message should already provide enough information.
 		 *
 		 * https://www.postgresql.org/docs/devel/libpq-connect.html#LIBPQ-PQCONNECTSTARTPARAMS
 		 */
-		elog(WARNING, "Immediate failure to connect with node:\n\t%s\n\terror: %s",
-			 sk->conninfo, walprop_error_message(sk->conn));
+		elog(WARNING, "Immediate failure to connect with node '%s:%s':\n\terror: %s",
+			 sk->host, sk->port, walprop_error_message(sk->conn));
 
 		/*
 		 * Even though the connection failed, we still need to clean up the
@@ -1403,14 +1395,11 @@ DetermineEpochStartLsn(void)
 static bool
 WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
 {
-	char		conninfo[MAXCONNINFO];
 	char	   *err;
 	WalReceiverConn *wrconn;
 	WalRcvStreamOptions options;
 
-	sprintf(conninfo, "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-			safekeeper[donor].host, safekeeper[donor].port, neon_timeline_walproposer, neon_tenant_walproposer);
-	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
+	wrconn = walrcv_connect(safekeeper[donor].conninfo, false, "wal_proposer_recovery", &err);
 	if (!wrconn)
 	{
 		ereport(WARNING,

@@ -26,13 +26,13 @@ use crate::{
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
     tenant::{Timeline, WalReceiverInfo},
-    tenant_mgr,
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
+use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::lsn::Lsn;
 
 /// Status of the connection.
 #[derive(Debug, Clone)]
@@ -56,22 +56,23 @@ pub struct WalConnectionStatus {
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
-    wal_source_connstr: String,
+    wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
-    info!("connecting to {wal_source_connstr}");
-    let connect_cfg = format!("{wal_source_connstr} application_name=pageserver replication=true");
+    info!("connecting to {wal_source_connconf:?}");
 
-    let (mut replication_client, connection) = time::timeout(
-        connect_timeout,
-        tokio_postgres::connect(&connect_cfg, postgres::NoTls),
-    )
-    .await
-    .context("Timed out while waiting for walreceiver connection to open")?
-    .context("Failed to open walreceiver connection")?;
+    let (mut replication_client, connection) = {
+        let mut config = wal_source_connconf.to_tokio_postgres_config();
+        config.application_name("pageserver");
+        config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
+        time::timeout(connect_timeout, config.connect(postgres::NoTls))
+            .await
+            .context("Timed out while waiting for walreceiver connection to open")?
+            .context("Failed to open walreceiver connection")?
+    };
 
     info!("connected!");
     let mut connection_status = WalConnectionStatus {
@@ -138,10 +139,6 @@ pub async fn handle_walreceiver_connection(
         warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
         return Ok(());
     }
-
-    let tenant_id = timeline.tenant_id;
-    let timeline_id = timeline.timeline_id;
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -291,19 +288,8 @@ pub async fn handle_walreceiver_connection(
         })?;
 
         if let Some(last_lsn) = status_update {
-            let remote_index = tenant.get_remote_index();
-            let timeline_remote_consistent_lsn = remote_index
-                .read()
-                .await
-                // here we either do not have this timeline in remote index
-                // or there were no checkpoints for it yet
-                .timeline_entry(&TenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                })
-                .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
-                // no checkpoint was uploaded
-                .unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn =
+                timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
@@ -316,7 +302,7 @@ pub async fn handle_walreceiver_connection(
 
             // Update the status about what we just received. This is shown in the mgmt API.
             let last_received_wal = WalReceiverInfo {
-                wal_source_connstr: wal_source_connstr.to_owned(),
+                wal_source_connconf: wal_source_connconf.clone(),
                 last_received_msg_lsn: last_lsn,
                 last_received_msg_ts: ts
                     .duration_since(SystemTime::UNIX_EPOCH)
