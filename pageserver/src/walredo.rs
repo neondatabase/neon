@@ -615,22 +615,23 @@ fn tokio_postgres_redo(
                 child,
                 tx.clone(),
                 rx.clone(),
-                tenant_id,
                 expected_pipelined,
                 Some(first),
                 watcher,
-            );
+            )
+            .in_current_span();
 
             fut.await;
         }
 
         Ok(())
-    };
+    }
+    .instrument(info_span!("wal-redo ctrl", %tenant_id));
 
     (handle, ipc)
 }
 
-#[instrument(skip(conf))]
+#[instrument(skip(conf, tenant_id))]
 async fn launch_walredo(
     conf: &PageServerConf,
     tenant_id: TenantId,
@@ -700,7 +701,6 @@ async fn walredo_rpc<F>(
     mut child: tokio::process::Child,
     work_tx: flume::Sender<Payload>,
     work_rx: flume::Receiver<Payload>,
-    tenant_id: TenantId,
     expected_inflight: usize,
     initial: Option<Payload>,
     shutdown: F,
@@ -711,7 +711,7 @@ async fn walredo_rpc<F>(
         .id()
         .expect("pid is present before killing the process");
 
-    info!("Launched wal-redo process for {tenant_id}: {pid}");
+    info!("Launched wal-redo process: {pid}");
 
     // we send the external the request in different commands
     let stdin = child.stdin.take().expect("not taken yet");
@@ -842,7 +842,7 @@ async fn walredo_rpc<F>(
         }
         info!("task exiting");
     }
-    .instrument(info_span!("wal-redo", pid, %tenant_id))
+    .instrument(info_span!("wal-redo", pid))
     .await
 }
 
