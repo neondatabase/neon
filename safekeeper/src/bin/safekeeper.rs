@@ -57,9 +57,6 @@ fn main() -> anyhow::Result<()> {
 
     let mut conf = SafeKeeperConf::default();
 
-    // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry("safekeper");
-
     if let Some(dir) = arg_matches.get_one::<PathBuf>("datadir") {
         // change into the data directory.
         std::env::set_current_dir(dir)?;
@@ -138,6 +135,12 @@ fn main() -> anyhow::Result<()> {
     if let Some(log_format) = arg_matches.get_one::<String>("log-format") {
         conf.log_format = LogFormat::from_config(log_format)?;
     }
+
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(&[
+        ("process", "safekeeper"),
+        ("node_id", &conf.my_id.to_string()),
+    ]);
 
     start_safekeeper(conf, given_id, arg_matches.get_flag("init"))
 }

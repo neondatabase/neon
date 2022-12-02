@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let arg_matches = cli().get_matches();
 
     // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry("proxy");
+    let _sentry_guard = init_sentry(&[("process", "proxy")]);
 
     let tls_config = match (
         arg_matches.get_one::<String>("tls-key"),

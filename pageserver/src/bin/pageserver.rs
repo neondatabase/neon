@@ -78,9 +78,6 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
 
-    // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry("pageserver");
-
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,
         ControlFlow::Break(()) => {
@@ -88,6 +85,10 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard =
+        init_sentry(&[("process", "pageserver"), ("node_id", &conf.id.to_string())]);
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
