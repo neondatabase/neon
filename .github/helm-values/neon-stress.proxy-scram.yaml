@@ -4,7 +4,6 @@ settings:
   authBackend: "console"
   authEndpoint: "http://neon-stress-console.local/management/api/v2"
   domain: "*.stress.neon.tech"
-  sentryURL: "{{ SENTRY_URL_PROXY }}"
 
 podLabels:
   zenith_service: proxy-scram

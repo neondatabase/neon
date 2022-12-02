@@ -8,7 +8,6 @@ settings:
   authBackend: "console"
   authEndpoint: "http://console-staging.local/management/api/v2"
   domain: "*.us-east-2.aws.neon.build"
-  sentryURL: "{{ SENTRY_URL_PROXY }}"
 
 # -- Additional labels for neon-proxy pods
 podLabels:

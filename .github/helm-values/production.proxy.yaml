@@ -2,7 +2,6 @@ settings:
   authBackend: "link"
   authEndpoint: "https://console.neon.tech/authenticate_proxy_request/"
   uri: "https://console.neon.tech/psql_session/"
-  sentryURL: "{{ SENTRY_URL_PROXY }}"
 
 # -- Additional labels for zenith-proxy pods
 podLabels:
