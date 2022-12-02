@@ -48,10 +48,8 @@ async fn main() -> anyhow::Result<()> {
 
     let arg_matches = cli().get_matches();
 
-    // initialize sentry if sentry-url is provided
-    let _sentry_guard = arg_matches
-        .get_one::<String>("sentry-url")
-        .map(|url| init_sentry(url.as_str(), "proxy"));
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry("proxy");
 
     let tls_config = match (
         arg_matches.get_one::<String>("tls-key"),
@@ -183,13 +181,6 @@ fn cli() -> clap::Command {
                 .long("tls-cert")
                 .alias("ssl-cert") // backwards compatibility
                 .help("path to TLS cert for client postgres connections"),
-        )
-        .arg(
-            Arg::new("sentry-url")
-                .short('s')
-                .long("sentry-url")
-                .alias("sentry")
-                .help("Sentry url for error reporting"),
         )
 }
 

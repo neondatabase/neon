@@ -78,10 +78,8 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
 
-    // initialize sentry if sentry-url is provided
-    let _sentry_guard = arg_matches
-        .get_one::<String>("sentry-url")
-        .map(|url| init_sentry(url.as_str(), "pageserver"));
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry("pageserver");
 
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,
@@ -411,13 +409,6 @@ fn cli() -> Command {
                 .long("enabled-features")
                 .action(ArgAction::SetTrue)
                 .help("Show enabled compile time features"),
-        )
-        .arg(
-            Arg::new("sentry-url")
-                .short('s')
-                .long("sentry-url")
-                .alias("sentry")
-                .help("Sentry url for error reporting"),
         )
 }
 

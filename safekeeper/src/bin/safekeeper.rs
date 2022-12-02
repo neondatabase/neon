@@ -57,10 +57,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut conf = SafeKeeperConf::default();
 
-    // initialize sentry if sentry-url is provided
-    let _sentry_guard = arg_matches
-        .get_one::<String>("sentry-url")
-        .map(|url| init_sentry(url.as_str(), "safekeper"));
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry("safekeper");
 
     if let Some(dir) = arg_matches.get_one::<PathBuf>("datadir") {
         // change into the data directory.
@@ -430,13 +428,6 @@ fn cli() -> Command {
             Arg::new("log-format")
                 .long("log-format")
                 .help("Format for logging, either 'plain' or 'json'")
-        )
-        .arg(
-            Arg::new("sentry-url")
-                .short('s')
-                .long("sentry-url")
-                .alias("sentry")
-                .help("Sentry url for error reporting"),
         )
 }
 

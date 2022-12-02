@@ -8,7 +8,6 @@ settings:
   authBackend: "link"
   authEndpoint: "https://console.stage.neon.tech/authenticate_proxy_request/"
   uri: "https://console.stage.neon.tech/psql_session/"
-  sentryURL: "{{ SENTRY_URL_PROXY }}"
 
 # -- Additional labels for neon-proxy-link pods
 podLabels:

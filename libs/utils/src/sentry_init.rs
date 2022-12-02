@@ -1,8 +1,12 @@
 use sentry::ClientInitGuard;
+use std::env;
 
-pub fn init_sentry(sentry_url: &str, process_name: &str) -> ClientInitGuard {
-    let _guard = sentry::init((
-        sentry_url,
+#[must_use]
+pub fn init_sentry(process_name: &str) -> Option<ClientInitGuard> {
+    let dsn = env::var("SENTRY_DSN").ok()?;
+
+    let guard = sentry::init((
+        dsn,
         sentry::ClientOptions {
             release: sentry::release_name!(),
             ..Default::default()
@@ -11,5 +15,5 @@ pub fn init_sentry(sentry_url: &str, process_name: &str) -> ClientInitGuard {
     sentry::configure_scope(|scope| {
         scope.set_tag("process", process_name);
     });
-    _guard
+    Some(guard)
 }
