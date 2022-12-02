@@ -162,7 +162,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 		size_t available = (pipe->req.head.pos >= pipe->req.tail.pos
 					 ? QUEUE_BUF_SIZE - (pipe->req.head.pos - pipe->req.tail.pos)
 					 : pipe->req.tail.pos - pipe->req.head.pos) - MESSAGE_DATA_ALIGNMENT;
-		if (available == 0)
+		if (available == 0 || (!header_sent && pipe->req.busy))
 		{
 			/* Ring buffer is full: wait until consumer takes some requests */
 #ifndef BUSY_WAIT_RESPONSES
@@ -207,6 +207,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 			}
 			else
 			{
+				assert(pipe->req.busy);
 				if (available > req_size)
 					available = req_size;
 
@@ -254,7 +255,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 		size_t available = pipe->resp.head.pos >= pipe->resp.tail.pos
 			? pipe->resp.head.pos - pipe->resp.tail.pos
 			: QUEUE_BUF_SIZE - (pipe->resp.tail.pos - pipe->resp.head.pos);
-		if (available == 0)
+		if (available == 0 || (!header_received && pipe->resp.busy))
 		{
 #ifndef BUSY_WAIT_RESPONSES
 			if (header_received && pipe->resp.tail.n_blocked != 0)
@@ -286,6 +287,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 			if (!header_received)
 			{
 				assert(tail >= MESSAGE_DATA_ALIGNMENT);
+				assert(!pipe->resp.busy);
 				memcpy(&resp_hdr, &pipe->resp.data[pipe->resp.tail.pos], sizeof resp_hdr);
 				if (resp_hdr.id != req_hdr.id)
 				{
@@ -304,6 +306,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 			}
 			else
 			{
+				assert(pipe->resp.busy);
 				if (available > resp_size)
 					available = resp_size;
 
