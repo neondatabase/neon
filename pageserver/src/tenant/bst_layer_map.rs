@@ -32,6 +32,10 @@ impl BSTLM {
     pub fn insert(self: &mut Self, key_begin: u32, key_end: u32, lsn: u32, value: String) {
         // TODO check for off-by-one errors
 
+        // TODO check if LSN is lower than current max LSN. It should be rare for
+        //      that to happen with image layers, and there are solutions, but it's
+        //      tricky.
+
         // NOTE The order of the following lines is important!!
 
         // Preserve information after right endpoint
