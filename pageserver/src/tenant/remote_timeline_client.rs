@@ -1033,7 +1033,7 @@ mod tests {
             // Any version will do
             // but it should be consistent with the one in the tests
             crate::DEFAULT_PG_VERSION,
-            utils::id::RegionId(0),
+            RegionId(0),
         );
 
         // go through serialize + deserialize to fix the header, including checksum
