@@ -461,9 +461,16 @@ impl PageServerConf {
     ///
     /// Errors if the path provided does not start from pageserver's workdir.
     pub fn remote_layer_path(&self, local_layer_path: &Path) -> anyhow::Result<RemotePath> {
-        RemotePath::strip_base_path(&self.workdir, local_layer_path).with_context(|| {
-            format!("Failed to derive remote layer path for the local path {local_layer_path:?}")
-        })
+        local_layer_path
+            .strip_prefix(&self.workdir)
+            .context("Failed to strip workdir prefix")
+            .and_then(RemotePath::new)
+            .with_context(|| {
+                format!(
+                    "Failed to resolve remote part of path {:?} for base {:?}",
+                    local_layer_path, self.workdir
+                )
+            })
     }
 
     /// Turns storage remote path of a layer into its local path.

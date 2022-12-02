@@ -382,11 +382,19 @@ async fn backup_single_segment(
     timeline_dir: &Path,
     workspace_dir: &Path,
 ) -> Result<()> {
-    let segment_file_name = seg.file_path(timeline_dir)?;
-    let remote_segment_file = RemotePath::strip_base_path(workspace_dir, &segment_file_name)?;
+    let segment_file_path = seg.file_path(timeline_dir)?;
+    let remote_segment_path = segment_file_path
+        .strip_prefix(&workspace_dir)
+        .context("Failed to strip workspace dir prefix")
+        .and_then(RemotePath::new)
+        .with_context(|| {
+            format!(
+                "Failed to resolve remote part of path {segment_file_path:?} for base {workspace_dir:?}",
+            )
+        })?;
 
-    backup_object(&segment_file_name, &remote_segment_file, seg.size()).await?;
-    debug!("Backup of {} done", segment_file_name.display());
+    backup_object(&segment_file_path, &remote_segment_path, seg.size()).await?;
+    debug!("Backup of {} done", segment_file_path.display());
 
     Ok(())
 }

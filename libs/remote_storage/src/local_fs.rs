@@ -78,9 +78,12 @@ impl RemoteStorage for LocalFs {
             .await?
             .into_iter()
             .map(|path| {
-                RemotePath::new(path.strip_prefix(&self.storage_root).expect(
-                    "We list files for storage root, hence should be able to remote the prefix",
-                ))
+                path.strip_prefix(&self.storage_root)
+                    .context("Failed to strip storage root prefix")
+                    .and_then(RemotePath::new)
+                    .expect(
+                        "We list files for storage root, hence should be able to remote the prefix",
+                    )
             })
             .collect())
     }
@@ -94,9 +97,12 @@ impl RemoteStorage for LocalFs {
             .await?
             .into_iter()
             .map(|path| {
-                RemotePath::new(path.strip_prefix(&self.storage_root).expect(
-                    "We list files for storage root, hence should be able to remote the prefix",
-                ))
+                path.strip_prefix(&self.storage_root)
+                    .context("Failed to strip preifix")
+                    .and_then(RemotePath::new)
+                    .expect(
+                        "We list files for storage root, hence should be able to remote the prefix",
+                    )
             })
             .collect())
     }
@@ -408,7 +414,7 @@ mod fs_tests {
     async fn upload_file_negatives() -> anyhow::Result<()> {
         let storage = create_storage()?;
 
-        let id = RemotePath::new(Path::new("dummy"));
+        let id = RemotePath::new(Path::new("dummy"))?;
         let content = std::io::Cursor::new(b"12345");
 
         // Check that you get an error if the size parameter doesn't match the actual
@@ -450,7 +456,7 @@ mod fs_tests {
         );
 
         let non_existing_path = "somewhere/else";
-        match storage.download(&RemotePath::new(Path::new(non_existing_path))).await {
+        match storage.download(&RemotePath::new(Path::new(non_existing_path))?).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -650,7 +656,16 @@ mod fs_tests {
             .join(name);
         let (file, size) = create_file_for_upload(&from_path, &dummy_contents(name)).await?;
 
-        let relative_path = RemotePath::strip_base_path(&storage.storage_root, &from_path)?;
+        let relative_path = from_path
+            .strip_prefix(&storage.storage_root)
+            .context("Failed to strip storage root prefix")
+            .and_then(RemotePath::new)
+            .with_context(|| {
+                format!(
+                    "Failed to resolve remote part of path {:?} for base {:?}",
+                    from_path, storage.storage_root
+                )
+            })?;
 
         storage
             .upload(Box::new(file), size, &relative_path, metadata)

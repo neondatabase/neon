@@ -48,19 +48,12 @@ const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 pub struct RemotePath(PathBuf);
 
 impl RemotePath {
-    pub fn new(relative_path: &Path) -> Self {
-        debug_assert!(
+    pub fn new(relative_path: &Path) -> anyhow::Result<Self> {
+        anyhow::ensure!(
             relative_path.is_relative(),
             "Path {relative_path:?} is not relative"
         );
-        Self(relative_path.to_path_buf())
-    }
-
-    pub fn strip_base_path(base_path: &Path, full_path: &Path) -> anyhow::Result<Self> {
-        let relative = full_path.strip_prefix(base_path).with_context(|| {
-            format!("path {full_path:?} is not relative to base {base_path:?}",)
-        })?;
-        Ok(Self::new(relative))
+        Ok(Self(relative_path.to_path_buf()))
     }
 
     pub fn to_full_path(&self, base_path: &Path) -> PathBuf {
@@ -373,17 +366,17 @@ mod tests {
 
     #[test]
     fn test_object_name() {
-        let k = RemotePath::new(Path::new("a/b/c"));
+        let k = RemotePath::new(Path::new("a/b/c")).unwrap();
         assert_eq!(k.object_name(), Some("c"));
 
-        let k = RemotePath::new(Path::new("a/b/c/"));
+        let k = RemotePath::new(Path::new("a/b/c/")).unwrap();
         assert_eq!(k.object_name(), Some("c"));
 
-        let k = RemotePath::new(Path::new("a/"));
+        let k = RemotePath::new(Path::new("a/")).unwrap();
         assert_eq!(k.object_name(), Some("a"));
 
         // XXX is it impossible to have an empty key?
-        let k = RemotePath::new(Path::new(""));
+        let k = RemotePath::new(Path::new("")).unwrap();
         assert_eq!(k.object_name(), None);
     }
 }

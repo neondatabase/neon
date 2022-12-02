@@ -648,14 +648,10 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        // Convert the paths into RelativePaths, and gather other information we need.
-        let mut relative_paths = Vec::with_capacity(paths.len());
+        // Convert the paths into RemotePaths, and gather other information we need.
+        let mut remote_paths = Vec::with_capacity(paths.len());
         for path in paths {
-            relative_paths.push(RemotePath::strip_base_path(
-                &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-                path,
-            )?);
-            relative_paths.push(self.conf.remote_layer_path(path)?);
+            remote_paths.push(self.conf.remote_layer_path(path)?);
         }
 
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
@@ -671,8 +667,8 @@ impl RemoteTimelineClient {
         // from latest_files, but not yet scheduled for deletion. Use a closure
         // to syntactically forbid ? or bail! calls here.
         let no_bail_here = || {
-            for relative_path in relative_paths {
-                upload_queue.latest_files.remove(&relative_path);
+            for remote_path in remote_paths {
+                upload_queue.latest_files.remove(&remote_path);
             }
 
             let index_part = IndexPart::new(

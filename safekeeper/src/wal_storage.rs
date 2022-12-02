@@ -549,7 +549,16 @@ impl WalReader {
 
         // Try to open remote file, if remote reads are enabled
         if self.enable_remote_read {
-            let remote_wal_file_path = RemotePath::strip_base_path(&self.workdir, &wal_file_path)?;
+            let remote_wal_file_path = wal_file_path
+                .strip_prefix(&self.workdir)
+                .context("Failed to strip workdir prefix")
+                .and_then(RemotePath::new)
+                .with_context(|| {
+                    format!(
+                        "Failed to resolve remote part of path {:?} for base {:?}",
+                        wal_file_path, self.workdir,
+                    )
+                })?;
             return read_object(&remote_wal_file_path, xlogoff as u64).await;
         }
 
