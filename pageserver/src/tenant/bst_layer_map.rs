@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+// TODO the `im` crate has 20x more downloads and also has persistent
+// BTree. See if it's better. (What's "fully persistent?")
 use rpds::RedBlackTreeMap;
 
 
