@@ -261,8 +261,6 @@ fn bench_from_real_project(c: &mut Criterion) {
 
 // Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
 fn bench_sequential(c: &mut Criterion) {
-    let mut layer_map = LayerMap::default();
-    let mut bstlm = BSTLM::new();
 
     // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
     //
@@ -271,6 +269,7 @@ fn bench_sequential(c: &mut Criterion) {
     //      Putting it inside the `bench_function` closure is not a solution
     //      because then it runs multiple times during warmup.
     let now = Instant::now();
+    let mut layer_map = LayerMap::default();
     for i in 0..100_000 {
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
@@ -282,14 +281,23 @@ fn bench_sequential(c: &mut Criterion) {
     }
     println!("Finished layer map init in {:?}", now.elapsed());
 
+    // Init bst layer map with the same layers
     let now = Instant::now();
-    for i in 0..100_000 {
-        let i32 = (i as u32) % 100;
-        let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
-        let begin = zero.add(10 * i32).to_i128();
-        let end = zero.add(10 * i32 + 1).to_i128();
+    let mut bstlm = BSTLM::new();
+    for layer in layer_map.iter_historic_layers() {
+        if layer.is_incremental() {
+            panic!("AAA");
+        } else {
+            let kr = layer.get_key_range();
+            let lr = layer.get_lsn_range();
 
-        bstlm.insert(begin, end, i as u64, format!("Layer {}", i));
+            bstlm.insert(
+                kr.start.to_i128(),
+                kr.end.to_i128(),
+                lr.start.0,
+                format!("Layer {}", lr.start.0),
+            );
+        }
     }
     println!("Finished bst init in {:?}", now.elapsed());
 
