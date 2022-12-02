@@ -34,9 +34,16 @@ impl BSTLM {
     pub fn insert(self: &mut Self, key_begin: i128, key_end: i128, lsn: u64, value: String) {
         // TODO check for off-by-one errors
 
-        // TODO check if LSN is lower than current max LSN. It should be rare for
-        //      that to happen with image layers, and there are solutions, but it's
-        //      tricky.
+        // It's a persistent map, not a retroactive one
+        if let Some(last_entry) = self.historic.iter().rev().next() {
+            let last_lsn = last_entry.0;
+            if lsn == *last_lsn {
+                // TODO there are edge cases to take care of
+            }
+            if lsn < *last_lsn {
+                todo!("smaller lsn not implemented yet")
+            }
+        }
 
         // NOTE The order of the following lines is important!!
 

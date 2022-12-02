@@ -246,17 +246,65 @@ fn bench_from_captest_env(c: &mut Criterion) {
 // too long processing layer map queries.
 fn bench_from_real_project(c: &mut Criterion) {
     // TODO consider compressing this file
+
+    // Init layer map
+    let now = Instant::now();
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
+    println!("Finished layer map init in {:?}", now.elapsed());
+
+    // Init bst layer map with the same layers
+    let now = Instant::now();
+    let mut bstlm = BSTLM::new();
+    let mut sorted_layers: Vec<_> = layer_map.iter_historic_layers().collect();
+    sorted_layers.sort_by(|a, b| {
+        a.get_lsn_range().start.cmp(&b.get_lsn_range().start)
+    });
+    for layer in sorted_layers {
+        if layer.is_incremental() {
+            // TODO check if they're sorted
+            let kr = layer.get_key_range();
+            let lr = layer.get_lsn_range();
+
+            bstlm.insert(
+                kr.start.to_i128(),
+                kr.end.to_i128(),
+                lr.start.0,
+                format!("Layer {}", lr.start.0),
+            );
+        } else {
+            let kr = layer.get_key_range();
+            let lr = layer.get_lsn_range();
+
+            bstlm.insert(
+                kr.start.to_i128(),
+                kr.end.to_i128(),
+                lr.start.0,
+                format!("Layer {}", lr.start.0),
+            );
+        }
+    }
+    println!("Finished bst init in {:?}", now.elapsed());
+
+    // Choose uniformly distributed queries
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
-    // Test with uniform query pattern
-    c.bench_function("real_map_uniform_queries", |b| {
+    // Define and name the benchmark function
+    let mut group = c.benchmark_group("real_map_uniform_queries");
+    group.bench_function("current_code", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1).unwrap();
             }
         });
     });
+    group.bench_function("persistent_bst", |b| {
+        b.iter(|| {
+            for q in queries.clone().into_iter() {
+                bstlm.query(q.0.to_i128(), q.1.0);
+            }
+        });
+    });
+    group.finish();
 }
 
 // Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
@@ -327,5 +375,7 @@ fn bench_sequential(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(group_3, bench_sequential);
-criterion_main!(group_3);
+// HACK TODO bring back all the bench functions. I remove
+// them here to avoid initializing.
+criterion_group!(group, bench_from_real_project);
+criterion_main!(group);
