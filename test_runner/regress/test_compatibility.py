@@ -215,7 +215,8 @@ def prepare_snapshot(
 
     # Remove wal-redo temp directory
     for tenant in (repo_dir / "tenants").glob("*"):
-        shutil.rmtree(tenant / "wal-redo-datadir.___temp")
+        for walredo in tenant.glob("wal-redo-datadir*.___temp"):
+            shutil.rmtree(walredo)
 
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
