@@ -21,7 +21,6 @@ impl std::fmt::Debug for BSTLM {
     }
 }
 
-/// Layer map (good enough for benchmarks) implemented using persistent segment tree
 impl BSTLM {
     pub fn new() -> Self {
         BSTLM {
@@ -91,5 +90,6 @@ fn test_bstlm() {
     // After Layer 3 insertion
     assert_eq!(bstlm.query(4, 125), Some(&"Layer 2".to_string()));
     assert_eq!(bstlm.query(5, 125), Some(&"Layer 3".to_string()));
+
     assert_eq!(bstlm.query(7, 125), Some(&"Layer 2".to_string()));
 }
