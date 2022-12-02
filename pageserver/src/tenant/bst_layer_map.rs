@@ -10,10 +10,10 @@ use rpds::RedBlackTreeMap;
 /// so it's missing unnecessary details. Values are String for now.
 pub struct BSTLM {
     /// Mapping key to the latest layer (if any) until the next key
-    head: RedBlackTreeMap<u32, Option<String>>,
+    head: RedBlackTreeMap<i128, Option<String>>,
 
     /// All previous states of `self.head`
-    historic: BTreeMap<u32, RedBlackTreeMap<u32, Option<String>>>,
+    historic: BTreeMap<u64, RedBlackTreeMap<i128, Option<String>>>,
 }
 
 impl std::fmt::Debug for BSTLM {
@@ -31,7 +31,7 @@ impl BSTLM {
         }
     }
 
-    pub fn insert(self: &mut Self, key_begin: u32, key_end: u32, lsn: u32, value: String) {
+    pub fn insert(self: &mut Self, key_begin: i128, key_end: i128, lsn: u64, value: String) {
         // TODO check for off-by-one errors
 
         // TODO check if LSN is lower than current max LSN. It should be rare for
@@ -63,7 +63,7 @@ impl BSTLM {
         self.historic.insert(lsn, self.head.clone());
     }
 
-    pub fn query(self: &Self, key: u32, lsn: u32) -> Option<&String> {
+    pub fn query(self: &Self, key: i128, lsn: u64) -> Option<&String> {
         // TODO check for off-by-one errors
 
         let version = self.historic.range(0..=lsn).rev().next()?.1;
