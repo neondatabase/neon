@@ -1075,7 +1075,7 @@ impl Timeline {
                     continue;
                 }
 
-                trace!("downloading image file: {}", file = path.display());
+                trace!("downloading image file: {}", path.display());
                 let sz = remote_client
                     .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
                     .await
@@ -1105,7 +1105,7 @@ impl Timeline {
                     continue;
                 }
 
-                trace!("downloading image file: {}", file = path.display());
+                trace!("downloading delta file: {}", path.display());
                 let sz = remote_client
                     .download_layer_file(&RelativePath::from_filename(path), &layer_metadata)
                     .await
