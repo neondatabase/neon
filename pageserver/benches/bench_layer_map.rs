@@ -1,5 +1,6 @@
 use anyhow::Result;
 use pageserver::repository::{Key, Value};
+use pageserver::tenant::bst_layer_map::BSTLM;
 use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::segment_tree_layer_map::STLM;
@@ -261,6 +262,7 @@ fn bench_from_real_project(c: &mut Criterion) {
 fn bench_sequential(c: &mut Criterion) {
     let mut layer_map = LayerMap::default();
     let mut stlm = STLM::new();
+    let mut bstlm = BSTLM::new();
 
     // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
     //
@@ -298,6 +300,21 @@ fn bench_sequential(c: &mut Criterion) {
     }
     println!("Finished persistent segment tree init in {:?}", now.elapsed());
 
+    let now = Instant::now();
+    for i in 0..100_000 {
+        // TODO try inserting a super-wide layer in between every 10 to reflect
+        //      what often happens with L1 layers that include non-rel changes.
+        //      Maybe do that as a separate test.
+        let i32 = (i as u32) % 100;
+        let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
+        let layer = DummyImage {
+            key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
+            lsn: Lsn(i),
+        };
+        bstlm.insert(10 * i32, 10 * i32 + 1, i as u32, format!("Layer {}", i));
+    }
+    println!("Finished bst init in {:?}", now.elapsed());
+
     // Choose 100 uniformly random queries
     let rng = &mut StdRng::seed_from_u64(1);
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map)
@@ -318,6 +335,13 @@ fn bench_sequential(c: &mut Criterion) {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 stlm.query(q.0.field6, q.1.0 as u32);
+            }
+        });
+    });
+    group.bench_function("persistent_bst", |b| {
+        b.iter(|| {
+            for q in queries.clone().into_iter() {
+                bstlm.query(q.0.field6, q.1.0 as u32);
             }
         });
     });
