@@ -64,7 +64,10 @@ impl BSTLM {
         version.range(0..=key).rev().next()?.1.as_ref()
     }
 
-    // TODO add API for delta layers with lsn range
+    // TODO Add API for delta layers with lsn range.
+    //      The easy solution is to only store images, and then from every
+    //      image point to deltas on top of it. There might be something
+    //      nicer but we have this solution as backup.
 }
 
 
