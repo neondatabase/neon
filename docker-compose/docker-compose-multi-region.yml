@@ -1,0 +1,322 @@
+# This YAML can be run using either docker-compose (single node) or Docker Swarm (multiple nodes).
+# 
+# Run with docker-compose: TODO
+#
+# Run with Docker Swarm: TODO
+#
+version: '3.8'
+
+configs:
+  compute_spec:
+    file: ./compute_wrapper/var/db/postgres/specs/spec-multi-region.json
+  compute_shell:
+    file: ./compute_wrapper/shell/compute-multi-region.sh
+
+volumes:
+  pageserver-r1-data:
+  pageserver-r2-data:
+
+services:
+  etcd:
+    restart: always
+    image: quay.io/coreos/etcd:v3.5.4
+    ports:
+      - 2379:2379
+      - 2380:2380
+    environment:
+      # This signifficantly speeds up etcd and we anyway don't persistent data there.
+      ETCD_UNSAFE_NO_FSYNC: "1"
+    command:
+      - "etcd"
+      - "--auto-compaction-mode=revision"
+      - "--auto-compaction-retention=1"
+      - "--name=etcd-cluster"
+      - "--initial-cluster-state=new"
+      - "--initial-cluster-token=etcd-cluster-1"
+      - "--initial-cluster=etcd-cluster=http://etcd:2380"
+      - "--initial-advertise-peer-urls=http://etcd:2380"
+      - "--advertise-client-urls=http://etcd:2379"
+      - "--listen-client-urls=http://0.0.0.0:2379"
+      - "--listen-peer-urls=http://0.0.0.0:2380"
+      - "--quota-backend-bytes=134217728" # 128 MB
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.role==manager
+
+  minio:
+    restart: always
+    image: quay.io/minio/minio:RELEASE.2022-11-17T23-20-09Z
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=password
+    command: server /data --address :9000 --console-address ":9001"
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.role==manager
+
+  #############################################
+  #                 REGION 1                  #
+  #############################################
+  pageserver-r1: &pageserver
+    restart: always
+    image: ctring/neon:${TAG:-latest}
+    environment:
+      - BROKER_ENDPOINT='http://etcd:2379'
+      - LISTEN_PG_ADDR=6400
+      - LISTEN_HTTP_ADDR=9898
+      #- RUST_BACKTRACE=1
+    ports:
+       #- 6400:6400  # pg protocol handler
+       - 9898:9898 # http endpoints
+    # volumes:
+    #   - type: volume
+    #     source: pageserver-r1-data
+    #     target: /data
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - |
+        until (/usr/bin/mc alias set minio http://minio:9000 minio password) do
+             echo 'Waiting to start minio...' && sleep 1
+        done
+        rm -rf /data/.neon
+        /usr/bin/mc cp -r minio/neon/.neon /data
+        /usr/local/bin/pageserver -D /data/.neon/                                     \
+                                  -c "broker_endpoints=[$$BROKER_ENDPOINT]"           \
+                                  -c "listen_pg_addr='0.0.0.0:$$LISTEN_PG_ADDR'"      \
+                                  -c "listen_http_addr='0.0.0.0:$$LISTEN_HTTP_ADDR'"  \
+                                  -c "pg_distrib_dir='/usr/local/'"
+    depends_on:
+      - etcd
+      - minio
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_pageserver==true
+
+  safekeeper-r1-1: &safekeeper
+    restart: always
+    image: ctring/neon:${TAG:-latest}
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper-r1-1:5454
+      - SAFEKEEPER_ID=1
+      - BROKER_ENDPOINT=http://etcd:2379
+      #- RUST_BACKTRACE=1
+    extra_hosts:
+      # While other services can connect to a safekeeper using its name, the safekeeper
+      # itself cannot resolve its own name (?!), hence cannot bind to the listen-pg 
+      # address. This line tricks the safekeeper to bind to 0.0.0.0.
+      - safekeeper-r1-1:0.0.0.0
+    ports:
+      #- 5454:5454 # pg protocol handler
+      - 7676:7676 # http endpoints
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - |
+        until (/usr/bin/mc alias set minio http://minio:9000 minio password) do
+             echo 'Waiting to start minio...' && sleep 1
+        done
+        rm -rf /data/*
+        /usr/bin/mc cp -r minio/neon/.neon/safekeepers/sk1 /data
+        mv /data/sk1/* . && rm -r /data/sk1
+        safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL \
+                   --listen-http='0.0.0.0:7676' \
+                   --id=$$SAFEKEEPER_ID \
+                   --broker-endpoints=$$BROKER_ENDPOINT \
+                   -D /data
+    depends_on:
+      - etcd
+      - minio
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper1==true
+
+  safekeeper-r1-2:
+    <<: *safekeeper
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper-r1-2:5454
+      - SAFEKEEPER_ID=2
+      - BROKER_ENDPOINT=http://etcd:2379
+      #- RUST_BACKTRACE=1
+    extra_hosts:
+      - safekeeper-r1-2:0.0.0.0
+    ports: []
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper2==true
+
+  safekeeper-r1-3:
+    <<: *safekeeper
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper-r1-3:5454
+      - SAFEKEEPER_ID=3
+      - BROKER_ENDPOINT=http://etcd:2379
+      #- RUST_BACKTRACE=1
+    extra_hosts:
+      - safekeeper-r1-3:0.0.0.0
+    ports: []
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper3==true
+
+  xactserver-r1: &xactserver
+    image: ctring/xactserver:${TAG:-latest}
+    environment:
+      - NODE_ID=1
+      - CONNECT_PG=postgresql://compute-r1:55433
+      - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+    command:
+      - |
+        /usr/local/bin/xactserver   \
+          --listen-pg=0.0.0.0:10000 \
+          --connect-pg=$$CONNECT_PG \
+          --node-id=$$NODE_ID       \
+          --nodes=$$NODES
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_xactserver==true
+
+  compute-r1: &compute
+    restart: always
+    build:
+      context: ./compute_wrapper/
+      args:
+        - REPOSITORY=ctring
+        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-14}
+        - TAG=${TAG:-latest}
+        - http_proxy=$http_proxy
+        - https_proxy=$https_proxy
+    image: localhost:5000/compute-node-v${PG_VERSION:-14}:${TAG:-latest}
+    environment:
+      - PG_VERSION=${PG_VERSION:-14}
+      - PAGESERVER_HOST=pageserver-r1
+      - SAFEKEEPERS_ADDR=safekeeper-r1-1:5454,safekeeper-r1-2:5454,safekeeper-r1-3:5454
+      - REGION=1
+      - XACTSERVER=xactserver-r1:10000
+      #- RUST_BACKTRACE=1
+    # Mount these as configs instead of volumes so that it works correctly in swarm mode
+    configs:
+      - source: compute_spec
+        target: /var/db/postgres/specs/spec-multi-region.json
+      - source: compute_shell
+        target: /shell/compute-multi-region.sh
+        mode: 0555 # readable and executable
+    ports:
+      - 55433:55433 # pg protocol handler
+    entrypoint:
+      - "/shell/compute-multi-region.sh"
+    depends_on:
+      - safekeeper-r1-1
+      - safekeeper-r1-2
+      - safekeeper-r1-3
+      - pageserver-r1
+      - xactserver-r1
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_compute==true
+
+  #############################################
+  #                 REGION 2                  #
+  #############################################
+  pageserver-r2:
+    <<: *pageserver
+    environment:
+      - BROKER_ENDPOINT='http://etcd:2379'
+      - LISTEN_PG_ADDR=6400
+      - LISTEN_HTTP_ADDR=9898
+      #- RUST_BACKTRACE=1
+    ports:
+       #- 6400:6400  # pg protocol handler
+       - 9899:9898 # http endpoints
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_pageserver==true
+
+  safekeeper-r2-1:
+    <<: *safekeeper
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper-r2-1:5454
+      - SAFEKEEPER_ID=1
+      - BROKER_ENDPOINT=http://etcd:2379
+      #- RUST_BACKTRACE=1
+    extra_hosts:
+      - safekeeper-r2-1:0.0.0.0
+    ports: []
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper2==true
+
+  safekeeper-r2-2:
+    <<: *safekeeper
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper-r2-2:5454
+      - SAFEKEEPER_ID=2
+      - BROKER_ENDPOINT=http://etcd:2379
+      #- RUST_BACKTRACE=1
+    extra_hosts:
+      - safekeeper-r2-2:0.0.0.0
+    ports: []
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper2==true
+
+  safekeeper-r2-3:
+    <<: *safekeeper
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper-r2-3:5454
+      - SAFEKEEPER_ID=3
+      - BROKER_ENDPOINT=http://etcd:2379
+      #- RUST_BACKTRACE=1
+    extra_hosts:
+      - safekeeper-r2-3:0.0.0.0
+    ports: []
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_safekeeper2==true
+
+  xactserver-r2:
+    <<: *xactserver
+    environment:
+      - NODE_ID=2
+      - CONNECT_PG=postgresql://compute-r2:55433
+      - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000
+
+  compute-r2:
+    <<: *compute
+    environment:
+      - PG_VERSION=${PG_VERSION:-14}
+      - PAGESERVER_HOST=pageserver-r2
+      - SAFEKEEPERS_ADDR=safekeeper-r2-1:5454,safekeeper-r2-2:5454,safekeeper-r2-3:5454
+      - REGION=2
+      - XACTSERVER=xactserver-r2:10000
+      #- RUST_BACKTRACE=1
+    ports:
+      - 55434:55433 # pg protocol handler
+      - 3081:3080 # http endpoints
+    depends_on:
+      - safekeeper-r2-1
+      - safekeeper-r2-2
+      - safekeeper-r2-3
+      - pageserver-r2
+      - xactserver-r2
+  

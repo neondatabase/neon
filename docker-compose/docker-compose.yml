@@ -1,9 +1,12 @@
 # This YAML can be run using either docker-compose (single node) or Docker Swarm (multiple nodes).
 # 
 # Run with docker-compose:
+#   - Build the wrapped compute image
 #
-#   - To start this stack, change to the directory of this file and run:
+#       docker compose build
 #
+#   - To start the stack, change to the directory of this file and run:
+#       
 #       docker compose up -d
 #
 #   - The compute node will be available on port 55433 (password is "cloud_admin"):

@@ -1,0 +1,161 @@
+{
+    "format_version": 1.0,
+
+    "timestamp": "2022-10-12T18:00:00.000Z",
+    "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8c",
+
+    "cluster": {
+        "cluster_id": "multi_region",
+        "name": "multi_region_neon",
+        "state": "restarted",
+        "roles": [
+        ],
+        "databases": [
+        ],
+        "settings": [
+            {
+                "name": "fsync",
+                "value": "off",
+                "vartype": "bool"
+            },
+            {
+                "name": "wal_level",
+                "value": "remote_xact",
+                "vartype": "enum"
+            },
+            {
+                "name": "hot_standby",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "wal_log_hints",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "log_connections",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "port",
+                "value": "55433",
+                "vartype": "integer"
+            },
+            {
+                "name": "shared_buffers",
+                "value": "1MB",
+                "vartype": "string"
+            },
+            {
+                "name": "max_connections",
+                "value": "100",
+                "vartype": "integer"
+            },
+            {
+                "name": "listen_addresses",
+                "value": "0.0.0.0",
+                "vartype": "string"
+            },
+            {
+                "name": "max_wal_senders",
+                "value": "10",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_replication_slots",
+                "value": "10",
+                "vartype": "integer"
+            },
+            {
+                "name": "wal_sender_timeout",
+                "value": "5s",
+                "vartype": "string"
+            },
+            {
+                "name": "wal_keep_size",
+                "value": "0",
+                "vartype": "integer"
+            },
+            {
+                "name": "password_encryption",
+                "value": "md5",
+                "vartype": "enum"
+            },
+            {
+                "name": "restart_after_crash",
+                "value": "off",
+                "vartype": "bool"
+            },
+            {
+                "name": "synchronous_standby_names",
+                "value": "walproposer",
+                "vartype": "string"
+            },
+            {
+                "name": "shared_preload_libraries",
+                "value": "neon,remotexact",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.safekeepers",
+                "value": "SAFEKEEPERS_ADDR",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.timeline_id",
+                "value": "TIMELINE_ID",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.tenant_id",
+                "value": "TENANT_ID",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.pageserver_connstring",
+                "value": "host=PAGESERVER_HOST port=6400",
+                "vartype": "string"
+            },
+            {
+                "name": "max_replication_write_lag",
+                "value": "500MB",
+                "vartype": "string"
+            },
+            {
+                "name": "max_replication_flush_lag",
+                "value": "10GB",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.slru_csnlog",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "enable_csn_snapshot",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "max_prepared_transactions",
+                "value": "64",
+                "vartype": "integer"
+            },
+            {
+                "name": "remotexact.connstring",
+                "value": "postgresql://XACTSERVER",
+                "vartype": "string"
+            },
+            {
+                "name": "current_region",
+                "value": "REGION",
+                "vartype": "integer"
+            }
+        ]
+    },
+
+    "delta_operations": [
+    ]
+}
