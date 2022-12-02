@@ -12,10 +12,6 @@ configs:
   compute_shell:
     file: ./compute_wrapper/shell/compute-multi-region.sh
 
-volumes:
-  pageserver-r1-data:
-  pageserver-r2-data:
-
 services:
   etcd:
     restart: always
@@ -73,10 +69,6 @@ services:
     ports:
        #- 6400:6400  # pg protocol handler
        - 9898:9898 # http endpoints
-    # volumes:
-    #   - type: volume
-    #     source: pageserver-r1-data
-    #     target: /data
     entrypoint:
       - "/bin/sh"
       - "-c"
