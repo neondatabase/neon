@@ -16,6 +16,7 @@ pub struct KeySpace {
 // See comment to partition() method below. This constant is limited each layer to contain 16k relation.
 // 16k - is first user Oid, so it separates system and user relations.
 //
+#[allow(clippy::unusual_byte_groupings)]
 const MAX_LAYER_KEY_RANGE: i128 = 0x00_00000000_00000000_00004000_00_00000000i128;
 
 impl KeySpace {
