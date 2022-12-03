@@ -256,29 +256,17 @@ fn bench_from_real_project(c: &mut Criterion) {
     let mut bstlm = BSTLM::new();
     let mut sorted_layers: Vec<_> = layer_map.iter_historic_layers().collect();
     sorted_layers.sort_by(|a, b| a.get_lsn_range().start.cmp(&b.get_lsn_range().start));
+    // TODO implement out of order inserts
     for layer in sorted_layers {
-        if layer.is_incremental() {
-            // TODO check if they're sorted
-            let kr = layer.get_key_range();
-            let lr = layer.get_lsn_range();
+        let kr = layer.get_key_range();
+        let lr = layer.get_lsn_range();
 
-            bstlm.insert(
-                kr.start.to_i128(),
-                kr.end.to_i128(),
-                lr.start.0,
-                format!("Layer {}", lr.start.0),
-            );
-        } else {
-            let kr = layer.get_key_range();
-            let lr = layer.get_lsn_range();
-
-            bstlm.insert(
-                kr.start.to_i128(),
-                kr.end.to_i128(),
-                lr.start.0,
-                format!("Layer {}", lr.start.0),
-            );
-        }
+        bstlm.insert(
+            kr.start.to_i128(),
+            kr.end.to_i128(),
+            lr.start.0,
+            format!("Layer {}", lr.start.0),
+        );
     }
     println!("Finished bst init in {:?}", now.elapsed());
 
