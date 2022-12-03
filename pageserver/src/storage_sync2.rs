@@ -204,7 +204,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::ensure;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use tokio::runtime::Runtime;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use tracing::{info_span, Instrument};
 
 use utils::lsn::Lsn;
@@ -888,10 +888,20 @@ impl RemoteTimelineClient {
                 Err(e) => {
                     let retries = task.retries.fetch_add(1, Ordering::SeqCst);
 
-                    error!(
-                        "failed to perform remote task {}, will retry (attempt {}): {:?}",
-                        task.op, retries, e
-                    );
+                    // uploads may fail due to rate limts (IAM, S3) or spurious network and external errors
+                    // such issues are relatively regular, so don't use WARN or ERROR to avoid alerting
+                    // people and tests until the retries are definitely causing delays.
+                    if retries < 3 {
+                        info!(
+                            "failed to perform remote task {}, will retry (attempt {}): {:?}",
+                            task.op, retries, e
+                        );
+                    } else {
+                        warn!(
+                            "failed to perform remote task {}, will retry (attempt {}): {:?}",
+                            task.op, retries, e
+                        );
+                    }
 
                     // sleep until it's time to retry, or we're cancelled
                     tokio::select! {
