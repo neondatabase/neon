@@ -73,6 +73,7 @@ use utils::{
 
 mod blob_io;
 pub mod block_io;
+pub mod bst_layer_map;
 mod delta_layer;
 mod disk_btree;
 pub(crate) mod ephemeral_file;

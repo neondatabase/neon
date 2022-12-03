@@ -1,5 +1,7 @@
 use anyhow::Result;
+use num_traits::ToPrimitive;
 use pageserver::repository::{Key, Value};
+use pageserver::tenant::bst_layer_map::BSTLM;
 use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
@@ -243,23 +245,67 @@ fn bench_from_captest_env(c: &mut Criterion) {
 // too long processing layer map queries.
 fn bench_from_real_project(c: &mut Criterion) {
     // TODO consider compressing this file
+
+    // Init layer map
+    let now = Instant::now();
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
+    println!("Finished layer map init in {:?}", now.elapsed());
+
+    // Init bst layer map with the same layers
+    let now = Instant::now();
+    let mut bstlm = BSTLM::new();
+    let mut sorted_layers: Vec<_> = layer_map.iter_historic_layers().collect();
+    sorted_layers.sort_by(|a, b| a.get_lsn_range().start.cmp(&b.get_lsn_range().start));
+    for layer in sorted_layers {
+        if layer.is_incremental() {
+            // TODO check if they're sorted
+            let kr = layer.get_key_range();
+            let lr = layer.get_lsn_range();
+
+            bstlm.insert(
+                kr.start.to_i128(),
+                kr.end.to_i128(),
+                lr.start.0,
+                format!("Layer {}", lr.start.0),
+            );
+        } else {
+            let kr = layer.get_key_range();
+            let lr = layer.get_lsn_range();
+
+            bstlm.insert(
+                kr.start.to_i128(),
+                kr.end.to_i128(),
+                lr.start.0,
+                format!("Layer {}", lr.start.0),
+            );
+        }
+    }
+    println!("Finished bst init in {:?}", now.elapsed());
+
+    // Choose uniformly distributed queries
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
-    // Test with uniform query pattern
-    c.bench_function("real_map_uniform_queries", |b| {
+    // Define and name the benchmark function
+    let mut group = c.benchmark_group("real_map_uniform_queries");
+    group.bench_function("current_code", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1).unwrap();
             }
         });
     });
+    group.bench_function("persistent_bst", |b| {
+        b.iter(|| {
+            for q in queries.clone().into_iter() {
+                bstlm.query(q.0.to_i128(), q.1 .0);
+            }
+        });
+    });
+    group.finish();
 }
 
 // Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
 fn bench_sequential(c: &mut Criterion) {
-    let mut layer_map = LayerMap::default();
-
     // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
     //
     // TODO This code is pretty slow and runs even if we're only running other
@@ -267,39 +313,62 @@ fn bench_sequential(c: &mut Criterion) {
     //      Putting it inside the `bench_function` closure is not a solution
     //      because then it runs multiple times during warmup.
     let now = Instant::now();
+    let mut layer_map = LayerMap::default();
     for i in 0..100_000 {
-        // TODO try inserting a super-wide layer in between every 10 to reflect
-        //      what often happens with L1 layers that include non-rel changes.
-        //      Maybe do that as a separate test.
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
         let layer = DummyImage {
             key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
-            lsn: Lsn(10 * i),
+            lsn: Lsn(i),
         };
         layer_map.insert_historic(Arc::new(layer));
     }
+    println!("Finished layer map init in {:?}", now.elapsed());
 
-    // Manually measure runtime without criterion because criterion
-    // has a minimum sample size of 10 and I don't want to run it 10 times.
-    println!("Finished init in {:?}", now.elapsed());
+    // Init bst layer map with the same layers
+    let now = Instant::now();
+    let mut bstlm = BSTLM::new();
+    for layer in layer_map.iter_historic_layers() {
+        if layer.is_incremental() {
+            panic!("AAA");
+        } else {
+            let kr = layer.get_key_range();
+            let lr = layer.get_lsn_range();
+
+            bstlm.insert(
+                kr.start.to_i128(),
+                kr.end.to_i128(),
+                lr.start.0,
+                format!("Layer {}", lr.start.0),
+            );
+        }
+    }
+    println!("Finished bst init in {:?}", now.elapsed());
 
     // Choose 100 uniformly random queries
     let rng = &mut StdRng::seed_from_u64(1);
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map)
-        .choose_multiple(rng, 1)
+        .choose_multiple(rng, 100)
         .copied()
         .collect();
 
     // Define and name the benchmark function
-    c.bench_function("sequential_uniform_queries", |b| {
-        // Run the search queries
+    let mut group = c.benchmark_group("sequential_uniform_queries");
+    group.bench_function("current_code", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1).unwrap();
             }
         });
     });
+    group.bench_function("persistent_bst", |b| {
+        b.iter(|| {
+            for q in queries.clone().into_iter() {
+                bstlm.query(q.0.to_i128(), q.1 .0);
+            }
+        });
+    });
+    group.finish();
 }
 
 criterion_group!(group_1, bench_from_captest_env);
