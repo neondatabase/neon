@@ -2642,7 +2642,9 @@ impl Timeline {
                     data.records.len()
                 );
             } else {
-                let base_img = if let Some((_lsn, img)) = data.img {
+                let mut base_img_lsn = Lsn(0);
+                let base_img = if let Some((img_lsn, img)) = data.img {
+                    base_img_lsn = img_lsn;
                     trace!(
                         "found {} WAL records and a base image for {} at {}, performing WAL redo",
                         data.records.len(),
@@ -2659,7 +2661,14 @@ impl Timeline {
 
                 let img = self
                     .walredo_mgr
-                    .request_redo(key, request_lsn, base_img, data.records, self.pg_version)
+                    .request_redo(
+                        key,
+                        request_lsn,
+                        base_img,
+                        base_img_lsn,
+                        data.records,
+                        self.pg_version,
+                    )
                     .context("Failed to reconstruct a page image:")?;
 
                 if img.len() == page_cache::PAGE_SZ {

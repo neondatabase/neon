@@ -85,6 +85,7 @@ pub trait WalRedoManager: Send + Sync {
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
+        base_img_lsn: Lsn,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError>;
@@ -148,6 +149,7 @@ impl WalRedoManager for PostgresRedoManager {
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
+        base_img_lsn: Lsn,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
@@ -170,6 +172,7 @@ impl WalRedoManager for PostgresRedoManager {
                         key,
                         lsn,
                         img,
+                        base_img_lsn,
                         &records[batch_start..i],
                         self.conf.wal_redo_timeout,
                         pg_version,
@@ -189,6 +192,7 @@ impl WalRedoManager for PostgresRedoManager {
                 key,
                 lsn,
                 img,
+                base_img_lsn,
                 &records[batch_start..],
                 self.conf.wal_redo_timeout,
                 pg_version,
@@ -228,6 +232,7 @@ impl PostgresRedoManager {
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
+        base_img_lsn: Lsn,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
         pg_version: u32,
@@ -282,9 +287,12 @@ impl PostgresRedoManager {
         // next request will launch a new one.
         if result.is_err() {
             error!(
-                "error applying {} WAL records ({} bytes) to reconstruct page image at LSN {}",
+                "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}",
                 records.len(),
+				records.first().map(|p| p.0).unwrap_or(Lsn(0)),
+				records.last().map(|p| p.0).unwrap_or(Lsn(0)),
                 nbytes,
+				base_img_lsn,
                 lsn
             );
             let process = process_guard.take().unwrap();
@@ -822,7 +830,7 @@ impl PostgresRedoProcess {
                 // good enough, the important thing is to get the message to the log.
                 if n > 0 {
                     error!(
-                        "wal-redo-postgres: {}",
+                        "wal-redo-postgres: {}, ",
                         String::from_utf8_lossy(&errbuf[0..n])
                     );
 
