@@ -52,6 +52,7 @@
 #include "access/xlogdefs.h"
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
+#include "commands/explain.h"
 #include "pagestore_client.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/autovacuum.h"
@@ -242,8 +243,6 @@ PrefetchState *MyPState;
 	) \
 )
 
-int			n_prefetch_hits = 0;
-int			n_prefetch_misses = 0;
 int			n_prefetch_missed_caches = 0;
 int			n_prefetch_dupes = 0;
 
@@ -1749,7 +1748,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (slot->effective_request_lsn >= request_lsn)
 		{
 			ring_index = slot->my_ring_index;
-			n_prefetch_hits += 1;
+			prefetch_stats.hits += 1;
 		}
 		else /* the current prefetch LSN is not large enough, so drop the prefetch */
 		{
@@ -1774,7 +1773,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	{
 		if (entry == NULL)
 		{
-			n_prefetch_misses += 1;
+			prefetch_stats.misses += 1;
 
 			ring_index = prefetch_register_buffer(buftag, &request_latest,
 												  &request_lsn);
