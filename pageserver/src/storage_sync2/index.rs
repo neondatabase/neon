@@ -281,6 +281,5 @@ mod tests {
 
         let part = serde_json::from_str::<IndexPart>(example).unwrap();
         assert_eq!(part, expected);
-
     }
 }
