@@ -1,8 +1,66 @@
 # This YAML can be run using either docker-compose (single node) or Docker Swarm (multiple nodes).
-# 
-# Run with docker-compose: TODO
+# All of the following commands are run in the same directory as this file.
 #
-# Run with Docker Swarm: TODO
+# Run with docker-compose
+#   - Run the prepare script:
+#
+#       ./prepare-multi-region.sh compose <path to neon data (.neon)>
+#
+#   - Build the wrapped compute image:
+#
+#       docker compose build
+#
+#   - Start the stack:
+#       
+#       docker compose up -d
+#
+#   - The compute node will be available on port 55433:
+#
+#       psql -p55433 -h localhost -U cloud_admin postgres
+#
+#   - To stop this stack, run:
+#
+#       docker compose down
+#
+# Run with Docker Swarm:
+#   - Follow this tutorial to start a swarm: https://docs.docker.com/engine/swarm/swarm-tutorial/.
+#     All of following commands starting with "docker" must be run on the manager node.
+#
+#   - Run the prepare script:
+#
+#       ./prepare-multi-region.sh swarm <path to neon data (.neon)>
+#
+#   - Create a private registry to store the compute image:
+#
+#       docker service create --name registry --publish published=5000,target=5000 registry:2
+#   
+#   - Build and push the compute image:
+#
+#       docker compose build
+#       docker compose push
+#
+#   - Start this stack in the swarm:
+#
+#       docker stack deploy --compose-file docker-compose.yml neon
+#
+#   - (Optional) By default, the services are spread across the nodes in an undeterministic manner.
+#     To control which node a service runs on, we need to place a constraint on it. Examples of such
+#     constraints are provided. Activate them by uncommenting the "deploy.placement.constraints"
+#     keys in the services. The neon-specific services are constrained based on node labels, so they
+#     will not be run until at least a node is assigned with the necessary label. For example,
+#     run the following command to label a node named "vm1" to run the pageserver:
+#
+#       docker node update --label-add has_pageserver=true vm1
+#
+#   - The compute nodes will be available on port 55433 (region 1) and 55434 (region 2) of any node in
+#     the swarm:
+#
+#       psql -p55433 -h <ip-of-any-node> -U cloud_admin postgres
+#       psql -p55434 -h <ip-of-any-node> -U cloud_admin postgres
+#
+#   - To stop this stack:
+#
+#       docker stack rm neon
 #
 version: '3.8'
 
@@ -11,6 +69,11 @@ configs:
     file: ./compute_wrapper/var/db/postgres/specs/spec-multi-region.json
   compute_shell:
     file: ./compute_wrapper/shell/compute-multi-region.sh
+
+networks:
+  default:
+    name: neon
+    external: true
 
 services:
   etcd:
@@ -40,21 +103,6 @@ services:
     #     constraints:
     #       - node.role==manager
 
-  minio:
-    restart: always
-    image: quay.io/minio/minio:RELEASE.2022-11-17T23-20-09Z
-    ports:
-      - 9000:9000
-      - 9001:9001
-    environment:
-      - MINIO_ROOT_USER=minio
-      - MINIO_ROOT_PASSWORD=password
-    command: server /data --address :9000 --console-address ":9001"
-    # deploy:
-    #   placement:
-    #     constraints:
-    #       - node.role==manager
-
   #############################################
   #                 REGION 1                  #
   #############################################
@@ -74,7 +122,7 @@ services:
       - "-c"
     command:
       - |
-        until (/usr/bin/mc alias set minio http://minio:9000 minio password) do
+        until (/usr/bin/mc alias set minio http://minio:9000 minioadmin minioadmin) do
              echo 'Waiting to start minio...' && sleep 1
         done
         rm -rf /data/.neon
@@ -86,11 +134,11 @@ services:
                                   -c "pg_distrib_dir='/usr/local/'"
     depends_on:
       - etcd
-      - minio
     # deploy:
     #   placement:
     #     constraints:
     #       - node.labels.has_pageserver==true
+    #       - node.labels.region==1
 
   safekeeper-r1-1: &safekeeper
     restart: always
@@ -113,7 +161,7 @@ services:
       - "-c"
     command:
       - |
-        until (/usr/bin/mc alias set minio http://minio:9000 minio password) do
+        until (/usr/bin/mc alias set minio http://minio:9000 minioadmin minioadmin) do
              echo 'Waiting to start minio...' && sleep 1
         done
         rm -rf /data/*
@@ -126,11 +174,11 @@ services:
                    -D /data
     depends_on:
       - etcd
-      - minio
     # deploy:
     #   placement:
     #     constraints:
     #       - node.labels.has_safekeeper1==true
+    #       - node.labels.region==1
 
   safekeeper-r1-2:
     <<: *safekeeper
@@ -146,6 +194,7 @@ services:
     #   placement:
     #     constraints:
     #       - node.labels.has_safekeeper2==true
+    #       - node.labels.region==1
 
   safekeeper-r1-3:
     <<: *safekeeper
@@ -161,6 +210,7 @@ services:
     #   placement:
     #     constraints:
     #       - node.labels.has_safekeeper3==true
+    #       - node.labels.region==1
 
   xactserver-r1: &xactserver
     image: ctring/xactserver:${TAG:-latest}
@@ -168,6 +218,8 @@ services:
       - NODE_ID=1
       - CONNECT_PG=postgresql://compute-r1:55433
       - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000
+    extra_hosts:
+      - xactserver-r1:0.0.0.0
     entrypoint:
       - "/bin/sh"
       - "-c"
@@ -182,6 +234,7 @@ services:
     #   placement:
     #     constraints:
     #       - node.labels.has_xactserver==true
+    #       - node.labels.region==1
 
   compute-r1: &compute
     restart: always
@@ -222,6 +275,7 @@ services:
     #   placement:
     #     constraints:
     #       - node.labels.has_compute==true
+    #       - node.labels.region==1
 
   #############################################
   #                 REGION 2                  #
@@ -240,6 +294,7 @@ services:
     #   placement:
     #     constraints:
     #       - node.labels.has_pageserver==true
+    #       - node.labels.region==2
 
   safekeeper-r2-1:
     <<: *safekeeper
@@ -254,7 +309,8 @@ services:
     # deploy:
     #   placement:
     #     constraints:
-    #       - node.labels.has_safekeeper2==true
+    #       - node.labels.has_safekeeper1==true
+    #       - node.labels.region==2
 
   safekeeper-r2-2:
     <<: *safekeeper
@@ -270,6 +326,7 @@ services:
     #   placement:
     #     constraints:
     #       - node.labels.has_safekeeper2==true
+    #       - node.labels.region==2
 
   safekeeper-r2-3:
     <<: *safekeeper
@@ -284,7 +341,8 @@ services:
     # deploy:
     #   placement:
     #     constraints:
-    #       - node.labels.has_safekeeper2==true
+    #       - node.labels.has_safekeeper3==true
+    #       - node.labels.region==2
 
   xactserver-r2:
     <<: *xactserver
@@ -292,6 +350,13 @@ services:
       - NODE_ID=2
       - CONNECT_PG=postgresql://compute-r2:55433
       - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000
+    extra_hosts:
+      - xactserver-r2:0.0.0.0
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_xactserver==true
+    #       - node.labels.region==2
 
   compute-r2:
     <<: *compute
@@ -311,4 +376,8 @@ services:
       - safekeeper-r2-3
       - pageserver-r2
       - xactserver-r2
-  
+    # deploy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.has_compute==true
+    #       - node.labels.region==2

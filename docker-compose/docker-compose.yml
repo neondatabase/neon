@@ -1,11 +1,12 @@
 # This YAML can be run using either docker-compose (single node) or Docker Swarm (multiple nodes).
-# 
+# All of the following commands are run in the same directory as this file.
+#
 # Run with docker-compose:
 #   - Build the wrapped compute image
 #
 #       docker compose build
 #
-#   - To start the stack, change to the directory of this file and run:
+#   - Start the stack:
 #       
 #       docker compose up -d
 #
@@ -18,7 +19,6 @@
 #       docker compose down
 #
 # Run with Docker Swarm:
-#
 #   - Follow this tutorial to start a swarm: https://docs.docker.com/engine/swarm/swarm-tutorial/.
 #     All of following commands starting with "docker" must be run on the manager node.
 #
