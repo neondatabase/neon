@@ -448,6 +448,6 @@ impl Request {
             pg_version,
         } = self;
 
-        manager.request_redo(key, lsn, base_img, records, pg_version)
+        manager.request_redo(key, lsn, base_img, Lsn(0), records, pg_version)
     }
 }

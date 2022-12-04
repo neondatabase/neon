@@ -227,6 +227,7 @@ impl PostgresRedoManager {
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
+    #[allow(clippy::too_many_arguments)]
     fn apply_batch_postgres(
         &self,
         key: Key,
