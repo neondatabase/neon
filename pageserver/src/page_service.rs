@@ -941,7 +941,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 /// ensures that queries don't fail immediately after pageserver startup, because
 /// all tenants are still loading.
 async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> Result<Arc<Tenant>> {
-    let tenant = tenant_mgr::get_tenant(tenant_id, false)?;
+    let tenant = tenant_mgr::get_tenant(tenant_id, false).await?;
     match tokio::time::timeout(Duration::from_secs(30), tenant.wait_to_become_active()).await {
         Ok(wait_result) => wait_result
             // no .context(), the error message is good enough and some tests depend on it
