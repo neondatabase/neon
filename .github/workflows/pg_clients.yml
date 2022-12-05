@@ -52,7 +52,6 @@ jobs:
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        environment: staging
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
 
@@ -77,7 +76,6 @@ jobs:
       if: ${{ always() }}
       uses: ./.github/actions/neon-project-delete
       with:
-        environment: staging
         project_id: ${{ steps.create-neon-project.outputs.project_id }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
