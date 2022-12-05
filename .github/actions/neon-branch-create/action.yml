@@ -5,9 +5,6 @@ inputs:
   api_key:
     desctiption: 'Neon API key'
     required: true
-  environment:
-    desctiption: 'dev (aka captest) or staging'
-    required: true
   project_id:
     desctiption: 'ID of the Project to create Branch in'
     required: true
@@ -22,27 +19,6 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Parse Input
-      id: parse-input
-      shell: bash -euxo pipefail {0}
-      run: |
-        case "${ENVIRONMENT}" in
-          dev)
-            API_HOST=console.dev.neon.tech
-            ;;
-          staging)
-            API_HOST=console.stage.neon.tech
-            ;;
-          *)
-            echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
-            exit 1
-            ;;
-        esac
-
-        echo "api_host=${API_HOST}" >> $GITHUB_OUTPUT
-      env:
-        ENVIRONMENT: ${{ inputs.environment }}
-
     - name: Create New Branch
       id: create-branch
       shell: bash -euxo pipefail {0}
@@ -85,7 +61,7 @@ runs:
         echo "host=${host}" >> $GITHUB_OUTPUT
       env:
         API_KEY: ${{ inputs.api_key }}
-        API_HOST: ${{ steps.parse-input.outputs.api_host }}
+        API_HOST: console.stage.neon.tech
         PROJECT_ID: ${{ inputs.project_id }}
 
     - name: Get Role name
@@ -104,7 +80,7 @@ runs:
         echo "role_name=${role_name}" >> $GITHUB_OUTPUT
       env:
         API_KEY: ${{ inputs.api_key }}
-        API_HOST: ${{ steps.parse-input.outputs.api_host }}
+        API_HOST: console.stage.neon.tech
         PROJECT_ID: ${{ inputs.project_id }}
         BRANCH_ID: ${{ steps.create-branch.outputs.branch_id }}
 
@@ -147,7 +123,7 @@ runs:
         echo "dsn=${dsn}" >> $GITHUB_OUTPUT
       env:
         API_KEY: ${{ inputs.api_key }}
-        API_HOST: ${{ steps.parse-input.outputs.api_host }}
+        API_HOST: console.stage.neon.tech
         PROJECT_ID: ${{ inputs.project_id }}
         BRANCH_ID: ${{ steps.create-branch.outputs.branch_id }}
         ROLE_NAME: ${{ steps.role-name.outputs.role_name }}
