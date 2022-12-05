@@ -1483,7 +1483,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PageReconstructError> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -2828,12 +2828,31 @@ impl Timeline {
     }
 }
 
+/// An error happened in a get() operation.
+#[derive(thiserror::Error)]
+pub enum PageReconstructError {
+    #[error(transparent)]
+    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
+
+    #[error(transparent)]
+    WalRedo(#[from] crate::walredo::WalRedoError),
+}
+
+impl std::fmt::Debug for PageReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            PageReconstructError::Other(err) => err.fmt(f),
+            PageReconstructError::WalRedo(err) => err.fmt(f),
+        }
+    }
+}
+
 /// Helper function for get_reconstruct_data() to add the path of layers traversed
 /// to an error, as anyhow context information.
 fn layer_traversal_error(
     msg: String,
     path: Vec<(ValueReconstructResult, Lsn, TraversalId)>,
-) -> anyhow::Result<()> {
+) -> Result<(), PageReconstructError> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
     let mut msg_iter = path
@@ -2849,7 +2868,8 @@ fn layer_traversal_error(
     let err = anyhow!(msg_iter.next().unwrap());
 
     // Append all subsequent traversals, and the error message 'msg', as contexts.
-    Err(msg_iter.fold(err, |err, msg| err.context(msg)))
+    let msg = msg_iter.fold(err, |err, msg| err.context(msg));
+    Err(PageReconstructError::Other(msg))
 }
 
 /// Various functions to mutate the timeline.
