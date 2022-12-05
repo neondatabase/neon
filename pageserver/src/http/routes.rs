@@ -218,24 +218,30 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         query_param_present(&request, "include-non-incremental-physical-size");
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)
-        .await
-        .map_err(ApiError::NotFound)?;
-    let timelines = tenant.list_timelines();
+    let response_data = async {
+        let tenant = tenant_mgr::get_tenant(tenant_id, true)
+            .await
+            .map_err(ApiError::NotFound)?;
+        let timelines = tenant.list_timelines();
 
-    let mut response_data = Vec::with_capacity(timelines.len());
-    for timeline in timelines {
-        let timeline_info = build_timeline_info(
-            tenant.current_state(),
-            &timeline,
-            include_non_incremental_logical_size,
-            include_non_incremental_physical_size,
-        )
-        .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
-        .map_err(ApiError::InternalServerError)?;
+        let mut response_data = Vec::with_capacity(timelines.len());
+        for timeline in timelines {
+            let timeline_info = build_timeline_info(
+                tenant.current_state(),
+                &timeline,
+                include_non_incremental_logical_size,
+                include_non_incremental_physical_size,
+            )
+            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
+            .map_err(ApiError::InternalServerError)?;
 
-        response_data.push(timeline_info);
+            response_data.push(timeline_info);
+        }
+
+        Ok(response_data)
     }
+    .instrument(info_span!("timeline_list", tenant = %tenant_id))
+    .await?;
 
     json_response(StatusCode::OK, response_data)
 }
