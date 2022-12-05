@@ -15,12 +15,14 @@ use crate::tenant::metadata::TimelineMetadata;
 
 use utils::lsn::Lsn;
 
-/// A part of the filesystem path, that needs a root to become a path again.
+/// Path on the remote storage, relative to some inner prefix.
+/// The prefix is an implementation detail, that allows representing local paths
+/// as the remote ones, stripping the local storage prefix away.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct RelativePath(PathBuf);
+pub struct RemotePath(PathBuf);
 
-impl RelativePath {
+impl RemotePath {
     pub fn new(relative_path: &Path) -> Self {
         debug_assert!(
             relative_path.is_relative(),
@@ -96,22 +98,22 @@ pub struct IndexPart {
     #[serde(default)]
     version: usize,
 
-    /// Each of the layers present on remote storage.
+    /// Layer names, which are stored on the remote storage.
     ///
     /// Additional metadata can might exist in `layer_metadata`.
-    pub timeline_layers: HashSet<RelativePath>,
+    pub timeline_layers: HashSet<RemotePath>,
 
     /// FIXME: unused field. This should be removed, but that changes the on-disk format,
     /// so we need to make sure we're backwards- (and maybe forwards-) compatible
     /// First pass is to move it to Optional and the next would be its removal
-    missing_layers: Option<HashSet<RelativePath>>,
+    missing_layers: Option<HashSet<RemotePath>>,
 
-    /// Per layer file metadata, which can be present for a present or missing layer file.
+    /// Per layer file name metadata, which can be present for a present or missing layer file.
     ///
     /// Older versions of `IndexPart` will not have this property or have only a part of metadata
     /// that latest version stores.
     #[serde(default)]
-    pub layer_metadata: HashMap<RelativePath, IndexLayerMetadata>,
+    pub layer_metadata: HashMap<RemotePath, IndexLayerMetadata>,
 
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated here for convenience.
@@ -129,7 +131,7 @@ impl IndexPart {
     pub const FILE_NAME: &'static str = "index_part.json";
 
     pub fn new(
-        layers_and_metadata: HashMap<RelativePath, LayerFileMetadata>,
+        layers_and_metadata: HashMap<RemotePath, LayerFileMetadata>,
         disk_consistent_lsn: Lsn,
         metadata_bytes: Vec<u8>,
     ) -> Self {
@@ -172,9 +174,9 @@ impl From<&'_ LayerFileMetadata> for IndexLayerMetadata {
 }
 
 fn separate_paths_and_metadata(
-    input: &HashMap<RelativePath, LayerFileMetadata>,
-    output: &mut HashSet<RelativePath>,
-    layer_metadata: &mut HashMap<RelativePath, IndexLayerMetadata>,
+    input: &HashMap<RemotePath, LayerFileMetadata>,
+    output: &mut HashSet<RemotePath>,
+    layer_metadata: &mut HashMap<RemotePath, IndexLayerMetadata>,
 ) {
     for (path, metadata) in input {
         let metadata = IndexLayerMetadata::from(metadata);
@@ -198,8 +200,8 @@ mod tests {
 
         let expected = IndexPart {
             version: 0,
-            timeline_layers: HashSet::from([RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))]),
-            missing_layers: Some(HashSet::from([RelativePath(PathBuf::from("not_a_real_layer_but_adding_coverage"))])),
+            timeline_layers: HashSet::from([RemotePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))]),
+            missing_layers: Some(HashSet::from([RemotePath(PathBuf::from("not_a_real_layer_but_adding_coverage"))])),
             layer_metadata: HashMap::default(),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: [113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
@@ -226,13 +228,13 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: HashSet::from([RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))]),
-            missing_layers: Some(HashSet::from([RelativePath(PathBuf::from("not_a_real_layer_but_adding_coverage"))])),
+            timeline_layers: HashSet::from([RemotePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))]),
+            missing_layers: Some(HashSet::from([RemotePath(PathBuf::from("not_a_real_layer_but_adding_coverage"))])),
             layer_metadata: HashMap::from([
-                (RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9")), IndexLayerMetadata {
+                (RemotePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9")), IndexLayerMetadata {
                     file_size: Some(25600000),
                 }),
-                (RelativePath(PathBuf::from("not_a_real_layer_but_adding_coverage")), IndexLayerMetadata {
+                (RemotePath(PathBuf::from("not_a_real_layer_but_adding_coverage")), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: Some(9007199254741001),
@@ -262,12 +264,12 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: [RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))].into_iter().collect(),
+            timeline_layers: [RemotePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"))].into_iter().collect(),
             layer_metadata: HashMap::from([
-                (RelativePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9")), IndexLayerMetadata {
+                (RemotePath(PathBuf::from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9")), IndexLayerMetadata {
                     file_size: Some(25600000),
                 }),
-                (RelativePath(PathBuf::from("not_a_real_layer_but_adding_coverage")), IndexLayerMetadata {
+                (RemotePath(PathBuf::from("not_a_real_layer_but_adding_coverage")), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: Some(9007199254741001),
@@ -275,7 +277,7 @@ mod tests {
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: [112,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
-            missing_layers: None::<HashSet<RelativePath>>,
+            missing_layers: None::<HashSet<RemotePath>>,
         };
 
         let part = serde_json::from_str::<IndexPart>(example).unwrap();
