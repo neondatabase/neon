@@ -219,7 +219,7 @@ impl PersistentLayer for ImageLayer {
     fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
-    fn iter(&self) -> LayerIter<'_> {
+    fn iter(&self) -> Result<LayerIter<'_>> {
         unimplemented!();
     }
 
