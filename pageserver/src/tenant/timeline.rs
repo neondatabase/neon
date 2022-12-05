@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::storage_sync::index::{IndexPart, RelativePath};
+use crate::storage_sync::index::{IndexPart, RemotePath};
 use crate::storage_sync::RemoteTimelineClient;
 use crate::tenant::{
     delta_layer::{DeltaLayer, DeltaLayerWriter},
@@ -1013,7 +1013,7 @@ impl Timeline {
         local_filenames.retain(|path| {
             let layer_metadata = index_part
                 .layer_metadata
-                .get(&RelativePath::new(path))
+                .get(&RemotePath::new(path))
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
 
@@ -1062,7 +1062,7 @@ impl Timeline {
 
             let layer_metadata = index_part
                 .layer_metadata
-                .get(&RelativePath::new(path))
+                .get(&RemotePath::new(path))
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
 
@@ -1077,7 +1077,7 @@ impl Timeline {
 
                 trace!("downloading image file: {}", path.display());
                 let sz = remote_client
-                    .download_layer_file(&RelativePath::new(path), &layer_metadata)
+                    .download_layer_file(&RemotePath::new(path), &layer_metadata)
                     .await
                     .context("download image layer")?;
                 trace!("done");
@@ -1107,7 +1107,7 @@ impl Timeline {
 
                 trace!("downloading delta file: {}", path.display());
                 let sz = remote_client
-                    .download_layer_file(&RelativePath::new(path), &layer_metadata)
+                    .download_layer_file(&RemotePath::new(path), &layer_metadata)
                     .await
                     .context("download delta layer")?;
                 trace!("done");
