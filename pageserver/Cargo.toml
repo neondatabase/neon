@@ -18,7 +18,7 @@ async-stream = "0.3"
 async-trait = "0.1"
 byteorder = "1.4.3"
 bytes = "1.0.1"
-chrono = "0.4.19"
+chrono = { version = "0.4.23", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["string"] }
 close_fds = "0.3.2"
 const_format = "0.2.21"
