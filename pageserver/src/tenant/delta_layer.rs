@@ -391,28 +391,19 @@ impl PersistentLayer for DeltaLayer {
         self.path()
     }
 
-    fn iter(&self) -> LayerIter<'_> {
-        let inner = match self.load() {
-            Ok(inner) => inner,
-            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
-        };
-
-        match DeltaValueIter::new(inner) {
+    fn iter(&self) -> Result<LayerIter<'_>> {
+        let inner = self.load().context("load delta layer")?;
+        Ok(match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
             Err(err) => Box::new(std::iter::once(Err(err))),
-        }
+        })
     }
 
-    fn key_iter(&self) -> LayerKeyIter<'_> {
-        let inner = match self.load() {
-            Ok(inner) => inner,
-            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
-        };
-
-        match DeltaKeyIter::new(inner) {
-            Ok(iter) => Box::new(iter),
-            Err(e) => panic!("Layer index is corrupted: {e:?}"),
-        }
+    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
+        let inner = self.load()?;
+        Ok(Box::new(
+            DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
+        ))
     }
 
     fn delete(&self) -> Result<()> {
