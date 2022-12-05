@@ -922,8 +922,7 @@ impl NoLeakChild {
 
         match child.wait() {
             Ok(exit_status) => {
-                // log at error level since .kill() is something we only do on errors ATM
-                error!(exit_status = %exit_status, "wait successful");
+                info!(exit_status = %exit_status, "wait successful");
             }
             Err(e) => {
                 error!(error = %e, "wait error; might leak the child process; it will show as zombie (defunct)");
