@@ -187,13 +187,13 @@ fn import_slru<Reader: Read>(
     path: &Path,
     mut reader: Reader,
     len: usize,
-) -> Result<()> {
-    trace!("importing slru file {}", path.display());
+) -> anyhow::Result<()> {
+    info!("importing slru file {path:?}");
 
     let mut buf: [u8; 8192] = [0u8; 8192];
     let filename = &path
         .file_name()
-        .expect("missing slru filename")
+        .with_context(|| format!("missing slru filename for path {path:?}"))?
         .to_string_lossy();
     let segno = u32::from_str_radix(filename, 16)?;
 
@@ -279,7 +279,9 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                    .no_ondemand_download()?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -405,7 +407,9 @@ pub fn import_wal_from_tar<Reader: Read>(
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                    .no_ondemand_download()?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);

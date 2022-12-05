@@ -91,7 +91,7 @@ async fn exponential_backoff(n: u32, base_increment: f64, max_seconds: f64) {
     }
 }
 
-fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
+pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
     if n == 0 {
         0.0
     } else {

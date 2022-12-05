@@ -35,6 +35,7 @@
 #![allow(clippy::declare_interior_mutable_const)]
 
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -134,7 +135,14 @@ pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create background op runtime")
 });
 
+#[derive(Debug, Clone, Copy)]
 pub struct PageserverTaskId(u64);
+
+impl fmt::Display for PageserverTaskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Each task that we track is associated with a "task ID". It's just an
 /// increasing number that we assign. Note that it is different from tokio::task::Id.
@@ -198,6 +206,9 @@ pub enum TaskKind {
     // Task that uploads a file to remote storage
     RemoteUploadTask,
 
+    // Task that downloads a file from remote storage
+    RemoteDownloadTask,
+
     // task that handles the initial downloading of all tenants
     InitialLoad,
 
@@ -206,6 +217,9 @@ pub enum TaskKind {
 
     // task that handhes metrics collection
     MetricsCollection,
+
+    // task that drives downloading layers
+    DownloadAllRemoteLayers,
 }
 
 #[derive(Default)]
@@ -435,6 +449,10 @@ pub async fn shutdown_tasks(
 
 pub fn current_task_kind() -> Option<TaskKind> {
     CURRENT_TASK.try_with(|ct| ct.kind).ok()
+}
+
+pub fn current_task_id() -> Option<PageserverTaskId> {
+    CURRENT_TASK.try_with(|ct| ct.task_id).ok()
 }
 
 /// A Future that can be used to check if the current task has been requested to

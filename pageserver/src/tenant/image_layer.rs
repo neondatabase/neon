@@ -36,10 +36,11 @@ use bytes::Bytes;
 use hex;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
+use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard};
 use tracing::*;
@@ -105,6 +106,7 @@ pub struct ImageLayer {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub key_range: Range<Key>,
+    pub file_size: u64,
 
     // This entry contains an image of all pages as of this LSN
     pub lsn: Lsn,
@@ -228,6 +230,10 @@ impl PersistentLayer for ImageLayer {
         fs::remove_file(self.path())?;
         Ok(())
     }
+
+    fn file_size(&self) -> Option<u64> {
+        Some(self.file_size)
+    }
 }
 
 impl ImageLayer {
@@ -344,6 +350,7 @@ impl ImageLayer {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         filename: &ImageFileName,
+        file_size: u64,
     ) -> ImageLayer {
         ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -351,6 +358,7 @@ impl ImageLayer {
             tenant_id,
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
+            file_size,
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,
@@ -363,21 +371,21 @@ impl ImageLayer {
     /// Create an ImageLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'pageserver_binutils' binary.
-    pub fn new_for_path<F>(path: &Path, file: F) -> Result<ImageLayer>
-    where
-        F: std::os::unix::prelude::FileExt,
-    {
+    pub fn new_for_path(path: &Path, file: File) -> Result<ImageLayer> {
         let mut summary_buf = Vec::new();
         summary_buf.resize(PAGE_SZ, 0);
         file.read_exact_at(&mut summary_buf, 0)?;
         let summary = Summary::des_prefix(&summary_buf)?;
-
+        let metadata = file
+            .metadata()
+            .context("get file metadata to determine size")?;
         Ok(ImageLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
             timeline_id: summary.timeline_id,
             tenant_id: summary.tenant_id,
             key_range: summary.key_range,
             lsn: summary.lsn,
+            file_size: metadata.len(),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
                 loaded: false,
@@ -523,6 +531,10 @@ impl ImageLayerWriterInner {
         file.seek(SeekFrom::Start(0))?;
         Summary::ser_into(&summary, &mut file)?;
 
+        let metadata = file
+            .metadata()
+            .context("get metadata to determine file size")?;
+
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
@@ -532,6 +544,7 @@ impl ImageLayerWriterInner {
             tenant_id: self.tenant_id,
             key_range: self.key_range.clone(),
             lsn: self.lsn,
+            file_size: metadata.len(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,

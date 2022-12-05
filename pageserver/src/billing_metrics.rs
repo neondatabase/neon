@@ -73,10 +73,10 @@ pub enum BillingMetricKind {
     /// This is an absolute, per-tenant metric.
     /// This is the same metric that tenant/tenant_id/size endpoint returns.
     SyntheticStorageSize,
-    /// Size of all the files in the tenant's directory on disk on the pageserver.
+    /// Size of all the layer files in the tenant's directory on disk on the pageserver.
     /// This is an absolute, per-tenant metric.
-    /// See also prometheus metric CURRENT_PHYSICAL_SIZE.
-    PhysicalSize,
+    /// See also prometheus metric RESIDENT_PHYSICAL_SIZE.
+    ResidentSize,
     /// Size of the remote storage (S3) directory.
     /// This is an absolute, per-tenant metric.
     RemoteStorageSize,
@@ -89,7 +89,7 @@ impl FromStr for BillingMetricKind {
         match s {
             "written_size" => Ok(Self::WrittenSize),
             "synthetic_storage_size" => Ok(Self::SyntheticStorageSize),
-            "physical_size" => Ok(Self::PhysicalSize),
+            "resident_size" => Ok(Self::ResidentSize),
             "remote_storage_size" => Ok(Self::RemoteStorageSize),
             _ => anyhow::bail!("invalid value \"{s}\" for metric type"),
         }
@@ -101,7 +101,7 @@ impl fmt::Display for BillingMetricKind {
         f.write_str(match self {
             BillingMetricKind::WrittenSize => "written_size",
             BillingMetricKind::SyntheticStorageSize => "synthetic_storage_size",
-            BillingMetricKind::PhysicalSize => "physical_size",
+            BillingMetricKind::ResidentSize => "resident_size",
             BillingMetricKind::RemoteStorageSize => "remote_storage_size",
         })
     }
@@ -171,7 +171,7 @@ pub async fn collect_metrics_task(
 
         let tenant = tenant_mgr::get_tenant(tenant_id, true).await?;
 
-        let mut tenant_physical_size = 0;
+        let mut tenant_resident_size = 0;
 
         // iterate through list of timelines in tenant
         for timeline in tenant.list_timelines().iter() {
@@ -186,27 +186,27 @@ pub async fn collect_metrics_task(
                 timeline_written_size,
             ));
 
-            let timeline_size = timeline.get_physical_size();
-            tenant_physical_size += timeline_size;
+            let timeline_resident_size = timeline.get_resident_physical_size();
+            tenant_resident_size += timeline_resident_size;
 
             debug!(
-                "per-timeline current metrics for tenant: {}: timeline {} physical_size={} last_record_lsn {} (as bytes)",
-                tenant_id, timeline.timeline_id, timeline_size, timeline_written_size)
+                "per-timeline current metrics for tenant: {}: timeline {} resident_size={} last_record_lsn {} (as bytes)",
+                tenant_id, timeline.timeline_id, timeline_resident_size, timeline_written_size)
         }
 
         let tenant_remote_size = tenant.get_remote_size().await?;
         debug!(
-            "collected current metrics for tenant: {}: state={:?} tenant_physical_size={} remote_size={}",
-            tenant_id, tenant_state, tenant_physical_size, tenant_remote_size
+            "collected current metrics for tenant: {}: state={:?} resident_size={} remote_size={}",
+            tenant_id, tenant_state, tenant_resident_size, tenant_remote_size
         );
 
         current_metrics.push((
             BillingMetricsKey {
                 tenant_id,
                 timeline_id: None,
-                metric: BillingMetricKind::PhysicalSize,
+                metric: BillingMetricKind::ResidentSize,
             },
-            tenant_physical_size,
+            tenant_resident_size,
         ));
 
         current_metrics.push((
