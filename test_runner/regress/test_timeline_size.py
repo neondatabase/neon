@@ -20,10 +20,12 @@ from fixtures.neon_fixtures import (
     PortDistributor,
     Postgres,
     VanillaPostgres,
+    assert_tenant_status,
     wait_for_last_flush_lsn,
+    wait_until,
 )
 from fixtures.types import TenantId, TimelineId
-from fixtures.utils import get_timeline_dir_size, wait_until
+from fixtures.utils import get_timeline_dir_size
 
 
 def test_timeline_size(neon_simple_env: NeonEnv):
@@ -320,7 +322,17 @@ def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
     env.pageserver.stop()
     env.pageserver.start()
 
-    assert_physical_size(env, env.initial_tenant, new_timeline_id)
+    # Wait for the tenant to be loaded
+    client = env.pageserver.http_client()
+    wait_until(
+        number_of_iterations=5,
+        interval=1,
+        func=lambda: assert_tenant_status(client, env.initial_tenant, "Active"),
+    )
+
+    assert_physical_size_invariants(
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id)
+    )
 
 
 def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
@@ -341,7 +353,9 @@ def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
-    assert_physical_size(env, env.initial_tenant, new_timeline_id)
+    assert_physical_size_invariants(
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id)
+    )
 
 
 def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder):
@@ -376,7 +390,9 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_compact(env.initial_tenant, new_timeline_id)
 
-    assert_physical_size(env, env.initial_tenant, new_timeline_id)
+    assert_physical_size_invariants(
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id)
+    )
 
 
 def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
@@ -415,7 +431,9 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_gc(env.initial_tenant, new_timeline_id, gc_horizon=None)
 
-    assert_physical_size(env, env.initial_tenant, new_timeline_id)
+    assert_physical_size_invariants(
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id)
+    )
 
 
 # The timeline logical and physical sizes are also exposed as prometheus metrics.
@@ -448,7 +466,7 @@ def test_timeline_size_metrics(
     # get the metrics and parse the metric for the current timeline's physical size
     metrics = env.pageserver.http_client().get_metrics()
     matches = re.search(
-        f'^pageserver_current_physical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
+        f'^pageserver_resident_physical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
         metrics,
         re.MULTILINE,
     )
@@ -507,11 +525,12 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
 
     tenant, timeline = env.neon_cli.create_tenant()
 
-    def get_timeline_physical_size(timeline: TimelineId):
-        res = client.timeline_detail(tenant, timeline, include_non_incremental_physical_size=True)
-        return res["current_physical_size_non_incremental"]
+    def get_timeline_resident_physical_size(timeline: TimelineId):
+        sizes = get_physical_size_values(env, tenant, timeline)
+        assert_physical_size_invariants(sizes)
+        return sizes.prometheus_resident_physical
 
-    timeline_total_size = get_timeline_physical_size(timeline)
+    timeline_total_resident_physical_size = get_timeline_resident_physical_size(timeline)
     for i in range(10):
         n_rows = random.randint(100, 1000)
 
@@ -528,22 +547,54 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
         wait_for_last_flush_lsn(env, pg, tenant, timeline)
         pageserver_http.timeline_checkpoint(tenant, timeline)
 
-        timeline_total_size += get_timeline_physical_size(timeline)
+        timeline_total_resident_physical_size += get_timeline_resident_physical_size(timeline)
 
         pg.stop()
 
-    tenant_physical_size = int(client.tenant_status(tenant_id=tenant)["current_physical_size"])
-    assert tenant_physical_size == timeline_total_size
+    # ensure that tenant_status current_physical size reports sum of timeline current_physical_size
+    tenant_current_physical_size = int(
+        client.tenant_status(tenant_id=tenant)["current_physical_size"]
+    )
+    assert tenant_current_physical_size == sum(
+        [tl["current_physical_size"] for tl in client.timeline_list(tenant_id=tenant)]
+    )
+    # since we don't do layer eviction, current_physical_size is identical to resident physical size
+    assert timeline_total_resident_physical_size == tenant_current_physical_size
 
 
-def assert_physical_size(env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId):
-    """Check the current physical size returned from timeline API
-    matches the total physical size of the timeline on disk"""
+class TimelinePhysicalSizeValues:
+    api_current_physical: int
+    prometheus_resident_physical: int
+    python_timelinedir_layerfiles_physical: int
+
+
+def get_physical_size_values(
+    env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId
+) -> TimelinePhysicalSizeValues:
+    res = TimelinePhysicalSizeValues()
+
     client = env.pageserver.http_client()
-    res = client.timeline_detail(tenant_id, timeline_id, include_non_incremental_physical_size=True)
+
+    res.prometheus_resident_physical = client.get_timeline_metric(
+        tenant_id, timeline_id, "pageserver_resident_physical_size"
+    )
+
+    detail = client.timeline_detail(
+        tenant_id, timeline_id, include_timeline_dir_layer_file_size_sum=True
+    )
+    res.api_current_physical = detail["current_physical_size"]
+
     timeline_path = env.timeline_dir(tenant_id, timeline_id)
-    assert res["current_physical_size"] == res["current_physical_size_non_incremental"]
-    assert res["current_physical_size"] == get_timeline_dir_size(timeline_path)
+    res.python_timelinedir_layerfiles_physical = get_timeline_dir_size(timeline_path)
+
+    return res
+
+
+def assert_physical_size_invariants(sizes: TimelinePhysicalSizeValues):
+    # resident phyiscal size is defined as
+    assert sizes.python_timelinedir_layerfiles_physical == sizes.prometheus_resident_physical
+    # we don't do layer eviction, so, all layers are resident
+    assert sizes.api_current_physical == sizes.prometheus_resident_physical
 
 
 # Timeline logical size initialization is an asynchronous background task that runs once,

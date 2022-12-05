@@ -407,7 +407,7 @@ impl WalreceiverState {
                 .await
                 .context("walreceiver connection handling failure")
             }
-            .instrument(info_span!("walreceiver_connection", id = %id))
+            .instrument(info_span!("walreceiver_connection", id = %id, node_id = %new_sk_id))
         });
 
         let now = Utc::now().naive_utc();

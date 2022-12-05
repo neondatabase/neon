@@ -12,7 +12,7 @@
 //!
 use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use once_cell::sync::OnceCell;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -238,6 +238,10 @@ impl VirtualFile {
     /// Call File::sync_all() on the underlying File.
     pub fn sync_all(&self) -> Result<(), Error> {
         self.with_file("fsync", |file| file.sync_all())?
+    }
+
+    pub fn metadata(&self) -> Result<fs::Metadata, Error> {
+        self.with_file("metadata", |file| file.metadata())?
     }
 
     /// Helper function that looks up the underlying File for this VirtualFile,

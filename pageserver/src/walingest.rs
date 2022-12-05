@@ -31,7 +31,10 @@ use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
+use crate::tenant::PageReconstructResult;
 use crate::tenant::Timeline;
+use crate::try_no_ondemand_download;
+use crate::try_page_reconstruct_result as try_prr;
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -52,10 +55,10 @@ pub struct WalIngest<'a> {
 }
 
 impl<'a> WalIngest<'a> {
-    pub fn new(timeline: &Timeline, startpoint: Lsn) -> Result<WalIngest> {
+    pub fn new(timeline: &Timeline, startpoint: Lsn) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let checkpoint_bytes = timeline.get_checkpoint(startpoint)?;
+        let checkpoint_bytes = timeline.get_checkpoint(startpoint).no_ondemand_download()?;
         let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
@@ -80,10 +83,12 @@ impl<'a> WalIngest<'a> {
         lsn: Lsn,
         modification: &mut DatadirModification,
         decoded: &mut DecodedWALRecord,
-    ) -> Result<()> {
+    ) -> PageReconstructResult<()> {
         modification.lsn = lsn;
-        decode_wal_record(recdata, decoded, self.timeline.pg_version)
-            .context("failed decoding wal record")?;
+        try_prr!(
+            decode_wal_record(recdata, decoded, self.timeline.pg_version)
+                .context("failed decoding wal record")
+        );
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -98,7 +103,7 @@ impl<'a> WalIngest<'a> {
         if decoded.xl_rmid == pg_constants::RM_HEAP_ID
             || decoded.xl_rmid == pg_constants::RM_HEAP2_ID
         {
-            self.ingest_heapam_record(&mut buf, modification, decoded)?;
+            try_prr!(self.ingest_heapam_record(&mut buf, modification, decoded));
         }
         // Handle other special record types
         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
@@ -106,13 +111,13 @@ impl<'a> WalIngest<'a> {
                 == pg_constants::XLOG_SMGR_CREATE
         {
             let create = XlSmgrCreate::decode(&mut buf);
-            self.ingest_xlog_smgr_create(modification, &create)?;
+            try_prr!(self.ingest_xlog_smgr_create(modification, &create));
         } else if decoded.xl_rmid == pg_constants::RM_SMGR_ID
             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_SMGR_TRUNCATE
         {
             let truncate = XlSmgrTruncate::decode(&mut buf);
-            self.ingest_xlog_smgr_truncate(modification, &truncate)?;
+            try_prr!(self.ingest_xlog_smgr_truncate(modification, &truncate));
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
             debug!(
                 "handle RM_DBASE_ID for Postgres version {:?}",
@@ -125,14 +130,14 @@ impl<'a> WalIngest<'a> {
                     let createdb = XlCreateDatabase::decode(&mut buf);
                     debug!("XLOG_DBASE_CREATE v14");
 
-                    self.ingest_xlog_dbase_create(modification, &createdb)?;
+                    try_prr!(self.ingest_xlog_dbase_create(modification, &createdb));
                 } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                     == postgres_ffi::v14::bindings::XLOG_DBASE_DROP
                 {
                     let dropdb = XlDropDatabase::decode(&mut buf);
                     for tablespace_id in dropdb.tablespace_ids {
                         trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                        modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+                        try_prr!(modification.drop_dbdir(tablespace_id, dropdb.db_id));
                     }
                 }
             } else if self.timeline.pg_version == 15 {
@@ -148,14 +153,14 @@ impl<'a> WalIngest<'a> {
                     // So we can reuse XlCreateDatabase here.
                     debug!("XLOG_DBASE_CREATE_FILE_COPY");
                     let createdb = XlCreateDatabase::decode(&mut buf);
-                    self.ingest_xlog_dbase_create(modification, &createdb)?;
+                    try_prr!(self.ingest_xlog_dbase_create(modification, &createdb));
                 } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                     == postgres_ffi::v15::bindings::XLOG_DBASE_DROP
                 {
                     let dropdb = XlDropDatabase::decode(&mut buf);
                     for tablespace_id in dropdb.tablespace_ids {
                         trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                        modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+                        try_prr!(modification.drop_dbdir(tablespace_id, dropdb.db_id));
                     }
                 }
             }
@@ -167,38 +172,38 @@ impl<'a> WalIngest<'a> {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                self.put_slru_page_image(
+                try_prr!(self.put_slru_page_image(
                     modification,
                     SlruKind::Clog,
                     segno,
                     rpageno,
                     ZERO_PAGE.clone(),
-                )?;
+                ));
             } else {
                 assert!(info == pg_constants::CLOG_TRUNCATE);
                 let xlrec = XlClogTruncate::decode(&mut buf);
-                self.ingest_clog_truncate_record(modification, &xlrec)?;
+                try_prr!(self.ingest_clog_truncate_record(modification, &xlrec));
             }
         } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
             let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
             if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_ABORT {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
-                self.ingest_xact_record(
+                try_prr!(self.ingest_xact_record(
                     modification,
                     &parsed_xact,
                     info == pg_constants::XLOG_XACT_COMMIT,
-                )?;
+                ));
             } else if info == pg_constants::XLOG_XACT_COMMIT_PREPARED
                 || info == pg_constants::XLOG_XACT_ABORT_PREPARED
             {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
-                self.ingest_xact_record(
+                try_prr!(self.ingest_xact_record(
                     modification,
                     &parsed_xact,
                     info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
-                )?;
+                ));
                 // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
                 trace!(
                     "Drop twophaseFile for xid {} parsed_xact.xid {} here at {}",
@@ -206,9 +211,10 @@ impl<'a> WalIngest<'a> {
                     parsed_xact.xid,
                     lsn,
                 );
-                modification.drop_twophase_file(parsed_xact.xid)?;
+                try_prr!(modification.drop_twophase_file(parsed_xact.xid));
             } else if info == pg_constants::XLOG_XACT_PREPARE {
-                modification.put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]))?;
+                try_prr!(modification
+                    .put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..])));
             }
         } else if decoded.xl_rmid == pg_constants::RM_MULTIXACT_ID {
             let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
@@ -217,34 +223,34 @@ impl<'a> WalIngest<'a> {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                self.put_slru_page_image(
+                try_prr!(self.put_slru_page_image(
                     modification,
                     SlruKind::MultiXactOffsets,
                     segno,
                     rpageno,
                     ZERO_PAGE.clone(),
-                )?;
+                ));
             } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                self.put_slru_page_image(
+                try_prr!(self.put_slru_page_image(
                     modification,
                     SlruKind::MultiXactMembers,
                     segno,
                     rpageno,
                     ZERO_PAGE.clone(),
-                )?;
+                ));
             } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                 let xlrec = XlMultiXactCreate::decode(&mut buf);
-                self.ingest_multixact_create_record(modification, &xlrec)?;
+                try_prr!(self.ingest_multixact_create_record(modification, &xlrec));
             } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
                 let xlrec = XlMultiXactTruncate::decode(&mut buf);
-                self.ingest_multixact_truncate_record(modification, &xlrec)?;
+                try_prr!(self.ingest_multixact_truncate_record(modification, &xlrec));
             }
         } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
             let xlrec = XlRelmapUpdate::decode(&mut buf);
-            self.ingest_relmap_page(modification, &xlrec, decoded)?;
+            try_prr!(self.ingest_relmap_page(modification, &xlrec, decoded));
         } else if decoded.xl_rmid == pg_constants::RM_XLOG_ID {
             let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
             if info == pg_constants::XLOG_NEXTOID {
@@ -258,7 +264,9 @@ impl<'a> WalIngest<'a> {
             {
                 let mut checkpoint_bytes = [0u8; SIZEOF_CHECKPOINT];
                 buf.copy_to_slice(&mut checkpoint_bytes);
-                let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
+                let xlog_checkpoint = try_prr!(
+                    CheckPoint::decode(&checkpoint_bytes).context("deserialize CheckPoint")
+                );
                 trace!(
                     "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
                     xlog_checkpoint.oldestXid,
@@ -279,22 +287,23 @@ impl<'a> WalIngest<'a> {
         // Iterate through all the blocks that the record modifies, and
         // "put" a separate copy of the record for each block.
         for blk in decoded.blocks.iter() {
-            self.ingest_decoded_block(modification, lsn, decoded, blk)?;
+            try_no_ondemand_download!(self.ingest_decoded_block(modification, lsn, decoded, blk));
         }
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
-            let new_checkpoint_bytes = self.checkpoint.encode()?;
+            let new_checkpoint_bytes =
+                try_prr!(self.checkpoint.encode().context("encode checkpoint"));
 
-            modification.put_checkpoint(new_checkpoint_bytes)?;
+            try_prr!(modification.put_checkpoint(new_checkpoint_bytes));
             self.checkpoint_modified = false;
         }
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        modification.commit()?;
+        try_prr!(modification.commit());
 
-        Ok(())
+        PageReconstructResult::Success(())
     }
 
     fn ingest_decoded_block(
@@ -303,7 +312,7 @@ impl<'a> WalIngest<'a> {
         lsn: Lsn,
         decoded: &DecodedWALRecord,
         blk: &DecodedBkpBlock,
-    ) -> Result<()> {
+    ) -> PageReconstructResult<()> {
         let rel = RelTag {
             spcnode: blk.rnode_spcnode,
             dbnode: blk.rnode_dbnode,
@@ -323,7 +332,7 @@ impl<'a> WalIngest<'a> {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
         // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, self.timeline.pg_version)?
+            && !try_prr!(postgres_ffi::bkpimage_is_compressed(blk.bimg_info, self.timeline.pg_version))
         {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;
@@ -345,15 +354,20 @@ impl<'a> WalIngest<'a> {
                 page_set_lsn(&mut image, lsn)
             }
             assert_eq!(image.len(), BLCKSZ as usize);
-            self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
+            try_no_ondemand_download!(self.put_rel_page_image(
+                modification,
+                rel,
+                blk.blkno,
+                image.freeze()
+            ));
         } else {
             let rec = NeonWalRecord::Postgres {
                 will_init: blk.will_init || blk.apply_image,
                 rec: decoded.record.clone(),
             };
-            self.put_rel_wal_record(modification, rel, blk.blkno, rec)?;
+            try_prr!(self.put_rel_wal_record(modification, rel, blk.blkno, rec));
         }
-        Ok(())
+        PageReconstructResult::Success(())
     }
 
     fn ingest_heapam_record(
@@ -505,7 +519,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         modification: &mut DatadirModification,
         rec: &XlCreateDatabase,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         let db_id = rec.db_id;
         let tablespace_id = rec.tablespace_id;
         let src_db_id = rec.src_db_id;
@@ -520,14 +534,16 @@ impl<'a> WalIngest<'a> {
 
         let rels = modification
             .tline
-            .list_rels(src_tablespace_id, src_db_id, req_lsn)?;
+            .list_rels(src_tablespace_id, src_db_id, req_lsn)
+            .no_ondemand_download()?;
 
         debug!("ingest_xlog_dbase_create: {} rels", rels.len());
 
         // Copy relfilemap
         let filemap = modification
             .tline
-            .get_relmap_file(src_tablespace_id, src_db_id, req_lsn)?;
+            .get_relmap_file(src_tablespace_id, src_db_id, req_lsn)
+            .no_ondemand_download()?;
         modification.put_relmap_file(tablespace_id, db_id, filemap)?;
 
         let mut num_rels_copied = 0;
@@ -536,7 +552,10 @@ impl<'a> WalIngest<'a> {
             assert_eq!(src_rel.spcnode, src_tablespace_id);
             assert_eq!(src_rel.dbnode, src_db_id);
 
-            let nblocks = modification.tline.get_rel_size(src_rel, req_lsn, true)?;
+            let nblocks = modification
+                .tline
+                .get_rel_size(src_rel, req_lsn, true)
+                .no_ondemand_download()?;
             let dst_rel = RelTag {
                 spcnode: tablespace_id,
                 dbnode: db_id,
@@ -553,7 +572,8 @@ impl<'a> WalIngest<'a> {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true)?;
+                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true)
+                    .no_ondemand_download()?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
             }
@@ -657,7 +677,7 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification,
         parsed: &XlXactParsedRecord,
         is_commit: bool,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // Record update of CLOG pages
         let mut pageno = parsed.xid / pg_constants::CLOG_XACTS_PER_PAGE;
         let mut segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -713,7 +733,11 @@ impl<'a> WalIngest<'a> {
                     relnode: xnode.relnode,
                 };
                 let last_lsn = self.timeline.get_last_record_lsn();
-                if modification.tline.get_rel_exists(rel, last_lsn, true)? {
+                if modification
+                    .tline
+                    .get_rel_exists(rel, last_lsn, true)
+                    .no_ondemand_download()?
+                {
                     self.put_rel_drop(modification, rel)?;
                 }
             }
@@ -725,7 +749,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         modification: &mut DatadirModification,
         xlrec: &XlClogTruncate,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         info!(
             "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {}",
             xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db
@@ -767,7 +791,8 @@ impl<'a> WalIngest<'a> {
         let req_lsn = modification.tline.get_last_record_lsn();
         for segno in modification
             .tline
-            .list_slru_segments(SlruKind::Clog, req_lsn)?
+            .list_slru_segments(SlruKind::Clog, req_lsn)
+            .no_ondemand_download()?
         {
             let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
             if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
@@ -923,10 +948,10 @@ impl<'a> WalIngest<'a> {
         rel: RelTag,
         blknum: BlockNumber,
         img: Bytes,
-    ) -> Result<()> {
-        self.handle_rel_extend(modification, rel, blknum)?;
-        modification.put_rel_page_image(rel, blknum, img)?;
-        Ok(())
+    ) -> PageReconstructResult<()> {
+        try_no_ondemand_download!(self.handle_rel_extend(modification, rel, blknum));
+        try_prr!(modification.put_rel_page_image(rel, blknum, img));
+        PageReconstructResult::Success(())
     }
 
     fn put_rel_wal_record(
@@ -936,7 +961,8 @@ impl<'a> WalIngest<'a> {
         blknum: BlockNumber,
         rec: NeonWalRecord,
     ) -> Result<()> {
-        self.handle_rel_extend(modification, rel, blknum)?;
+        self.handle_rel_extend(modification, rel, blknum)
+            .no_ondemand_download()?;
         modification.put_rel_wal_record(rel, blknum, rec)?;
         Ok(())
     }
@@ -946,7 +972,7 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification,
         rel: RelTag,
         nblocks: BlockNumber,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         modification.put_rel_truncation(rel, nblocks)?;
         Ok(())
     }
@@ -956,11 +982,17 @@ impl<'a> WalIngest<'a> {
         Ok(())
     }
 
-    fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> Result<BlockNumber> {
-        let nblocks = if !self.timeline.get_rel_exists(rel, lsn, true)? {
+    fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> anyhow::Result<BlockNumber> {
+        let nblocks = if !self
+            .timeline
+            .get_rel_exists(rel, lsn, true)
+            .no_ondemand_download()?
+        {
             0
         } else {
-            self.timeline.get_rel_size(rel, lsn, true)?
+            self.timeline
+                .get_rel_size(rel, lsn, true)
+                .no_ondemand_download()?
         };
         Ok(nblocks)
     }
@@ -970,30 +1002,31 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification,
         rel: RelTag,
         blknum: BlockNumber,
-    ) -> Result<()> {
+    ) -> PageReconstructResult<()> {
         let new_nblocks = blknum + 1;
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let old_nblocks = if !self.timeline.get_rel_exists(rel, last_lsn, true)? {
-            // create it with 0 size initially, the logic below will extend it
-            modification.put_rel_creation(rel, 0)?;
-            0
-        } else {
-            self.timeline.get_rel_size(rel, last_lsn, true)?
-        };
+        let old_nblocks =
+            if !try_no_ondemand_download!(self.timeline.get_rel_exists(rel, last_lsn, true)) {
+                // create it with 0 size initially, the logic below will extend it
+                try_prr!(modification.put_rel_creation(rel, 0));
+                0
+            } else {
+                try_no_ondemand_download!(self.timeline.get_rel_size(rel, last_lsn, true))
+            };
 
         if new_nblocks > old_nblocks {
             //info!("extending {} {} to {}", rel, old_nblocks, new_nblocks);
-            modification.put_rel_extend(rel, new_nblocks)?;
+            try_prr!(modification.put_rel_extend(rel, new_nblocks));
 
             // fill the gap with zeros
             for gap_blknum in old_nblocks..blknum {
-                modification.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone())?;
+                try_prr!(modification.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone()));
             }
         }
-        Ok(())
+        PageReconstructResult::Success(())
     }
 
     fn put_slru_page_image(
@@ -1015,7 +1048,7 @@ impl<'a> WalIngest<'a> {
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // we don't use a cache for this like we do for relations. SLRUS are explcitly
         // extended with ZEROPAGE records, not with commit records, so it happens
         // a lot less frequently.
@@ -1027,13 +1060,16 @@ impl<'a> WalIngest<'a> {
         let last_lsn = self.timeline.get_last_record_lsn();
         let old_nblocks = if !self
             .timeline
-            .get_slru_segment_exists(kind, segno, last_lsn)?
+            .get_slru_segment_exists(kind, segno, last_lsn)
+            .no_ondemand_download()?
         {
             // create it with 0 size initially, the logic below will extend it
             modification.put_slru_segment_creation(kind, segno, 0)?;
             0
         } else {
-            self.timeline.get_slru_segment_size(kind, segno, last_lsn)?
+            self.timeline
+                .get_slru_segment_size(kind, segno, last_lsn)
+                .no_ondemand_download()?
         };
 
         if new_nblocks > old_nblocks {
@@ -1099,58 +1135,103 @@ mod tests {
 
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest.put_rel_creation(&mut m, TESTREL_A)?;
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
+        walingest
+            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))
+            .no_ondemand_download()?;
         m.commit()?;
         let mut m = tline.begin_modification(Lsn(0x30));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"))?;
+        walingest
+            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"))
+            .no_ondemand_download()?;
         m.commit()?;
         let mut m = tline.begin_modification(Lsn(0x40));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"))?;
+        walingest
+            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"))
+            .no_ondemand_download()?;
         m.commit()?;
         let mut m = tline.begin_modification(Lsn(0x50));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"))?;
+        walingest
+            .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"))
+            .no_ondemand_download()?;
         m.commit()?;
 
         assert_current_logical_size(&*tline, Lsn(0x50));
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10), false)?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10), false).is_err());
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x10), false)
+                .no_ondemand_download()?,
+            false
+        );
+        assert!(tline
+            .get_rel_size(TESTREL_A, Lsn(0x10), false)
+            .no_ondemand_download()
+            .is_err());
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, 1);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, 3);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false)
+                .no_ondemand_download()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x20), false)
+                .no_ondemand_download()?,
+            1
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x50), false)
+                .no_ondemand_download()?,
+            3
+        );
 
         // Check page contents at each LSN
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 2")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 3")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1 at 4")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1161,20 +1242,36 @@ mod tests {
         assert_current_logical_size(&*tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60), false)?, 2);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x60), false)
+                .no_ondemand_download()?,
+            2
+        );
+        assert_eq!(
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         // should still see the truncated block with older LSN
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, 3);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x50), false)
+                .no_ondemand_download()?,
+            3
+        );
+        assert_eq!(
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1182,35 +1279,62 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x68));
         walingest.put_rel_truncation(&mut m, TESTREL_A, 0)?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x68), false)?, 0);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x68), false)
+                .no_ondemand_download()?,
+            0
+        );
 
         // Extend from 0 to 2 blocks, leaving a gap
         let mut m = tline.begin_modification(Lsn(0x70));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"))?;
+        walingest
+            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"))
+            .no_ondemand_download()?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70), false)?, 2);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x70), false)
+                .no_ondemand_download()?,
+            2
+        );
+        assert_eq!(
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false)
+                .no_ondemand_download()?,
             ZERO_PAGE
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1")
         );
 
         // Extend a lot more, leaving a big gap that spans across segments
         let mut m = tline.begin_modification(Lsn(0x80));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"))?;
+        walingest
+            .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"))
+            .no_ondemand_download()?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80), false)?, 1501);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x80), false)
+                .no_ondemand_download()?,
+            1501
+        );
         for blk in 2..1500 {
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false)
+                    .no_ondemand_download()?,
                 ZERO_PAGE
             );
         }
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false)
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1500")
         );
 
@@ -1226,12 +1350,24 @@ mod tests {
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
+        walingest
+            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))
+            .no_ondemand_download()?;
         m.commit()?;
 
         // Check that rel exists and size is correct
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, 1);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false)
+                .no_ondemand_download()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x20), false)
+                .no_ondemand_download()?,
+            1
+        );
 
         // Drop rel
         let mut m = tline.begin_modification(Lsn(0x30));
@@ -1239,19 +1375,36 @@ mod tests {
         m.commit()?;
 
         // Check that rel is not visible anymore
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30), false)?, false);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x30), false)
+                .no_ondemand_download()?,
+            false
+        );
 
         // FIXME: should fail
         //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x30), false)?.is_none());
 
         // Re-create it
         let mut m = tline.begin_modification(Lsn(0x40));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"))?;
+        walingest
+            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"))
+            .no_ondemand_download()?;
         m.commit()?;
 
         // Check that rel exists and size is correct
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x40), false)?, 1);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x40), false)
+                .no_ondemand_download()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x40), false)
+                .no_ondemand_download()?,
+            1
+        );
 
         Ok(())
     }
@@ -1270,23 +1423,45 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x20));
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
-            walingest.put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data))?;
+            walingest
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data))
+                .no_ondemand_download()?;
         }
         m.commit()?;
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10), false)?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10), false).is_err());
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x10), false)
+                .no_ondemand_download()?,
+            false
+        );
+        assert!(tline
+            .get_rel_size(TESTREL_A, Lsn(0x10), false)
+            .no_ondemand_download()
+            .is_err());
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, relsize);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false)
+                .no_ondemand_download()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x20), false)
+                .no_ondemand_download()?,
+            relsize
+        );
 
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false)
+                    .no_ondemand_download()?,
                 TEST_IMG(&data)
             );
         }
@@ -1298,24 +1473,38 @@ mod tests {
         m.commit()?;
 
         // Check reported size and contents after truncation
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60), false)?, 1);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x60), false)
+                .no_ondemand_download()?,
+            1
+        );
 
         for blkno in 0..1 {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false)
+                    .no_ondemand_download()?,
                 TEST_IMG(&data)
             );
         }
 
         // should still see all blocks with older LSN
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, relsize);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x50), false)
+                .no_ondemand_download()?,
+            relsize
+        );
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false)
+                    .no_ondemand_download()?,
                 TEST_IMG(&data)
             );
         }
@@ -1326,18 +1515,32 @@ mod tests {
         let mut m = tline.begin_modification(lsn);
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, lsn);
-            walingest.put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data))?;
+            walingest
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data))
+                .no_ondemand_download()?;
         }
         m.commit()?;
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80), false)?, relsize);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x80), false)
+                .no_ondemand_download()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x80), false)
+                .no_ondemand_download()?,
+            relsize
+        );
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x80);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false)
+                    .no_ondemand_download()?,
                 TEST_IMG(&data)
             );
         }
@@ -1358,14 +1561,18 @@ mod tests {
             lsn += 0x10;
             let mut m = tline.begin_modification(Lsn(lsn));
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
-            walingest.put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img)?;
+            walingest
+                .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img)
+                .no_ondemand_download()?;
             m.commit()?;
         }
 
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(lsn), false)
+                .no_ondemand_download()?,
             RELSEG_SIZE + 1
         );
 
@@ -1374,7 +1581,12 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(lsn));
         walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE)?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?, RELSEG_SIZE);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(lsn), false)
+                .no_ondemand_download()?,
+            RELSEG_SIZE
+        );
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate another block
@@ -1383,7 +1595,9 @@ mod tests {
         walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1)?;
         m.commit()?;
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(lsn), false)
+                .no_ondemand_download()?,
             RELSEG_SIZE - 1
         );
         assert_current_logical_size(&*tline, Lsn(lsn));
@@ -1397,7 +1611,9 @@ mod tests {
             walingest.put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber)?;
             m.commit()?;
             assert_eq!(
-                tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
+                tline
+                    .get_rel_size(TESTREL_A, Lsn(lsn), false)
+                    .no_ondemand_download()?,
                 size as BlockNumber
             );
 

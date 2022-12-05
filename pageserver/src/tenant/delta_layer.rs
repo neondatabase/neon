@@ -39,7 +39,7 @@ use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
@@ -182,6 +182,8 @@ pub struct DeltaLayer {
     pub timeline_id: TimelineId,
     pub key_range: Range<Key>,
     pub lsn_range: Range<Lsn>,
+
+    pub file_size: u64,
 
     inner: RwLock<DeltaLayerInner>,
 }
@@ -411,6 +413,10 @@ impl PersistentLayer for DeltaLayer {
         fs::remove_file(self.path())?;
         Ok(())
     }
+
+    fn file_size(&self) -> Option<u64> {
+        Some(self.file_size)
+    }
 }
 
 impl DeltaLayer {
@@ -535,6 +541,7 @@ impl DeltaLayer {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         filename: &DeltaFileName,
+        file_size: u64,
     ) -> DeltaLayer {
         DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -542,6 +549,7 @@ impl DeltaLayer {
             tenant_id,
             key_range: filename.key_range.clone(),
             lsn_range: filename.lsn_range.clone(),
+            file_size,
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -554,14 +562,15 @@ impl DeltaLayer {
     /// Create a DeltaLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'pageserver_binutils' binary.
-    pub fn new_for_path<F>(path: &Path, file: F) -> Result<Self>
-    where
-        F: FileExt,
-    {
+    pub fn new_for_path(path: &Path, file: File) -> Result<Self> {
         let mut summary_buf = Vec::new();
         summary_buf.resize(PAGE_SZ, 0);
         file.read_exact_at(&mut summary_buf, 0)?;
         let summary = Summary::des_prefix(&summary_buf)?;
+
+        let metadata = file
+            .metadata()
+            .context("get file metadata to determine size")?;
 
         Ok(DeltaLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
@@ -569,6 +578,7 @@ impl DeltaLayer {
             tenant_id: summary.tenant_id,
             key_range: summary.key_range,
             lsn_range: summary.lsn_range,
+            file_size: metadata.len(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -725,6 +735,10 @@ impl DeltaLayerWriterInner {
         file.seek(SeekFrom::Start(0))?;
         Summary::ser_into(&summary, &mut file)?;
 
+        let metadata = file
+            .metadata()
+            .context("get file metadata to determine size")?;
+
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
@@ -734,6 +748,7 @@ impl DeltaLayerWriterInner {
             timeline_id: self.timeline_id,
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
+            file_size: metadata.len(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,

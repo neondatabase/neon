@@ -318,14 +318,8 @@ def remote_consistent_lsn(
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
     lsn_str = detail["remote_consistent_lsn"]
-    if lsn_str is None:
-        # No remote information at all. This happens right after creating
-        # a timeline, before any part of it has been uploaded to remote
-        # storage yet.
-        return 0
-    else:
-        assert isinstance(lsn_str, str)
-        return lsn_from_hex(lsn_str)
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
 
 
 def wait_for_upload(

@@ -37,7 +37,7 @@ def metrics_handler(request: Request) -> Response:
 
     checks = {
         "written_size": lambda value: value > 0,
-        "physical_size": lambda value: value >= 0,
+        "resident_size": lambda value: value >= 0,
         # >= 0 check here is to avoid race condition when we receive metrics before
         # remote_uploaded is updated
         "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
