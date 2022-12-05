@@ -155,7 +155,7 @@ async fn wait_for_active_tenant(
     wait: Duration,
 ) -> ControlFlow<(), Arc<Tenant>> {
     let tenant = loop {
-        match tenant_mgr::get_tenant(tenant_id, false) {
+        match tenant_mgr::get_tenant(tenant_id, false).await {
             Ok(tenant) => break tenant,
             Err(e) => {
                 error!("Failed to get a tenant {tenant_id}: {e:#}");

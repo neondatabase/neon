@@ -297,10 +297,20 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         })
         .transpose()
         .context("Failed to init generic remote storage")?;
-    {
-        let _rt_guard = BACKGROUND_RUNTIME.enter();
-        tenant_mgr::init_tenant_mgr(conf, remote_storage.clone())?
-    };
+
+    let (init_result_sender, init_result_receiver) =
+        std::sync::mpsc::channel::<anyhow::Result<()>>();
+    let storage_for_spawn = remote_storage.clone();
+    let _handler = BACKGROUND_RUNTIME.spawn(async move {
+        let result = tenant_mgr::init_tenant_mgr(conf, storage_for_spawn).await;
+        init_result_sender.send(result)
+    });
+    match init_result_receiver.recv() {
+        Ok(init_result) => init_result.context("Failed to init tenant_mgr")?,
+        Err(_sender_dropped_err) => {
+            anyhow::bail!("Failed to init tenant_mgr: no init status was returned");
+        }
+    }
 
     // Spawn all HTTP related tasks in the MGMT_REQUEST_RUNTIME.
     // bind before launching separate thread so the error reported before startup exits
