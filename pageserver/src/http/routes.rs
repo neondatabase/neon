@@ -310,6 +310,7 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .map_err(ApiError::NotFound)?;
     let result = match timeline
         .find_lsn_for_timestamp(timestamp_pg)
+        .context("find_lsn_for_timestamp")
         .map_err(ApiError::InternalServerError)?
     {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),

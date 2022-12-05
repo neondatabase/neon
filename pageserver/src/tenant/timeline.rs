@@ -370,8 +370,10 @@ impl Timeline {
     /// the Repository implementation may incorrectly return a value from an ancestor
     /// branch, for example, or waste a lot of cycles chasing the non-existing key.
     ///
-    pub fn get(&self, key: Key, lsn: Lsn) -> anyhow::Result<Bytes> {
-        anyhow::ensure!(lsn.is_valid(), "Invalid LSN");
+    pub fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
+        if !lsn.is_valid() {
+            return Err(PageReconstructError::Other(anyhow!("Invalid LSN")));
+        }
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
@@ -2056,7 +2058,10 @@ impl Timeline {
                     while key < range.end {
                         let img = match self.get(key, lsn) {
                             Ok(img) => img,
-                            Err(err) => {
+                            Err(
+                                err @ PageReconstructError::Other(_)
+                                | err @ PageReconstructError::WalRedo(_),
+                            ) => {
                                 // If we fail to reconstruct a VM or FSM page, we can zero the
                                 // page without losing any actual user data. That seems better
                                 // than failing repeatedly and getting stuck.
@@ -2076,7 +2081,7 @@ impl Timeline {
                                     warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
                                     ZERO_PAGE.clone()
                                 } else {
-                                    return Err(err);
+                                    return Err(anyhow::Error::new(err));
                                 }
                             }
                         };
@@ -2762,7 +2767,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         mut data: ValueReconstructState,
-    ) -> anyhow::Result<Bytes> {
+    ) -> Result<Bytes, PageReconstructError> {
         // Perform WAL redo if needed
         data.records.reverse();
 
@@ -2776,7 +2781,11 @@ impl Timeline {
                 );
                 Ok(img.clone())
             } else {
-                bail!("base image for {} at {} not found", key, request_lsn);
+                Err(PageReconstructError::Other(anyhow!(
+                    "base image for {} at {} not found",
+                    key,
+                    request_lsn
+                )))
             }
         } else {
             // We need to do WAL redo.
@@ -2784,12 +2793,12 @@ impl Timeline {
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
             if data.img.is_none() && !data.records.first().unwrap().1.will_init() {
-                bail!(
+                Err(PageReconstructError::Other(anyhow!(
                     "Base image for {} at {} not found, but got {} WAL records",
                     key,
                     request_lsn,
                     data.records.len()
-                );
+                )))
             } else {
                 if data.img.is_some() {
                     trace!(
