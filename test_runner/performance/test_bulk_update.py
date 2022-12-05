@@ -42,7 +42,8 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
 
     cur.execute("drop table t")
     cur.execute("set enable_seqscan_prefetch=on")
-    cur.execute("set seqscan_prefetch_buffers=100")
+    cur.execute("set effective_io_concurrency=32")
+    cur.execute("set maintenance_io_concurrency=32")
 
     cur.execute(f"create table t2(x integer) WITH (fillfactor={fillfactor})")
 
