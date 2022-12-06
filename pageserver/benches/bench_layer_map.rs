@@ -1,7 +1,7 @@
 use anyhow::Result;
 use num_traits::ToPrimitive;
 use pageserver::repository::{Key, Value};
-use pageserver::tenant::bst_layer_map::BSTLM;
+use pageserver::tenant::bst_layer_map::PersistentLayerMap;
 use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
@@ -253,7 +253,7 @@ fn bench_from_real_project(c: &mut Criterion) {
 
     // Init bst layer map with the same layers
     let now = Instant::now();
-    let mut bstlm = BSTLM::new();
+    let mut bstlm = PersistentLayerMap::new();
     let mut sorted_layers: Vec<_> = layer_map.iter_historic_layers().collect();
     sorted_layers.sort_by(|a, b| a.get_lsn_range().start.cmp(&b.get_lsn_range().start));
     // TODO implement out of order inserts
@@ -315,21 +315,20 @@ fn bench_sequential(c: &mut Criterion) {
 
     // Init bst layer map with the same layers
     let now = Instant::now();
-    let mut bstlm = BSTLM::new();
-    for layer in layer_map.iter_historic_layers() {
-        if layer.is_incremental() {
-            panic!("AAA");
-        } else {
-            let kr = layer.get_key_range();
-            let lr = layer.get_lsn_range();
+    let mut bstlm = PersistentLayerMap::new();
+    let mut sorted_layers: Vec<_> = layer_map.iter_historic_layers().collect();
+    sorted_layers.sort_by(|a, b| a.get_lsn_range().start.cmp(&b.get_lsn_range().start));
+    // TODO implement out of order inserts
+    for layer in sorted_layers {
+        let kr = layer.get_key_range();
+        let lr = layer.get_lsn_range();
 
-            bstlm.insert(
-                kr.start.to_i128(),
-                kr.end.to_i128(),
-                lr.start.0,
-                format!("Layer {}", lr.start.0),
-            );
-        }
+        bstlm.insert(
+            kr.start.to_i128(),
+            kr.end.to_i128(),
+            lr.start.0,
+            format!("Layer {}", lr.start.0),
+        );
     }
     println!("Finished bst init in {:?}", now.elapsed());
 

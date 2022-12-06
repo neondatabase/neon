@@ -28,6 +28,8 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
+use super::bst_layer_map::PersistentLayerMap;
+
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
@@ -54,6 +56,10 @@ pub struct LayerMap {
 
     /// All the historic layers are kept here
     historic_layers: RTree<LayerRTreeObject>,
+
+    /// HACK I'm experimenting with a new index to reaplace the RTree. If this
+    ///      works out I'll clean up the struct later.
+    index: PersistentLayerMap<Arc<dyn Layer>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
@@ -241,6 +247,14 @@ impl LayerMap {
     /// layer.
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
+        // HACK use the index to query and return early. If this works I'll
+        //      rewrite the function.
+        let result = self.index.query(key.to_i128(), end_lsn.0);
+        return Ok(result.map(|layer| SearchResult {
+            layer: Arc::clone(layer),
+            lsn_floor: Lsn(0), // TODO what's this?
+        }));
+
         // linear search
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<Arc<dyn Layer>> = None;
@@ -345,10 +359,21 @@ impl LayerMap {
     /// Insert an on-disk layer
     ///
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
+        // TODO the index needs to support out of order insertion for this to work
+        let kr = layer.get_key_range();
+        let lr = layer.get_lsn_range();
+        self.index.insert(
+            kr.start.to_i128(),
+            kr.end.to_i128(),
+            lr.start.0,
+            Arc::clone(&layer),
+        );
+
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
         }
-        self.historic_layers.insert(LayerRTreeObject::new(layer));
+        // HACK don't update RTree, too slow
+        // self.historic_layers.insert(LayerRTreeObject::new(layer));
         NUM_ONDISK_LAYERS.inc();
     }
 
@@ -586,3 +611,5 @@ impl LayerMap {
         Ok(())
     }
 }
+
+// TODO add layer map tests
