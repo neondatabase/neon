@@ -17,7 +17,7 @@ pub(super) async fn delete_layer<'a>(
     });
     debug!("Deleting layer from remote storage: {local_layer_path:?}",);
 
-    let path_to_delete = conf.remote_layer_path(local_layer_path)?;
+    let path_to_delete = conf.remote_path(local_layer_path)?;
 
     // XXX: If the deletion fails because the object already didn't exist,
     // it would be good to just issue a warning but consider it success.

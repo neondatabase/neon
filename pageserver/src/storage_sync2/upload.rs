@@ -30,7 +30,7 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_path = conf
         .metadata_path(timeline_id, tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
-    let storage_path = conf.remote_layer_path(&index_part_path)?;
+    let storage_path = conf.remote_path(&index_part_path)?;
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &storage_path)
         .await
@@ -50,7 +50,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
     });
-    let storage_path = conf.remote_layer_path(source_path)?;
+    let storage_path = conf.remote_path(source_path)?;
 
     let source_file = fs::File::open(&source_path)
         .await

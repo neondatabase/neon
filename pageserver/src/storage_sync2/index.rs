@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tracing::error;
 
 use crate::tenant::metadata::TimelineMetadata;
 
@@ -115,7 +114,8 @@ impl IndexPart {
                     timeline_layers.insert(layer_name.to_owned());
                     layer_metadata.insert(layer_name.to_owned(), metadata);
                 }
-                None => error!("Layer {remote_path:?} has no file name, skipping"),
+                // TODO move this on a type level: we know, that every layer entry does have a name
+                None => panic!("Layer {remote_path:?} has no file name, skipping"),
             }
         }
 

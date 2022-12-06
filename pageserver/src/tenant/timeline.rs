@@ -1024,7 +1024,7 @@ impl Timeline {
 
             let remote_layer_path = self
                 .conf
-                .remote_layer_path(&local_layer_path)
+                .remote_path(&local_layer_path)
                 .expect("local_layer_path received from the same conf that provided a workdir");
 
             if local_layer_path.exists() {

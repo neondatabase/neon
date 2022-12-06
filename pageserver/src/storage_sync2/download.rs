@@ -31,7 +31,7 @@ pub async fn download_layer_file<'a>(
     remote_path: &'a RemotePath,
     layer_metadata: &'a LayerFileMetadata,
 ) -> anyhow::Result<u64> {
-    let local_path = conf.local_layer_path(remote_path);
+    let local_path = conf.local_path(remote_path);
 
     // Perform a rename inspired by durable_rename from file_utils.c.
     // The sequence:
@@ -134,7 +134,7 @@ pub async fn list_remote_timelines<'a>(
     tenant_id: TenantId,
 ) -> anyhow::Result<Vec<(TimelineId, IndexPart)>> {
     let tenant_path = conf.timelines_path(&tenant_id);
-    let tenant_storage_path = conf.remote_layer_path(&tenant_path)?;
+    let tenant_storage_path = conf.remote_path(&tenant_path)?;
 
     let timelines = storage
         .list_prefixes(Some(&tenant_storage_path))
@@ -197,7 +197,7 @@ pub async fn download_index_part(
         .metadata_path(timeline_id, tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
     let part_storage_path = conf
-        .remote_layer_path(&index_part_path)
+        .remote_path(&index_part_path)
         .map_err(DownloadError::BadInput)?;
 
     let mut index_part_download = storage.download(&part_storage_path).await?;

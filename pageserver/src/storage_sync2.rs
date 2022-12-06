@@ -374,7 +374,7 @@ impl UploadQueue {
         let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
         for timeline_name in &index_part.timeline_layers {
             let local_path = timeline_path.join(timeline_name);
-            let remote_timeline_path = conf.remote_layer_path(&local_path).expect(
+            let remote_timeline_path = conf.remote_path(&local_path).expect(
                 "Remote timeline path and local timeline path were constructed form the same conf",
             );
             let layer_metadata = index_part
@@ -626,7 +626,7 @@ impl RemoteTimelineClient {
 
         upload_queue
             .latest_files
-            .insert(self.conf.remote_layer_path(path)?, layer_metadata.clone());
+            .insert(self.conf.remote_path(path)?, layer_metadata.clone());
 
         let op = UploadOp::UploadLayer(PathBuf::from(path), layer_metadata.clone());
         self.update_upload_queue_unfinished_metric(1, &op);
@@ -651,7 +651,7 @@ impl RemoteTimelineClient {
         // Convert the paths into RemotePaths, and gather other information we need.
         let mut remote_paths = Vec::with_capacity(paths.len());
         for path in paths {
-            remote_paths.push(self.conf.remote_layer_path(path)?);
+            remote_paths.push(self.conf.remote_path(path)?);
         }
 
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
