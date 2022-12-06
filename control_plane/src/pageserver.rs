@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufReader, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::{io, result};
 
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
@@ -168,29 +168,21 @@ impl PageServerNode {
             }
             Err(e) => eprintln!("{e:#}"),
         }
-        match pageserver_process.kill() {
-            Err(e) => {
-                eprintln!(
-                    "Failed to stop pageserver {} process with pid {}: {e:#}",
-                    self.env.pageserver.id,
-                    pageserver_process.id(),
-                )
-            }
-            Ok(()) => {
-                println!(
-                    "Stopped pageserver {} process with pid {}",
-                    self.env.pageserver.id,
-                    pageserver_process.id(),
-                );
-                // cleanup after pageserver startup, since we do not call regular `stop_process` during init
-                let pid_file = self.pid_file();
-                if let Err(e) = fs::remove_file(&pid_file) {
-                    if e.kind() != io::ErrorKind::NotFound {
-                        eprintln!("Failed to remove pid file {pid_file:?} after stopping the process: {e:#}");
-                    }
-                }
-            }
-        }
+        background_process::send_stop_child_process(&pageserver_process)?;
+
+        let exit_code = pageserver_process.wait()?;
+        ensure!(
+            exit_code.success(),
+            format!(
+                "pageserver init failed with exit code {:?}",
+                exit_code.code()
+            )
+        );
+        println!(
+            "Stopped pageserver {} process with pid {}",
+            self.env.pageserver.id,
+            pageserver_process.id(),
+        );
         init_result
     }
 

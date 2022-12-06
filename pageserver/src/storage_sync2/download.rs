@@ -15,7 +15,7 @@ use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
 use super::index::IndexPart;
-use super::RelativePath;
+use super::RemotePath;
 
 async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
     fs::File::open(path).await?.sync_all().await
@@ -31,7 +31,7 @@ pub async fn download_layer_file<'a>(
     storage: &'a GenericRemoteStorage,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    path: &'a RelativePath,
+    path: &'a RemotePath,
     layer_metadata: &'a LayerFileMetadata,
 ) -> anyhow::Result<u64> {
     let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);

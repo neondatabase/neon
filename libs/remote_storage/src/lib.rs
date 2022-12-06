@@ -178,21 +178,23 @@ impl std::error::Error for DownloadError {}
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
 #[derive(Clone)]
-pub struct GenericRemoteStorage(Arc<dyn RemoteStorage>);
+pub enum GenericRemoteStorage {
+    LocalFs(LocalFs),
+    AwsS3(Arc<S3Bucket>),
+}
 
 impl Deref for GenericRemoteStorage {
     type Target = dyn RemoteStorage;
 
     fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
+        match self {
+            GenericRemoteStorage::LocalFs(local_fs) => local_fs,
+            GenericRemoteStorage::AwsS3(s3_bucket) => s3_bucket.as_ref(),
+        }
     }
 }
 
 impl GenericRemoteStorage {
-    pub fn new(storage: impl RemoteStorage) -> Self {
-        Self(Arc::new(storage))
-    }
-
     pub fn from_config(
         working_directory: PathBuf,
         storage_config: &RemoteStorageConfig,
@@ -200,12 +202,12 @@ impl GenericRemoteStorage {
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => {
                 info!("Using fs root '{}' as a remote storage", root.display());
-                GenericRemoteStorage::new(LocalFs::new(root.clone(), working_directory)?)
+                GenericRemoteStorage::LocalFs(LocalFs::new(root.clone(), working_directory)?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
                 info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
-                GenericRemoteStorage::new(S3Bucket::new(s3_config, working_directory)?)
+                GenericRemoteStorage::AwsS3(Arc::new(S3Bucket::new(s3_config, working_directory)?))
             }
         })
     }
