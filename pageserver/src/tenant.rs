@@ -571,7 +571,7 @@ impl Tenant {
     pub fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        remote_storage: &GenericRemoteStorage,
+        remote_storage: GenericRemoteStorage,
     ) -> Arc<Tenant> {
         // XXX: Attach should provide the config, especially during tenant migration.
         //      See https://github.com/neondatabase/neon/issues/1555
@@ -584,7 +584,7 @@ impl Tenant {
             tenant_conf,
             wal_redo_manager,
             tenant_id,
-            Some(remote_storage.clone()),
+            Some(remote_storage),
         ));
 
         // Do all the hard work in the background

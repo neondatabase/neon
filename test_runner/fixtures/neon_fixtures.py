@@ -1119,6 +1119,14 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach")
         self.verbose_error(res)
 
+    def tenant_load(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load")
+        self.verbose_error(res)
+
+    def tenant_ignore(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/ignore")
+        self.verbose_error(res)
+
     def tenant_status(self, tenant_id: TenantId) -> Dict[Any, Any]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)

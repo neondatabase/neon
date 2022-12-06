@@ -274,6 +274,7 @@ paths:
         schema:
           type: string
           format: hex
+
     post:
       description: Schedules attach operation to happen in the background for given tenant
       responses:
@@ -325,10 +326,98 @@ paths:
           type: string
           format: hex
     post:
-      description: Detach local tenant
+      description: |
+        Remove tenant data (including all corresponding timelines) from pageserver's memory and file system.
+        Files on the remote storage are not affected.
       responses:
         "200":
           description: Tenant detached
+        "400":
+          description: Error when no tenant id found in path parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/ignore:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: |
+        Remove tenant data (including all corresponding timelines) from pageserver's memory.
+        Files on local disk and remote storage are not affected.
+
+        Future pageserver restarts won't load the data back until `load` is called on such tenant.
+      responses:
+        "200":
+          description: Tenant ignored
+        "400":
+          description: Error when no tenant id found in path parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/load:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: |
+        Schedules an operation that attempts to load a tenant from the local disk and
+        synchronise it with the remote storage (if enabled), repeating pageserver's restart logic for tenant load.
+        If the tenant was ignored before, removes the ignore mark and continues with load scheduling.
+
+        Errors if the tenant is absent on disk, already present in memory or fails to schedule its load.
+        Scheduling a load does not mean that the tenant would load successfully, check tenant status to ensure load correctness.
+      responses:
+        "202":
+          description: Tenant scheduled to load successfully
         "400":
           description: Error when no tenant id found in path parameters
           content:
