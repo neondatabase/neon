@@ -333,10 +333,6 @@ impl PageServerConfigBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
-        let broker_endpoints = self
-            .broker_endpoints
-            .ok_or(anyhow!("No broker endpoints provided"))?;
-
         Ok(PageServerConf {
             listen_pg_addr: self
                 .listen_pg_addr
@@ -372,7 +368,9 @@ impl PageServerConfigBuilder {
             profiling: self.profiling.ok_or(anyhow!("missing profiling"))?,
             // TenantConf is handled separately
             default_tenant_conf: TenantConf::default(),
-            broker_endpoints,
+            broker_endpoints: self
+                .broker_endpoints
+                .ok_or(anyhow!("No broker endpoints provided"))?,
             broker_etcd_prefix: self
                 .broker_etcd_prefix
                 .ok_or(anyhow!("missing broker_etcd_prefix"))?,

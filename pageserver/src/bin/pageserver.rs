@@ -26,6 +26,7 @@ use utils::{
     lock_file, logging,
     postgres_backend::AuthType,
     project_git_version,
+    sentry_init::{init_sentry, release_name},
     signals::{self, Signal},
     tcp_listener,
 };
@@ -84,6 +85,9 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(release_name!(), &[("node_id", &conf.id.to_string())]);
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {

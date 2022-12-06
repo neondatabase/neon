@@ -35,11 +35,14 @@ use utils::{
     http::endpoint,
     id::NodeId,
     logging::{self, LogFormat},
-    project_git_version, signals, tcp_listener,
+    project_git_version,
+    sentry_init::{init_sentry, release_name},
+    signals, tcp_listener,
 };
 
 const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
+
 project_git_version!(GIT_VERSION);
 
 fn main() -> anyhow::Result<()> {
@@ -133,6 +136,8 @@ fn main() -> anyhow::Result<()> {
         conf.log_format = LogFormat::from_config(log_format)?;
     }
 
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(release_name!(), &[("node_id", &conf.my_id.to_string())]);
     start_safekeeper(conf, given_id, arg_matches.get_flag("init"))
 }
 
