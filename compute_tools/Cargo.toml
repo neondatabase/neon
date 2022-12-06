@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-chrono = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = "4.0"
 env_logger = "0.9"
 futures = "0.3.13"

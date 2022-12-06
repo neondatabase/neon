@@ -204,7 +204,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::ensure;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use tokio::runtime::Runtime;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use tracing::{info_span, Instrument};
 
 use utils::lsn::Lsn;
@@ -217,7 +217,7 @@ use crate::metrics::RemoteOpKind;
 use crate::metrics::REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS;
 use crate::{
     config::PageServerConf,
-    storage_sync::index::{LayerFileMetadata, RelativePath},
+    storage_sync::index::{LayerFileMetadata, RemotePath},
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
@@ -287,7 +287,7 @@ struct UploadQueueInitialized {
 
     /// All layer files stored in the remote storage, taking into account all
     /// in-progress and queued operations
-    latest_files: HashMap<RelativePath, LayerFileMetadata>,
+    latest_files: HashMap<RemotePath, LayerFileMetadata>,
 
     /// Metadata stored in the remote storage, taking into account all
     /// in-progress and queued operations.
@@ -510,7 +510,7 @@ impl RemoteTimelineClient {
     /// On success, returns the size of the downloaded file.
     pub async fn download_layer_file(
         &self,
-        path: &RelativePath,
+        path: &RemotePath,
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
         let downloaded_size = download::download_layer_file(
@@ -612,7 +612,7 @@ impl RemoteTimelineClient {
             "file size not initialized in metadata"
         );
 
-        let relative_path = RelativePath::from_local_path(
+        let relative_path = RemotePath::strip_base_path(
             &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
             path,
         )?;
@@ -644,7 +644,7 @@ impl RemoteTimelineClient {
         // Convert the paths into RelativePaths, and gather other information we need.
         let mut relative_paths = Vec::with_capacity(paths.len());
         for path in paths {
-            relative_paths.push(RelativePath::from_local_path(
+            relative_paths.push(RemotePath::strip_base_path(
                 &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
                 path,
             )?);
@@ -888,10 +888,20 @@ impl RemoteTimelineClient {
                 Err(e) => {
                     let retries = task.retries.fetch_add(1, Ordering::SeqCst);
 
-                    error!(
-                        "failed to perform remote task {}, will retry (attempt {}): {:?}",
-                        task.op, retries, e
-                    );
+                    // uploads may fail due to rate limts (IAM, S3) or spurious network and external errors
+                    // such issues are relatively regular, so don't use WARN or ERROR to avoid alerting
+                    // people and tests until the retries are definitely causing delays.
+                    if retries < 3 {
+                        info!(
+                            "failed to perform remote task {}, will retry (attempt {}): {:?}",
+                            task.op, retries, e
+                        );
+                    } else {
+                        warn!(
+                            "failed to perform remote task {}, will retry (attempt {}): {:?}",
+                            task.op, retries, e
+                        );
+                    }
 
                     // sleep until it's time to retry, or we're cancelled
                     tokio::select! {
@@ -1083,7 +1093,7 @@ mod tests {
         TimelineMetadata::from_bytes(&metadata.to_bytes().unwrap()).unwrap()
     }
 
-    fn assert_file_list(a: &HashSet<RelativePath>, b: &[&str]) {
+    fn assert_file_list(a: &HashSet<RemotePath>, b: &[&str]) {
         let xx = PathBuf::from("");
         let mut avec: Vec<String> = a
             .iter()

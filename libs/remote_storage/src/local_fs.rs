@@ -33,6 +33,7 @@ fn remote_object_id_from_path(path: &Path) -> anyhow::Result<RemoteObjectId> {
     ))
 }
 
+#[derive(Debug, Clone)]
 pub struct LocalFs {
     working_directory: PathBuf,
     storage_root: PathBuf,

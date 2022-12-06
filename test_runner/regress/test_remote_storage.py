@@ -71,8 +71,10 @@ def test_remote_storage_backup_and_restore(
     # FIXME retry downloads without throwing errors
     env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
     # we have a bunch of pytest.raises for these below
-    env.pageserver.allowed_errors.append(".*tenant already exists.*")
-    env.pageserver.allowed_errors.append(".*attach is already in progress.*")
+    env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
+    env.pageserver.allowed_errors.append(
+        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
+    )
 
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
@@ -136,7 +138,7 @@ def test_remote_storage_backup_and_restore(
 
     # assert cannot attach timeline that is scheduled for download
     # FIXME implement layer download retries
-    with pytest.raises(Exception, match="tenant already exists, current state: Broken"):
+    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
         client.tenant_attach(tenant_id)
 
     tenant_status = client.tenant_status(tenant_id)
@@ -149,9 +151,7 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # ensure that an initiated attach operation survives pageserver restart
-    with pytest.raises(
-        Exception, match=r".*(tenant already exists|attach is already in progress).*"
-    ):
+    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
         client.tenant_attach(tenant_id)
     log.info("waiting for timeline redownload")
     wait_until(
@@ -191,7 +191,7 @@ def test_remote_storage_upload_queue_retries(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
+        test_name="test_remote_storage_upload_queue_retries",
     )
 
     env = neon_env_builder.init_start()
@@ -353,7 +353,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
+        test_name="test_timeline_deletion_with_files_stuck_in_upload_queue",
     )
 
     env = neon_env_builder.init_start()
