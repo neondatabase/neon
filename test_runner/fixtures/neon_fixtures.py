@@ -3084,3 +3084,34 @@ def fork_at_current_lsn(
     """
     current_lsn = pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
+
+
+def wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    safekeepers: List[Safekeeper],
+    pageserver: NeonPageserver,
+):
+    sk_commit_lsns = [
+        sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn for sk in safekeepers
+    ]
+    lsn = max(sk_commit_lsns)
+    ps_http = pageserver.http_client()
+    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, lsn)
+    return lsn
+
+
+def wait_for_sk_commit_lsn_to_reach_remote_storage(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    safekeepers: List[Safekeeper],
+    pageserver: NeonPageserver,
+):
+    lsn = wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
+        tenant_id, timeline_id, safekeepers, pageserver
+    )
+    ps_http = pageserver.http_client()
+    # force a checkpoint to trigger upload
+    ps_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(ps_http, tenant_id, timeline_id, lsn)
+    return lsn
