@@ -490,7 +490,7 @@ impl PageServerConf {
         let mut builder = PageServerConfigBuilder::default();
         builder.workdir(workdir.to_owned());
 
-        let mut t_conf: TenantConfOpt = Default::default();
+        let mut t_conf = TenantConfOpt::default();
 
         for (key, item) in toml.iter() {
             match key {
@@ -620,6 +620,12 @@ impl PageServerConf {
         }
         if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
             t_conf.max_lsn_wal_lag = Some(parse_toml_from_str("max_lsn_wal_lag", max_lsn_wal_lag)?);
+        }
+        if let Some(trace_read_requests) = item.get("trace_read_requests") {
+            t_conf.trace_read_requests =
+                Some(trace_read_requests.as_bool().with_context(|| {
+                    "configure option trace_read_requests is not a bool".to_string()
+                })?);
         }
 
         Ok(t_conf)
@@ -1017,6 +1023,35 @@ broker_endpoints = ['{broker_endpoint}']
                 "Remote storage config should correctly parse the S3 config"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_tenant_config() -> anyhow::Result<()> {
+        let tempdir = tempdir()?;
+        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
+
+        let broker_endpoint = "http://127.0.0.1:7777";
+        let trace_read_requests = true;
+
+        let config_string = format!(
+            r#"{ALL_BASE_VALUES_TOML}
+pg_distrib_dir='{}'
+broker_endpoints = ['{broker_endpoint}']
+
+[tenant_config]
+trace_read_requests = {trace_read_requests}"#,
+            pg_distrib_dir.display(),
+        );
+
+        let toml = config_string.parse()?;
+
+        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        assert_eq!(
+            conf.default_tenant_conf.trace_read_requests, trace_read_requests,
+            "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
+        );
+
         Ok(())
     }
 
