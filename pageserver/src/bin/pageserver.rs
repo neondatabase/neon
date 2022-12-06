@@ -87,10 +87,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry(
-        release_name!(),
-        &[("process", "pageserver"), ("node_id", &conf.id.to_string())],
-    );
+    let _sentry_guard = init_sentry(release_name!(), &[("node_id", &conf.id.to_string())]);
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {

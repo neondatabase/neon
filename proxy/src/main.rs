@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry(release_name!(), &[("process", "proxy")]);
+    let _sentry_guard = init_sentry(release_name!(), &[]);
 
     let arg_matches = cli().get_matches();
 
