@@ -8,7 +8,7 @@ POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 # environment variable.
 #
 BUILD_TYPE ?= debug
-PG_LDFLAGS = -lshmpipe $(LDFLAGS)
+PG_LDFLAGS = -lshmpipe -L$(ROOT_PROJECT_DIR)/libs/shmpipe $(LDFLAGS)
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
 	PG_CFLAGS = -O2 -g3 $(CFLAGS)
@@ -110,7 +110,7 @@ postgres-v15-headers: postgres-v15-configure
 
 # Compile and install PostgreSQL
 .PHONY: postgres-v14
-postgres-v14: postgres-v14-configure \
+postgres-v14: shmem-pipe postgres-v14-configure \
 		  postgres-v14-headers # to prevent `make install` conflicts with neon's `postgres-headers`
 	+@echo "Compiling PostgreSQL v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14 MAKELEVEL=0 install
@@ -124,7 +124,7 @@ postgres-v14: postgres-v14-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pageinspect install
 
 .PHONY: postgres-v15
-postgres-v15: postgres-v15-configure \
+postgres-v15:  shmem-pipe postgres-v15-configure \
 		  postgres-v15-headers # to prevent `make install` conflicts with neon's `postgres-headers`
 	+@echo "Compiling PostgreSQL v15"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15 MAKELEVEL=0 install
@@ -139,6 +139,9 @@ postgres-v15: postgres-v15-configure \
 
 # shorthand to build all Postgres versions
 postgres: postgres-v14 postgres-v15
+
+shmem-pipe:
+	$(MAKE) -C $(ROOT_PROJECT_DIR)/libs/shmpipe
 
 .PHONY: postgres-v14-clean
 postgres-v14-clean:
