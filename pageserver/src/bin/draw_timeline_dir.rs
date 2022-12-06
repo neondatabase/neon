@@ -11,8 +11,8 @@
 //!
 //! Example use:
 //! ```
-//! $ cd test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE
-//! $ ls | grep "__" | cargo run --release --bin draw_timeline_dir > out.svg
+//! $ ls test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE | \
+//! $   grep "__" | cargo run --release --bin draw_timeline_dir > out.svg
 //! $ firefox out.svg
 //! ```
 //!
@@ -25,6 +25,8 @@ use anyhow::Result;
 use pageserver::repository::Key;
 use std::cmp::Ordering;
 use std::io::{self, BufRead};
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -65,7 +67,11 @@ fn main() -> Result<()> {
     let mut ranges: Vec<(Range<Key>, Range<Lsn>)> = vec![];
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
-        let range = parse_filename(&line.unwrap());
+        let line = line.unwrap();
+        let line = PathBuf::from_str(&line).unwrap();
+        let filename = line.file_name().unwrap();
+        let filename = filename.to_str().unwrap();
+        let range = parse_filename(filename);
         ranges.push(range);
     }
 
