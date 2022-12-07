@@ -53,8 +53,8 @@ You can specify different number of producers, for example to test shmpipe with 
 #define MAX_SPIN_ITERATIONS 1024
 
 typedef struct {
-	uint32 id;    /* message id is used to identify responses */
-	uint32 size;  /* message size not including header */
+	u32 id;    /* message id is used to identify responses */
+	u32 size;  /* message size not including header */
 } message_header_t;
 
 typedef atomic_bool latch_t;
@@ -82,7 +82,7 @@ typedef struct {
 typedef struct pipe_t {
 	queue_t req;
 	queue_t resp;
-	uint32  msg_id; /* generator of message ids, protected by request queue mutex */
+	u32  msg_id; /* generator of message ids, protected by request queue mutex */
 } pipe_t;
 
 
@@ -347,7 +347,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 	latch_release(&pipe->resp.cs);
 }
 
-void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg_id)
+void shmem_pipe_get_request(pipe_t* pipe, char** data, u32* size, u32* msg_id)
 {
 	message_header_t req_hdr;
 	int header_received = 0;
@@ -436,7 +436,7 @@ void shmem_pipe_get_request(pipe_t* pipe, char** data, uint32* size, uint32* msg
 	latch_release(&pipe->req.cs);
 }
 
-void shmem_pipe_send_response(pipe_t* pipe, uint32 msg_id, char const* resp, size_t resp_size)
+void shmem_pipe_send_response(pipe_t* pipe, u32 msg_id, char const* resp, size_t resp_size)
 {
 	int header_sent = 0;
 
@@ -646,8 +646,8 @@ int main(int argc, char** argv)
 	else
 	{
 		char* data;
-		uint32 msg_id;
-		uint32 size;
+		u32 msg_id;
+		u32 size;
 		pipe_t* pipe = shmem_pipe_init(tenant);
 
 		for (i = 0; i < n_threads * N_REQUESTS; i++)

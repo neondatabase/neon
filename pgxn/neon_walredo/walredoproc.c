@@ -86,19 +86,13 @@
 #include "utils/ps_status.h"
 
 #include "inmem_smgr.h"
+#include "shmpipe.h"
 
 #ifdef HAVE_LIBSECCOMP
 #include "neon_seccomp.h"
 #endif
 
 PG_MODULE_MAGIC;
-
-struct pipe_t;
-
-extern struct pipe_t* shmem_pipe_open(char const* name);
-extern void shmem_pipe_get_request(struct pipe_t* pipe, char** data, uint32* size, uint32* msg_id);
-extern void shmem_pipe_send_response(struct pipe_t* pipe, uint32 msg_id, char const* resp, size_t resp_size);
-
 
 static int	ReadRedoCommand(StringInfo inBuf);
 static void BeginRedoForBlock(StringInfo input_message);

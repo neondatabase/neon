@@ -1,4 +1,7 @@
+extern crate cc;
+
 fn main() {
-    println!("cargo:rustc-link-lib=shmpipe");
-    println!("cargo:rustc-link-search=libs/shmpipe");
+    cc::Build::new()
+        .file("../../pgxn/neon_walredo/shmpipe.c")
+        .compile("libshmpipe.a");
 }

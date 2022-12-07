@@ -11,6 +11,8 @@ OBJS = \
 # are wrapped in #ifdef HAVE_LIBSECCOMP instead.
 OBJS += seccomp.o
 
+OBJS += shmpipe.o
+
 PGFILEDESC = "neon_walredo - helper process that runs in Neon pageserver"
 
 PG_CONFIG = pg_config

@@ -9,3 +9,6 @@ build = "build.rs"
 
 [dependencies]
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+
+[build-dependencies]
+cc = "1.0"
