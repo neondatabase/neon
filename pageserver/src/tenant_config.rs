@@ -185,6 +185,9 @@ impl TenantConfOpt {
         if let Some(max_lsn_wal_lag) = other.max_lsn_wal_lag {
             self.max_lsn_wal_lag = Some(max_lsn_wal_lag);
         }
+        if let Some(trace_read_requests) = other.trace_read_requests {
+            self.trace_read_requests = Some(trace_read_requests);
+        }
     }
 }
 
