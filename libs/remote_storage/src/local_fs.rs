@@ -32,15 +32,19 @@ pub struct LocalFs {
 
 impl LocalFs {
     /// Attempts to create local FS storage, along with its root directory.
-    pub fn new(storage_root: PathBuf) -> anyhow::Result<Self> {
+    /// Storage root will be created (if does not exist) and transformed into an absolute path (if passed as relative).
+    pub fn new(mut storage_root: PathBuf) -> anyhow::Result<Self> {
         if !storage_root.exists() {
             std::fs::create_dir_all(&storage_root).with_context(|| {
-                format!(
-                    "Failed to create all directories in the given root path '{}'",
-                    storage_root.display(),
-                )
+                format!("Failed to create all directories in the given root path {storage_root:?}")
             })?;
         }
+        if !storage_root.is_absolute() {
+            storage_root = storage_root.canonicalize().with_context(|| {
+                format!("Failed to represent path {storage_root:?} as an absolute path")
+            })?;
+        }
+
         Ok(Self { storage_root })
     }
 
@@ -90,7 +94,7 @@ impl RemoteStorage for LocalFs {
 
     async fn list_prefixes(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         let path = match prefix {
-            Some(prefix) => Cow::Owned(prefix.to_full_path(&self.storage_root)),
+            Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
             None => Cow::Borrowed(&self.storage_root),
         };
         Ok(get_all_files(path.as_ref(), false)
@@ -114,7 +118,7 @@ impl RemoteStorage for LocalFs {
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
-        let target_file_path = to.to_full_path(&self.storage_root);
+        let target_file_path = to.with_base(&self.storage_root);
         create_target_directory(&target_file_path).await?;
         // We need this dance with sort of durable rename (without fsyncs)
         // to prevent partial uploads. This was really hit when pageserver shutdown
@@ -194,7 +198,7 @@ impl RemoteStorage for LocalFs {
     }
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
-        let target_path = from.to_full_path(&self.storage_root);
+        let target_path = from.with_base(&self.storage_root);
         if file_exists(&target_path).map_err(DownloadError::BadInput)? {
             let source = io::BufReader::new(
                 fs::OpenOptions::new()
@@ -234,7 +238,7 @@ impl RemoteStorage for LocalFs {
                 return Err(DownloadError::Other(anyhow::anyhow!("Invalid range, start ({start_inclusive}) and end_exclusive ({end_exclusive:?}) difference is zero bytes")));
             }
         }
-        let target_path = from.to_full_path(&self.storage_root);
+        let target_path = from.with_base(&self.storage_root);
         if file_exists(&target_path).map_err(DownloadError::BadInput)? {
             let mut source = io::BufReader::new(
                 fs::OpenOptions::new()
@@ -271,15 +275,12 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete(&self, from: &RemotePath) -> anyhow::Result<()> {
-        let file_path = from.to_full_path(&self.storage_root);
+    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+        let file_path = path.with_base(&self.storage_root);
         if file_path.exists() && file_path.is_file() {
             Ok(fs::remove_file(file_path).await?)
         } else {
-            bail!(
-                "File '{}' either does not exist or is not a file",
-                file_path.display()
-            )
+            bail!("File {file_path:?} either does not exist or is not a file")
         }
     }
 
@@ -589,7 +590,7 @@ mod fs_tests {
             Err(e) => {
                 let error_string = e.to_string();
                 assert!(error_string.contains("does not exist"));
-                let expected_path = upload_target.to_full_path(&storage.storage_root);
+                let expected_path = upload_target.with_base(&storage.storage_root);
                 assert!(error_string.contains(expected_path.to_str().unwrap()));
             }
         }

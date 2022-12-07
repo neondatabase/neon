@@ -419,7 +419,7 @@ impl RemoteStorage for S3Bucket {
         .await
     }
 
-    async fn delete(&self, remote_object_id: &RemotePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
         let _guard = self
             .concurrency_limiter
             .acquire()
@@ -431,7 +431,7 @@ impl RemoteStorage for S3Bucket {
         self.client
             .delete_object()
             .bucket(self.bucket_name.clone())
-            .key(self.relative_path_to_s3_object(remote_object_id))
+            .key(self.relative_path_to_s3_object(path))
             .send()
             .await
             .map_err(|e| {

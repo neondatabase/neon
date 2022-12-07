@@ -56,7 +56,7 @@ impl RemotePath {
         Ok(Self(relative_path.to_path_buf()))
     }
 
-    pub fn to_full_path(&self, base_path: &Path) -> PathBuf {
+    pub fn with_base(&self, base_path: &Path) -> PathBuf {
         base_path.join(&self.0)
     }
 
@@ -378,5 +378,11 @@ mod tests {
         // XXX is it impossible to have an empty key?
         let k = RemotePath::new(Path::new("")).unwrap();
         assert_eq!(k.object_name(), None);
+    }
+
+    #[test]
+    fn rempte_path_cannot_be_created_from_absolute_ones() {
+        let err = RemotePath::new(Path::new("/")).expect_err("Should fail on absolute paths");
+        assert_eq!(err.to_string(), "Path \"/\" is not relative");
     }
 }

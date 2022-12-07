@@ -456,7 +456,7 @@ impl PageServerConf {
             .join(METADATA_FILE_NAME)
     }
 
-    /// Files on the remote stoage are stored with paths, relative to the workdir.
+    /// Files on the remote storage are stored with paths, relative to the workdir.
     /// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
     ///
     /// Errors if the path provided does not start from pageserver's workdir.
@@ -475,7 +475,7 @@ impl PageServerConf {
 
     /// Turns storage remote path of a file into its local path.
     pub fn local_path(&self, remote_path: &RemotePath) -> PathBuf {
-        remote_path.to_full_path(&self.workdir)
+        remote_path.with_base(&self.workdir)
     }
 
     //
