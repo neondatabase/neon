@@ -926,7 +926,7 @@ jobs:
 
       - name: Deploy storage-broker
         run:
-          DOCKER_TAG=${{ need.tag.outputs.build-tag }}
+          DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
           helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   deploy-proxy-new:
@@ -1012,7 +1012,7 @@ jobs:
 
       - name: Deploy storage-broker
         run:
-          DOCKER_TAG=${{ need.tag.outputs.build-tag }}
+          DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
           helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace neon-storage-broker --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   deploy-proxy-prod-new:
@@ -1086,7 +1086,7 @@ jobs:
 
       - name: Deploy storage-broker
         run:
-          DOCKER_TAG=${{ need.tag.outputs.build-tag }}
+          DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
           helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace neon-storage-broker --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   promote-compatibility-data:
