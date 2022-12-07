@@ -595,11 +595,11 @@ impl<C: CommandExt> CloseFileDescriptors for C {
 /// Handle to the Postgres WAL redo process
 ///
 struct PostgresRedoProcess {
-    tenant_id: TenantId,
-    child: NoLeakChild,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-    stderr: ChildStderr,
+    _tenant_id: TenantId,
+    _child: NoLeakChild,
+    _stdin: ChildStdin,
+    _stdout: ChildStdout,
+    _stderr: ChildStderr,
 }
 
 impl PostgresRedoProcess {
@@ -724,17 +724,17 @@ impl PostgresRedoProcess {
         let child = scopeguard::ScopeGuard::into_inner(child);
 
         Ok(PostgresRedoProcess {
-            tenant_id,
-            child,
-            stdin,
-            stdout,
-            stderr,
+            _tenant_id: tenant_id,
+            _child: child,
+            _stdin: stdin,
+            _stdout: stdout,
+            _stderr: stderr,
         })
     }
 
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.child.id()))]
+    #[instrument(skip_all, fields(tenant_id=%self._tenant_id, pid=%self._child.id()))]
     fn kill(self) {
-        self.child.kill_and_wait();
+        self._child.kill_and_wait();
     }
 }
 
