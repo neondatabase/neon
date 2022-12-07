@@ -668,11 +668,11 @@ jobs:
       - id: set-matrix
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA", "console_api_key_secret": "NEON_STAGING_API_KEY"}'
-            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA", "console_api_key_secret": "NEON_CAPTEST_API_KEY"}'
+            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "storage_broker_ns": "neon-storage-broker", "storage_broker_config": "staging.neon-storage-broker", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA", "console_api_key_secret": "NEON_STAGING_API_KEY"}'
+            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "storage_broker_ns": "neon-stress-storage-broker", "storage_broker_config": "neon-stress.neon-storage-broker", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA", "console_api_key_secret": "NEON_CAPTEST_API_KEY", storage_broker_config: }'
             echo "include=[$STAGING, $NEON_STRESS]" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
+            PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "storage_broker_ns": "neon-storage-broker", "storage_broker_config": "production.neon-storage-broker", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
             echo "include=[$PRODUCTION]" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
@@ -888,6 +888,47 @@ jobs:
           helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml       --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
+  deploy-storage-broker-staging:
+    runs-on: [ self-hosted, dev, x64 ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    if: |
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    env:
+      KUBECONFIG: .kubeconfig
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Add curl
+        run: apt update && apt install curl -y
+
+      - name: Store kubeconfig file
+        run: |
+          echo "${{ secrets[matrix.kubeconfig_secret] }}" | base64 --decode > ${KUBECONFIG}
+          chmod 0600 ${KUBECONFIG}
+
+      - name: Setup helm v3
+        run: |
+          curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+
+      - name: Deploy storage-broker
+        run:
+          DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
+          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+
   deploy-proxy-new:
     runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
@@ -939,6 +980,41 @@ jobs:
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
+  deploy-storage-broker-dev-new:
+    runs-on: [ self-hosted, dev, x64 ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+    needs: [ push-docker-hub, tag, regress-tests ]
+    if: |
+      (github.ref_name == 'main') &&
+      github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - target_region:  us-east-2
+            target_cluster: dev-us-east-2-beta
+          - target_region:  eu-west-1
+            target_cluster: dev-eu-west-1-zeta
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure environment
+        run: |
+          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+          aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
+
+      - name: Deploy storage-broker
+        run:
+          DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
+          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace neon-storage-broker --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+
   deploy-proxy-prod-new:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
@@ -975,6 +1051,43 @@ jobs:
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+
+  deploy-storage-broker-prod-new:
+    runs-on: prod
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+    needs: [ push-docker-hub, tag, regress-tests ]
+    if: |
+      (github.ref_name == 'release') &&
+      github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - target_region:  us-east-2
+            target_cluster: prod-us-east-2-delta
+          - target_region: eu-central-1
+            target_cluster: prod-eu-central-1-gamma
+          - target_region: ap-southeast-1
+            target_cluster: prod-ap-southeast-1-epsilon
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure environment
+        run: |
+          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+          aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
+
+      - name: Deploy storage-broker
+        run:
+          DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
+          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace neon-storage-broker --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
 
   promote-compatibility-data:
     runs-on: [ self-hosted, dev, x64 ]
