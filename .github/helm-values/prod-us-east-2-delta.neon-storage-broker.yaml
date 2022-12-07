@@ -24,11 +24,7 @@ ingress:
 
 
 metrics:
-  enabled: true
-  serviceMonitor:
-    enabled: true
-    selector:
-      release: kube-prometheus-stack
+  enabled: false
 
 extraManifests:
   - apiVersion: operator.victoriametrics.com/v1beta1
