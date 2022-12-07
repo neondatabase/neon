@@ -2828,6 +2828,10 @@ def check_restored_datadir_content(
     # stop postgres to ensure that files won't change
     pg.stop()
 
+    # pg.stop() doesn't wait for backends termination so it can happen that there still be some transactions
+    # after returning from pg.stop(). Just make small pause to let postgres to terminate before taking basebackup
+    time.sleep(1)
+
     # Take a basebackup from pageserver
     restored_dir_path = env.repo_dir / f"{pg.node_name}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
