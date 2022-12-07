@@ -280,9 +280,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     let remote_storage = conf
         .remote_storage_config
         .as_ref()
-        .map(|storage_config| {
-            GenericRemoteStorage::from_config(conf.workdir.clone(), storage_config)
-        })
+        .map(GenericRemoteStorage::from_config)
         .transpose()
         .context("Failed to init generic remote storage")?;
 

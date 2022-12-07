@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::storage_sync::index::{IndexPart, RemotePath};
+use crate::storage_sync::index::IndexPart;
 use crate::storage_sync::RemoteTimelineClient;
 use crate::tenant::{
     delta_layer::{DeltaLayer, DeltaLayerWriter},
@@ -999,55 +999,9 @@ impl Timeline {
         &self,
         index_part: &IndexPart,
         remote_client: &RemoteTimelineClient,
-        mut local_filenames: HashSet<PathBuf>,
+        local_layers: HashSet<PathBuf>,
         up_to_date_disk_consistent_lsn: Lsn,
     ) -> anyhow::Result<HashSet<PathBuf>> {
-        let mut remote_filenames: HashSet<PathBuf> = HashSet::new();
-        for fname in index_part.timeline_layers.iter() {
-            remote_filenames.insert(fname.to_local_path(&PathBuf::from("")));
-        }
-
-        // Are there any local files that exist, with a size that doesn't match
-        // with the size stored in the remote index file?
-        // If so, rename_to_backup those files so that we re-download them later.
-        local_filenames.retain(|path| {
-            let layer_metadata = index_part
-                .layer_metadata
-                .get(&RemotePath::new(path))
-                .map(LayerFileMetadata::from)
-                .unwrap_or(LayerFileMetadata::MISSING);
-
-            if let Some(remote_size) = layer_metadata.file_size() {
-                let local_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id).join(&path);
-                match local_path.metadata() {
-                    Ok(metadata) => {
-                        let local_size = metadata.len();
-
-                        if local_size != remote_size {
-                            warn!("removing local file \"{}\" because it has unexpected length {}; length in remote index is {}",
-                                  path.display(),
-                                  local_size,
-                                  remote_size);
-                            if let Err(err) = rename_to_backup(&local_path) {
-                                error!("could not rename file \"{}\": {:?}",
-                                       local_path.display(), err);
-                            }
-                            self.metrics.current_physical_size_gauge.sub(local_size);
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                    Err(err) => {
-                        error!("could not get size of local file \"{}\": {:?}", path.display(), err);
-                        true
-                    }
-                }
-            } else {
-                true
-            }
-        });
-
         // Are we missing some files that are present in remote storage?
         // Download them now.
         // TODO Downloading many files this way is not efficient.
@@ -1056,17 +1010,63 @@ impl Timeline {
         //    b) typical case now is that there is nothing to sync, this downloads a lot
         //       1) if there was another pageserver that came and generated new files
         //       2) during attach of a timeline with big history which we currently do not do
-        for path in remote_filenames.difference(&local_filenames) {
-            let fname = path.to_str().unwrap();
-            info!("remote layer file {fname} does not exist locally");
+        let mut local_only_layers = local_layers;
+        let timeline_dir = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        for remote_layer_name in &index_part.timeline_layers {
+            let local_layer_path = timeline_dir.join(remote_layer_name);
+            local_only_layers.remove(&local_layer_path);
 
-            let layer_metadata = index_part
+            let remote_layer_metadata = index_part
                 .layer_metadata
-                .get(&RemotePath::new(path))
+                .get(remote_layer_name)
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
 
-            if let Some(imgfilename) = ImageFileName::parse_str(fname) {
+            let remote_layer_path = self
+                .conf
+                .remote_path(&local_layer_path)
+                .expect("local_layer_path received from the same conf that provided a workdir");
+
+            if local_layer_path.exists() {
+                let mut already_downloaded = true;
+                // Are there any local files that exist, with a size that doesn't match
+                // with the size stored in the remote index file?
+                // If so, rename_to_backup those files so that we re-download them later.
+                if let Some(remote_size) = remote_layer_metadata.file_size() {
+                    match local_layer_path.metadata() {
+                        Ok(metadata) => {
+                            let local_size = metadata.len();
+
+                            if local_size != remote_size {
+                                warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
+                                if let Err(err) = rename_to_backup(&local_layer_path) {
+                                    error!("could not rename file {local_layer_path:?}: {err:?}");
+                                } else {
+                                    self.metrics.current_physical_size_gauge.sub(local_size);
+                                    already_downloaded = false;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            error!("could not get size of local file {local_layer_path:?}: {err:?}")
+                        }
+                    }
+                }
+
+                if already_downloaded {
+                    continue;
+                }
+            } else {
+                info!("remote layer {remote_layer_path:?} does not exist locally");
+            }
+
+            let layer_name = local_layer_path
+                .file_name()
+                .and_then(|os_str| os_str.to_str())
+                .with_context(|| {
+                    format!("Layer file {local_layer_path:?} has no name in unicode")
+                })?;
+            if let Some(imgfilename) = ImageFileName::parse_str(layer_name) {
                 if imgfilename.lsn > up_to_date_disk_consistent_lsn {
                     warn!(
                         "found future image layer {} on timeline {} remote_consistent_lsn is {}",
@@ -1075,11 +1075,13 @@ impl Timeline {
                     continue;
                 }
 
-                trace!("downloading image file: {path:?}");
-                let sz = remote_client
-                    .download_layer_file(&RemotePath::new(path), &layer_metadata)
+                trace!("downloading image file: {remote_layer_path:?}");
+                let downloaded_size = remote_client
+                    .download_layer_file(&remote_layer_path, &remote_layer_metadata)
                     .await
-                    .context("download image layer")?;
+                    .with_context(|| {
+                        format!("failed to download image layer from path {remote_layer_path:?}")
+                    })?;
                 trace!("done");
 
                 let image_layer =
@@ -1089,8 +1091,10 @@ impl Timeline {
                     .write()
                     .unwrap()
                     .insert_historic(Arc::new(image_layer));
-                self.metrics.current_physical_size_gauge.add(sz);
-            } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
+                self.metrics
+                    .current_physical_size_gauge
+                    .add(downloaded_size);
+            } else if let Some(deltafilename) = DeltaFileName::parse_str(layer_name) {
                 // Create a DeltaLayer struct for each delta file.
                 // The end-LSN is exclusive, while disk_consistent_lsn is
                 // inclusive. For example, if disk_consistent_lsn is 100, it is
@@ -1105,11 +1109,13 @@ impl Timeline {
                     continue;
                 }
 
-                trace!("downloading delta file: {path:?}");
+                trace!("downloading delta file: {remote_layer_path:?}");
                 let sz = remote_client
-                    .download_layer_file(&RemotePath::new(path), &layer_metadata)
+                    .download_layer_file(&remote_layer_path, &remote_layer_metadata)
                     .await
-                    .context("download delta layer")?;
+                    .with_context(|| {
+                        format!("failed to download delta layer from path {remote_layer_path:?}")
+                    })?;
                 trace!("done");
 
                 let delta_layer =
@@ -1121,16 +1127,11 @@ impl Timeline {
                     .insert_historic(Arc::new(delta_layer));
                 self.metrics.current_physical_size_gauge.add(sz);
             } else {
-                bail!("unexpected layer filename in remote storage: {}", fname);
+                bail!("unexpected layer filename {layer_name} in remote storage path: {remote_layer_path:?}");
             }
         }
 
-        // now these are local only filenames
-        let local_only_filenames = local_filenames
-            .difference(&remote_filenames)
-            .cloned()
-            .collect();
-        Ok(local_only_filenames)
+        Ok(local_only_layers)
     }
 
     ///
@@ -1164,47 +1165,46 @@ impl Timeline {
         let disk_consistent_lsn = up_to_date_metadata.disk_consistent_lsn();
 
         // Build a map of local layers for quick lookups
-        let mut local_filenames: HashSet<PathBuf> = HashSet::new();
-        for layer in self.layers.read().unwrap().iter_historic_layers() {
-            local_filenames.insert(layer.filename());
-        }
+        let local_layers = self
+            .layers
+            .read()
+            .unwrap()
+            .iter_historic_layers()
+            .map(|historic_layer| {
+                historic_layer
+                    .local_path()
+                    .expect("Historic layers should have a path")
+            })
+            .collect::<HashSet<_>>();
 
-        let local_only_filenames = match index_part {
+        let local_only_layers = match index_part {
             Some(index_part) => {
                 info!(
                     "initializing upload queue from remote index with {} layer files",
                     index_part.timeline_layers.len()
                 );
                 remote_client.init_upload_queue(index_part)?;
-                let local_only_filenames = self
-                    .download_missing(
-                        index_part,
-                        remote_client,
-                        local_filenames,
-                        disk_consistent_lsn,
-                    )
-                    .await?;
-                local_only_filenames
+                self.download_missing(index_part, remote_client, local_layers, disk_consistent_lsn)
+                    .await?
             }
             None => {
                 info!("initializing upload queue as empty");
                 remote_client.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
-                local_filenames
+                local_layers
             }
         };
 
         // Are there local files that don't exist remotely? Schedule uploads for them
-        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
-        for fname in &local_only_filenames {
-            let absolute = timeline_path.join(fname);
-            let sz = absolute
+        for layer_path in &local_only_layers {
+            let layer_size = layer_path
                 .metadata()
-                .with_context(|| format!("failed to get file {} metadata", fname.display()))?
+                .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
                 .len();
-            info!("scheduling {} for upload", fname.display());
-            remote_client.schedule_layer_file_upload(&absolute, &LayerFileMetadata::new(sz))?;
+            info!("scheduling {layer_path:?} for upload");
+            remote_client
+                .schedule_layer_file_upload(layer_path, &LayerFileMetadata::new(layer_size))?;
         }
-        if !local_only_filenames.is_empty() {
+        if !local_only_layers.is_empty() {
             remote_client.schedule_index_upload(up_to_date_metadata)?;
         }
 

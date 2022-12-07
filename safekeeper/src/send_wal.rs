@@ -226,6 +226,7 @@ impl ReplicationConn {
             let mut end_pos = stop_pos.unwrap_or(inmem_state.commit_lsn);
 
             let mut wal_reader = WalReader::new(
+                spg.conf.workdir.clone(),
                 spg.conf.timeline_dir(&tli.ttid),
                 &persisted_state,
                 start_pos,

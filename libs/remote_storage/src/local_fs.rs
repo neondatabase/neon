@@ -5,6 +5,7 @@
 //! volume is mounted to the local FS.
 
 use std::{
+    borrow::Cow,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -18,61 +19,33 @@ use tokio::{
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 
-use crate::{Download, DownloadError, RemoteObjectId};
+use crate::{Download, DownloadError, RemotePath};
 
-use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
+use super::{RemoteStorage, StorageMetadata};
 
 const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
 
-/// Convert a Path in the remote storage into a RemoteObjectId
-fn remote_object_id_from_path(path: &Path) -> anyhow::Result<RemoteObjectId> {
-    Ok(RemoteObjectId(
-        path.to_str()
-            .ok_or_else(|| anyhow::anyhow!("unexpected characters found in path"))?
-            .to_string(),
-    ))
-}
-
 #[derive(Debug, Clone)]
 pub struct LocalFs {
-    working_directory: PathBuf,
     storage_root: PathBuf,
 }
 
 impl LocalFs {
     /// Attempts to create local FS storage, along with its root directory.
-    pub fn new(root: PathBuf, working_directory: PathBuf) -> anyhow::Result<Self> {
-        if !root.exists() {
-            std::fs::create_dir_all(&root).with_context(|| {
-                format!(
-                    "Failed to create all directories in the given root path '{}'",
-                    root.display(),
-                )
+    /// Storage root will be created (if does not exist) and transformed into an absolute path (if passed as relative).
+    pub fn new(mut storage_root: PathBuf) -> anyhow::Result<Self> {
+        if !storage_root.exists() {
+            std::fs::create_dir_all(&storage_root).with_context(|| {
+                format!("Failed to create all directories in the given root path {storage_root:?}")
             })?;
         }
-        Ok(Self {
-            working_directory,
-            storage_root: root,
-        })
-    }
-
-    ///
-    /// Get the absolute path in the local filesystem to given remote object.
-    ///
-    /// This is public so that it can be used in tests. Should not be used elsewhere.
-    ///
-    pub fn resolve_in_storage(&self, remote_object_id: &RemoteObjectId) -> anyhow::Result<PathBuf> {
-        let path = PathBuf::from(&remote_object_id.0);
-        if path.is_relative() {
-            Ok(self.storage_root.join(path))
-        } else if path.starts_with(&self.storage_root) {
-            Ok(path)
-        } else {
-            bail!(
-                "Path '{}' does not belong to the current storage",
-                path.display()
-            )
+        if !storage_root.is_absolute() {
+            storage_root = storage_root.canonicalize().with_context(|| {
+                format!("Failed to represent path {storage_root:?} as an absolute path")
+            })?;
         }
+
+        Ok(Self { storage_root })
     }
 
     async fn read_storage_metadata(
@@ -104,45 +77,48 @@ impl LocalFs {
 
 #[async_trait::async_trait]
 impl RemoteStorage for LocalFs {
-    /// Convert a "local" path into a "remote path"
-    fn remote_object_id(&self, local_path: &Path) -> anyhow::Result<RemoteObjectId> {
-        let path = self.storage_root.join(
-            strip_path_prefix(&self.working_directory, local_path)
-                .context("local path does not belong to this storage")?,
-        );
-        remote_object_id_from_path(&path)
+    async fn list(&self) -> anyhow::Result<Vec<RemotePath>> {
+        Ok(get_all_files(&self.storage_root, true)
+            .await?
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&self.storage_root)
+                    .context("Failed to strip storage root prefix")
+                    .and_then(RemotePath::new)
+                    .expect(
+                        "We list files for storage root, hence should be able to remote the prefix",
+                    )
+            })
+            .collect())
     }
 
-    fn local_path(&self, remote_object_id: &RemoteObjectId) -> anyhow::Result<PathBuf> {
-        let storage_path = PathBuf::from(&remote_object_id.0);
-        let relative_path = strip_path_prefix(&self.storage_root, &storage_path)
-            .context("local path does not belong to this storage")?;
-        Ok(self.working_directory.join(relative_path))
-    }
-
-    async fn list(&self) -> anyhow::Result<Vec<RemoteObjectId>> {
-        get_all_files(&self.storage_root, true).await
-    }
-
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RemoteObjectId>,
-    ) -> anyhow::Result<Vec<RemoteObjectId>> {
+    async fn list_prefixes(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         let path = match prefix {
-            Some(prefix) => Path::new(&prefix.0),
-            None => &self.storage_root,
+            Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
+            None => Cow::Borrowed(&self.storage_root),
         };
-        get_all_files(path, false).await
+        Ok(get_all_files(path.as_ref(), false)
+            .await?
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&self.storage_root)
+                    .context("Failed to strip preifix")
+                    .and_then(RemotePath::new)
+                    .expect(
+                        "We list files for storage root, hence should be able to remote the prefix",
+                    )
+            })
+            .collect())
     }
 
     async fn upload(
         &self,
-        from: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
-        from_size_bytes: usize,
-        to: &RemoteObjectId,
+        data: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
+        data_size_bytes: usize,
+        to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
-        let target_file_path = self.resolve_in_storage(to)?;
+        let target_file_path = to.with_base(&self.storage_root);
         create_target_directory(&target_file_path).await?;
         // We need this dance with sort of durable rename (without fsyncs)
         // to prevent partial uploads. This was really hit when pageserver shutdown
@@ -163,8 +139,8 @@ impl RemoteStorage for LocalFs {
                 })?,
         );
 
-        let from_size_bytes = from_size_bytes as u64;
-        let mut buffer_to_read = from.take(from_size_bytes);
+        let from_size_bytes = data_size_bytes as u64;
+        let mut buffer_to_read = data.take(from_size_bytes);
 
         let bytes_read = io::copy(&mut buffer_to_read, &mut destination)
             .await
@@ -221,27 +197,22 @@ impl RemoteStorage for LocalFs {
         Ok(())
     }
 
-    async fn download(&self, from: &RemoteObjectId) -> Result<Download, DownloadError> {
-        let file_path = self
-            .resolve_in_storage(from)
-            .map_err(DownloadError::BadInput)?;
-        if file_exists(&file_path).map_err(DownloadError::BadInput)? {
+    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+        let target_path = from.with_base(&self.storage_root);
+        if file_exists(&target_path).map_err(DownloadError::BadInput)? {
             let source = io::BufReader::new(
                 fs::OpenOptions::new()
                     .read(true)
-                    .open(&file_path)
+                    .open(&target_path)
                     .await
                     .with_context(|| {
-                        format!(
-                            "Failed to open source file '{}' to use in the download",
-                            file_path.display()
-                        )
+                        format!("Failed to open source file {target_path:?} to use in the download")
                     })
                     .map_err(DownloadError::Other)?,
             );
 
             let metadata = self
-                .read_storage_metadata(&file_path)
+                .read_storage_metadata(&target_path)
                 .await
                 .map_err(DownloadError::Other)?;
             Ok(Download {
@@ -255,7 +226,7 @@ impl RemoteStorage for LocalFs {
 
     async fn download_byte_range(
         &self,
-        from: &RemoteObjectId,
+        from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
     ) -> Result<Download, DownloadError> {
@@ -267,20 +238,15 @@ impl RemoteStorage for LocalFs {
                 return Err(DownloadError::Other(anyhow::anyhow!("Invalid range, start ({start_inclusive}) and end_exclusive ({end_exclusive:?}) difference is zero bytes")));
             }
         }
-        let file_path = self
-            .resolve_in_storage(from)
-            .map_err(DownloadError::BadInput)?;
-        if file_exists(&file_path).map_err(DownloadError::BadInput)? {
+        let target_path = from.with_base(&self.storage_root);
+        if file_exists(&target_path).map_err(DownloadError::BadInput)? {
             let mut source = io::BufReader::new(
                 fs::OpenOptions::new()
                     .read(true)
-                    .open(&file_path)
+                    .open(&target_path)
                     .await
                     .with_context(|| {
-                        format!(
-                            "Failed to open source file '{}' to use in the download",
-                            file_path.display()
-                        )
+                        format!("Failed to open source file {target_path:?} to use in the download")
                     })
                     .map_err(DownloadError::Other)?,
             );
@@ -290,7 +256,7 @@ impl RemoteStorage for LocalFs {
                 .context("Failed to seek to the range start in a local storage file")
                 .map_err(DownloadError::Other)?;
             let metadata = self
-                .read_storage_metadata(&file_path)
+                .read_storage_metadata(&target_path)
                 .await
                 .map_err(DownloadError::Other)?;
 
@@ -309,15 +275,12 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete(&self, path: &RemoteObjectId) -> anyhow::Result<()> {
-        let file_path = self.resolve_in_storage(path)?;
+    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+        let file_path = path.with_base(&self.storage_root);
         if file_path.exists() && file_path.is_file() {
             Ok(fs::remove_file(file_path).await?)
         } else {
-            bail!(
-                "File '{}' either does not exist or is not a file",
-                file_path.display()
-            )
+            bail!("File {file_path:?} either does not exist or is not a file")
         }
     }
 
@@ -333,7 +296,7 @@ fn storage_metadata_path(original_path: &Path) -> PathBuf {
 fn get_all_files<'a, P>(
     directory_path: P,
     recursive: bool,
-) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RemoteObjectId>>> + Send + Sync + 'a>>
+) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<PathBuf>>> + Send + Sync + 'a>>
 where
     P: AsRef<Path> + Send + Sync + 'a,
 {
@@ -347,20 +310,20 @@ where
                     let file_type = dir_entry.file_type().await?;
                     let entry_path = dir_entry.path();
                     if file_type.is_symlink() {
-                        debug!("{:?} us a symlink, skipping", entry_path)
+                        debug!("{entry_path:?} us a symlink, skipping")
                     } else if file_type.is_dir() {
                         if recursive {
                             paths.extend(get_all_files(&entry_path, true).await?.into_iter())
                         } else {
-                            paths.push(remote_object_id_from_path(&dir_entry.path())?)
+                            paths.push(entry_path)
                         }
                     } else {
-                        paths.push(remote_object_id_from_path(&dir_entry.path())?);
+                        paths.push(entry_path);
                     }
                 }
                 Ok(paths)
             } else {
-                bail!("Path '{}' is not a directory", directory_path.display())
+                bail!("Path {directory_path:?} is not a directory")
             }
         } else {
             Ok(Vec::new())
@@ -396,173 +359,6 @@ fn file_exists(file_path: &Path) -> anyhow::Result<bool> {
 }
 
 #[cfg(test)]
-mod pure_tests {
-    use tempfile::tempdir;
-
-    use super::*;
-
-    #[test]
-    fn storage_path_positive() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
-
-        let storage_root = PathBuf::from("somewhere").join("else");
-        let storage = LocalFs {
-            working_directory: workdir.clone(),
-            storage_root: storage_root.clone(),
-        };
-
-        let local_path = workdir
-            .join("timelines")
-            .join("some_timeline")
-            .join("file_name");
-        let expected_path = storage_root.join(local_path.strip_prefix(&workdir)?);
-
-        let actual_path = PathBuf::from(
-            storage
-                .remote_object_id(&local_path)
-                .expect("Matching path should map to storage path normally")
-                .0,
-        );
-        assert_eq!(
-            expected_path,
-            actual_path,
-            "File paths from workdir should be stored in local fs storage with the same path they have relative to the workdir"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn storage_path_negatives() -> anyhow::Result<()> {
-        #[track_caller]
-        fn storage_path_error(storage: &LocalFs, mismatching_path: &Path) -> String {
-            match storage.remote_object_id(mismatching_path) {
-                Ok(wrong_path) => panic!(
-                    "Expected path '{}' to error, but got storage path: {:?}",
-                    mismatching_path.display(),
-                    wrong_path,
-                ),
-                Err(e) => format!("{:?}", e),
-            }
-        }
-
-        let workdir = tempdir()?.path().to_owned();
-        let storage_root = PathBuf::from("somewhere").join("else");
-        let storage = LocalFs {
-            working_directory: workdir.clone(),
-            storage_root,
-        };
-
-        let error_string = storage_path_error(&storage, &workdir);
-        assert!(error_string.contains("does not belong to this storage"));
-        assert!(error_string.contains(workdir.to_str().unwrap()));
-
-        let mismatching_path_str = "/something/else";
-        let error_message = storage_path_error(&storage, Path::new(mismatching_path_str));
-        assert!(
-            error_message.contains(mismatching_path_str),
-            "Error should mention wrong path"
-        );
-        assert!(
-            error_message.contains(workdir.to_str().unwrap()),
-            "Error should mention server workdir"
-        );
-        assert!(error_message.contains("does not belong to this storage"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn local_path_positive() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
-        let storage_root = PathBuf::from("somewhere").join("else");
-        let storage = LocalFs {
-            working_directory: workdir.clone(),
-            storage_root: storage_root.clone(),
-        };
-
-        let name = "not a metadata";
-        let local_path = workdir.join("timelines").join("some_timeline").join(name);
-        assert_eq!(
-            local_path,
-            storage
-                .local_path(&remote_object_id_from_path(
-                    &storage_root.join(local_path.strip_prefix(&workdir)?)
-                )?)
-                .expect("For a valid input, valid local path should be parsed"),
-            "Should be able to parse metadata out of the correctly named remote delta file"
-        );
-
-        let local_metadata_path = workdir
-            .join("timelines")
-            .join("some_timeline")
-            .join("metadata");
-        let remote_metadata_path = storage.remote_object_id(&local_metadata_path)?;
-        assert_eq!(
-            local_metadata_path,
-            storage
-                .local_path(&remote_metadata_path)
-                .expect("For a valid input, valid local path should be parsed"),
-            "Should be able to parse metadata out of the correctly named remote metadata file"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn local_path_negatives() -> anyhow::Result<()> {
-        #[track_caller]
-        fn local_path_error(storage: &LocalFs, storage_path: &RemoteObjectId) -> String {
-            match storage.local_path(storage_path) {
-                Ok(wrong_path) => panic!(
-                    "Expected local path input {:?} to cause an error, but got file path: {:?}",
-                    storage_path, wrong_path,
-                ),
-                Err(e) => format!("{:?}", e),
-            }
-        }
-
-        let storage_root = PathBuf::from("somewhere").join("else");
-        let storage = LocalFs {
-            working_directory: tempdir()?.path().to_owned(),
-            storage_root,
-        };
-
-        let totally_wrong_path = "wrong_wrong_wrong";
-        let error_message =
-            local_path_error(&storage, &RemoteObjectId(totally_wrong_path.to_string()));
-        assert!(error_message.contains(totally_wrong_path));
-
-        Ok(())
-    }
-
-    #[test]
-    fn download_destination_matches_original_path() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
-        let original_path = workdir
-            .join("timelines")
-            .join("some_timeline")
-            .join("some name");
-
-        let storage_root = PathBuf::from("somewhere").join("else");
-        let dummy_storage = LocalFs {
-            working_directory: workdir,
-            storage_root,
-        };
-
-        let storage_path = dummy_storage.remote_object_id(&original_path)?;
-        let download_destination = dummy_storage.local_path(&storage_path)?;
-
-        assert_eq!(
-            original_path, download_destination,
-            "'original path -> storage path -> matching fs path' transformation should produce the same path as the input one for the correct path"
-        );
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
 mod fs_tests {
     use super::*;
 
@@ -573,7 +369,7 @@ mod fs_tests {
         storage: &LocalFs,
         #[allow(clippy::ptr_arg)]
         // have to use &PathBuf due to `storage.local_path` parameter requirements
-        remote_storage_path: &RemoteObjectId,
+        remote_storage_path: &RemotePath,
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
         let mut download = storage
@@ -596,41 +392,16 @@ mod fs_tests {
 
     #[tokio::test]
     async fn upload_file() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
         let storage = create_storage()?;
 
-        let (file, size) = create_file_for_upload(
-            &storage.working_directory.join("whatever"),
-            "whatever_contents",
-        )
-        .await?;
-        let target_path = "/somewhere/else";
-        match storage
-            .upload(
-                Box::new(file),
-                size,
-                &RemoteObjectId(target_path.to_string()),
-                None,
-            )
-            .await
-        {
-            Ok(()) => panic!("Should not allow storing files with wrong target path"),
-            Err(e) => {
-                let message = format!("{:?}", e);
-                assert!(message.contains(target_path));
-                assert!(message.contains("does not belong to the current storage"));
-            }
-        }
-        assert!(storage.list().await?.is_empty());
-
-        let target_path_1 = upload_dummy_file(&workdir, &storage, "upload_1", None).await?;
+        let target_path_1 = upload_dummy_file(&storage, "upload_1", None).await?;
         assert_eq!(
             storage.list().await?,
             vec![target_path_1.clone()],
             "Should list a single file after first upload"
         );
 
-        let target_path_2 = upload_dummy_file(&workdir, &storage, "upload_2", None).await?;
+        let target_path_2 = upload_dummy_file(&storage, "upload_2", None).await?;
         assert_eq!(
             list_files_sorted(&storage).await?,
             vec![target_path_1.clone(), target_path_2.clone()],
@@ -644,7 +415,7 @@ mod fs_tests {
     async fn upload_file_negatives() -> anyhow::Result<()> {
         let storage = create_storage()?;
 
-        let id = storage.remote_object_id(&storage.working_directory.join("dummy"))?;
+        let id = RemotePath::new(Path::new("dummy"))?;
         let content = std::io::Cursor::new(b"12345");
 
         // Check that you get an error if the size parameter doesn't match the actual
@@ -669,16 +440,14 @@ mod fs_tests {
     }
 
     fn create_storage() -> anyhow::Result<LocalFs> {
-        LocalFs::new(tempdir()?.path().to_owned(), tempdir()?.path().to_owned())
+        LocalFs::new(tempdir()?.path().to_owned())
     }
 
     #[tokio::test]
     async fn download_file() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
-
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
         let contents = read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
         assert_eq!(
@@ -688,7 +457,7 @@ mod fs_tests {
         );
 
         let non_existing_path = "somewhere/else";
-        match storage.download(&RemoteObjectId(non_existing_path.to_string())).await {
+        match storage.download(&RemotePath::new(Path::new(non_existing_path))?).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -697,11 +466,9 @@ mod fs_tests {
 
     #[tokio::test]
     async fn download_file_range_positive() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
-
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
         let full_range_download_contents =
             read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
@@ -767,11 +534,9 @@ mod fs_tests {
 
     #[tokio::test]
     async fn download_file_range_negative() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
-
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
         let start = 1_000_000_000;
         let end = start + 1;
@@ -813,11 +578,9 @@ mod fs_tests {
 
     #[tokio::test]
     async fn delete_file() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
-
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
         storage.delete(&upload_target).await?;
         assert!(storage.list().await?.is_empty());
@@ -827,7 +590,8 @@ mod fs_tests {
             Err(e) => {
                 let error_string = e.to_string();
                 assert!(error_string.contains("does not exist"));
-                assert!(error_string.contains(&upload_target.0));
+                let expected_path = upload_target.with_base(&storage.storage_root);
+                assert!(error_string.contains(expected_path.to_str().unwrap()));
             }
         }
         Ok(())
@@ -835,8 +599,6 @@ mod fs_tests {
 
     #[tokio::test]
     async fn file_with_metadata() -> anyhow::Result<()> {
-        let workdir = tempdir()?.path().to_owned();
-
         let storage = create_storage()?;
         let upload_name = "upload_1";
         let metadata = StorageMetadata(HashMap::from([
@@ -844,7 +606,7 @@ mod fs_tests {
             ("two".to_string(), "2".to_string()),
         ]));
         let upload_target =
-            upload_dummy_file(&workdir, &storage, upload_name, Some(metadata.clone())).await?;
+            upload_dummy_file(&storage, upload_name, Some(metadata.clone())).await?;
 
         let full_range_download_contents =
             read_and_assert_remote_file_contents(&storage, &upload_target, Some(&metadata)).await?;
@@ -884,23 +646,32 @@ mod fs_tests {
     }
 
     async fn upload_dummy_file(
-        workdir: &Path,
         storage: &LocalFs,
         name: &str,
         metadata: Option<StorageMetadata>,
-    ) -> anyhow::Result<RemoteObjectId> {
-        let timeline_path = workdir.join("timelines").join("some_timeline");
-        let relative_timeline_path = timeline_path.strip_prefix(&workdir)?;
-        let storage_path = storage.storage_root.join(relative_timeline_path).join(name);
-        let remote_object_id = RemoteObjectId(storage_path.to_str().unwrap().to_string());
-
-        let from_path = storage.working_directory.join(name);
+    ) -> anyhow::Result<RemotePath> {
+        let from_path = storage
+            .storage_root
+            .join("timelines")
+            .join("some_timeline")
+            .join(name);
         let (file, size) = create_file_for_upload(&from_path, &dummy_contents(name)).await?;
 
+        let relative_path = from_path
+            .strip_prefix(&storage.storage_root)
+            .context("Failed to strip storage root prefix")
+            .and_then(RemotePath::new)
+            .with_context(|| {
+                format!(
+                    "Failed to resolve remote part of path {:?} for base {:?}",
+                    from_path, storage.storage_root
+                )
+            })?;
+
         storage
-            .upload(Box::new(file), size, &remote_object_id, metadata)
+            .upload(Box::new(file), size, &relative_path, metadata)
             .await?;
-        remote_object_id_from_path(&storage_path)
+        Ok(relative_path)
     }
 
     async fn create_file_for_upload(
@@ -925,7 +696,7 @@ mod fs_tests {
         format!("contents for {name}")
     }
 
-    async fn list_files_sorted(storage: &LocalFs) -> anyhow::Result<Vec<RemoteObjectId>> {
+    async fn list_files_sorted(storage: &LocalFs) -> anyhow::Result<Vec<RemotePath>> {
         let mut files = storage.list().await?;
         files.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(files)

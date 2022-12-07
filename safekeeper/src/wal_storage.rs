@@ -8,6 +8,7 @@
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
 use anyhow::{bail, Context, Result};
+use remote_storage::RemotePath;
 
 use std::io::{self, Seek, SeekFrom};
 use std::pin::Pin;
@@ -445,6 +446,7 @@ fn remove_segments_from_disk(
 }
 
 pub struct WalReader {
+    workdir: PathBuf,
     timeline_dir: PathBuf,
     wal_seg_size: usize,
     pos: Lsn,
@@ -459,6 +461,7 @@ pub struct WalReader {
 
 impl WalReader {
     pub fn new(
+        workdir: PathBuf,
         timeline_dir: PathBuf,
         state: &SafeKeeperState,
         start_pos: Lsn,
@@ -478,6 +481,7 @@ impl WalReader {
         }
 
         Ok(Self {
+            workdir,
             timeline_dir,
             wal_seg_size: state.server.wal_seg_size as usize,
             pos: start_pos,
@@ -545,7 +549,17 @@ impl WalReader {
 
         // Try to open remote file, if remote reads are enabled
         if self.enable_remote_read {
-            return read_object(wal_file_path, xlogoff as u64).await;
+            let remote_wal_file_path = wal_file_path
+                .strip_prefix(&self.workdir)
+                .context("Failed to strip workdir prefix")
+                .and_then(RemotePath::new)
+                .with_context(|| {
+                    format!(
+                        "Failed to resolve remote part of path {:?} for base {:?}",
+                        wal_file_path, self.workdir,
+                    )
+                })?;
+            return read_object(&remote_wal_file_path, xlogoff as u64).await;
         }
 
         bail!("WAL segment is not found")

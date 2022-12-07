@@ -202,7 +202,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::ensure;
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use tokio::runtime::Runtime;
 use tracing::{info, warn};
 use tracing::{info_span, Instrument};
@@ -217,7 +217,7 @@ use crate::metrics::RemoteOpKind;
 use crate::metrics::REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS;
 use crate::{
     config::PageServerConf,
-    storage_sync::index::{LayerFileMetadata, RemotePath},
+    storage_sync::index::LayerFileMetadata,
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
@@ -337,18 +337,18 @@ impl UploadQueue {
 
         let state = UploadQueueInitialized {
             // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
-            latest_files: Default::default(),
+            latest_files: HashMap::new(),
             latest_metadata: metadata.clone(),
             // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
             // safekeepers from garbage-collecting anything.
             last_uploaded_consistent_lsn: Lsn(0),
             // what follows are boring default initializations
-            task_counter: Default::default(),
+            task_counter: 0,
             num_inprogress_layer_uploads: 0,
             num_inprogress_metadata_uploads: 0,
             num_inprogress_deletions: 0,
-            inprogress_tasks: Default::default(),
-            queued_operations: Default::default(),
+            inprogress_tasks: HashMap::new(),
+            queued_operations: VecDeque::new(),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -357,6 +357,10 @@ impl UploadQueue {
 
     fn initialize_with_current_remote_index_part(
         &mut self,
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+
         index_part: &IndexPart,
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
@@ -366,14 +370,19 @@ impl UploadQueue {
             }
         }
 
-        let mut files = HashMap::new();
-        for path in &index_part.timeline_layers {
+        let mut files = HashMap::with_capacity(index_part.timeline_layers.len());
+        let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
+        for timeline_name in &index_part.timeline_layers {
+            let local_path = timeline_path.join(timeline_name);
+            let remote_timeline_path = conf.remote_path(&local_path).expect(
+                "Remote timeline path and local timeline path were constructed form the same conf",
+            );
             let layer_metadata = index_part
                 .layer_metadata
-                .get(path)
+                .get(timeline_name)
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
-            files.insert(path.clone(), layer_metadata);
+            files.insert(remote_timeline_path, layer_metadata);
         }
 
         let index_part_metadata = index_part.parse_metadata()?;
@@ -391,8 +400,8 @@ impl UploadQueue {
             num_inprogress_layer_uploads: 0,
             num_inprogress_metadata_uploads: 0,
             num_inprogress_deletions: 0,
-            inprogress_tasks: Default::default(),
-            queued_operations: Default::default(),
+            inprogress_tasks: HashMap::new(),
+            queued_operations: VecDeque::new(),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -456,7 +465,12 @@ impl RemoteTimelineClient {
     /// The given `index_part` must be the one on the remote.
     pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_with_current_remote_index_part(index_part)?;
+        upload_queue.initialize_with_current_remote_index_part(
+            self.conf,
+            self.tenant_id,
+            self.timeline_id,
+            index_part,
+        )?;
         Ok(())
     }
 
@@ -510,15 +524,13 @@ impl RemoteTimelineClient {
     /// On success, returns the size of the downloaded file.
     pub async fn download_layer_file(
         &self,
-        path: &RemotePath,
+        remote_path: &RemotePath,
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
         let downloaded_size = download::download_layer_file(
             self.conf,
             &self.storage_impl,
-            self.tenant_id,
-            self.timeline_id,
-            path,
+            remote_path,
             layer_metadata,
         )
         .measure_remote_op(
@@ -536,13 +548,13 @@ impl RemoteTimelineClient {
             let new_metadata = LayerFileMetadata::new(downloaded_size);
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
-            if let Some(upgraded) = upload_queue.latest_files.get_mut(path) {
+            if let Some(upgraded) = upload_queue.latest_files.get_mut(remote_path) {
                 upgraded.merge(&new_metadata);
             } else {
                 // The file should exist, since we just downloaded it.
                 warn!(
                     "downloaded file {:?} not found in local copy of the index file",
-                    path
+                    remote_path
                 );
             }
         }
@@ -612,14 +624,9 @@ impl RemoteTimelineClient {
             "file size not initialized in metadata"
         );
 
-        let relative_path = RemotePath::strip_base_path(
-            &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-            path,
-        )?;
-
         upload_queue
             .latest_files
-            .insert(relative_path, layer_metadata.clone());
+            .insert(self.conf.remote_path(path)?, layer_metadata.clone());
 
         let op = UploadOp::UploadLayer(PathBuf::from(path), layer_metadata.clone());
         self.update_upload_queue_unfinished_metric(1, &op);
@@ -641,13 +648,10 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        // Convert the paths into RelativePaths, and gather other information we need.
-        let mut relative_paths = Vec::with_capacity(paths.len());
+        // Convert the paths into RemotePaths, and gather other information we need.
+        let mut remote_paths = Vec::with_capacity(paths.len());
         for path in paths {
-            relative_paths.push(RemotePath::strip_base_path(
-                &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-                path,
-            )?);
+            remote_paths.push(self.conf.remote_path(path)?);
         }
 
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
@@ -663,8 +667,8 @@ impl RemoteTimelineClient {
         // from latest_files, but not yet scheduled for deletion. Use a closure
         // to syntactically forbid ? or bail! calls here.
         let no_bail_here = || {
-            for relative_path in relative_paths {
-                upload_queue.latest_files.remove(&relative_path);
+            for remote_path in remote_paths {
+                upload_queue.latest_files.remove(&remote_path);
             }
 
             let index_part = IndexPart::new(
@@ -838,14 +842,19 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref path, ref layer_metadata) => {
-                    upload::upload_timeline_layer(&self.storage_impl, path, layer_metadata)
-                        .measure_remote_op(
-                            self.tenant_id,
-                            self.timeline_id,
-                            RemoteOpFileKind::Layer,
-                            RemoteOpKind::Upload,
-                        )
-                        .await
+                    upload::upload_timeline_layer(
+                        self.conf,
+                        &self.storage_impl,
+                        path,
+                        layer_metadata,
+                    )
+                    .measure_remote_op(
+                        self.tenant_id,
+                        self.timeline_id,
+                        RemoteOpFileKind::Layer,
+                        RemoteOpKind::Upload,
+                    )
+                    .await
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
                     upload::upload_index_part(
@@ -864,7 +873,7 @@ impl RemoteTimelineClient {
                     .await
                 }
                 UploadOp::Delete(metric_file_kind, ref path) => {
-                    delete::delete_layer(&self.storage_impl, path)
+                    delete::delete_layer(self.conf, &self.storage_impl, path)
                         .measure_remote_op(
                             self.tenant_id,
                             self.timeline_id,
@@ -1093,15 +1102,11 @@ mod tests {
         TimelineMetadata::from_bytes(&metadata.to_bytes().unwrap()).unwrap()
     }
 
-    fn assert_file_list(a: &HashSet<RemotePath>, b: &[&str]) {
-        let xx = PathBuf::from("");
-        let mut avec: Vec<String> = a
-            .iter()
-            .map(|x| x.to_local_path(&xx).to_string_lossy().into())
-            .collect();
+    fn assert_file_list(a: &HashSet<String>, b: &[&str]) {
+        let mut avec: Vec<&str> = a.iter().map(|a| a.as_str()).collect();
         avec.sort();
 
-        let mut bvec = b.to_owned();
+        let mut bvec = b.to_vec();
         bvec.sort_unstable();
 
         assert_eq!(avec, bvec);
@@ -1169,8 +1174,7 @@ mod tests {
 
         println!("workdir: {}", harness.conf.workdir.display());
 
-        let storage_impl =
-            GenericRemoteStorage::from_config(harness.conf.workdir.clone(), &storage_config)?;
+        let storage_impl = GenericRemoteStorage::from_config(&storage_config)?;
         let client = Arc::new(RemoteTimelineClient {
             conf: harness.conf,
             runtime,

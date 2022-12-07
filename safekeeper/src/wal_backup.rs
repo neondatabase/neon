@@ -13,7 +13,7 @@ use std::time::Duration;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::fs::File;
 use tokio::runtime::Builder;
 
@@ -151,7 +151,7 @@ async fn update_task(
             let timeline_dir = conf.timeline_dir(&ttid);
 
             let handle = tokio::spawn(
-                backup_task_main(ttid, timeline_dir, shutdown_rx)
+                backup_task_main(ttid, timeline_dir, conf.workdir.clone(), shutdown_rx)
                     .instrument(info_span!("WAL backup task", ttid = %ttid)),
             );
 
@@ -182,10 +182,10 @@ async fn wal_backup_launcher_main_loop(
 
     let conf_ = conf.clone();
     REMOTE_STORAGE.get_or_init(|| {
-        conf_.remote_storage.as_ref().map(|c| {
-            GenericRemoteStorage::from_config(conf_.workdir, c)
-                .expect("failed to create remote storage")
-        })
+        conf_
+            .remote_storage
+            .as_ref()
+            .map(|c| GenericRemoteStorage::from_config(c).expect("failed to create remote storage"))
     });
 
     // Presense in this map means launcher is aware s3 offloading is needed for
@@ -234,6 +234,7 @@ async fn wal_backup_launcher_main_loop(
 struct WalBackupTask {
     timeline: Arc<Timeline>,
     timeline_dir: PathBuf,
+    workspace_dir: PathBuf,
     wal_seg_size: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
 }
@@ -242,6 +243,7 @@ struct WalBackupTask {
 async fn backup_task_main(
     ttid: TenantTimelineId,
     timeline_dir: PathBuf,
+    workspace_dir: PathBuf,
     mut shutdown_rx: Receiver<()>,
 ) {
     info!("started");
@@ -257,6 +259,7 @@ async fn backup_task_main(
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
         timeline: tli,
         timeline_dir,
+        workspace_dir,
     };
 
     // task is spinned up only when wal_seg_size already initialized
@@ -321,6 +324,7 @@ impl WalBackupTask {
                 commit_lsn,
                 self.wal_seg_size,
                 &self.timeline_dir,
+                &self.workspace_dir,
             )
             .await
             {
@@ -353,11 +357,12 @@ pub async fn backup_lsn_range(
     end_lsn: Lsn,
     wal_seg_size: usize,
     timeline_dir: &Path,
+    workspace_dir: &Path,
 ) -> Result<Lsn> {
     let mut res = start_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
     for s in &segments {
-        backup_single_segment(s, timeline_dir)
+        backup_single_segment(s, timeline_dir, workspace_dir)
             .await
             .with_context(|| format!("offloading segno {}", s.seg_no))?;
 
@@ -372,11 +377,24 @@ pub async fn backup_lsn_range(
     Ok(res)
 }
 
-async fn backup_single_segment(seg: &Segment, timeline_dir: &Path) -> Result<()> {
-    let segment_file_name = seg.file_path(timeline_dir)?;
+async fn backup_single_segment(
+    seg: &Segment,
+    timeline_dir: &Path,
+    workspace_dir: &Path,
+) -> Result<()> {
+    let segment_file_path = seg.file_path(timeline_dir)?;
+    let remote_segment_path = segment_file_path
+        .strip_prefix(&workspace_dir)
+        .context("Failed to strip workspace dir prefix")
+        .and_then(RemotePath::new)
+        .with_context(|| {
+            format!(
+                "Failed to resolve remote part of path {segment_file_path:?} for base {workspace_dir:?}",
+            )
+        })?;
 
-    backup_object(&segment_file_name, seg.size()).await?;
-    debug!("Backup of {} done", segment_file_name.display());
+    backup_object(&segment_file_path, &remote_segment_path, seg.size()).await?;
+    debug!("Backup of {} done", segment_file_path.display());
 
     Ok(())
 }
@@ -426,7 +444,7 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
-async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
+async fn backup_object(source_file: &Path, target_file: &RemotePath, size: usize) -> Result<()> {
     let storage = REMOTE_STORAGE
         .get()
         .expect("failed to get remote storage")
@@ -441,12 +459,12 @@ async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
     })?);
 
     storage
-        .upload_storage_object(Box::new(file), size, source_file)
+        .upload_storage_object(Box::new(file), size, target_file)
         .await
 }
 
 pub async fn read_object(
-    file_path: PathBuf,
+    file_path: &RemotePath,
     offset: u64,
 ) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead>>> {
     let storage = REMOTE_STORAGE
@@ -455,19 +473,13 @@ pub async fn read_object(
         .as_ref()
         .context("No remote storage configured")?;
 
-    info!(
-        "segment download about to start for local path {} at offset {}",
-        file_path.display(),
-        offset
-    );
+    info!("segment download about to start from remote path {file_path:?} at offset {offset}");
+
     let download = storage
-        .download_storage_object(Some((offset, None)), &file_path)
+        .download_storage_object(Some((offset, None)), file_path)
         .await
         .with_context(|| {
-            format!(
-                "Failed to open WAL segment download stream for local path {}",
-                file_path.display()
-            )
+            format!("Failed to open WAL segment download stream for remote path {file_path:?}")
         })?;
 
     Ok(download.download_stream)
