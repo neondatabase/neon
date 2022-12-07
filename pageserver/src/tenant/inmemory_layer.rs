@@ -181,10 +181,6 @@ impl Layer for InMemoryLayer {
         true
     }
 
-    fn is_in_memory(&self) -> bool {
-        true
-    }
-
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool) -> Result<()> {
         let inner = self.inner.read().unwrap();

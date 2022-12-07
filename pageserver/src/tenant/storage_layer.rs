@@ -133,9 +133,6 @@ pub trait Layer: Send + Sync {
     /// the previous non-incremental layer.
     fn is_incremental(&self) -> bool;
 
-    /// Returns true for layers that are represented in memory.
-    fn is_in_memory(&self) -> bool;
-
     /// Iterate through all keys and values stored in the layer
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
 

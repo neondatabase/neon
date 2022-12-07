@@ -2485,16 +2485,6 @@ impl Timeline {
         //
         let mut layers = self.layers.write().unwrap();
         'outer: for l in layers.iter_historic_layers() {
-            // This layer is in the process of being flushed to disk.
-            // It will be swapped out of the layer map, replaced with
-            // on-disk layers containing the same data.
-            // We can't GC it, as it's not on disk. We can't remove it
-            // from the layer map yet, as it would make its data
-            // inaccessible.
-            if l.is_in_memory() {
-                continue;
-            }
-
             result.layers_total += 1;
 
             // 1. Is it newer than GC horizon cutoff point?

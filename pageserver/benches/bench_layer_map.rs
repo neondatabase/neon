@@ -62,10 +62,6 @@ impl Layer for DummyDelta {
         true
     }
 
-    fn is_in_memory(&self) -> bool {
-        false
-    }
-
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
         panic!()
     }
@@ -124,10 +120,6 @@ impl Layer for DummyImage {
     }
 
     fn is_incremental(&self) -> bool {
-        false
-    }
-
-    fn is_in_memory(&self) -> bool {
         false
     }
 
