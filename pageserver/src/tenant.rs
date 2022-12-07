@@ -782,7 +782,7 @@ impl Tenant {
         let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
             Ok(conf) => conf,
             Err(e) => {
-                error!("load tenant config failed: {}", e);
+                error!("load tenant config failed: {:?}", e);
                 return Tenant::create_broken_tenant(conf, tenant_id);
             }
         };
