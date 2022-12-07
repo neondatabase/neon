@@ -201,8 +201,6 @@ pub struct TimelineInfo {
     pub last_received_msg_ts: Option<u128>,
     pub pg_version: u32,
 
-    pub awaits_download: bool,
-
     pub state: TimelineState,
 
     // Some of the above fields are duplicated in 'local' and 'remote', for backwards-

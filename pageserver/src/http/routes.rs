@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
-use pageserver_api::models::TenantState;
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
@@ -81,12 +80,11 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 
 // Helper function to construct a TimelineInfo struct for a timeline
 fn build_timeline_info(
-    tenant_state: TenantState,
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<TimelineInfo> {
-    let mut info = build_timeline_info_common(tenant_state, timeline)?;
+    let mut info = build_timeline_info_common(timeline)?;
     if include_non_incremental_logical_size {
         info.current_logical_size_non_incremental =
             Some(timeline.get_current_logical_size_non_incremental(info.last_record_lsn)?);
@@ -98,10 +96,7 @@ fn build_timeline_info(
     Ok(info)
 }
 
-fn build_timeline_info_common(
-    tenant_state: TenantState,
-    timeline: &Arc<Timeline>,
-) -> anyhow::Result<TimelineInfo> {
+fn build_timeline_info_common(timeline: &Arc<Timeline>) -> anyhow::Result<TimelineInfo> {
     let last_record_lsn = timeline.get_last_record_lsn();
     let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
         let guard = timeline.last_received_wal.lock().unwrap();
@@ -153,10 +148,6 @@ fn build_timeline_info_common(
 
         state,
 
-        // XXX bring back tracking of downloads per timeline, or, introduce
-        // an 'Attaching' state for the timeline and get rid of this field.
-        awaits_download: tenant_state == TenantState::Attaching,
-
         // Duplicate some fields in 'local' and 'remote' fields, for backwards-compatility
         // with the control plane.
         local: LocalTimelineInfo {
@@ -201,7 +192,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     .await {
         Ok(Some(new_timeline)) => {
             // Created. Construct a TimelineInfo for it.
-            let timeline_info = build_timeline_info_common(tenant.current_state(), &new_timeline)
+            let timeline_info = build_timeline_info_common(&new_timeline)
                 .map_err(ApiError::InternalServerError)?;
             json_response(StatusCode::CREATED, timeline_info)
         }
@@ -227,7 +218,6 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
             let timeline_info = build_timeline_info(
-                tenant.current_state(),
                 &timeline,
                 include_non_incremental_logical_size,
                 include_non_incremental_physical_size,
@@ -295,7 +285,6 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             .map_err(ApiError::NotFound)?;
 
         let timeline_info = build_timeline_info(
-            tenant.current_state(),
             &timeline,
             include_non_incremental_logical_size,
             include_non_incremental_physical_size,

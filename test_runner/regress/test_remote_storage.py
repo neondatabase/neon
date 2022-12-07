@@ -165,7 +165,6 @@ def test_remote_storage_backup_and_restore(
     assert (
         Lsn(detail["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
-    assert not detail["awaits_download"]
 
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:

@@ -748,7 +748,6 @@ components:
         - tenant_id
         - last_record_lsn
         - disk_consistent_lsn
-        - awaits_download
         - state
         - latest_gc_cutoff_lsn
       properties:
@@ -791,8 +790,6 @@ components:
           format: hex
         last_received_msg_ts:
           type: integer
-        awaits_download:
-          type: boolean
         state:
           type: string
         latest_gc_cutoff_lsn:
