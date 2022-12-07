@@ -52,6 +52,7 @@ use utils::{
     lsn::Lsn,
 };
 
+use super::filename::LayerFileName;
 use super::storage_layer::PureLayer;
 
 ///
@@ -208,9 +209,8 @@ impl PureLayer for DeltaLayer {
     }
 
     fn short_id(&self) -> String {
-        format!("{}", self.filename().display())
+        self.filename().file_name()
     }
-
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool) -> Result<()> {
         println!(
@@ -381,12 +381,12 @@ impl Layer for DeltaLayer {
         self.timeline_id
     }
 
-    fn filename(&self) -> PathBuf {
-        PathBuf::from(self.layer_name().to_string())
+    fn filename(&self) -> LayerFileName {
+        self.layer_name().into()
     }
 
-    fn local_path(&self) -> Option<PathBuf> {
-        Some(self.path())
+    fn local_path(&self) -> Option<LayerFileName> {
+        Some(self.filename())
     }
 
     fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
@@ -521,8 +521,8 @@ impl DeltaLayer {
                 }
             }
             PathOrConf::Path(path) => {
-                let actual_filename = Path::new(path.file_name().unwrap());
-                let expected_filename = self.filename();
+                let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+                let expected_filename = self.filename().file_name();
 
                 if actual_filename != expected_filename {
                     println!(

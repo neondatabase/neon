@@ -7,7 +7,6 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use utils::{
@@ -15,6 +14,7 @@ use utils::{
     lsn::Lsn,
 };
 
+use super::filename::LayerFileName;
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -138,13 +138,13 @@ pub trait Layer: Send + Sync + PureLayer {
 
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
-    fn filename(&self) -> PathBuf;
+    fn filename(&self) -> LayerFileName;
 
     /// If the layer has a corresponding file on a local filesystem, return its filename.
     /// `None` otherwise.
     /// NB: all current implementations return `Some`, but with on-demand download,
     /// a new `RemoteLayer` type will be added that returns `None` here.
-    fn local_path(&self) -> Option<PathBuf>;
+    fn local_path(&self) -> Option<LayerFileName>;
 
     /// Iterate through all keys and values stored in the layer
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
