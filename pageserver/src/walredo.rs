@@ -84,8 +84,7 @@ pub trait WalRedoManager: Send + Sync {
         &self,
         key: Key,
         lsn: Lsn,
-        base_img: Option<Bytes>,
-        base_img_lsn: Lsn,
+        base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError>;
@@ -148,8 +147,7 @@ impl WalRedoManager for PostgresRedoManager {
         &self,
         key: Key,
         lsn: Lsn,
-        base_img: Option<Bytes>,
-        base_img_lsn: Lsn,
+        base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
@@ -158,7 +156,8 @@ impl WalRedoManager for PostgresRedoManager {
             return Err(WalRedoError::InvalidRequest);
         }
 
-        let mut img: Option<Bytes> = base_img;
+        let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
+        let mut img = base_img.map(|p| p.1);
         let mut batch_neon = can_apply_in_neon(&records[0].1);
         let mut batch_start = 0;
         for i in 1..records.len() {
