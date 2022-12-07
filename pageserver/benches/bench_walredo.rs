@@ -431,7 +431,7 @@ fn pg_record(will_init: bool, bytes: &'static [u8]) -> NeonWalRecord {
 struct Request {
     key: Key,
     lsn: Lsn,
-    base_img: Option<Bytes>,
+    base_img: Option<(Lsn,Bytes)>,
     records: Vec<(Lsn, NeonWalRecord)>,
     pg_version: u32,
 }
@@ -448,6 +448,6 @@ impl Request {
             pg_version,
         } = self;
 
-        manager.request_redo(key, lsn, base_img, Lsn(0), records, pg_version)
+        manager.request_redo(key, lsn, base_img, records, pg_version)
     }
 }
