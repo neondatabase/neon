@@ -83,15 +83,19 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 # I'm not sure why it wouldn't work, but this is the only place (apart from
 # the "build-all-versions" entry points) where direct mention of PostgreSQL
 # versions is used.
+.PHONY: postgres-configure-v15
 postgres-configure-v15: $(POSTGRES_INSTALL_DIR)/build/v15/config.status
+.PHONY: postgres-configure-v14
 postgres-configure-v14: $(POSTGRES_INSTALL_DIR)/build/v14/config.status
 
 # Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/<version>/include
+.PHONY: postgres-headers-%
 postgres-headers-%: postgres-configure-%
 	+@echo "Installing PostgreSQL $* headers"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/include MAKELEVEL=0 install
 
 # Compile and install PostgreSQL
+.PHONY: postgres-%
 postgres-%: postgres-configure-% \
 		  postgres-headers-% # to prevent `make install` conflicts with neon's `postgres-headers`
 	+@echo "Compiling PostgreSQL $*"
@@ -105,12 +109,14 @@ postgres-%: postgres-configure-% \
 	+@echo "Compiling pageinspect $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
 
+.PHONY: postgres-clean-%
 postgres-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
 
+.PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
@@ -128,6 +134,7 @@ neon-pg-ext-%: postgres-%
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install
 
+.PHONY: neon-pg-ext-clean-%
 neon-pg-ext-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/neon-$* -f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/neon_walredo-$* -f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile clean
@@ -144,6 +151,7 @@ neon-pg-ext-clean: \
 	neon-pg-ext-clean-v15
 
 # shorthand to build all Postgres versions
+.PHONY: postgres
 postgres: \
 	postgres-v14 \
 	postgres-v15
