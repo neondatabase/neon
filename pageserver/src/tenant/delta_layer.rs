@@ -52,6 +52,8 @@ use utils::{
     lsn::Lsn,
 };
 
+use super::storage_layer::PureLayer;
+
 ///
 /// Header stored in the beginning of the file
 ///
@@ -193,15 +195,7 @@ pub struct DeltaLayerInner {
     file: Option<FileBlockReader<VirtualFile>>,
 }
 
-impl Layer for DeltaLayer {
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
-
+impl PureLayer for DeltaLayer {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -209,13 +203,87 @@ impl Layer for DeltaLayer {
     fn get_lsn_range(&self) -> Range<Lsn> {
         self.lsn_range.clone()
     }
-
-    fn filename(&self) -> PathBuf {
-        PathBuf::from(self.layer_name().to_string())
+    fn is_incremental(&self) -> bool {
+        true
     }
 
-    fn local_path(&self) -> Option<PathBuf> {
-        Some(self.path())
+    fn short_id(&self) -> String {
+        format!("{}", self.filename().display())
+    }
+
+    /// debugging function to print out the contents of the layer
+    fn dump(&self, verbose: bool) -> Result<()> {
+        println!(
+            "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
+            self.tenant_id,
+            self.timeline_id,
+            self.key_range.start,
+            self.key_range.end,
+            self.lsn_range.start,
+            self.lsn_range.end
+        );
+
+        if !verbose {
+            return Ok(());
+        }
+
+        let inner = self.load()?;
+
+        println!(
+            "index_start_blk: {}, root {}",
+            inner.index_start_blk, inner.index_root_blk
+        );
+
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            inner.index_start_blk,
+            inner.index_root_blk,
+            file,
+        );
+
+        tree_reader.dump()?;
+
+        let mut cursor = file.block_cursor();
+
+        // A subroutine to dump a single blob
+        let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
+            let buf = cursor.read_blob(blob_ref.pos())?;
+            let val = Value::des(&buf)?;
+            let desc = match val {
+                Value::Image(img) => {
+                    format!(" img {} bytes", img.len())
+                }
+                Value::WalRecord(rec) => {
+                    let wal_desc = walrecord::describe_wal_record(&rec)?;
+                    format!(
+                        " rec {} bytes will_init: {} {}",
+                        buf.len(),
+                        rec.will_init(),
+                        wal_desc
+                    )
+                }
+            };
+            Ok(desc)
+        };
+
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |delta_key, val| {
+                let blob_ref = BlobRef(val);
+                let key = DeltaKey::extract_key_from_buf(delta_key);
+                let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
+
+                let desc = match dump_blob(blob_ref) {
+                    Ok(desc) => desc,
+                    Err(err) => format!("ERROR: {}", err),
+                };
+                println!("  key {} at {}: {}", key, lsn, desc);
+                true
+            },
+        )?;
+
+        Ok(())
     }
 
     fn get_value_reconstruct_data(
@@ -302,6 +370,24 @@ impl Layer for DeltaLayer {
             Ok(ValueReconstructResult::Complete)
         }
     }
+}
+
+impl Layer for DeltaLayer {
+    fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    fn get_timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+
+    fn filename(&self) -> PathBuf {
+        PathBuf::from(self.layer_name().to_string())
+    }
+
+    fn local_path(&self) -> Option<PathBuf> {
+        Some(self.path())
+    }
 
     fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
         let inner = match self.load() {
@@ -333,83 +419,11 @@ impl Layer for DeltaLayer {
         Ok(())
     }
 
-    fn is_incremental(&self) -> bool {
-        true
-    }
-
-    /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool) -> Result<()> {
-        println!(
-            "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
-            self.tenant_id,
-            self.timeline_id,
-            self.key_range.start,
-            self.key_range.end,
-            self.lsn_range.start,
-            self.lsn_range.end
-        );
-
-        if !verbose {
-            return Ok(());
-        }
-
-        let inner = self.load()?;
-
-        println!(
-            "index_start_blk: {}, root {}",
-            inner.index_start_blk, inner.index_root_blk
-        );
-
-        let file = inner.file.as_ref().unwrap();
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
-            file,
-        );
-
-        tree_reader.dump()?;
-
-        let mut cursor = file.block_cursor();
-
-        // A subroutine to dump a single blob
-        let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
-            let buf = cursor.read_blob(blob_ref.pos())?;
-            let val = Value::des(&buf)?;
-            let desc = match val {
-                Value::Image(img) => {
-                    format!(" img {} bytes", img.len())
-                }
-                Value::WalRecord(rec) => {
-                    let wal_desc = walrecord::describe_wal_record(&rec)?;
-                    format!(
-                        " rec {} bytes will_init: {} {}",
-                        buf.len(),
-                        rec.will_init(),
-                        wal_desc
-                    )
-                }
-            };
-            Ok(desc)
-        };
-
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |delta_key, val| {
-                let blob_ref = BlobRef(val);
-                let key = DeltaKey::extract_key_from_buf(delta_key);
-                let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
-
-                let desc = match dump_blob(blob_ref) {
-                    Ok(desc) => desc,
-                    Err(err) => format!("ERROR: {}", err),
-                };
-                println!("  key {} at {}: {}", key, lsn, desc);
-                true
-            },
-        )?;
-
-        Ok(())
+    fn as_pure_layer<'a>(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn PureLayer>
+    where
+        Self: 'a,
+    {
+        self
     }
 }
 

@@ -8,6 +8,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -69,26 +70,8 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
-/// A Layer contains all data in a "rectangle" consisting of a range of keys and
-/// range of LSNs.
-///
-/// There are two kinds of layers, in-memory and on-disk layers. In-memory
-/// layers are used to ingest incoming WAL, and provide fast access to the
-/// recent page versions. On-disk layers are stored as files on disk, and are
-/// immutable. This trait presents the common functionality of in-memory and
-/// on-disk layers.
-///
-/// Furthermore, there are two kinds of on-disk layers: delta and image layers.
-/// A delta layer contains all modifications within a range of LSNs and keys.
-/// An image layer is a snapshot of all the data in a key-range, at a single
-/// LSN
-///
-pub trait Layer: Send + Sync {
-    fn get_tenant_id(&self) -> TenantId;
-
-    /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId;
-
+/// Supertrait of the [`Layer`] trait that conta
+pub trait PureLayer: Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -100,13 +83,11 @@ pub trait Layer: Send + Sync {
     /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     fn get_lsn_range(&self) -> Range<Lsn>;
 
-    /// Filename used to store this layer on disk. (Even in-memory layers
-    /// implement this, to print a handy unique identifier for the layer for
-    /// log messages, even though they're never not on disk.)
-    fn filename(&self) -> PathBuf;
-
-    /// If a layer has a corresponding file on a local filesystem, return its absolute path.
-    fn local_path(&self) -> Option<PathBuf>;
+    /// Does this layer only contain some data for the key-range (incremental),
+    /// or does it contain a version of every page? This is important to know
+    /// for garbage collecting old layers: an incremental layer depends on
+    /// the previous non-incremental layer.
+    fn is_incremental(&self) -> bool;
 
     ///
     /// Return data needed to reconstruct given page at LSN.
@@ -127,11 +108,40 @@ pub trait Layer: Send + Sync {
         reconstruct_data: &mut ValueReconstructState,
     ) -> Result<ValueReconstructResult>;
 
-    /// Does this layer only contain some data for the key-range (incremental),
-    /// or does it contain a version of every page? This is important to know
-    /// for garbage collecting old layers: an incremental layer depends on
-    /// the previous non-incremental layer.
-    fn is_incremental(&self) -> bool;
+    /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
+    fn short_id(&self) -> String;
+
+    /// Dump summary of the contents of the layer to stdout
+    fn dump(&self, verbose: bool) -> Result<()>;
+}
+
+/// A Layer contains all data in a "rectangle" consisting of a range of keys and
+/// range of LSNs.
+///
+/// There are two kinds of layers, in-memory and on-disk layers. In-memory
+/// layers are used to ingest incoming WAL, and provide fast access to the
+/// recent page versions. On-disk layers are stored as files on disk, and are
+/// immutable. This trait presents the common functionality of in-memory and
+/// on-disk layers.
+///
+/// Furthermore, there are two kinds of on-disk layers: delta and image layers.
+/// A delta layer contains all modifications within a range of LSNs and keys.
+/// An image layer is a snapshot of all the data in a key-range, at a single
+/// LSN
+///
+pub trait Layer: Send + Sync + PureLayer {
+    fn get_tenant_id(&self) -> TenantId;
+
+    /// Identify the timeline this layer belongs to
+    fn get_timeline_id(&self) -> TimelineId;
+
+    /// Filename used to store this layer on disk. (Even in-memory layers
+    /// implement this, to print a handy unique identifier for the layer for
+    /// log messages, even though they're never not on disk.)
+    fn filename(&self) -> PathBuf;
+
+    /// If a layer has a corresponding file on a local filesystem, return its absolute path.
+    fn local_path(&self) -> Option<PathBuf>;
 
     /// Iterate through all keys and values stored in the layer
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
@@ -145,6 +155,8 @@ pub trait Layer: Send + Sync {
     /// Permanently remove this layer from disk.
     fn delete(&self) -> Result<()>;
 
-    /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool) -> Result<()>;
+    // https://articles.bchlr.de/traits-dynamic-dispatch-upcasting
+    fn as_pure_layer<'a>(self: Arc<Self>) -> Arc<dyn PureLayer>
+    where
+        Self: 'a;
 }
