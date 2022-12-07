@@ -19,7 +19,7 @@ ingress:
           pathType: Prefix
   tls:
     - hosts:
-        - storage-broker-delta.us-west-2.aws.neon.tech
+        - storage-broker-eta.us-west-2.aws.neon.tech
       secretName: storage-broker-tls
 
 
