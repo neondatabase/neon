@@ -30,7 +30,6 @@ You can specify different number of producers, for example to test shmpipe with 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <malloc.h>
 #include <pthread.h>
 #include <assert.h>
 #include <unistd.h>
