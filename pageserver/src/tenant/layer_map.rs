@@ -250,9 +250,12 @@ impl LayerMap {
         // HACK use the index to query and return early. If this works I'll
         //      rewrite the function.
         let result = self.index.query(key.to_i128(), end_lsn.0);
+        // TODO check if this is correct. I'm returning the latest layer by
+        //      start lsn, but the current solution first looks for latest
+        //      by end lsn.
         return Ok(result.map(|layer| SearchResult {
             layer: Arc::clone(layer),
-            lsn_floor: Lsn(0), // TODO what's this?
+            lsn_floor: layer.get_lsn_range().start,
         }));
 
         // linear search
