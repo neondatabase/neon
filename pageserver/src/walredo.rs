@@ -738,6 +738,14 @@ impl PostgresRedoProcess {
     }
 }
 
+impl Drop for PostgresRedoManager {
+    fn drop(&mut self) {
+        unsafe {
+            shmem_pipe_close(self.pipe);
+        }
+    }
+}
+
 /// Wrapper type around `std::process::Child` which guarantees that the child
 /// will be killed and waited-for by this process before being dropped.
 struct NoLeakChild {
