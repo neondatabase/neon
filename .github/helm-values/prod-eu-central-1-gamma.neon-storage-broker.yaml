@@ -13,7 +13,7 @@ ingress:
     cert-manager.io/cluster-issuer: "cert-manager-clusterissuer"
 
   hosts:
-    - host: storage-broker-gamma.eu-central-1.aws.neon.tech
+    - host: storage-broker.gamma.eu-central-1.aws.neon.tech
       paths:
         - path: /
           pathType: Prefix
