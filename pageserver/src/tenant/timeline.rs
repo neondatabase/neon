@@ -1126,6 +1126,12 @@ impl Timeline {
                     .unwrap()
                     .insert_historic(Arc::new(delta_layer));
                 self.metrics.current_physical_size_gauge.add(sz);
+            } else if layer_name.ends_with(".old") {
+                // For details see https://github.com/neondatabase/neon/issues/3024
+                warn!(
+                    "got backup file on the remote storage, ignoring it {file}",
+                    file = layer_name
+                )
             } else {
                 bail!("unexpected layer filename {layer_name} in remote storage path: {remote_layer_path:?}");
             }

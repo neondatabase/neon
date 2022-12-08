@@ -2896,6 +2896,7 @@ def assert_no_in_progress_downloads_for_tenant(
 ):
     tenant_status = pageserver_http_client.tenant_status(tenant)
     assert tenant_status["has_in_progress_downloads"] is False, tenant_status
+    assert tenant_status["state"] == "Active"
 
 
 def remote_consistent_lsn(
