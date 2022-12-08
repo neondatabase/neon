@@ -9,7 +9,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 byteorder = "1.4.3"
 bytes = "1.0.1"
-clap = "4.0"
+clap = { version = "4.0", features = ["derive"] }
 const_format = "0.2.21"
 crc32c = "0.6.0"
 fs2 = "0.4.3"

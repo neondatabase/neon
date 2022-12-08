@@ -37,8 +37,11 @@ pub fn wal_backup_launcher_thread_main(
     conf: SafeKeeperConf,
     wal_backup_launcher_rx: Receiver<TenantTimelineId>,
 ) {
-    let rt = Builder::new_multi_thread()
-        .worker_threads(conf.backup_runtime_threads)
+    let mut builder = Builder::new_multi_thread();
+    if let Some(num_threads) = conf.backup_runtime_threads {
+        builder.worker_threads(num_threads);
+    }
+    let rt = builder
         .enable_all()
         .build()
         .expect("failed to create wal backup runtime");

@@ -20,14 +20,21 @@ use utils::lsn::Lsn;
 struct GlobalTimelinesState {
     timelines: HashMap<TenantTimelineId, Arc<Timeline>>,
     wal_backup_launcher_tx: Option<Sender<TenantTimelineId>>,
-    conf: SafeKeeperConf,
+    conf: Option<SafeKeeperConf>,
 }
 
 impl GlobalTimelinesState {
+    /// Get configuration, which must be set once during init.
+    fn get_conf(&self) -> &SafeKeeperConf {
+        self.conf
+            .as_ref()
+            .expect("GlobalTimelinesState conf is not initialized")
+    }
+
     /// Get dependencies for a timeline constructor.
     fn get_dependencies(&self) -> (SafeKeeperConf, Sender<TenantTimelineId>) {
         (
-            self.conf.clone(),
+            self.get_conf().clone(),
             self.wal_backup_launcher_tx.as_ref().unwrap().clone(),
         )
     }
@@ -55,7 +62,7 @@ static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
     Mutex::new(GlobalTimelinesState {
         timelines: HashMap::new(),
         wal_backup_launcher_tx: None,
-        conf: SafeKeeperConf::default(),
+        conf: None,
     })
 });
 
@@ -71,12 +78,12 @@ impl GlobalTimelines {
         let mut state = TIMELINES_STATE.lock().unwrap();
         assert!(state.wal_backup_launcher_tx.is_none());
         state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
-        state.conf = conf;
+        state.conf = Some(conf);
 
         // Iterate through all directories and load tenants for all directories
         // named as a valid tenant_id.
         let mut tenant_count = 0;
-        let tenants_dir = state.conf.workdir.clone();
+        let tenants_dir = state.get_conf().workdir.clone();
         for tenants_dir_entry in std::fs::read_dir(&tenants_dir)
             .with_context(|| format!("failed to list tenants dir {}", tenants_dir.display()))?
         {
@@ -111,7 +118,7 @@ impl GlobalTimelines {
         state: &mut MutexGuard<GlobalTimelinesState>,
         tenant_id: TenantId,
     ) -> Result<()> {
-        let timelines_dir = state.conf.tenant_dir(&tenant_id);
+        let timelines_dir = state.get_conf().tenant_dir(&tenant_id);
         for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
             .with_context(|| format!("failed to list timelines dir {}", timelines_dir.display()))?
         {
@@ -122,7 +129,7 @@ impl GlobalTimelines {
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
                         match Timeline::load_timeline(
-                            state.conf.clone(),
+                            state.get_conf().clone(),
                             ttid,
                             state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
                         ) {
@@ -281,7 +288,11 @@ impl GlobalTimelines {
             }
             Err(_) => {
                 // Timeline is not memory, but it may still exist on disk in broken state.
-                let dir_path = TIMELINES_STATE.lock().unwrap().conf.timeline_dir(ttid);
+                let dir_path = TIMELINES_STATE
+                    .lock()
+                    .unwrap()
+                    .get_conf()
+                    .timeline_dir(ttid);
                 let dir_existed = delete_dir(dir_path)?;
 
                 Ok(TimelineDeleteForceResult {
@@ -327,7 +338,13 @@ impl GlobalTimelines {
         // Note that we could concurrently create new timelines while we were deleting them,
         // so the directory may be not empty. In this case timelines will have bad state
         // and timeline background jobs can panic.
-        delete_dir(TIMELINES_STATE.lock().unwrap().conf.tenant_dir(tenant_id))?;
+        delete_dir(
+            TIMELINES_STATE
+                .lock()
+                .unwrap()
+                .get_conf()
+                .tenant_dir(tenant_id),
+        )?;
 
         let tlis_after_delete = Self::get_all_for_tenant(*tenant_id);
         if !tlis_after_delete.is_empty() {
