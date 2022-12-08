@@ -385,7 +385,7 @@ jobs:
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
-    - name: Benchmark clickbench
+    - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
@@ -411,5 +411,118 @@ jobs:
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
         slack-message: "Periodic OLAP perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  tpch-compare:
+    # TCP-H DB for rds-aurora and rds-Postgres deployed to the same clusters
+    # we use for performance testing in pgbench-compare & clickbench-compare.
+    # Run this job only when clickbench-compare is finished to avoid the intersection.
+    # We might change it after https://github.com/neondatabase/neon/issues/2900.
+    #
+    # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
+    if: success() || failure()
+    needs: [ clickbench-compare ]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # neon-captest-prefetch: We have pre-created projects with prefetch enabled
+        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
+        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
+        platform: [ neon-captest-prefetch, rds-postgres, rds-aurora ]
+
+    env:
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      DEFAULT_PG_VERSION: 14
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      PLATFORM: ${{ matrix.platform }}
+
+    # NOTE: Here we use non-standadard `captest` runner (instead of `dev`) which is located in us-east-2 region.
+    #       We will move the rest of benchmarking jobs to staging in https://github.com/neondatabase/neon/pull/2838
+    runs-on: [ self-hosted, captest, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:pinned
+      options: --init
+
+    timeout-minutes: 360 # 6h
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    - name: Add Postgres binaries to PATH
+      run: |
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
+
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+        case "${PLATFORM}" in
+          neon-captest-prefetch)
+            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_TPCH_S10_CONNSTR }}
+            ;;
+          rds-aurora)
+            CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_TPCH_S10_CONNSTR }}
+            ;;
+          rds-postgres)
+            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_TPCH_S10_CONNSTR }}
+            ;;
+          *)
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            exit 1
+            ;;
+        esac
+
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+
+        psql ${CONNSTR} -c "SELECT version();"
+
+    - name: Set database options
+      if: matrix.platform == 'neon-captest-prefetch'
+      run: |
+        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
+
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+
+    - name: Run TPC-H benchmark
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance/test_perf_olap.py
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_tpch
+      env:
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+
+    - name: Create Allure report
+      if: success() || failure()
+      uses: ./.github/actions/allure-report
+      with:
+        action: generate
+        build_type: ${{ env.BUILD_TYPE }}
+
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C033QLM5P7D" # dev-staging-stream
+        slack-message: "Periodic TPC-H perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
