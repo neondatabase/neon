@@ -43,6 +43,7 @@ use storage_broker::{parse_proto_ttid, EitherBody, DEFAULT_LISTEN_ADDR};
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
 use utils::project_git_version;
+use utils::sentry_init::{init_sentry, release_name};
 
 project_git_version!(GIT_VERSION);
 
@@ -417,6 +418,9 @@ async fn http1_handler(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(release_name!(), &[]);
+
     let args = Args::parse();
 
     logging::init(LogFormat::from_config(&args.log_format)?)?;
