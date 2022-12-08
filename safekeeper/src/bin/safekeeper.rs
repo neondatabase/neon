@@ -264,10 +264,10 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
     signals.handle(|signal| {
         // TODO: implement graceful shutdown with joining threads etc
         info!(
-            "Got {}. Terminating in immediate shutdown mode",
+            "received {}, terminating in immediate shutdown mode",
             signal.name()
         );
-        std::process::exit(111);
+        std::process::exit(0);
     })
 }
 
