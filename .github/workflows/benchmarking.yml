@@ -15,9 +15,6 @@ on:
 
   workflow_dispatch: # adds ability to run this manually
     inputs:
-      environment:
-        description: 'Environment to run remote tests on (dev or staging)'
-        required: false
       region_id:
         description: 'Use a particular region. If not set the default region will be used'
         required: false
@@ -37,102 +34,68 @@ concurrency:
 
 jobs:
   bench:
-    # this workflow runs on self hosteed runner
-    # it's environment is quite different from usual guthub runner
-    # probably the most important difference is that it doesn't start from clean workspace each time
-    # e g if you install system packages they are not cleaned up since you install them directly in host machine
-    # not a container or something
-    # See documentation for more info: https://docs.github.com/en/actions/hosting-your-own-runners/about-self-hosted-runners
-    runs-on: [self-hosted, zenith-benchmarker]
-
     env:
-      POSTGRES_DISTRIB_DIR: /usr/pgsql
+      TEST_PG_BENCH_DURATIONS_MATRIX: "300"
+      TEST_PG_BENCH_SCALES_MATRIX: "10,100"
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      PLATFORM: "neon-staging"
+
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
 
     steps:
-    - name: Checkout zenith repo
-      uses: actions/checkout@v3
+    - uses: actions/checkout@v3
 
-    # actions/setup-python@v2 is not working correctly on self-hosted runners
-    # see https://github.com/actions/setup-python/issues/162
-    # and probably https://github.com/actions/setup-python/issues/162#issuecomment-865387976 in particular
-    # so the simplest solution to me is to use already installed system python and spin virtualenvs for job runs.
-    # there is Python 3.7.10 already installed on the machine so use it to install poetry and then use poetry's virtuealenvs
-    - name: Install poetry & deps
-      run: |
-        python3 -m pip install --upgrade poetry wheel
-        # since pip/poetry caches are reused there shouldn't be any troubles with install every time
-        ./scripts/pysync
-
-    - name: Show versions
-      run: |
-        echo Python
-        python3 --version
-        poetry run python3 --version
-        echo Poetry
-        poetry --version
-        echo Pgbench
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
 
     - name: Create Neon Project
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        environment: ${{ github.event.inputs.environment || 'staging' }}
-        api_key: ${{ ( github.event.inputs.environment || 'staging' ) == 'staging' && secrets.NEON_STAGING_API_KEY  || secrets.NEON_CAPTEST_API_KEY }}
+        region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Run benchmark
-      # pgbench is installed system wide from official repo
-      # https://download.postgresql.org/pub/repos/yum/13/redhat/rhel-7-x86_64/
-      # via
-      # sudo tee /etc/yum.repos.d/pgdg.repo<<EOF
-      # [pgdg13]
-      # name=PostgreSQL 13 for RHEL/CentOS 7 - x86_64
-      # baseurl=https://download.postgresql.org/pub/repos/yum/13/redhat/rhel-7-x86_64/
-      # enabled=1
-      # gpgcheck=0
-      # EOF
-      # sudo yum makecache
-      # sudo yum install postgresql13-contrib
-      # actual binaries are located in /usr/pgsql-13/bin/
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        # Set --sparse-ordering option of pytest-order plugin
+        # to ensure tests are running in order of appears in the file.
+        # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
+        extra_params: -m remote_cluster --sparse-ordering --timeout 5400 --ignore test_runner/performance/test_perf_olap.py
       env:
-        # The pgbench test runs two tests of given duration against each scale.
-        # So the total runtime with these parameters is 2 * 2 * 300 = 1200, or 20 minutes.
-        # Plus time needed to initialize the test databases.
-        TEST_PG_BENCH_DURATIONS_MATRIX: "300"
-        TEST_PG_BENCH_SCALES_MATRIX: "10,100"
-        PLATFORM: "neon-staging"
         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
-      run: |
-        # just to be sure that no data was cached on self hosted runner
-        # since it might generate duplicates when calling ingest_perf_test_result.py
-        rm -rf perf-report-staging
-        mkdir -p perf-report-staging
-        # Set --sparse-ordering option of pytest-order plugin to ensure tests are running in order of appears in the file,
-        # it's important for test_perf_pgbench.py::test_pgbench_remote_* tests.
-        # Do not run tests from test_runner/performance/test_perf_olap.py because they require a prepared DB. We run them separately in `clickbench-compare` job.
-        ./scripts/pytest test_runner/performance/ -v \
-          -m "remote_cluster" \
-          --sparse-ordering \
-          --out-dir perf-report-staging \
-          --timeout 5400 \
-          --ignore test_runner/performance/test_perf_olap.py
-
-    - name: Submit result
-      env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-      run: |
-        REPORT_FROM=$(realpath perf-report-staging) REPORT_TO=staging scripts/generate_and_push_perf_report.sh
 
     - name: Delete Neon Project
       if: ${{ always() }}
       uses: ./.github/actions/neon-project-delete
       with:
-        environment: staging
         project_id: ${{ steps.create-neon-project.outputs.project_id }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Create Allure report
+      if: success() || failure()
+      uses: ./.github/actions/allure-report
+      with:
+        action: generate
+        build_type: ${{ env.BUILD_TYPE }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -152,15 +115,22 @@ jobs:
         # neon-captest-prefetch: Same, with prefetching enabled (new project)
         # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
         # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch, rds-postgres ]
+        platform: [ neon-captest-new, neon-captest-prefetch, rds-postgres ]
         db_size: [ 10gb ]
+        runner: [ us-east-2 ]
         include:
+          - platform: neon-captest-reuse
+            db_size: 10gb
+            runner: dev  # TODO: Switch to us-east-2 after dry-bonus-223539 migration to staging
           - platform: neon-captest-new
             db_size: 50gb
+            runner: us-east-2
           - platform: neon-captest-prefetch
             db_size: 50gb
+            runner: us-east-2
           - platform: rds-aurora
             db_size: 50gb
+            runner: us-east-2
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
@@ -172,9 +142,9 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, "${{ matrix.runner }}", x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
     timeout-minutes: 360 # 6h
@@ -199,8 +169,9 @@ jobs:
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        environment: ${{ github.event.inputs.environment || 'dev' }}
-        api_key: ${{ ( github.event.inputs.environment || 'dev' ) == 'staging' && secrets.NEON_STAGING_API_KEY  || secrets.NEON_CAPTEST_API_KEY }}
+        region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Set up Connection String
       id: set-up-connstr
@@ -278,20 +249,19 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
+    - name: Delete Neon Project
+      if: ${{ steps.create-neon-project.outputs.project_id && always() }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        project_id: ${{ steps.create-neon-project.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
     - name: Create Allure report
       if: success() || failure()
       uses: ./.github/actions/allure-report
       with:
         action: generate
         build_type: ${{ env.BUILD_TYPE }}
-
-    - name: Delete Neon Project
-      if: ${{ steps.create-neon-project.outputs.project_id && always() }}
-      uses: ./.github/actions/neon-project-delete
-      with:
-        environment: dev
-        project_id: ${{ steps.create-neon-project.outputs.project_id }}
-        api_key: ${{ secrets.NEON_CAPTEST_API_KEY }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -329,9 +299,9 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
     timeout-minutes: 360 # 6h
@@ -440,9 +410,7 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    # NOTE: Here we use non-standadard `captest` runner (instead of `dev`) which is located in us-east-2 region.
-    #       We will move the rest of benchmarking jobs to staging in https://github.com/neondatabase/neon/pull/2838
-    runs-on: [ self-hosted, captest, x64 ]
+    runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:pinned
       options: --init
