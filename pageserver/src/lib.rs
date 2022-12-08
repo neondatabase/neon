@@ -160,7 +160,7 @@ pub fn is_uninit_mark(path: &Path) -> bool {
 #[macro_export]
 macro_rules! fail_point {
     ($($name:expr),*) => {{
-        if cfg!(test) || *crate::TESTING_MODE.get().expect("testing_mode not initialized") {
+        if cfg!(test) || *$crate::TESTING_MODE.get().expect("testing_mode not initialized") {
             fail::fail_point!($($name), *)
         }
     }};

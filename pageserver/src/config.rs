@@ -713,9 +713,8 @@ fn parse_toml_string(name: &str, item: &Item) -> Result<String> {
 }
 
 fn parse_toml_bool(name: &str, item: &Item) -> Result<bool> {
-    Ok(item
-        .as_bool()
-        .with_context(|| format!("configure option {name} is not a boolean"))?)
+    item.as_bool()
+        .with_context(|| format!("configure option {name} is not a boolean"))
 }
 
 fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
