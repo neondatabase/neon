@@ -33,7 +33,7 @@ from _pytest.config import Config
 from _pytest.fixtures import FixtureRequest
 from fixtures.log_helper import log
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import Fn, allure_attach_from_dir, etcd_path, get_self_dir, subprocess_capture
+from fixtures.utils import allure_attach_from_dir, etcd_path, get_self_dir, subprocess_capture
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
