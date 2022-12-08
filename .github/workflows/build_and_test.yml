@@ -1031,6 +1031,8 @@ jobs:
         include:
           - target_region:  us-east-2
             target_cluster: prod-us-east-2-delta
+          - target_region:  us-west-2
+            target_cluster: prod-us-west-2-eta
           - target_region: eu-central-1
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
@@ -1068,6 +1070,8 @@ jobs:
         include:
           - target_region:  us-east-2
             target_cluster: prod-us-east-2-delta
+          - target_region:  us-west-2
+            target_cluster: prod-us-west-2-eta
           - target_region: eu-central-1
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
