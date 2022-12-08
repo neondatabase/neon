@@ -248,15 +248,6 @@ def test_tenant_upgrades_index_json_from_v0(
     # then go ahead and modify the "remote" version as if it was downgraded, needing upgrade
     env = neon_env_builder.init_start()
 
-    # FIXME: Are these expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
-    env.pageserver.allowed_errors.append(
-        ".*Failed to get local tenant state: Tenant .* not found in the local state.*"
-    )
-
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
 
@@ -350,6 +341,82 @@ def test_tenant_upgrades_index_json_from_v0(
 
 
 # FIXME: test index_part.json getting downgraded from imaginary new version
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_tenant_ignores_backup_file(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    # getting a too eager compaction happening for this test would not play
+    # well with the strict assertions.
+    neon_env_builder.pageserver_config_override = "tenant_config.compaction_period='1h'"
+
+    neon_env_builder.enable_remote_storage(remote_storage_kind, "test_tenant_ignores_backup_file")
+
+    # launch pageserver, populate the default tenants timeline, wait for it to be uploaded,
+    # then go ahead and modify the "remote" version as if it was downgraded, needing upgrade
+    env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.append(".*got backup file on the remote storage, ignoring it.*")
+
+    pageserver_http = env.pageserver.http_client()
+    pg = env.postgres.create_start("main")
+
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+
+    with pg.cursor() as cur:
+        cur.execute("CREATE TABLE t0 AS VALUES (123, 'second column as text');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    # flush, wait until in remote storage
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    env.postgres.stop_all()
+    env.pageserver.stop()
+
+    # change the remote file to have entry with .0.old suffix
+    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
+    with open(timeline_path, "r+") as timeline_file:
+        # keep the deserialized for later inspection
+        orig_index_part = json.load(timeline_file)
+        backup_layer_name = orig_index_part["timeline_layers"][0] + ".0.old"
+        orig_index_part["timeline_layers"].append(backup_layer_name)
+
+        timeline_file.seek(0)
+        json.dump(orig_index_part, timeline_file)
+
+    env.pageserver.start()
+    pageserver_http = env.pageserver.http_client()
+
+    wait_until(
+        number_of_iterations=5,
+        interval=1,
+        func=lambda: assert_no_in_progress_downloads_for_tenant(pageserver_http, tenant_id),
+    )
+
+    pg = env.postgres.create_start("main")
+
+    with pg.cursor() as cur:
+        cur.execute("INSERT INTO t0 VALUES (234, 'test data');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    # not needed anymore
+    env.postgres.stop_all()
+    env.pageserver.stop()
+
+    # file is still mentioned in the index. Removing it requires more hacking on remote queue initialization
+    # Will be easier to do once there will be no .download_missing so it will be only one cycle through the layers
+    # in load_layer_map
+    new_index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    backup_layers = filter(lambda x: x.endswith(".old"), new_index_part["timeline_layers"])
+    assert len(list(backup_layers)) == 1
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
