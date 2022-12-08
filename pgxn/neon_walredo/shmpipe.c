@@ -164,12 +164,12 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 		if (available == 0 || (!header_sent && pipe->req.busy))
 		{
 			/* Ring buffer is full: wait until consumer takes some requests */
-#ifndef BUSY_WAIT_RESPONSES
 			if (header_sent && pipe->req.head.n_blocked != 0)
 			{
 				pipe->req.head.n_blocked = 0;
 				event_signal(&pipe->req.head.event); /* notify receiver that head is advanced */
 			}
+#ifndef BUSY_WAIT_RESPONSES
 			do
 			{
 				/* Wait until tail is advanced */
