@@ -74,6 +74,12 @@ impl<Value: Clone> PersistentLayerMap<Value> {
 
         // Cover the inside of the interval
         // TODO use lsn_end to decide which ones to cover
+        //      NOTE currently insertion is amortized O(log N), and
+        //           this would make it worst case O(N), amortized
+        //           O(N), but in practice still pretty cheap. The
+        //           problem is solveable with lazy propagation but
+        //           that requires writing our own tree. It's premature
+        //           optimization.
         let to_remove: Vec<_> = self
             .head
             .range((key_begin + 1)..key_end)
