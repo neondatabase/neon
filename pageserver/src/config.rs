@@ -662,9 +662,7 @@ impl PageServerConf {
         }
         if let Some(trace_read_requests) = item.get("trace_read_requests") {
             t_conf.trace_read_requests =
-                Some(trace_read_requests.as_bool().with_context(|| {
-                    "configure option trace_read_requests is not a bool".to_string()
-                })?);
+                Some(parse_toml_bool("trace_read_requests", trace_read_requests)?);
         }
 
         Ok(t_conf)
