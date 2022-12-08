@@ -11,6 +11,9 @@ inputs:
   branch_id:
     desctiption: 'ID of the branch to delete'
     required: true
+  api_host:
+    desctiption: 'Neon API host'
+    default: console.stage.neon.tech
 
 runs:
   using: "composite"
@@ -49,7 +52,7 @@ runs:
           exit 1
         fi
       env:
+        API_HOST: ${{ inputs.api_host }}
         API_KEY: ${{ inputs.api_key }}
         PROJECT_ID: ${{ inputs.project_id }}
         BRANCH_ID: ${{ inputs.branch_id }}
-        API_HOST: console.stage.neon.tech

@@ -410,9 +410,7 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    # NOTE: Here we use non-standadard `captest` runner (instead of `dev`) which is located in us-east-2 region.
-    #       We will move the rest of benchmarking jobs to staging in https://github.com/neondatabase/neon/pull/2838
-    runs-on: [ self-hosted, captest, x64 ]
+    runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:pinned
       options: --init
