@@ -43,6 +43,8 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         }
     }
 
+    // TODO add lsn_end argument
+    // TODO also return the lsn of the next image
     pub fn insert(self: &mut Self, key_begin: i128, key_end: i128, lsn: u64, value: Value) {
         // TODO check for off-by-one errors
 
@@ -71,6 +73,7 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         self.head.insert_mut(key_begin, Some(value.clone()));
 
         // Cover the inside of the interval
+        // TODO use lsn_end to decide which ones to cover
         let to_remove: Vec<_> = self
             .head
             .range((key_begin + 1)..key_end)
