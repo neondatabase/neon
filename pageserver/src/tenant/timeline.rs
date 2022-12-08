@@ -2642,24 +2642,22 @@ impl Timeline {
                     data.records.len()
                 );
             } else {
-                let base_img = if let Some((_lsn, img)) = data.img {
+                if data.img.is_some() {
                     trace!(
                         "found {} WAL records and a base image for {} at {}, performing WAL redo",
                         data.records.len(),
                         key,
                         request_lsn
                     );
-                    Some(img)
                 } else {
                     trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
-                    None
                 };
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
                 let img = self
                     .walredo_mgr
-                    .request_redo(key, request_lsn, base_img, data.records, self.pg_version)
+                    .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
                     .context("Failed to reconstruct a page image:")?;
 
                 if img.len() == page_cache::PAGE_SZ {

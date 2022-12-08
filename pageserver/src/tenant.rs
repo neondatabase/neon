@@ -2669,7 +2669,7 @@ pub mod harness {
             &self,
             key: Key,
             lsn: Lsn,
-            base_img: Option<Bytes>,
+            base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
         ) -> Result<Bytes, WalRedoError> {

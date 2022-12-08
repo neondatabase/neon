@@ -84,7 +84,7 @@ pub trait WalRedoManager: Send + Sync {
         &self,
         key: Key,
         lsn: Lsn,
-        base_img: Option<Bytes>,
+        base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError>;
@@ -147,7 +147,7 @@ impl WalRedoManager for PostgresRedoManager {
         &self,
         key: Key,
         lsn: Lsn,
-        base_img: Option<Bytes>,
+        base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
@@ -156,7 +156,8 @@ impl WalRedoManager for PostgresRedoManager {
             return Err(WalRedoError::InvalidRequest);
         }
 
-        let mut img: Option<Bytes> = base_img;
+        let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
+        let mut img = base_img.map(|p| p.1);
         let mut batch_neon = can_apply_in_neon(&records[0].1);
         let mut batch_start = 0;
         for i in 1..records.len() {
@@ -170,6 +171,7 @@ impl WalRedoManager for PostgresRedoManager {
                         key,
                         lsn,
                         img,
+                        base_img_lsn,
                         &records[batch_start..i],
                         self.conf.wal_redo_timeout,
                         pg_version,
@@ -189,6 +191,7 @@ impl WalRedoManager for PostgresRedoManager {
                 key,
                 lsn,
                 img,
+                base_img_lsn,
                 &records[batch_start..],
                 self.conf.wal_redo_timeout,
                 pg_version,
@@ -223,11 +226,13 @@ impl PostgresRedoManager {
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
+    #[allow(clippy::too_many_arguments)]
     fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
+        base_img_lsn: Lsn,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
         pg_version: u32,
@@ -282,9 +287,12 @@ impl PostgresRedoManager {
         // next request will launch a new one.
         if result.is_err() {
             error!(
-                "error applying {} WAL records ({} bytes) to reconstruct page image at LSN {}",
+                "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}",
                 records.len(),
+				records.first().map(|p| p.0).unwrap_or(Lsn(0)),
+				records.last().map(|p| p.0).unwrap_or(Lsn(0)),
                 nbytes,
+				base_img_lsn,
                 lsn
             );
             let process = process_guard.take().unwrap();
