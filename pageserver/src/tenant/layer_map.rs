@@ -248,7 +248,7 @@ pub struct SearchResult<PersistentLayerT: ?Sized> {
 
 impl<PersistentLayerT> LayerMap<PersistentLayerT>
 where
-    PersistentLayerT: ?Sized + Send + Sync + PureLayer,
+    PersistentLayerT: ?Sized + PureLayer,
 {
     ///
     /// Find the latest layer that covers the given 'key', with lsn <

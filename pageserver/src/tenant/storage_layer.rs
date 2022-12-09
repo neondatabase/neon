@@ -70,7 +70,8 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
-/// Supertrait of the [`Layer`] trait that conta
+/// Supertrait of the [`Layer`] trait that captures the bare minimum interface
+/// required by [`LayerMap`].
 pub trait PureLayer: Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
@@ -135,12 +136,14 @@ pub trait Layer: Send + Sync + PureLayer {
     /// Identify the timeline this layer belongs to
     fn get_timeline_id(&self) -> TimelineId;
 
-    /// Filename used to store this layer on disk. (Even in-memory layers
-    /// implement this, to print a handy unique identifier for the layer for
-    /// log messages, even though they're never not on disk.)
+    /// File name used for this layer, both in the pageserver's local filesystem
+    /// state as well as in the remote storage.
     fn filename(&self) -> PathBuf;
 
-    /// If a layer has a corresponding file on a local filesystem, return its absolute path.
+    /// If the layer has a corresponding file on a local filesystem, return its filename.
+    /// `None` otherwise.
+    /// NB: all current implementations return `Some`, but with on-demand download,
+    /// a new `RemoteLayer` type will be added that returns `None` here.
     fn local_path(&self) -> Option<PathBuf>;
 
     /// Iterate through all keys and values stored in the layer
