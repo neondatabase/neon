@@ -45,6 +45,80 @@ jobs:
         shell: bash
         id: build-tag
 
+  check-codestyle-python:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Cache poetry deps
+        id: cache_poetry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: v1-codestyle-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: Run isort to ensure code format
+        run: poetry run isort --diff --check .
+
+      - name: Run black to ensure code format
+        run: poetry run black --diff --check .
+
+      - name: Run flake8 to ensure code format
+        run: poetry run flake8 .
+
+      - name: Run mypy to check types
+        run: poetry run mypy .
+
+  check-codestyle-rust:
+    runs-on: [ self-hosted, dev, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Restore cargo deps cache
+        id: cache_cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry/
+            !~/.cargo/registry/src
+            ~/.cargo/git/
+            target/
+          key: v1-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+
+      # Some of our rust modules use FFI and need those to be checked
+      - name: Get postgres headers
+        run: make postgres-headers -j$(nproc)
+      - name: Run cargo clippy
+        run: ./run_clippy.sh
+
+      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
+      - name: Check formatting
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all -- --check
+
+      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
+      - name: Check rust dependencies
+        if: ${{ !cancelled() }}
+        run: |
+          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
+          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+        shell: bash -euxo pipefail {0}
+
   build-neon:
     runs-on: [ self-hosted, dev, x64 ]
     container:
@@ -250,7 +324,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: true
-          fetch-depth: 2
+          fetch-depth: 1
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
@@ -284,7 +358,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: true
-          fetch-depth: 2
+          fetch-depth: 1
 
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
