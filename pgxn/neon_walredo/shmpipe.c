@@ -102,8 +102,12 @@ static void event_init(event_t* event)
 
 static void event_destroy(event_t* event)
 {
-	pthread_mutex_destroy(&event->mutex);
+	/* See https://stackoverflow.com/questions/20439404/pthread-conditions-and-process-termination */
+	/* pthread_cond_broadcast(&event->cond); doesn't help in this case */
+#if 0
 	pthread_cond_destroy(&event->cond);
+#endif
+	pthread_mutex_destroy(&event->mutex);
 }
 
 static void event_reset(event_t* event)
