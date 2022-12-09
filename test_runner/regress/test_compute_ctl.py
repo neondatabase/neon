@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from subprocess import TimeoutExpired
 
 from fixtures.log_helper import log
@@ -195,18 +196,60 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         ctl_logs = exc.stderr.decode("utf-8")
         log.info("compute_ctl output:\n" + ctl_logs)
 
-    start = "starting safekeepers syncing"
-    end = "safekeepers synced at LSN"
-    start_pos = ctl_logs.index(start)
-    assert start_pos != -1
-    end_pos = ctl_logs.index(end, start_pos)
-    assert end_pos != -1
-    sync_safekeepers_logs = ctl_logs[start_pos : end_pos + len(end)]
-    log.info("sync_safekeepers_logs:\n" + sync_safekeepers_logs)
+    with ExternalProcessManager(Path(pgdata) / "postmaster.pid"):
+        start = "starting safekeepers syncing"
+        end = "safekeepers synced at LSN"
+        start_pos = ctl_logs.index(start)
+        assert start_pos != -1
+        end_pos = ctl_logs.index(end, start_pos)
+        assert end_pos != -1
+        sync_safekeepers_logs = ctl_logs[start_pos : end_pos + len(end)]
+        log.info("sync_safekeepers_logs:\n" + sync_safekeepers_logs)
 
-    # assert that --sync-safekeepers logs are present in the output
-    assert "connecting with node" in sync_safekeepers_logs
-    assert "connected with node" in sync_safekeepers_logs
-    assert "proposer connected to quorum (2)" in sync_safekeepers_logs
-    assert "got votes from majority (2)" in sync_safekeepers_logs
-    assert "sending elected msg to node" in sync_safekeepers_logs
+        # assert that --sync-safekeepers logs are present in the output
+        assert "connecting with node" in sync_safekeepers_logs
+        assert "connected with node" in sync_safekeepers_logs
+        assert "proposer connected to quorum (2)" in sync_safekeepers_logs
+        assert "got votes from majority (2)" in sync_safekeepers_logs
+        assert "sending elected msg to node" in sync_safekeepers_logs
+
+
+class ExternalProcessManager:
+    """
+    Context manager that kills a process with a pid file on exit.
+    """
+
+    def __init__(self, pid_file: Path):
+        self.path = pid_file
+        self.pid_file = open(pid_file, "r")
+        self.pid = int(self.pid_file.readline().strip())
+
+    def __enter__(self):
+        return self
+
+    def leave_alive(self):
+        self.pid_file.close()
+
+    def __exit__(self, _type, _value, _traceback):
+        import signal
+        import time
+
+        if self.pid_file.closed:
+            return
+
+        with self.pid_file:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except os.OsError as e:
+                if not self.path.is_file():
+                    return
+                log.info(f"Failed to kill {self.pid}, but the pidfile remains: {e}")
+                return
+
+            for _ in range(20):
+                if not self.path.is_file():
+                    return
+                time.sleep(0.2)
+
+            log.info("Process failed to stop after SIGTERM: {self.pid}")
+            os.kill(self.pid, signal.SIGKILL)
