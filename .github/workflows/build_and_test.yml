@@ -176,11 +176,11 @@ jobs:
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_FEATURES="--features testing"
-            CARGO_FLAGS="--locked --timings $CARGO_FEATURES"
+            CARGO_FLAGS="--locked $CARGO_FEATURES"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FEATURES="--features testing,profiling"
-            CARGO_FLAGS="--locked --timings --release $CARGO_FEATURES"
+            CARGO_FLAGS="--locked --release $CARGO_FEATURES"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
@@ -285,16 +285,6 @@ jobs:
         with:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
-
-      - name: Prepare cargo build timing stats for storing
-        run: |
-          mkdir -p "/tmp/neon/cargo-timings/$BUILD_TYPE/"
-          cp -r ./target/cargo-timings/* "/tmp/neon/cargo-timings/$BUILD_TYPE/"
-      - name: Upload cargo build stats
-        uses: ./.github/actions/upload
-        with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-build-stats
-          path: /tmp/neon/cargo-timings/
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
