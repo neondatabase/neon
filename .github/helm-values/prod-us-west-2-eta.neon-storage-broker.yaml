@@ -13,13 +13,13 @@ ingress:
     cert-manager.io/cluster-issuer: "cert-manager-clusterissuer"
 
   hosts:
-    - host: storage-broker-eta.us-west-2.aws.neon.tech
+    - host: storage-broker.eta.us-west-2.internal.aws.neon.tech
       paths:
         - path: /
           pathType: Prefix
   tls:
     - hosts:
-        - storage-broker-eta.us-west-2.aws.neon.tech
+        - storage-broker.eta.us-west-2.internal.aws.neon.tech
       secretName: storage-broker-tls
 
 

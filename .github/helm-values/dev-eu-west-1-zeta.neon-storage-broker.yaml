@@ -13,13 +13,13 @@ ingress:
     cert-manager.io/cluster-issuer: "cert-manager-clusterissuer"
 
   hosts:
-    - host: storage-broker-zeta.eu-west-1.aws.neon.build
+    - host: storage-broker.zeta.eu-west-1.internal.aws.neon.build
       paths:
         - path: /
           pathType: Prefix
   tls:
     - hosts:
-        - storage-broker-zeta.eu-west-1.aws.neon.build
+        - storage-broker.zeta.eu-west-1.internal.aws.neon.build
       secretName: storage-broker-tls
 
 
