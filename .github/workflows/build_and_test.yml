@@ -927,7 +927,7 @@ jobs:
       - name: Deploy storage-broker
         run:
           DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
-          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install --atomic -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 5m0s
 
   deploy-proxy-new:
     runs-on: [ self-hosted, dev, x64 ]
@@ -1013,7 +1013,7 @@ jobs:
       - name: Deploy storage-broker
         run:
           DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
-          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace neon-storage-broker --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace neon-storage-broker --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 5m0s
 
   deploy-proxy-prod-new:
     runs-on: prod
@@ -1091,7 +1091,7 @@ jobs:
       - name: Deploy storage-broker
         run:
           DOCKER_TAG=${{ needs.tag.outputs.build-tag }}
-          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace neon-storage-broker --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+          helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace neon-storage-broker --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 5m0s
 
   promote-compatibility-data:
     runs-on: [ self-hosted, dev, x64 ]
