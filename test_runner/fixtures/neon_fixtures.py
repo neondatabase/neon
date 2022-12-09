@@ -2939,24 +2939,24 @@ def wait_for_upload(
 
 
 # Does not use `wait_until` for debugging purposes
-def wait_until_tenant_status(
+def wait_until_tenant_state(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
-    expected_status: str,
+    expected_state: str,
     iterations: int,
 ) -> bool:
     for _ in range(iterations):
         try:
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
-            log.debug(f"Tenant {tenant_id} status: {tenant}")
-            if tenant["state"] == expected_status:
+            log.debug(f"Tenant {tenant_id} data: {tenant}")
+            if tenant["state"] == expected_state:
                 return True
         except Exception as e:
-            log.debug(f"Tenant {tenant_id} status retrieval failure: {e}")
+            log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
 
         time.sleep(1)
 
-    raise Exception(f"Tenant {tenant_id} did not become {expected_status} in {iterations} seconds")
+    raise Exception(f"Tenant {tenant_id} did not become {expected_state} in {iterations} seconds")
 
 
 def last_record_lsn(
