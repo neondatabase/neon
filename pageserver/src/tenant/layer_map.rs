@@ -254,7 +254,7 @@ impl LayerMap {
         //      start lsn, but the current solution first looks for latest
         //      by end lsn.
         return Ok(result.map(|layer| SearchResult {
-            layer: Arc::clone(layer),
+            layer: Arc::clone(&layer),
             lsn_floor: layer.get_lsn_range().start,
         }));
 

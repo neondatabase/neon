@@ -15,12 +15,12 @@ pub struct PersistentLayerMap<Value> {
     /// Mapping key to the latest layer (if any) until the next key.
     /// We use the Sync version of the map because we want Self to
     /// be Sync.
-    head: RedBlackTreeMapSync<i128, Option<Value>>,
+    head: RedBlackTreeMapSync<i128, Option<(u64, Value)>>,
 
     /// All previous states of `self.head`
     ///
     /// TODO: Sorted Vec + binary search could be slightly faster.
-    historic: BTreeMap<u64, RedBlackTreeMapSync<i128, Option<Value>>>,
+    historic: BTreeMap<u64, RedBlackTreeMapSync<i128, Option<(u64, Value)>>>,
 }
 
 impl<Value: std::fmt::Debug> std::fmt::Debug for PersistentLayerMap<Value> {
@@ -44,8 +44,16 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         }
     }
 
-    // TODO use lsn.end
-    // TODO also return the lsn of the next image
+    /// Helper function to subdivide the key range without changing any values
+    fn add_node(self: &mut Self, key: i128) {
+        let value = match self.head.range(0..=key).last() {
+            Some((_, Some(v))) => Some(v.clone()),
+            Some((_, None)) => None,
+            None => None,
+        };
+        self.head.insert_mut(key, value);
+    }
+
     pub fn insert(self: &mut Self, key: Range<i128>, lsn: Range<u64>, value: Value) {
         // TODO check for off-by-one errors
 
@@ -62,43 +70,51 @@ impl<Value: Clone> PersistentLayerMap<Value> {
 
         // NOTE The order of the following lines is important!!
 
-        // Preserve information after right endpoint
-        let value_at_end = match self.head.range(0..key.end).last() {
-            Some((_, Some(v))) => Some(v.clone()),
-            Some((_, None)) => None,
-            None => None,
-        };
-        self.head.insert_mut(key.end, value_at_end);
+        // Add nodes at endpoints
+        self.add_node(key.start);
+        self.add_node(key.end);
 
-        // Insert the left endpoint
-        self.head.insert_mut(key.start, Some(value.clone()));
-
-        // Cover the inside of the interval
-        // TODO use lsn_end to decide which ones to cover
-        //      NOTE currently insertion is amortized O(log N), and
-        //           this would make it worst case O(N), amortized
-        //           O(N), but in practice still pretty cheap. The
-        //           problem is solveable with lazy propagation but
-        //           that requires writing our own tree. It's premature
-        //           optimization.
-        let to_remove: Vec<_> = self
-            .head
-            .range((key.start + 1)..key.end)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in to_remove {
-            self.head.remove_mut(&key);
+        // Raise the height where necessary
+        //
+        // NOTE This loop is worst case O(N), but amortized O(log N) in the special
+        // case when rectangles have no height. In practice I don't think we'll see
+        // the kind of layer intersections needed to trigger O(N) behavior. If we
+        // do it can be fixed using lazy propagation.
+        let mut to_update = Vec::new();
+        let mut to_remove = Vec::new();
+        let mut prev_covered = false;
+        for (k, node) in self.head.range(key.clone()) {
+            let needs_cover = match node {
+                None => true,
+                Some((h, _)) => h < &lsn.end,
+            };
+            if needs_cover {
+                match prev_covered {
+                    true => to_remove.push(k.clone()),
+                    false => to_update.push(k.clone()),
+                }
+            }
+            prev_covered = needs_cover;
+        }
+        if !prev_covered {
+            to_remove.push(key.end);
+        }
+        for k in to_update {
+            self.head.insert_mut(k.clone(), Some((lsn.end.clone(), value.clone())));
+        }
+        for k in to_remove {
+            self.head.remove_mut(&k);
         }
 
         // Remember history. Clone is O(1)
         self.historic.insert(lsn.start, self.head.clone());
     }
 
-    pub fn query(self: &Self, key: i128, lsn: u64) -> Option<&Value> {
+    pub fn query(self: &Self, key: i128, lsn: u64) -> Option<Value> {
         // TODO check for off-by-one errors
 
         let version = self.historic.range(0..=lsn).rev().next()?.1;
-        version.range(0..=key).rev().next()?.1.as_ref()
+        version.range(0..=key).rev().next()?.1.as_ref().map(|(_, v)| v.clone())
     }
 
     pub fn trim(self: &mut Self, begin: &u64) {
@@ -126,29 +142,74 @@ fn test_immutable_bst_dependency() {
 }
 
 /// This is the most basic test that demonstrates intended usage.
+/// All layers in this test have height 1.
 #[test]
 fn test_persistent_simple() {
     let mut map = PersistentLayerMap::<String>::new();
     map.insert(0..5, 100..101, "Layer 1".to_string());
-    dbg!(&map);
     map.insert(3..9, 110..111, "Layer 2".to_string());
-    dbg!(&map);
     map.insert(5..6, 120..121, "Layer 3".to_string());
-    dbg!(&map);
 
     // After Layer 1 insertion
-    assert_eq!(map.query(1, 105), Some(&"Layer 1".to_string()));
-    assert_eq!(map.query(4, 105), Some(&"Layer 1".to_string()));
+    assert_eq!(map.query(1, 105), Some("Layer 1".to_string()));
+    assert_eq!(map.query(4, 105), Some("Layer 1".to_string()));
 
     // After Layer 2 insertion
-    assert_eq!(map.query(4, 115), Some(&"Layer 2".to_string()));
-    assert_eq!(map.query(8, 115), Some(&"Layer 2".to_string()));
+    assert_eq!(map.query(4, 115), Some("Layer 2".to_string()));
+    assert_eq!(map.query(8, 115), Some("Layer 2".to_string()));
     assert_eq!(map.query(11, 115), None);
 
     // After Layer 3 insertion
-    assert_eq!(map.query(4, 125), Some(&"Layer 2".to_string()));
-    assert_eq!(map.query(5, 125), Some(&"Layer 3".to_string()));
-    assert_eq!(map.query(7, 125), Some(&"Layer 2".to_string()));
+    assert_eq!(map.query(4, 125), Some("Layer 2".to_string()));
+    assert_eq!(map.query(5, 125), Some("Layer 3".to_string()));
+    assert_eq!(map.query(7, 125), Some("Layer 2".to_string()));
+}
+
+/// Test when rectangles have nontrivial height and possibly overlap
+#[test]
+fn test_persistent_overlapping() {
+    let mut map = PersistentLayerMap::<String>::new();
+
+    // Add 3 key-disjoint layers with varying LSN ranges
+    map.insert(1..2, 100..200, "Layer 1".to_string());
+    map.insert(4..5, 110..200, "Layer 2".to_string());
+    map.insert(7..8, 120..300, "Layer 3".to_string());
+
+    // Add wide and short layer
+    map.insert(0..9, 130..199, "Layer 4".to_string());
+
+    // Add wide layer taller than some
+    map.insert(0..9, 140..201, "Layer 5".to_string());
+
+    // Add wide layer taller than all
+    map.insert(0..9, 150..301, "Layer 6".to_string());
+
+    // After layer 4 insertion
+    assert_eq!(map.query(0, 135), Some("Layer 4".to_string()));
+    assert_eq!(map.query(1, 135), Some("Layer 1".to_string()));
+    assert_eq!(map.query(2, 135), Some("Layer 4".to_string()));
+    assert_eq!(map.query(4, 135), Some("Layer 2".to_string()));
+    assert_eq!(map.query(5, 135), Some("Layer 4".to_string()));
+    assert_eq!(map.query(7, 135), Some("Layer 3".to_string()));
+    assert_eq!(map.query(8, 135), Some("Layer 4".to_string()));
+
+    // After layer 5 insertion
+    assert_eq!(map.query(0, 145), Some("Layer 5".to_string()));
+    assert_eq!(map.query(1, 145), Some("Layer 5".to_string()));
+    assert_eq!(map.query(2, 145), Some("Layer 5".to_string()));
+    assert_eq!(map.query(4, 145), Some("Layer 5".to_string()));
+    assert_eq!(map.query(5, 145), Some("Layer 5".to_string()));
+    assert_eq!(map.query(7, 145), Some("Layer 3".to_string()));
+    assert_eq!(map.query(8, 145), Some("Layer 5".to_string()));
+
+    // After layer 6 insertion
+    assert_eq!(map.query(0, 155), Some("Layer 6".to_string()));
+    assert_eq!(map.query(1, 155), Some("Layer 6".to_string()));
+    assert_eq!(map.query(2, 155), Some("Layer 6".to_string()));
+    assert_eq!(map.query(4, 155), Some("Layer 6".to_string()));
+    assert_eq!(map.query(5, 155), Some("Layer 6".to_string()));
+    assert_eq!(map.query(7, 155), Some("Layer 6".to_string()));
+    assert_eq!(map.query(8, 155), Some("Layer 6".to_string()));
 }
 
 /// Layer map that supports:
