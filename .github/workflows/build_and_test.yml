@@ -7,6 +7,10 @@ on:
       - release
   pull_request:
 
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
 concurrency:
   # Allow only one workflow per any non-`main` branch.
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
@@ -117,7 +121,6 @@ jobs:
         run: |
           cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
           cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
-        shell: bash -euxo pipefail {0}
 
   build-neon:
     runs-on: [ self-hosted, dev, x64 ]
@@ -153,12 +156,10 @@ jobs:
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
-        shell: bash -euxo pipefail {0}
 
       - name: Set pg 15 revision for caching
         id: pg_v15_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
-        shell: bash -euxo pipefail {0}
 
       # Set some environment variables used by all the steps.
       #
@@ -184,7 +185,6 @@ jobs:
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
-        shell: bash -euxo pipefail {0}
 
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
@@ -221,26 +221,21 @@ jobs:
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
         run: mold -run make postgres-v14 -j$(nproc)
-        shell: bash -euxo pipefail {0}
 
       - name: Build postgres v15
         if: steps.cache_pg_15.outputs.cache-hit != 'true'
         run: mold -run make postgres-v15 -j$(nproc)
-        shell: bash -euxo pipefail {0}
 
       - name: Build neon extensions
         run: mold -run make neon-pg-ext -j$(nproc)
-        shell: bash -euxo pipefail {0}
 
       - name: Run cargo build
         run: |
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
-        shell: bash -euxo pipefail {0}
 
       - name: Run cargo test
         run: |
           ${cov_prefix} cargo test $CARGO_FLAGS
-        shell: bash -euxo pipefail {0}
 
       - name: Install rust binaries
         run: |
@@ -281,11 +276,9 @@ jobs:
               echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
           fi
-        shell: bash -euxo pipefail {0}
 
       - name: Install postgres binaries
         run: cp -a pg_install /tmp/neon/pg_install
-        shell: bash -euxo pipefail {0}
 
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
@@ -297,7 +290,6 @@ jobs:
         run: |
           mkdir -p "/tmp/neon/cargo-timings/$BUILD_TYPE/"
           cp -r ./target/cargo-timings/* "/tmp/neon/cargo-timings/$BUILD_TYPE/"
-        shell: bash -euxo pipefail {0}
       - name: Upload cargo build stats
         uses: ./.github/actions/upload
         with:
@@ -404,7 +396,6 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           REPORT_URL: ${{ steps.create-allure-report.outputs.report-url }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
-        shell: bash -euxo pipefail {0}
         run: |
           curl --fail --output suites.json ${REPORT_URL%/index.html}/data/suites.json
           ./scripts/pysync
@@ -453,7 +444,6 @@ jobs:
 
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
-        shell: bash -euxo pipefail {0}
 
       - name: Build and upload coverage report
         run: |
@@ -486,7 +476,6 @@ jobs:
               \"description\": \"Coverage report is ready\",
               \"target_url\": \"$REPORT_URL\"
             }"
-        shell: bash -euxo pipefail {0}
 
   trigger-e2e-tests:
     runs-on: [ self-hosted, dev, x64 ]
@@ -537,6 +526,9 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    defaults:
+      run:
+        shell: sh -eu {0}
 
     steps:
       - name: Checkout
@@ -555,6 +547,9 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    defaults:
+      run:
+        shell: sh -eu {0}
 
     steps:
       - name: Checkout
@@ -570,6 +565,10 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
+    defaults:
+      run:
+        shell: sh -eu {0}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v1 # v3 won't work with kaniko
@@ -587,6 +586,10 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
+    defaults:
+      run:
+        shell: sh -eu {0}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v1 # v3 won't work with kaniko
@@ -1176,7 +1179,6 @@ jobs:
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Promote compatibility snapshot for the release
-        shell: bash -euxo pipefail {0}
         env:
           BUCKET: neon-github-public-dev
           PREFIX: artifacts/latest
