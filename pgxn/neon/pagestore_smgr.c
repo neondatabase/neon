@@ -343,7 +343,7 @@ compact_prefetch_buffers(void)
 
 	if (MyPState->ring_last != empty_ring_index)
 	{
-		MyPState->ring_last = empty_ring_index;
+		prefetch_cleanup_trailing_unused();
 		return true;
 	}
 
