@@ -366,9 +366,8 @@ impl LayerMap {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.index.insert(
-            kr.start.to_i128(),
-            kr.end.to_i128(),
-            lr.start.0,
+            kr.start.to_i128()..kr.end.to_i128(),
+            lr.start.0..lr.end.0,
             Arc::clone(&layer),
         );
 

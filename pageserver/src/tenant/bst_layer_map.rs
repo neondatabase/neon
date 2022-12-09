@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::ops::Range;
 
 // TODO the `im` crate has 20x more downloads and also has
 // persistent/immutable BTree. See if it's better.
@@ -43,18 +44,18 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         }
     }
 
-    // TODO add lsn_end argument
+    // TODO use lsn.end
     // TODO also return the lsn of the next image
-    pub fn insert(self: &mut Self, key_begin: i128, key_end: i128, lsn: u64, value: Value) {
+    pub fn insert(self: &mut Self, key: Range<i128>, lsn: Range<u64>, value: Value) {
         // TODO check for off-by-one errors
 
         // It's only a persistent map, not a retroactive one
         if let Some(last_entry) = self.historic.iter().rev().next() {
             let last_lsn = last_entry.0;
-            if lsn == *last_lsn {
+            if lsn.start == *last_lsn {
                 // TODO there are edge cases to take care of
             }
-            if lsn < *last_lsn {
+            if lsn.start < *last_lsn {
                 panic!("unexpected retroactive insert");
             }
         }
@@ -62,15 +63,15 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         // NOTE The order of the following lines is important!!
 
         // Preserve information after right endpoint
-        let value_at_end = match self.head.range(0..key_end).last() {
+        let value_at_end = match self.head.range(0..key.end).last() {
             Some((_, Some(v))) => Some(v.clone()),
             Some((_, None)) => None,
             None => None,
         };
-        self.head.insert_mut(key_end, value_at_end);
+        self.head.insert_mut(key.end, value_at_end);
 
         // Insert the left endpoint
-        self.head.insert_mut(key_begin, Some(value.clone()));
+        self.head.insert_mut(key.start, Some(value.clone()));
 
         // Cover the inside of the interval
         // TODO use lsn_end to decide which ones to cover
@@ -82,7 +83,7 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         //           optimization.
         let to_remove: Vec<_> = self
             .head
-            .range((key_begin + 1)..key_end)
+            .range((key.start + 1)..key.end)
             .map(|(k, _)| k.clone())
             .collect();
         for key in to_remove {
@@ -90,7 +91,7 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         }
 
         // Remember history. Clone is O(1)
-        self.historic.insert(lsn, self.head.clone());
+        self.historic.insert(lsn.start, self.head.clone());
     }
 
     pub fn query(self: &Self, key: i128, lsn: u64) -> Option<&Value> {
@@ -128,11 +129,11 @@ fn test_immutable_bst_dependency() {
 #[test]
 fn test_persistent_simple() {
     let mut map = PersistentLayerMap::<String>::new();
-    map.insert(0, 5, 100, "Layer 1".to_string());
+    map.insert(0..5, 100..101, "Layer 1".to_string());
     dbg!(&map);
-    map.insert(3, 9, 110, "Layer 2".to_string());
+    map.insert(3..9, 110..111, "Layer 2".to_string());
     dbg!(&map);
-    map.insert(5, 6, 120, "Layer 3".to_string());
+    map.insert(5..6, 120..121, "Layer 3".to_string());
     dbg!(&map);
 
     // After Layer 1 insertion
@@ -181,10 +182,10 @@ pub struct RetroactiveLayerMap<Value> {
     map: PersistentLayerMap<Arc<Vec<Value>>>,
 
     /// We buffer insertion into the PersistentLayerMap to decrease the number of rebuilds.
-    buffer: BTreeMap<u64, Vec<(i128, i128, Value)>>,
+    buffer: BTreeMap<u64, Vec<(Range<i128>, Range<u64>, Value)>>,
 
     /// All current layers. This is not used for search. Only to make rebuilds easier.
-    layers: BTreeMap<u64, Vec<(i128, i128, Value)>>,
+    layers: BTreeMap<u64, Vec<(Range<i128>, Range<u64>, Value)>>,
 }
 
 impl<Value: std::fmt::Debug> std::fmt::Debug for RetroactiveLayerMap<Value> {
@@ -202,11 +203,11 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         }
     }
 
-    pub fn insert(self: &mut Self, key_begin: i128, key_end: i128, lsn: u64, value: Value) {
+    pub fn insert(self: &mut Self, key: Range<i128>, lsn: Range<u64>, value: Value) {
         self.buffer
-            .entry(lsn)
-            .and_modify(|vec| vec.push((key_begin, key_end, value.clone())))
-            .or_insert(vec![(key_begin, key_end, value.clone())]);
+            .entry(lsn.start)
+            .and_modify(|vec| vec.push((key.clone(), lsn.clone(), value.clone())))
+            .or_insert(vec![(key.clone(), lsn.clone(), value.clone())]);
     }
 
     pub fn rebuild(self: &mut Self) {
@@ -228,9 +229,9 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         // Rebuild
         self.map.trim(&rebuild_since);
         for (lsn, layers) in self.layers.range(rebuild_since..) {
-            for (key_begin, key_end, value) in layers {
+            for (key, lsn, value) in layers {
                 let wrapped = Arc::new(vec![value.clone()]);
-                self.map.insert(*key_begin, *key_end, *lsn, wrapped);
+                self.map.insert(key.clone(), lsn.clone(), wrapped);
             }
         }
     }
@@ -256,12 +257,12 @@ fn test_retroactive_simple() {
     let mut map = RetroactiveLayerMap::new();
 
     // Append some images in increasing LSN order
-    map.insert(0, 5, 100, "Image 1".to_string());
-    map.insert(3, 9, 110, "Image 2".to_string());
-    map.insert(5, 6, 120, "Image 3".to_string());
+    map.insert(0..5, 100..101, "Image 1".to_string());
+    map.insert(3..9, 110..111, "Image 2".to_string());
+    map.insert(5..6, 120..121, "Image 3".to_string());
 
     // Add a delta layer out of order
-    map.insert(2, 5, 105, "Delta 1".to_string());
+    map.insert(2..5, 105..106, "Delta 1".to_string());
 
     // Rebuild so we can start querying
     map.rebuild();
