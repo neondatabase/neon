@@ -70,6 +70,7 @@ pub(super) async fn gather_inputs(
 
     let timelines = tenant
         .refresh_gc_info()
+        .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
     if timelines.is_empty() {
