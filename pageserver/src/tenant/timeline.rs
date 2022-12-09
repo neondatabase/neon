@@ -160,7 +160,7 @@ pub struct Timeline {
 
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
-    pub gc_info: RwLock<GcInfo>,
+    pub gc_info: std::sync::RwLock<GcInfo>,
 
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
@@ -796,7 +796,7 @@ impl Timeline {
                 write_lock: Mutex::new(()),
                 layer_removal_cs: Default::default(),
 
-                gc_info: RwLock::new(GcInfo {
+                gc_info: std::sync::RwLock::new(GcInfo {
                     retain_lsns: Vec::new(),
                     horizon_cutoff: Lsn(0),
                     pitr_cutoff: Lsn(0),
@@ -2504,7 +2504,7 @@ impl Timeline {
     ///
     /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
     /// whether a record is needed for PITR.
-    pub(super) fn update_gc_info(
+    pub(super) async fn update_gc_info(
         &self,
         retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
