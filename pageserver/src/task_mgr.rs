@@ -139,7 +139,7 @@ pub struct PageserverTaskId(u64);
 
 /// Each task that we track is associated with a "task ID". It's just an
 /// increasing number that we assign. Note that it is different from tokio::task::Id.
-static NEXT_TASK_ID: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(1));
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Global registry of tasks
 static TASKS: Lazy<Mutex<HashMap<u64, Arc<PageServerTask>>>> =

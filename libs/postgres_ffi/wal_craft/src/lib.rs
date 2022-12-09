@@ -1,7 +1,6 @@
 use anyhow::*;
 use core::time::Duration;
 use log::*;
-use once_cell::sync::Lazy;
 use postgres::types::PgLsn;
 use postgres::Client;
 use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
@@ -26,15 +25,13 @@ pub struct PostgresServer {
     client_config: postgres::Config,
 }
 
-pub static REQUIRED_POSTGRES_CONFIG: Lazy<Vec<&'static str>> = Lazy::new(|| {
-    vec![
-        "wal_keep_size=50MB",            // Ensure old WAL is not removed
-        "shared_preload_libraries=neon", // can only be loaded at startup
-        // Disable background processes as much as possible
-        "wal_writer_delay=10s",
-        "autovacuum=off",
-    ]
-});
+pub static REQUIRED_POSTGRES_CONFIG: [&str; 4] = [
+    "wal_keep_size=50MB",            // Ensure old WAL is not removed
+    "shared_preload_libraries=neon", // can only be loaded at startup
+    // Disable background processes as much as possible
+    "wal_writer_delay=10s",
+    "autovacuum=off",
+];
 
 impl Conf {
     pub fn pg_distrib_dir(&self) -> anyhow::Result<PathBuf> {
