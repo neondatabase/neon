@@ -12,6 +12,7 @@ from fixtures.neon_fixtures import (
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_until_tenant_status,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
@@ -481,24 +482,3 @@ def ensure_test_data(data_id: int, data: str, pg: Postgres):
         assert (
             query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data
         ), "Should have timeline data back"
-
-
-# Does not use `wait_until` for debugging purposes
-def wait_until_tenant_status(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    expected_status: str,
-    iterations: int,
-) -> bool:
-    for _ in range(iterations):
-        try:
-            tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
-            log.debug(f"Tenant {tenant_id} status: {tenant}")
-            if tenant["state"] == expected_status:
-                return True
-        except Exception as e:
-            log.debug(f"Tenant {tenant_id} status retrieval failure: {e}")
-
-        time.sleep(1)
-
-    raise Exception(f"Tenant {tenant_id} did not become {expected_status} in {iterations} seconds")
