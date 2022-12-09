@@ -515,6 +515,27 @@ void shmem_pipe_send_response(pipe_t* pipe, u32 msg_id, char const* resp, size_t
 	latch_release(&pipe->resp.cs);
 }
 
+void shmem_pipe_reset(pipe_t* pipe)
+{
+	atomic_init(&pipe->resp.cs, 0);
+	atomic_init(&pipe->req.cs, 0);
+
+	pipe->resp.head.pos = 0;
+	pipe->resp.tail.pos = 0;
+	pipe->req.head.pos = 0;
+	pipe->req.tail.pos = 0;
+
+	pipe->resp.head.n_blocked = 0;
+	pipe->resp.tail.n_blocked = 0;
+	pipe->req.head.n_blocked = 0;
+	pipe->req.tail.n_blocked = 0;
+
+	pipe->req.busy = 0;
+	pipe->resp.busy = 0;
+
+	pipe->msg_id = 0;
+}
+
 pipe_t* shmem_pipe_init(char const* name)
 {
 	char buf[64];
@@ -542,19 +563,6 @@ pipe_t* shmem_pipe_init(char const* name)
 	}
 	close(fd);
 
-	atomic_init(&pipe->resp.cs, 0);
-	atomic_init(&pipe->req.cs, 0);
-
-	pipe->resp.head.pos = 0;
-	pipe->resp.tail.pos = 0;
-	pipe->req.head.pos = 0;
-	pipe->req.tail.pos = 0;
-
-	pipe->resp.head.n_blocked = 0;
-	pipe->resp.tail.n_blocked = 0;
-	pipe->req.head.n_blocked = 0;
-	pipe->req.tail.n_blocked = 0;
-
 #ifndef BUSY_WAIT_RESPONSES
 	event_init(&pipe->resp.head.event);
 	event_init(&pipe->resp.tail.event);
@@ -562,14 +570,10 @@ pipe_t* shmem_pipe_init(char const* name)
 #endif
 	event_init(&pipe->req.head.event);
 
-	pipe->req.busy = 0;
-	pipe->resp.busy = 0;
-
-	pipe->msg_id = 0;
+	shmem_pipe_reset(pipe);
 
 	return pipe;
 }
-
 
 pipe_t* shmem_pipe_open(char const* name)
 {

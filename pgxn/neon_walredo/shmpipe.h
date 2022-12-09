@@ -1,3 +1,6 @@
+#ifndef SHMPIPE_H
+#define SHMPIPE_H
+
 struct pipe_t;
 
 typedef unsigned int u32;
@@ -8,5 +11,6 @@ extern void shmem_pipe_send_response(struct pipe_t* pipe, u32 msg_id, char const
 extern struct pipe_t* shmem_pipe_init(char const* name);
 extern struct pipe_t* shmem_pipe_open(char const* name);
 extern void shmem_pipe_close(struct pipe_t* pipe);
+extern void shmem_pipe_reset(struct pipe_t* pipe);
 
-
+#endif
