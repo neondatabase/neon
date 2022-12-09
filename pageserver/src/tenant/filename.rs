@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use utils::lsn::Lsn;
 
@@ -211,10 +212,10 @@ impl From<DeltaFileName> for LayerFileName {
 #[cfg(test)]
 pub const LAYER_FILE_NAME_TEST_PREFIX: &str = "LAYER_FILE_NAME::test/";
 
-impl<'a> TryFrom<&'a str> for LayerFileName {
-    type Error = String;
+impl FromStr for LayerFileName {
+    type Err = String;
 
-    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         #[cfg(test)]
         if let Some(value) = value.strip_prefix(LAYER_FILE_NAME_TEST_PREFIX) {
             return Ok(LayerFileName::Test(value.to_owned()));
@@ -272,7 +273,7 @@ impl<'de> serde::de::Visitor<'de> for LayerFileNameVisitor {
     where
         E: serde::de::Error,
     {
-        LayerFileName::try_from(v).map_err(|e| E::custom(e))
+        v.parse().map_err(|e| E::custom(e))
     }
 }
 

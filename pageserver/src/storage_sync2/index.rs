@@ -4,8 +4,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use std::convert::TryFrom;
-
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
@@ -130,7 +128,8 @@ impl<'de> serde::de::Visitor<'de> for UncleanLayerFileNameVisitor {
     where
         E: serde::de::Error,
     {
-        match LayerFileName::try_from(v) {
+        let maybe_clean: Result<LayerFileName, _> = v.parse();
+        match maybe_clean {
             Ok(clean) => Ok(UncleanLayerFileName::Clean(clean)),
             Err(e) => {
                 if v.ends_with(".old") {
@@ -251,7 +250,7 @@ mod tests {
 
         let expected = IndexPart {
             version: 0,
-            timeline_layers: HashSet::from([LayerFileName::try_from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9").unwrap()]),
+            timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
             missing_layers: Some(HashSet::from([LayerFileName::new_test("not_a_real_layer_but_adding_coverage")])),
             layer_metadata: HashMap::default(),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -280,10 +279,10 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: HashSet::from([LayerFileName::try_from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9").unwrap()]),
+            timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
             missing_layers: Some(HashSet::from([LayerFileName::new_test("not_a_real_layer_but_adding_coverage")])),
             layer_metadata: HashMap::from([
-                (LayerFileName::try_from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9").unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: Some(25600000),
                 }),
                 (LayerFileName::new_test("not_a_real_layer_but_adding_coverage"), IndexLayerMetadata {
@@ -316,9 +315,9 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: [LayerFileName::try_from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9").unwrap()].into_iter().collect(),
+            timeline_layers: ["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()].into_iter().collect(),
             layer_metadata: HashMap::from([
-                (LayerFileName::try_from("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9").unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: Some(25600000),
                 }),
                 (LayerFileName::new_test("not_a_real_layer_but_adding_coverage"), IndexLayerMetadata {
