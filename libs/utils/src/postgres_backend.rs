@@ -437,12 +437,12 @@ impl PostgresBackend {
                     if root_cause.contains("connection closed unexpectedly")
                         || root_cause.contains("Broken pipe (os error 32)")
                     {
-                        error!(
+                        info!(
                             "query handler for '{}' failed: {}",
                             query_string, short_error
                         );
                     } else {
-                        error!("query handler for '{}' failed: {:?}", query_string, e);
+                        info!("query handler for '{}' failed: {:?}", query_string, e);
                     }
                     self.write_message_noflush(&BeMessage::ErrorResponse(&short_error))?;
                     // TODO: untangle convoluted control flow
@@ -476,7 +476,7 @@ impl PostgresBackend {
                 trace!("got execute {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string) {
-                    error!("query handler for '{}' failed: {:?}", query_string, e);
+                    info!("query handler for '{}' failed: {:?}", query_string, e);
                     self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used

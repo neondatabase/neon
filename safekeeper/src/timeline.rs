@@ -526,7 +526,8 @@ impl Timeline {
     /// pageserver doesn't need catchup.
     pub fn on_compute_disconnect(&self) -> Result<()> {
         if self.is_cancelled() {
-            bail!(TimelineError::Cancelled(self.ttid));
+            // Timeline is already cancelled, nothing to do.
+            return Ok(());
         }
 
         let is_wal_backup_action_pending: bool;
