@@ -681,6 +681,14 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	Assert(slot->my_ring_index == MyPState->ring_unused);
 	page_server->send((NeonRequest *) &request);
 
+	/* Remember request LSN for the prefetched page to avoid false pefetch invalidations */
+	SetLastWrittenLSNForBlock(
+		request.req.lsn,
+		slot->buftag.rnode,
+		slot->buftag.forkNum,
+		slot->buftag.blockNum
+	);
+
 	/* update prefetch state */
 	MyPState->n_requests_inflight += 1;
 	MyPState->n_unused -= 1;
