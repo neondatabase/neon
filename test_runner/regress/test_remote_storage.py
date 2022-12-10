@@ -19,6 +19,7 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_until_tenant_state,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import print_gc_result, query_scalar, wait_until
@@ -134,7 +135,7 @@ def test_remote_storage_backup_and_restore(
     client.tenant_attach(tenant_id)
 
     # is there a better way to assert that failpoint triggered?
-    time.sleep(10)
+    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
 
     # assert cannot attach timeline that is scheduled for download
     # FIXME implement layer download retries

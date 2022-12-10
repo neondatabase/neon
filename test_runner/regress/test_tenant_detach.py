@@ -12,6 +12,7 @@ from fixtures.neon_fixtures import (
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_until_tenant_state,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
@@ -230,7 +231,7 @@ def test_ignored_tenant_reattach(
 
     # now, load it from the local files and expect it works
     pageserver_http.tenant_load(tenant_id=ignored_tenant_id)
-    wait_until_tenant_status(pageserver_http, ignored_tenant_id, "Active", 5)
+    wait_until_tenant_state(pageserver_http, ignored_tenant_id, "Active", 5)
 
     tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     tenants_after_attach.sort()
@@ -289,7 +290,7 @@ def test_ignored_tenant_download_missing_layers(
 
     # now, load it from the local files and expect it to work due to remote storage restoration
     pageserver_http.tenant_load(tenant_id=tenant_id)
-    wait_until_tenant_status(pageserver_http, tenant_id, "Active", 5)
+    wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
     tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     tenants_after_attach.sort()
@@ -340,7 +341,7 @@ def test_ignored_tenant_stays_broken_without_metadata(
 
     # now, load it from the local files and expect it to be broken due to inability to load tenant files into memory
     pageserver_http.tenant_load(tenant_id=tenant_id)
-    wait_until_tenant_status(pageserver_http, tenant_id, "Broken", 5)
+    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 5)
 
 
 # Tests that attach is never working on a tenant, ignored or not, as long as it's not absent locally
@@ -441,7 +442,7 @@ def test_ignore_while_attaching(
     # But can load it from local files, that will restore attach.
     pageserver_http.tenant_load(tenant_id)
 
-    wait_until_tenant_status(pageserver_http, tenant_id, "Active", 5)
+    wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
     pg.stop()
     pg.start()
@@ -481,24 +482,3 @@ def ensure_test_data(data_id: int, data: str, pg: Postgres):
         assert (
             query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data
         ), "Should have timeline data back"
-
-
-# Does not use `wait_until` for debugging purposes
-def wait_until_tenant_status(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    expected_status: str,
-    iterations: int,
-) -> bool:
-    for _ in range(iterations):
-        try:
-            tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
-            log.debug(f"Tenant {tenant_id} status: {tenant}")
-            if tenant["state"] == expected_status:
-                return True
-        except Exception as e:
-            log.debug(f"Tenant {tenant_id} status retrieval failure: {e}")
-
-        time.sleep(1)
-
-    raise Exception(f"Tenant {tenant_id} did not become {expected_status} in {iterations} seconds")
