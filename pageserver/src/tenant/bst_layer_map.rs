@@ -255,6 +255,12 @@ impl<Value: std::fmt::Debug> std::fmt::Debug for RetroactiveLayerMap<Value> {
     }
 }
 
+impl<T: Clone> Default for RetroactiveLayerMap<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<Value: Clone> RetroactiveLayerMap<Value> {
     pub fn new() -> Self {
         Self {

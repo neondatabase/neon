@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use super::bst_layer_map::PersistentLayerMap;
+use super::bst_layer_map::RetroactiveLayerMap;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -59,7 +59,7 @@ pub struct LayerMap {
 
     /// HACK I'm experimenting with a new index to reaplace the RTree. If this
     ///      works out I'll clean up the struct later.
-    index: PersistentLayerMap<Arc<dyn Layer>>,
+    index: RetroactiveLayerMap<Arc<dyn Layer>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
@@ -374,9 +374,14 @@ impl LayerMap {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
         }
-        // HACK don't update RTree, too slow
-        // self.historic_layers.insert(LayerRTreeObject::new(layer));
+        // TODO remove this so insert isn't slow. I need it for now for iter_historic()
+        self.historic_layers.insert(LayerRTreeObject::new(layer));
         NUM_ONDISK_LAYERS.inc();
+    }
+
+    /// Must be called after a batch of insert_historic calls, before querying
+    pub fn rebuild_index(&mut self) {
+        self.index.rebuild();
     }
 
     ///

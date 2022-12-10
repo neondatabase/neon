@@ -180,6 +180,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
             panic!("unexpected filename {fname}");
         }
     }
+    layer_map.rebuild_index();
 
     println!("min: {min_lsn}, max: {max_lsn}");
 
@@ -256,15 +257,15 @@ fn bench_from_real_project(c: &mut Criterion) {
     let mut bstlm = PersistentLayerMap::new();
     let mut sorted_layers: Vec<_> = layer_map.iter_historic_layers().collect();
     sorted_layers.sort_by(|a, b| a.get_lsn_range().start.cmp(&b.get_lsn_range().start));
+
     // TODO implement out of order inserts
     for layer in sorted_layers {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
 
         bstlm.insert(
-            kr.start.to_i128(),
-            kr.end.to_i128(),
-            lr.start.0,
+            kr.start.to_i128()..kr.end.to_i128(),
+            lr.start.0..lr.end.0,
             format!("Layer {}", lr.start.0),
         );
     }
@@ -311,6 +312,7 @@ fn bench_sequential(c: &mut Criterion) {
         };
         layer_map.insert_historic(Arc::new(layer));
     }
+    layer_map.rebuild_index();
     println!("Finished layer map init in {:?}", now.elapsed());
 
     // Init bst layer map with the same layers
@@ -324,9 +326,8 @@ fn bench_sequential(c: &mut Criterion) {
         let lr = layer.get_lsn_range();
 
         bstlm.insert(
-            kr.start.to_i128(),
-            kr.end.to_i128(),
-            lr.start.0,
+            kr.start.to_i128()..kr.end.to_i128(),
+            lr.start.0..lr.end.0,
             format!("Layer {}", lr.start.0),
         );
     }
