@@ -1704,7 +1704,10 @@ impl Tenant {
 
         let mut target_config_file = VirtualFile::open_with_options(
             target_config_path,
-            OpenOptions::new().write(true).create_new(first_save),
+            OpenOptions::new()
+                .truncate(true)
+                .write(true)
+                .create_new(first_save),
         )?;
 
         target_config_file

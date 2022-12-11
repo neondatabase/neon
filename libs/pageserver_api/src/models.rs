@@ -117,6 +117,7 @@ impl TenantCreateRequest {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TenantConfigRequest {
+    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
