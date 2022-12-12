@@ -226,13 +226,6 @@ impl Layer for ImageLayer {
         fs::remove_file(self.path())?;
         Ok(())
     }
-
-    fn as_pure_layer<'a>(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn PureLayer>
-    where
-        Self: 'a,
-    {
-        self
-    }
 }
 
 impl ImageLayer {

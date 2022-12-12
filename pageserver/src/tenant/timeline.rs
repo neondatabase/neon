@@ -1314,7 +1314,35 @@ impl Timeline {
             Err(e) => error!("Failed to compute current logical size for metrics update: {e:?}"),
         }
     }
+}
 
+type TraversalId = String;
+
+trait TraversalLayerExt {
+    fn traversal_id(&self) -> TraversalId;
+}
+
+impl TraversalLayerExt for Arc<dyn Layer> {
+    fn traversal_id(&self) -> String {
+        format!(
+            "timeline {} layer file {}",
+            self.get_timeline_id(),
+            self.filename().file_name()
+        )
+    }
+}
+
+impl TraversalLayerExt for Arc<InMemoryLayer> {
+    fn traversal_id(&self) -> String {
+        format!(
+            "timeline {} in-memory {}",
+            self.get_timeline_id(),
+            self.short_id()
+        )
+    }
+}
+
+impl Timeline {
     ///
     /// Get a handle to a Layer for reading.
     ///
@@ -1335,7 +1363,7 @@ impl Timeline {
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
-        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, Arc<dyn PureLayer>)> = Vec::new();
+        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, String)> = Vec::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -1417,7 +1445,7 @@ impl Timeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, open_layer.clone()));
+                    traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
                     continue;
                 }
             }
@@ -1432,7 +1460,7 @@ impl Timeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, frozen_layer.clone()));
+                    traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
                     continue 'outer;
                 }
             }
@@ -1447,7 +1475,7 @@ impl Timeline {
                     reconstruct_state,
                 )?;
                 cont_lsn = lsn_floor;
-                traversal_path.push((result, cont_lsn, layer.as_pure_layer()));
+                traversal_path.push((result, cont_lsn, layer.traversal_id()));
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
@@ -2681,7 +2709,7 @@ impl Timeline {
 /// to an error, as anyhow context information.
 fn layer_traversal_error(
     msg: String,
-    path: Vec<(ValueReconstructResult, Lsn, Arc<dyn PureLayer>)>,
+    path: Vec<(ValueReconstructResult, Lsn, TraversalId)>,
 ) -> anyhow::Result<()> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
@@ -2690,9 +2718,7 @@ fn layer_traversal_error(
         .map(|(r, c, l)| {
             format!(
                 "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r,
-                c,
-                l.short_id(),
+                r, c, l,
             )
         })
         .chain(std::iter::once(msg));

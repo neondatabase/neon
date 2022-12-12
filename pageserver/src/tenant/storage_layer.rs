@@ -7,7 +7,6 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
-use std::sync::Arc;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -157,9 +156,4 @@ pub trait Layer: Send + Sync + PureLayer {
 
     /// Permanently remove this layer from disk.
     fn delete(&self) -> Result<()>;
-
-    // https://articles.bchlr.de/traits-dynamic-dispatch-upcasting
-    fn as_pure_layer<'a>(self: Arc<Self>) -> Arc<dyn PureLayer>
-    where
-        Self: 'a;
 }
