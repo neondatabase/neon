@@ -55,6 +55,8 @@ runs:
 
         project_id=$(echo $project | jq --raw-output '.project.id')
         echo "project_id=${project_id}" >> $GITHUB_OUTPUT
+
+        echo "Project ${project_id} has been created"
       env:
         API_HOST: ${{ inputs.api_host }}
         API_KEY: ${{ inputs.api_key }}
