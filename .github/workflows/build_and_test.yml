@@ -50,7 +50,11 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: [ self-hosted, dev, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cloud:pinned
+      options: --init
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -725,7 +729,7 @@ jobs:
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
   calculate-deploy-targets:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: [ self-hosted, dev, x64 ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -747,8 +751,8 @@ jobs:
           fi
 
   deploy:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    #container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    runs-on: [ self-hosted, dev, x64 ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -915,7 +919,7 @@ jobs:
 
   deploy-proxy:
     runs-on: [ self-hosted, dev, x64 ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
@@ -958,7 +962,7 @@ jobs:
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
     runs-on: [ self-hosted, dev, x64 ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
