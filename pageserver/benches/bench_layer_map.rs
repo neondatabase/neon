@@ -325,6 +325,7 @@ fn bench_sequential(c: &mut Criterion) {
             format!("Layer {}", lr.start.0),
         );
     }
+    bstlm.rebuild();
     println!("Finished bst init in {:?}", now.elapsed());
 
     // Choose 100 uniformly random queries

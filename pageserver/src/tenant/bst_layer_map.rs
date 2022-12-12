@@ -172,6 +172,48 @@ fn test_persistent_simple() {
     assert_eq!(map.query(7, 125), Some("Layer 2".to_string()));
 }
 
+/// Cover simple off-by-one edge cases
+#[test]
+fn test_off_by_one() {
+    let mut map = PersistentLayerMap::<String>::new();
+    map.insert(3..5, 100..110, "Layer 1".to_string());
+
+    // Check different LSNs
+    assert_eq!(map.query(4, 99), None);
+    assert_eq!(map.query(4, 100), Some("Layer 1".to_string()));
+
+    // Check different keys
+    assert_eq!(map.query(2, 105), None);
+    assert_eq!(map.query(3, 105), Some("Layer 1".to_string()));
+    assert_eq!(map.query(4, 105), Some("Layer 1".to_string()));
+    assert_eq!(map.query(5, 105), None);
+}
+
+/// Cover edge cases where layers begin or end on the same key
+#[test]
+fn test_key_collision() {
+    let mut map = PersistentLayerMap::<String>::new();
+
+    map.insert(3..5, 100..110, "Layer 10".to_string());
+    map.insert(5..8, 100..110, "Layer 11".to_string());
+
+    map.insert(3..4, 200..210, "Layer 20".to_string());
+
+    // Check after layer 11
+    assert_eq!(map.query(2, 105), None);
+    assert_eq!(map.query(3, 105), Some("Layer 10".to_string()));
+    assert_eq!(map.query(5, 105), Some("Layer 11".to_string()));
+    assert_eq!(map.query(7, 105), Some("Layer 11".to_string()));
+    assert_eq!(map.query(8, 105), None);
+
+    // Check after layer 20
+    assert_eq!(map.query(2, 205), None);
+    assert_eq!(map.query(3, 205), Some("Layer 20".to_string()));
+    assert_eq!(map.query(5, 205), Some("Layer 11".to_string()));
+    assert_eq!(map.query(7, 205), Some("Layer 11".to_string()));
+    assert_eq!(map.query(8, 205), None);
+}
+
 /// Test when rectangles have nontrivial height and possibly overlap
 #[test]
 fn test_persistent_overlapping() {
