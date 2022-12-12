@@ -1015,7 +1015,7 @@ impl Timeline {
         let mut local_only_layers = local_layers;
         let timeline_dir = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for remote_layer_name in &index_part.timeline_layers {
-            local_only_layers.remove(&remote_layer_name);
+            local_only_layers.remove(remote_layer_name);
 
             let remote_layer_metadata = index_part
                 .layer_metadata
@@ -1070,7 +1070,7 @@ impl Timeline {
 
                     trace!("downloading image file: {remote_layer_name:?}");
                     let downloaded_size = remote_client
-                        .download_layer_file(&remote_layer_name, &remote_layer_metadata)
+                        .download_layer_file(remote_layer_name, &remote_layer_metadata)
                         .await
                         .with_context(|| {
                             format!("failed to download image layer {remote_layer_name:?}")
@@ -1105,7 +1105,7 @@ impl Timeline {
 
                     trace!("downloading delta file: {remote_layer_name:?}");
                     let sz = remote_client
-                        .download_layer_file(&remote_layer_name, &remote_layer_metadata)
+                        .download_layer_file(remote_layer_name, &remote_layer_metadata)
                         .await
                         .with_context(|| {
                             format!("failed to download delta layer {remote_layer_name:?}")

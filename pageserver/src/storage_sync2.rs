@@ -370,7 +370,7 @@ impl UploadQueue {
         for layer_name in &index_part.timeline_layers {
             let layer_metadata = index_part
                 .layer_metadata
-                .get(&layer_name)
+                .get(layer_name)
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
             files.insert(layer_name.to_owned(), layer_metadata);
@@ -837,7 +837,7 @@ impl RemoteTimelineClient {
                         .timeline_path(&self.timeline_id, &self.tenant_id)
                         .join(layer_file_name.file_name());
                     upload::upload_timeline_layer(
-                        &self.conf,
+                        self.conf,
                         &self.storage_impl,
                         path,
                         layer_metadata,
@@ -871,7 +871,7 @@ impl RemoteTimelineClient {
                         .conf
                         .timeline_path(&self.timeline_id, &self.tenant_id)
                         .join(layer_file_name.file_name());
-                    delete::delete_layer(&self.conf, &self.storage_impl, path)
+                    delete::delete_layer(self.conf, &self.storage_impl, path)
                         .measure_remote_op(
                             self.tenant_id,
                             self.timeline_id,
