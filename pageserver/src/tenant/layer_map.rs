@@ -63,11 +63,11 @@ pub struct LayerMap<PersistentLayerT: ?Sized> {
 impl<T: ?Sized> Default for LayerMap<T> {
     fn default() -> Self {
         Self {
-            open_layer: Default::default(),
-            next_open_layer_at: Default::default(),
-            frozen_layers: Default::default(),
-            historic_layers: Default::default(),
-            l0_delta_layers: Default::default(),
+            open_layer: None,
+            next_open_layer_at: None,
+            frozen_layers: VecDeque::default(),
+            historic_layers: RTree::default(),
+            l0_delta_layers: Vec::default(),
         }
     }
 }
