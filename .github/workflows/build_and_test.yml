@@ -50,7 +50,11 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
-    runs-on: gha-ubuntu-22.04-4cores
+    runs-on: [ self-hosted, dev, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cloud:pinned
+      options: --init
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
