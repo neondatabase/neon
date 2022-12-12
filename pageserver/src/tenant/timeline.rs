@@ -931,6 +931,7 @@ impl Timeline {
                 trace!("found layer {}", layer.filename().display());
                 total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
+                layers.rebuild_index();
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -955,6 +956,7 @@ impl Timeline {
                 trace!("found layer {}", layer.filename().display());
                 total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
+                layers.rebuild_index();
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1085,10 +1087,11 @@ impl Timeline {
                 let image_layer =
                     ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
 
-                self.layers
-                    .write()
-                    .unwrap()
-                    .insert_historic(Arc::new(image_layer));
+                {
+                    let mut layers = self.layers.write().unwrap();
+                    layers.insert_historic(Arc::new(image_layer));
+                    layers.rebuild_index();
+                }
                 self.metrics.current_physical_size_gauge.add(sz);
             } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1115,10 +1118,11 @@ impl Timeline {
                 let delta_layer =
                     DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
 
-                self.layers
-                    .write()
-                    .unwrap()
-                    .insert_historic(Arc::new(delta_layer));
+                {
+                    let mut layers = self.layers.write().unwrap();
+                    layers.insert_historic(Arc::new(delta_layer));
+                    layers.rebuild_index();
+                }
                 self.metrics.current_physical_size_gauge.add(sz);
             } else {
                 bail!("unexpected layer filename in remote storage: {}", fname);
@@ -1811,6 +1815,7 @@ impl Timeline {
         {
             let mut layers = self.layers.write().unwrap();
             layers.insert_historic(Arc::new(new_delta));
+            layers.rebuild_index();
         }
 
         // update the timeline's physical size
@@ -1970,6 +1975,7 @@ impl Timeline {
             self.metrics.current_physical_size_gauge.add(metadata.len());
             layers.insert_historic(Arc::new(l));
         }
+        layers.rebuild_index();
         drop(layers);
         timer.stop_and_record();
 
@@ -2276,6 +2282,7 @@ impl Timeline {
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             layers.insert_historic(Arc::new(l));
+            layers.rebuild_index();
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
