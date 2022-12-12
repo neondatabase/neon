@@ -256,8 +256,9 @@ impl LayerMap {
             (Some(_), None) => panic!("returned None, expected Some"),
             (Some(old), Some(new)) => {
                 // TODO be more verbose and flexible
-                assert_eq!(old.layer.filename(), new.layer.filename());
-                assert_eq!(old.lsn_floor, new.lsn_floor);
+                let context = format!("query: key {}, end_lsn: {}", key, end_lsn);
+                assert_eq!(old.layer.filename(), new.layer.filename(), "{}", context);
+                assert_eq!(old.lsn_floor, new.lsn_floor, "{}", context);
             }
         }
         return Ok(new);
