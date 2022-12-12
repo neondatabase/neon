@@ -89,6 +89,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
         conf={
             "checkpoint_distance": "15000",
             "gc_period": "80sec",
+            "pitr_interval": "1 min",
         },
     )
 
@@ -107,7 +108,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "gc_horizon": 67108864,
                     "gc_period": 80,
                     "image_creation_threshold": 3,
-                    "pitr_interval": 2592000,
+                    "pitr_interval": 60,
                 }.items()
             )
 
@@ -130,6 +131,6 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "gc_horizon": 67108864,
                     "gc_period": 80,
                     "image_creation_threshold": 3,
-                    "pitr_interval": 2592000,
+                    "pitr_interval": 60,
                 }.items()
             )
