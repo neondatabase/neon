@@ -1,7 +1,7 @@
 use anyhow::Result;
 use num_traits::ToPrimitive;
 use pageserver::repository::{Key, Value};
-use pageserver::tenant::bst_layer_map::PersistentLayerMap;
+use pageserver::tenant::bst_layer_map::RetroactiveLayerMap;
 use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
@@ -254,12 +254,8 @@ fn bench_from_real_project(c: &mut Criterion) {
 
     // Init bst layer map with the same layers
     let now = Instant::now();
-    let mut bstlm = PersistentLayerMap::new();
-    let mut sorted_layers: Vec<_> = layer_map.iter_historic_layers().collect();
-    sorted_layers.sort_by(|a, b| a.get_lsn_range().start.cmp(&b.get_lsn_range().start));
-
-    // TODO implement out of order inserts
-    for layer in sorted_layers {
+    let mut bstlm = RetroactiveLayerMap::new();
+    for layer in layer_map.iter_historic_layers() {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
 
@@ -269,6 +265,7 @@ fn bench_from_real_project(c: &mut Criterion) {
             format!("Layer {}", lr.start.0),
         );
     }
+    bstlm.rebuild();
     println!("Finished bst init in {:?}", now.elapsed());
 
     // Choose uniformly distributed queries
@@ -317,11 +314,8 @@ fn bench_sequential(c: &mut Criterion) {
 
     // Init bst layer map with the same layers
     let now = Instant::now();
-    let mut bstlm = PersistentLayerMap::new();
-    let mut sorted_layers: Vec<_> = layer_map.iter_historic_layers().collect();
-    sorted_layers.sort_by(|a, b| a.get_lsn_range().start.cmp(&b.get_lsn_range().start));
-    // TODO implement out of order inserts
-    for layer in sorted_layers {
+    let mut bstlm = RetroactiveLayerMap::new();
+    for layer in layer_map.iter_historic_layers() {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
 

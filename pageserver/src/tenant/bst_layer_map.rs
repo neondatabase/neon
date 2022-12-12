@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::ops::Range;
+use std::sync::Arc;
 
 // TODO the `im` crate has 20x more downloads and also has
 // persistent/immutable BTree. See if it's better.
@@ -100,7 +100,8 @@ impl<Value: Clone> PersistentLayerMap<Value> {
             to_remove.push(key.end);
         }
         for k in to_update {
-            self.head.insert_mut(k.clone(), Some((lsn.end.clone(), value.clone())));
+            self.head
+                .insert_mut(k.clone(), Some((lsn.end.clone(), value.clone())));
         }
         for k in to_remove {
             self.head.remove_mut(&k);
@@ -114,7 +115,13 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         // TODO check for off-by-one errors
 
         let version = self.historic.range(0..=lsn).rev().next()?.1;
-        version.range(0..=key).rev().next()?.1.as_ref().map(|(_, v)| v.clone())
+        version
+            .range(0..=key)
+            .rev()
+            .next()?
+            .1
+            .as_ref()
+            .map(|(_, v)| v.clone())
     }
 
     pub fn trim(self: &mut Self, begin: &u64) {
@@ -295,10 +302,10 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
 
         // Rebuild
         self.map.trim(&rebuild_since);
-        for (lsn, layers) in self.layers.range(rebuild_since..) {
-            for (key, lsn, value) in layers {
+        for (_start_lsn, layers) in self.layers.range(rebuild_since..) {
+            for (key, end_lsn, value) in layers {
                 let wrapped = Arc::new(vec![value.clone()]);
-                self.map.insert(key.clone(), lsn.clone(), wrapped);
+                self.map.insert(key.clone(), end_lsn.clone(), wrapped);
             }
         }
     }
