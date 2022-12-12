@@ -218,7 +218,7 @@ impl Layer for ImageLayer {
         self.timeline_id
     }
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
-        todo!();
+        unimplemented!();
     }
 
     fn delete(&self) -> Result<()> {

@@ -40,16 +40,16 @@ impl PureLayer for DummyDelta {
         panic!()
     }
 
-    fn dump(&self, _verbose: bool) -> Result<()> {
-        todo!()
-    }
-
     fn is_incremental(&self) -> bool {
         true
     }
 
+    fn dump(&self, _verbose: bool) -> Result<()> {
+        unimplemented!()
+    }
+
     fn short_id(&self) -> String {
-        todo!()
+        unimplemented!()
     }
 }
 
@@ -82,11 +82,11 @@ impl PureLayer for DummyImage {
     }
 
     fn dump(&self, _verbose: bool) -> Result<()> {
-        todo!()
+        unimplemented!()
     }
 
     fn short_id(&self) -> String {
-        todo!()
+        unimplemented!()
     }
 }
 

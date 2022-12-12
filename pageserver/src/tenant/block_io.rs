@@ -60,7 +60,7 @@ where
 ///
 /// ```no_run
 /// # use pageserver::tenant::block_io::{BlockReader, FileBlockReader};
-/// # let reader: FileBlockReader<std::fs::File> = todo!();
+/// # let reader: FileBlockReader<std::fs::File> = unimplemented!("stub");
 /// let cursor = reader.block_cursor();
 /// let buf = cursor.read_blk(1);
 /// // do stuff with 'buf'
