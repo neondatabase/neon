@@ -60,6 +60,7 @@ pub struct LayerMap {
     /// HACK I'm experimenting with a new index to reaplace the RTree. If this
     ///      works out I'll clean up the struct later.
     index: RetroactiveLayerMap<Arc<dyn Layer>>,
+    images: RetroactiveLayerMap<Arc<dyn Layer>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
@@ -249,13 +250,24 @@ impl LayerMap {
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
         // HACK use the index to query and return early. If this works I'll
         //      rewrite the function.
-        let result = self.index.query(key.to_i128(), end_lsn.0);
-        // TODO check if this is correct. I'm returning the latest layer by
-        //      start lsn, but the current solution first looks for latest
-        //      by end lsn.
-        return Ok(result.map(|layer| SearchResult {
-            layer: Arc::clone(&layer),
-            lsn_floor: layer.get_lsn_range().start,
+        // TODO I'm making two separate queries, which is 2x the cost, but that
+        //      can be avoided in varous ways. Caching latest_image queries is
+        //      probably the simplest, but combining the two data structures
+        //      might be better.
+        let latest_layer = self.index.query(key.to_i128(), end_lsn.0);
+        let latest_image = self.images.query(key.to_i128(), end_lsn.0);
+        return Ok(latest_layer.map(|layer| {
+            // Compute lsn_floor
+            let mut lsn_floor = layer.get_lsn_range().start;
+            if let Some(image) = latest_image {
+                if layer.is_incremental() {
+                    lsn_floor = std::cmp::max(lsn_floor, image.get_lsn_range().start + 1)
+                }
+            }
+            SearchResult {
+                layer: Arc::clone(&layer),
+                lsn_floor,
+            }
         }));
 
         // linear search
@@ -370,6 +382,13 @@ impl LayerMap {
             lr.start.0..lr.end.0,
             Arc::clone(&layer),
         );
+        if !layer.is_incremental() {
+            self.images.insert(
+                kr.start.to_i128()..kr.end.to_i128(),
+                lr.start.0..lr.end.0,
+                Arc::clone(&layer),
+            );
+        }
 
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
@@ -382,6 +401,7 @@ impl LayerMap {
     /// Must be called after a batch of insert_historic calls, before querying
     pub fn rebuild_index(&mut self) {
         self.index.rebuild();
+        self.images.rebuild();
     }
 
     ///
