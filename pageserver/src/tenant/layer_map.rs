@@ -393,7 +393,6 @@ impl LayerMap {
     /// Insert an on-disk layer
     ///
     pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        // TODO the index needs to support out of order insertion for this to work
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.index.insert(
@@ -429,8 +428,14 @@ impl LayerMap {
     /// This should be called when the corresponding file on disk has been deleted.
     ///
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
-
-        // TODO remve from self.index and self.images
+        let kr = layer.get_key_range();
+        let lr = layer.get_lsn_range();
+        self.index
+            .remove(kr.start.to_i128()..kr.end.to_i128(), lr.start.0..lr.end.0);
+        if !layer.is_incremental() {
+            self.images
+                .remove(kr.start.to_i128()..kr.end.to_i128(), lr.start.0..lr.end.0);
+        }
 
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             let len_before = self.l0_delta_layers.len();
