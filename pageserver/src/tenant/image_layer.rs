@@ -208,8 +208,8 @@ impl PersistentLayer for ImageLayer {
         self.layer_name().into()
     }
 
-    fn local_path(&self) -> PathBuf {
-        self.path()
+    fn local_path(&self) -> Option<PathBuf> {
+        Some(self.path())
     }
 
     fn get_tenant_id(&self) -> TenantId {
