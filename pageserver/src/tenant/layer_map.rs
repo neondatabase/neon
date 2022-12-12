@@ -248,8 +248,23 @@ impl LayerMap {
     /// layer.
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
-        // HACK use the index to query and return early. If this works I'll
-        //      rewrite the function.
+        let old = self.search_old(key, end_lsn)?;
+        let new = self.search_new(key, end_lsn)?;
+        match (&old, &new) {
+            (None, None) => {}
+            (None, Some(_)) => panic!("returned Some, expected None"),
+            (Some(_), None) => panic!("returned None, expected Some"),
+            (Some(old), Some(new)) => {
+                // TODO be more verbose and flexible
+                assert_eq!(old.layer.filename(), new.layer.filename());
+                assert_eq!(old.lsn_floor, new.lsn_floor);
+            }
+        }
+        return Ok(new);
+    }
+
+    // HACK just testing correctness
+    fn search_new(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
         // TODO I'm making two separate queries, which is 2x the cost, but that
         //      can be avoided in varous ways. Caching latest_image queries is
         //      probably the simplest, but combining the two data structures
@@ -269,7 +284,10 @@ impl LayerMap {
                 lsn_floor,
             }
         }));
+    }
 
+    // HACK just testing correctness
+    fn search_old(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
         // linear search
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<Arc<dyn Layer>> = None;
