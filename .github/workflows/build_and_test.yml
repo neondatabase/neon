@@ -50,7 +50,7 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: gha-ubuntu-22.04-4cores
     steps:
       - name: Checkout
         uses: actions/checkout@v3
