@@ -197,12 +197,11 @@ pub use download::{is_temp_download_file, list_remote_timelines};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::ops::DerefMut;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::ensure;
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use remote_storage::{DownloadError, GenericRemoteStorage};
 use tokio::runtime::Runtime;
 use tracing::{info, warn};
 use tracing::{info_span, Instrument};
@@ -215,6 +214,7 @@ use crate::metrics::MeasureRemoteOp;
 use crate::metrics::RemoteOpFileKind;
 use crate::metrics::RemoteOpKind;
 use crate::metrics::REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS;
+use crate::tenant::filename::LayerFileName;
 use crate::{
     config::PageServerConf,
     storage_sync::index::LayerFileMetadata,
@@ -287,7 +287,7 @@ struct UploadQueueInitialized {
 
     /// All layer files stored in the remote storage, taking into account all
     /// in-progress and queued operations
-    latest_files: HashMap<RemotePath, LayerFileMetadata>,
+    latest_files: HashMap<LayerFileName, LayerFileMetadata>,
 
     /// Metadata stored in the remote storage, taking into account all
     /// in-progress and queued operations.
@@ -357,10 +357,6 @@ impl UploadQueue {
 
     fn initialize_with_current_remote_index_part(
         &mut self,
-        conf: &'static PageServerConf,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-
         index_part: &IndexPart,
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
@@ -371,18 +367,13 @@ impl UploadQueue {
         }
 
         let mut files = HashMap::with_capacity(index_part.timeline_layers.len());
-        let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
-        for timeline_name in &index_part.timeline_layers {
-            let local_path = timeline_path.join(timeline_name);
-            let remote_timeline_path = conf.remote_path(&local_path).expect(
-                "Remote timeline path and local timeline path were constructed form the same conf",
-            );
+        for layer_name in &index_part.timeline_layers {
             let layer_metadata = index_part
                 .layer_metadata
-                .get(timeline_name)
+                .get(layer_name)
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
-            files.insert(remote_timeline_path, layer_metadata);
+            files.insert(layer_name.to_owned(), layer_metadata);
         }
 
         let index_part_metadata = index_part.parse_metadata()?;
@@ -431,13 +422,13 @@ struct UploadTask {
 #[derive(Debug)]
 enum UploadOp {
     /// Upload a layer file
-    UploadLayer(PathBuf, LayerFileMetadata),
+    UploadLayer(LayerFileName, LayerFileMetadata),
 
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
 
     /// Delete a file.
-    Delete(RemoteOpFileKind, PathBuf),
+    Delete(RemoteOpFileKind, LayerFileName),
 
     /// Barrier. When the barrier operation is reached,
     Barrier(tokio::sync::watch::Sender<()>),
@@ -446,14 +437,16 @@ enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(path, metadata) => write!(
-                f,
-                "UploadLayer({}, size={:?})",
-                path.display(),
-                metadata.file_size()
-            ),
+            UploadOp::UploadLayer(path, metadata) => {
+                write!(
+                    f,
+                    "UploadLayer({}, size={:?})",
+                    path.file_name(),
+                    metadata.file_size()
+                )
+            }
             UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
-            UploadOp::Delete(_, path) => write!(f, "Delete({})", path.display()),
+            UploadOp::Delete(_, path) => write!(f, "Delete({})", path.file_name()),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }
@@ -465,12 +458,7 @@ impl RemoteTimelineClient {
     /// The given `index_part` must be the one on the remote.
     pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_with_current_remote_index_part(
-            self.conf,
-            self.tenant_id,
-            self.timeline_id,
-            index_part,
-        )?;
+        upload_queue.initialize_with_current_remote_index_part(index_part)?;
         Ok(())
     }
 
@@ -524,13 +512,15 @@ impl RemoteTimelineClient {
     /// On success, returns the size of the downloaded file.
     pub async fn download_layer_file(
         &self,
-        remote_path: &RemotePath,
+        layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
         let downloaded_size = download::download_layer_file(
             self.conf,
             &self.storage_impl,
-            remote_path,
+            self.tenant_id,
+            self.timeline_id,
+            layer_file_name,
             layer_metadata,
         )
         .measure_remote_op(
@@ -548,13 +538,13 @@ impl RemoteTimelineClient {
             let new_metadata = LayerFileMetadata::new(downloaded_size);
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
-            if let Some(upgraded) = upload_queue.latest_files.get_mut(remote_path) {
+            if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
                 upgraded.merge(&new_metadata);
             } else {
                 // The file should exist, since we just downloaded it.
                 warn!(
                     "downloaded file {:?} not found in local copy of the index file",
-                    remote_path
+                    layer_file_name
                 );
             }
         }
@@ -611,7 +601,7 @@ impl RemoteTimelineClient {
     ///
     pub fn schedule_layer_file_upload(
         self: &Arc<Self>,
-        path: &Path,
+        layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
@@ -626,13 +616,16 @@ impl RemoteTimelineClient {
 
         upload_queue
             .latest_files
-            .insert(self.conf.remote_path(path)?, layer_metadata.clone());
+            .insert(layer_file_name.clone(), layer_metadata.clone());
 
-        let op = UploadOp::UploadLayer(PathBuf::from(path), layer_metadata.clone());
+        let op = UploadOp::UploadLayer(layer_file_name.clone(), layer_metadata.clone());
         self.update_upload_queue_unfinished_metric(1, &op);
         upload_queue.queued_operations.push_back(op);
 
-        info!("scheduled layer file upload {}", path.display());
+        info!(
+            "scheduled layer file upload {}",
+            layer_file_name.file_name()
+        );
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
@@ -644,15 +637,12 @@ impl RemoteTimelineClient {
     ///
     /// The deletion won't actually be performed, until all preceding
     /// upload operations have completed succesfully.
-    pub fn schedule_layer_file_deletion(self: &Arc<Self>, paths: &[PathBuf]) -> anyhow::Result<()> {
+    pub fn schedule_layer_file_deletion(
+        self: &Arc<Self>,
+        names: &[LayerFileName],
+    ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
-
-        // Convert the paths into RemotePaths, and gather other information we need.
-        let mut remote_paths = Vec::with_capacity(paths.len());
-        for path in paths {
-            remote_paths.push(self.conf.remote_path(path)?);
-        }
 
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
         // so we don't need update it. Just serialize it.
@@ -667,8 +657,8 @@ impl RemoteTimelineClient {
         // from latest_files, but not yet scheduled for deletion. Use a closure
         // to syntactically forbid ? or bail! calls here.
         let no_bail_here = || {
-            for remote_path in remote_paths {
-                upload_queue.latest_files.remove(&remote_path);
+            for name in names {
+                upload_queue.latest_files.remove(name);
             }
 
             let index_part = IndexPart::new(
@@ -681,11 +671,11 @@ impl RemoteTimelineClient {
             upload_queue.queued_operations.push_back(op);
 
             // schedule the actual deletions
-            for path in paths {
-                let op = UploadOp::Delete(RemoteOpFileKind::Layer, PathBuf::from(path));
+            for name in names {
+                let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone());
                 self.update_upload_queue_unfinished_metric(1, &op);
                 upload_queue.queued_operations.push_back(op);
-                info!("scheduled layer file deletion {}", path.display());
+                info!("scheduled layer file deletion {}", name.file_name());
             }
 
             // Launch the tasks immediately, if possible
@@ -841,7 +831,11 @@ impl RemoteTimelineClient {
             }
 
             let upload_result: anyhow::Result<()> = match &task.op {
-                UploadOp::UploadLayer(ref path, ref layer_metadata) => {
+                UploadOp::UploadLayer(ref layer_file_name, ref layer_metadata) => {
+                    let path = &self
+                        .conf
+                        .timeline_path(&self.timeline_id, &self.tenant_id)
+                        .join(layer_file_name.file_name());
                     upload::upload_timeline_layer(
                         self.conf,
                         &self.storage_impl,
@@ -872,7 +866,11 @@ impl RemoteTimelineClient {
                     )
                     .await
                 }
-                UploadOp::Delete(metric_file_kind, ref path) => {
+                UploadOp::Delete(metric_file_kind, ref layer_file_name) => {
+                    let path = &self
+                        .conf
+                        .timeline_path(&self.timeline_id, &self.tenant_id)
+                        .join(layer_file_name.file_name());
                     delete::delete_layer(self.conf, &self.storage_impl, path)
                         .measure_remote_op(
                             self.tenant_id,
@@ -1078,7 +1076,7 @@ mod tests {
     use super::*;
     use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
-    use std::collections::HashSet;
+    use std::{collections::HashSet, path::Path};
     use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
@@ -1102,8 +1100,8 @@ mod tests {
         TimelineMetadata::from_bytes(&metadata.to_bytes().unwrap()).unwrap()
     }
 
-    fn assert_file_list(a: &HashSet<String>, b: &[&str]) {
-        let mut avec: Vec<&str> = a.iter().map(|a| a.as_str()).collect();
+    fn assert_file_list(a: &HashSet<LayerFileName>, b: &[&str]) {
+        let mut avec: Vec<String> = a.iter().map(|x| x.file_name()).collect();
         avec.sort();
 
         let mut bvec = b.to_vec();
@@ -1198,11 +1196,11 @@ mod tests {
         std::fs::write(timeline_path.join("bar"), &content_bar)?;
 
         client.schedule_layer_file_upload(
-            &timeline_path.join("foo"),
+            &LayerFileName::Test("foo".to_owned()),
             &LayerFileMetadata::new(content_foo.len() as u64),
         )?;
         client.schedule_layer_file_upload(
-            &timeline_path.join("bar"),
+            &LayerFileName::Test("bar".to_owned()),
             &LayerFileMetadata::new(content_bar.len() as u64),
         )?;
 
@@ -1244,10 +1242,10 @@ mod tests {
         let content_baz = dummy_contents("baz");
         std::fs::write(timeline_path.join("baz"), &content_baz)?;
         client.schedule_layer_file_upload(
-            &timeline_path.join("baz"),
+            &LayerFileName::Test("baz".to_owned()),
             &LayerFileMetadata::new(content_baz.len() as u64),
         )?;
-        client.schedule_layer_file_deletion(&[timeline_path.join("foo")])?;
+        client.schedule_layer_file_deletion(&[LayerFileName::Test("foo".to_owned())])?;
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();

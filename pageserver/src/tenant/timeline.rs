@@ -11,7 +11,7 @@ use tokio::task::spawn_blocking;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
-    storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
+    storage_layer::{PersistentLayer, ValueReconstructResult, ValueReconstructState},
 };
 
 use crate::config::PageServerConf;
@@ -62,6 +62,9 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use crate::{page_cache, storage_sync::index::LayerFileMetadata};
 
+use super::filename::LayerFileName;
+use super::storage_layer::Layer;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
     NotStarted,
@@ -78,7 +81,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub layers: RwLock<LayerMap>,
+    pub layers: RwLock<LayerMap<dyn PersistentLayer>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -927,7 +930,7 @@ impl Timeline {
                 let layer =
                     ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
 
-                trace!("found layer {}", layer.filename().display());
+                trace!("found layer {}", layer.path().display());
                 total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
@@ -951,7 +954,7 @@ impl Timeline {
                 let layer =
                     DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
 
-                trace!("found layer {}", layer.filename().display());
+                trace!("found layer {}", layer.path().display());
                 total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
@@ -998,9 +1001,9 @@ impl Timeline {
         &self,
         index_part: &IndexPart,
         remote_client: &RemoteTimelineClient,
-        local_layers: HashSet<PathBuf>,
+        local_layers: HashMap<LayerFileName, Arc<dyn PersistentLayer>>,
         up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashSet<PathBuf>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn PersistentLayer>>> {
         // Are we missing some files that are present in remote storage?
         // Download them now.
         // TODO Downloading many files this way is not efficient.
@@ -1012,8 +1015,7 @@ impl Timeline {
         let mut local_only_layers = local_layers;
         let timeline_dir = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for remote_layer_name in &index_part.timeline_layers {
-            let local_layer_path = timeline_dir.join(remote_layer_name);
-            local_only_layers.remove(&local_layer_path);
+            local_only_layers.remove(remote_layer_name);
 
             let remote_layer_metadata = index_part
                 .layer_metadata
@@ -1021,10 +1023,7 @@ impl Timeline {
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
 
-            let remote_layer_path = self
-                .conf
-                .remote_path(&local_layer_path)
-                .expect("local_layer_path received from the same conf that provided a workdir");
+            let local_layer_path = timeline_dir.join(remote_layer_name.file_name());
 
             if local_layer_path.exists() {
                 let mut already_downloaded = true;
@@ -1056,83 +1055,74 @@ impl Timeline {
                     continue;
                 }
             } else {
-                info!("remote layer {remote_layer_path:?} does not exist locally");
+                info!("remote layer {remote_layer_name:?} does not exist locally");
             }
 
-            let layer_name = local_layer_path
-                .file_name()
-                .and_then(|os_str| os_str.to_str())
-                .with_context(|| {
-                    format!("Layer file {local_layer_path:?} has no name in unicode")
-                })?;
-            if let Some(imgfilename) = ImageFileName::parse_str(layer_name) {
-                if imgfilename.lsn > up_to_date_disk_consistent_lsn {
-                    warn!(
+            match remote_layer_name {
+                LayerFileName::Image(imgfilename) => {
+                    if imgfilename.lsn > up_to_date_disk_consistent_lsn {
+                        warn!(
                         "found future image layer {} on timeline {} remote_consistent_lsn is {}",
                         imgfilename, self.timeline_id, up_to_date_disk_consistent_lsn
                     );
-                    continue;
+                        continue;
+                    }
+
+                    trace!("downloading image file: {remote_layer_name:?}");
+                    let downloaded_size = remote_client
+                        .download_layer_file(remote_layer_name, &remote_layer_metadata)
+                        .await
+                        .with_context(|| {
+                            format!("failed to download image layer {remote_layer_name:?}")
+                        })?;
+                    trace!("done");
+
+                    let image_layer =
+                        ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, imgfilename);
+
+                    self.layers
+                        .write()
+                        .unwrap()
+                        .insert_historic(Arc::new(image_layer));
+                    self.metrics
+                        .current_physical_size_gauge
+                        .add(downloaded_size);
                 }
-
-                trace!("downloading image file: {remote_layer_path:?}");
-                let downloaded_size = remote_client
-                    .download_layer_file(&remote_layer_path, &remote_layer_metadata)
-                    .await
-                    .with_context(|| {
-                        format!("failed to download image layer from path {remote_layer_path:?}")
-                    })?;
-                trace!("done");
-
-                let image_layer =
-                    ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
-
-                self.layers
-                    .write()
-                    .unwrap()
-                    .insert_historic(Arc::new(image_layer));
-                self.metrics
-                    .current_physical_size_gauge
-                    .add(downloaded_size);
-            } else if let Some(deltafilename) = DeltaFileName::parse_str(layer_name) {
-                // Create a DeltaLayer struct for each delta file.
-                // The end-LSN is exclusive, while disk_consistent_lsn is
-                // inclusive. For example, if disk_consistent_lsn is 100, it is
-                // OK for a delta layer to have end LSN 101, but if the end LSN
-                // is 102, then it might not have been fully flushed to disk
-                // before crash.
-                if deltafilename.lsn_range.end > up_to_date_disk_consistent_lsn + 1 {
-                    warn!(
+                LayerFileName::Delta(deltafilename) => {
+                    // Create a DeltaLayer struct for each delta file.
+                    // The end-LSN is exclusive, while disk_consistent_lsn is
+                    // inclusive. For example, if disk_consistent_lsn is 100, it is
+                    // OK for a delta layer to have end LSN 101, but if the end LSN
+                    // is 102, then it might not have been fully flushed to disk
+                    // before crash.
+                    if deltafilename.lsn_range.end > up_to_date_disk_consistent_lsn + 1 {
+                        warn!(
                         "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
                         deltafilename, self.timeline_id, up_to_date_disk_consistent_lsn
                     );
-                    continue;
+                        continue;
+                    }
+
+                    trace!("downloading delta file: {remote_layer_name:?}");
+                    let sz = remote_client
+                        .download_layer_file(remote_layer_name, &remote_layer_metadata)
+                        .await
+                        .with_context(|| {
+                            format!("failed to download delta layer {remote_layer_name:?}")
+                        })?;
+                    trace!("done");
+
+                    let delta_layer =
+                        DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, deltafilename);
+
+                    self.layers
+                        .write()
+                        .unwrap()
+                        .insert_historic(Arc::new(delta_layer));
+                    self.metrics.current_physical_size_gauge.add(sz);
                 }
-
-                trace!("downloading delta file: {remote_layer_path:?}");
-                let sz = remote_client
-                    .download_layer_file(&remote_layer_path, &remote_layer_metadata)
-                    .await
-                    .with_context(|| {
-                        format!("failed to download delta layer from path {remote_layer_path:?}")
-                    })?;
-                trace!("done");
-
-                let delta_layer =
-                    DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
-
-                self.layers
-                    .write()
-                    .unwrap()
-                    .insert_historic(Arc::new(delta_layer));
-                self.metrics.current_physical_size_gauge.add(sz);
-            } else if layer_name.ends_with(".old") {
-                // For details see https://github.com/neondatabase/neon/issues/3024
-                warn!(
-                    "got backup file on the remote storage, ignoring it {file}",
-                    file = layer_name
-                )
-            } else {
-                bail!("unexpected layer filename {layer_name} in remote storage path: {remote_layer_path:?}");
+                #[cfg(test)]
+                LayerFileName::Test(_) => unreachable!(),
             }
         }
 
@@ -1169,18 +1159,13 @@ impl Timeline {
 
         let disk_consistent_lsn = up_to_date_metadata.disk_consistent_lsn();
 
-        // Build a map of local layers for quick lookups
         let local_layers = self
             .layers
             .read()
             .unwrap()
             .iter_historic_layers()
-            .map(|historic_layer| {
-                historic_layer
-                    .local_path()
-                    .expect("Historic layers should have a path")
-            })
-            .collect::<HashSet<_>>();
+            .map(|l| (l.filename(), l))
+            .collect::<HashMap<_, _>>();
 
         let local_only_layers = match index_part {
             Some(index_part) => {
@@ -1189,6 +1174,7 @@ impl Timeline {
                     index_part.timeline_layers.len()
                 );
                 remote_client.init_upload_queue(index_part)?;
+
                 self.download_missing(index_part, remote_client, local_layers, disk_consistent_lsn)
                     .await?
             }
@@ -1200,14 +1186,15 @@ impl Timeline {
         };
 
         // Are there local files that don't exist remotely? Schedule uploads for them
-        for layer_path in &local_only_layers {
+        for (layer_name, layer) in &local_only_layers {
+            let layer_path = layer.local_path();
             let layer_size = layer_path
                 .metadata()
                 .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
                 .len();
             info!("scheduling {layer_path:?} for upload");
             remote_client
-                .schedule_layer_file_upload(layer_path, &LayerFileMetadata::new(layer_size))?;
+                .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
         }
         if !local_only_layers.is_empty() {
             remote_client.schedule_index_upload(up_to_date_metadata)?;
@@ -1322,7 +1309,36 @@ impl Timeline {
             Err(e) => error!("Failed to compute current logical size for metrics update: {e:?}"),
         }
     }
+}
 
+type TraversalId = String;
+
+trait TraversalLayerExt {
+    fn traversal_id(&self) -> TraversalId;
+}
+
+impl TraversalLayerExt for Arc<dyn PersistentLayer> {
+    fn traversal_id(&self) -> String {
+        debug_assert!(
+            self.local_path().to_str().unwrap()
+                .contains(&format!("{}", self.get_timeline_id())),
+            "need timeline ID to uniquely identify the layer when tranversal crosses ancestor boundary",
+        );
+        format!("{}", self.local_path().display())
+    }
+}
+
+impl TraversalLayerExt for Arc<InMemoryLayer> {
+    fn traversal_id(&self) -> String {
+        format!(
+            "timeline {} in-memory {}",
+            self.get_timeline_id(),
+            self.short_id()
+        )
+    }
+}
+
+impl Timeline {
     ///
     /// Get a handle to a Layer for reading.
     ///
@@ -1343,7 +1359,7 @@ impl Timeline {
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
-        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
+        let mut traversal_path = Vec::<(ValueReconstructResult, Lsn, TraversalId)>::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -1425,7 +1441,7 @@ impl Timeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, open_layer.clone()));
+                    traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
                     continue;
                 }
             }
@@ -1440,7 +1456,7 @@ impl Timeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, frozen_layer.clone()));
+                    traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
                     continue 'outer;
                 }
             }
@@ -1455,7 +1471,7 @@ impl Timeline {
                     reconstruct_state,
                 )?;
                 cont_lsn = lsn_floor;
-                traversal_path.push((result, cont_lsn, layer));
+                traversal_path.push((result, cont_lsn, layer.traversal_id()));
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
@@ -1670,7 +1686,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip(self, frozen_layer), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.filename().display()))]
+    #[instrument(skip(self, frozen_layer), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
     async fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> anyhow::Result<()> {
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
@@ -1729,7 +1745,7 @@ impl Timeline {
     fn update_metadata_file(
         &self,
         disk_consistent_lsn: Lsn,
-        layer_paths_to_upload: HashMap<PathBuf, LayerFileMetadata>,
+        layer_paths_to_upload: HashMap<LayerFileName, LayerFileMetadata>,
     ) -> anyhow::Result<()> {
         // We can only save a valid 'prev_record_lsn' value on disk if we
         // flushed *all* in-memory changes to disk. We only track
@@ -1794,10 +1810,11 @@ impl Timeline {
     fn create_delta_layer(
         &self,
         frozen_layer: &InMemoryLayer,
-    ) -> anyhow::Result<(PathBuf, LayerFileMetadata)> {
+    ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
         // Write it out
         let new_delta = frozen_layer.write_to_disk()?;
         let new_delta_path = new_delta.path();
+        let new_delta_filename = new_delta.filename();
 
         // Sync it to disk.
         //
@@ -1826,7 +1843,7 @@ impl Timeline {
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
-        Ok((new_delta_path, LayerFileMetadata::new(sz)))
+        Ok((new_delta_filename, LayerFileMetadata::new(sz)))
     }
 
     fn repartition(&self, lsn: Lsn, partition_size: u64) -> anyhow::Result<(KeyPartitioning, Lsn)> {
@@ -1888,7 +1905,7 @@ impl Timeline {
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         force: bool,
-    ) -> anyhow::Result<HashMap<PathBuf, LayerFileMetadata>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, LayerFileMetadata>> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
         for partition in partitioning.parts.iter() {
@@ -1966,9 +1983,10 @@ impl Timeline {
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
         let mut layers = self.layers.write().unwrap();
+        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for l in image_layers {
-            let path = l.path();
-            let metadata = path.metadata()?;
+            let path = l.filename();
+            let metadata = timeline_path.join(path.file_name()).metadata()?;
 
             layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
 
@@ -1984,7 +2002,7 @@ impl Timeline {
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
     new_layers: Vec<DeltaLayer>,
-    deltas_to_compact: Vec<Arc<dyn Layer>>,
+    deltas_to_compact: Vec<Arc<dyn PersistentLayer>>,
 }
 
 impl Timeline {
@@ -2042,7 +2060,7 @@ impl Timeline {
             level0_deltas.len()
         );
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().display());
+            info!("compact includes {}", l.filename().file_name());
         }
         // We don't need the original list of layers anymore. Drop it so that
         // we don't accidentally use it later in the function.
@@ -2271,7 +2289,7 @@ impl Timeline {
 
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
-                    &new_delta_path,
+                    &l.filename(),
                     &LayerFileMetadata::new(metadata.len()),
                 )?;
             }
@@ -2280,19 +2298,19 @@ impl Timeline {
             self.metrics.current_physical_size_gauge.add(metadata.len());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            layers.insert_historic(Arc::new(l));
+            let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
+            layers.insert_historic(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
-        let mut layer_paths_to_delete = Vec::with_capacity(deltas_to_compact.len());
+        let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
-            if let Some(path) = l.local_path() {
-                self.metrics
-                    .current_physical_size_gauge
-                    .sub(path.metadata()?.len());
-                layer_paths_to_delete.push(path);
-            }
+            let path = l.local_path();
+            self.metrics
+                .current_physical_size_gauge
+                .sub(path.metadata()?.len());
+            layer_names_to_delete.push(l.filename());
             l.delete()?;
             layers.remove_historic(l);
         }
@@ -2300,7 +2318,7 @@ impl Timeline {
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
+            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
         }
 
         Ok(())
@@ -2485,23 +2503,13 @@ impl Timeline {
         //
         let mut layers = self.layers.write().unwrap();
         'outer: for l in layers.iter_historic_layers() {
-            // This layer is in the process of being flushed to disk.
-            // It will be swapped out of the layer map, replaced with
-            // on-disk layers containing the same data.
-            // We can't GC it, as it's not on disk. We can't remove it
-            // from the layer map yet, as it would make its data
-            // inaccessible.
-            if l.is_in_memory() {
-                continue;
-            }
-
             result.layers_total += 1;
 
             // 1. Is it newer than GC horizon cutoff point?
             if l.get_lsn_range().end > horizon_cutoff {
                 debug!(
                     "keeping {} because it's newer than horizon_cutoff {}",
-                    l.filename().display(),
+                    l.filename().file_name(),
                     horizon_cutoff
                 );
                 result.layers_needed_by_cutoff += 1;
@@ -2512,7 +2520,7 @@ impl Timeline {
             if l.get_lsn_range().end > pitr_cutoff {
                 debug!(
                     "keeping {} because it's newer than pitr_cutoff {}",
-                    l.filename().display(),
+                    l.filename().file_name(),
                     pitr_cutoff
                 );
                 result.layers_needed_by_pitr += 1;
@@ -2529,7 +2537,7 @@ impl Timeline {
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
-                        l.filename().display(),
+                        l.filename().file_name(),
                         retain_lsn,
                         l.is_incremental(),
                     );
@@ -2562,7 +2570,7 @@ impl Timeline {
             {
                 debug!(
                     "keeping {} because it is the latest layer",
-                    l.filename().display()
+                    l.filename().file_name()
                 );
                 result.layers_not_updated += 1;
                 continue 'outer;
@@ -2571,7 +2579,7 @@ impl Timeline {
             // We didn't find any reason to keep this file, so remove it.
             debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.filename().display(),
+                l.filename().file_name(),
                 l.is_incremental(),
             );
             layers_to_remove.push(Arc::clone(&l));
@@ -2580,14 +2588,13 @@ impl Timeline {
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
-        let mut layer_paths_to_delete = Vec::with_capacity(layers_to_remove.len());
+        let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
-            if let Some(path) = doomed_layer.local_path() {
-                self.metrics
-                    .current_physical_size_gauge
-                    .sub(path.metadata()?.len());
-                layer_paths_to_delete.push(path);
-            }
+            let path = doomed_layer.local_path();
+            self.metrics
+                .current_physical_size_gauge
+                .sub(path.metadata()?.len());
+            layer_names_to_delete.push(doomed_layer.filename());
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
@@ -2603,7 +2610,7 @@ impl Timeline {
         }
 
         if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
+            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
         }
 
         result.elapsed = now.elapsed()?;
@@ -2688,7 +2695,7 @@ impl Timeline {
 /// to an error, as anyhow context information.
 fn layer_traversal_error(
     msg: String,
-    path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)>,
+    path: Vec<(ValueReconstructResult, Lsn, TraversalId)>,
 ) -> anyhow::Result<()> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
@@ -2697,9 +2704,7 @@ fn layer_traversal_error(
         .map(|(r, c, l)| {
             format!(
                 "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r,
-                c,
-                l.filename().display()
+                r, c, l,
             )
         })
         .chain(std::iter::once(msg));

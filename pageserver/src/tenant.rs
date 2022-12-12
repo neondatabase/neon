@@ -57,6 +57,7 @@ use crate::storage_sync::RemoteTimelineClient;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::metadata::load_metadata;
+use crate::tenant::storage_layer::Layer;
 use crate::tenant_config::TenantConfOpt;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
@@ -88,8 +89,6 @@ pub mod storage_layer;
 mod timeline;
 
 pub mod size;
-
-use storage_layer::Layer;
 
 pub use timeline::Timeline;
 

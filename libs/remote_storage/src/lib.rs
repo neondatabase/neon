@@ -142,7 +142,7 @@ impl std::fmt::Display for DownloadError {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
             DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
-            DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e}"),
+            DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
         }
     }
 }

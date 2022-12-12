@@ -411,12 +411,10 @@ def test_tenant_ignores_backup_file(
     env.postgres.stop_all()
     env.pageserver.stop()
 
-    # file is still mentioned in the index. Removing it requires more hacking on remote queue initialization
-    # Will be easier to do once there will be no .download_missing so it will be only one cycle through the layers
-    # in load_layer_map
+    # the .old file is gone from newly serialized index_part
     new_index_part = local_fs_index_part(env, tenant_id, timeline_id)
     backup_layers = filter(lambda x: x.endswith(".old"), new_index_part["timeline_layers"])
-    assert len(list(backup_layers)) == 1
+    assert len(list(backup_layers)) == 0
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])

@@ -6,15 +6,16 @@ use anyhow::{bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::debug;
+use tracing::{debug, info_span, Instrument};
 
 use crate::config::PageServerConf;
 use crate::storage_sync::index::LayerFileMetadata;
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use crate::tenant::filename::LayerFileName;
+use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
-use super::index::IndexPart;
+use super::index::{IndexPart, IndexPartUnclean};
 
 async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
     fs::File::open(path).await?.sync_all().await
@@ -28,10 +29,16 @@ async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Er
 pub async fn download_layer_file<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
-    remote_path: &'a RemotePath,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    layer_file_name: &'a LayerFileName,
     layer_metadata: &'a LayerFileMetadata,
 ) -> anyhow::Result<u64> {
-    let local_path = conf.local_path(remote_path);
+    let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
+
+    let local_path = timeline_path.join(layer_file_name.file_name());
+
+    let remote_path = conf.remote_path(&local_path)?;
 
     // Perform a rename inspired by durable_rename from file_utils.c.
     // The sequence:
@@ -52,7 +59,7 @@ pub async fn download_layer_file<'a>(
             temp_file_path.display()
         )
     })?;
-    let mut download = storage.download(remote_path).await.with_context(|| {
+    let mut download = storage.download(&remote_path).await.with_context(|| {
         format!(
             "Failed to open a download stream for layer with remote storage path '{remote_path:?}'"
         )
@@ -169,7 +176,9 @@ pub async fn list_remote_timelines<'a>(
             part_downloads.push(async move {
                 (
                     timeline_id,
-                    download_index_part(conf, &storage_clone, tenant_id, timeline_id).await,
+                    download_index_part(conf, &storage_clone, tenant_id, timeline_id)
+                        .instrument(info_span!("download_index_part", timeline=%timeline_id))
+                        .await,
                 )
             });
         }
@@ -211,11 +220,13 @@ pub async fn download_index_part(
     .with_context(|| format!("Failed to download an index part into file {index_part_path:?}"))
     .map_err(DownloadError::Other)?;
 
-    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
+    let index_part: IndexPartUnclean = serde_json::from_slice(&index_part_bytes)
         .with_context(|| {
             format!("Failed to deserialize index part file into file {index_part_path:?}")
         })
         .map_err(DownloadError::Other)?;
+
+    let index_part = index_part.remove_unclean_layer_file_names();
 
     Ok(index_part)
 }
