@@ -2298,6 +2298,7 @@ impl Timeline {
             l.delete()?;
             layers.remove_historic(l);
         }
+        layers.rebuild_index();
         drop(layers);
 
         // Also schedule the deletions in remote storage
@@ -2594,6 +2595,7 @@ impl Timeline {
             layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
         }
+        layers.rebuild_index();
 
         info!(
             "GC completed removing {} layers, cutoff {}",
