@@ -107,6 +107,32 @@ fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds
     }
 }
 
+/// Wait until the reference count of an Arc is 1. In other words, until there
+/// are no other references except the one passed as argument.
+///
+/// Implemented by polling and sleeping. `retryfn` is called after each unsuccessful
+/// attempt. It can be used to print more information about the operation to the log.
+///
+/// NOTE: This only checks the strong reference count. If there are weak references,
+/// it's possible for a weak reference to be upgraded just as this function returns.
+/// So unlike with `Arc::try_wait`, you cannot be certain that there are no other
+/// references if weak references exist.
+///
+pub async fn wait_arc_refcount<T: ?Sized, F>(this: &std::sync::Arc<T>, retryfn: F)
+    where F: Fn(&std::sync::Arc<T>, u32)
+{
+    let mut attempts: u32 = 0;
+    loop {
+        if std::sync::Arc::strong_count(this) == 1 {
+            return;
+        }
+        // sleep a little
+        retryfn(this, attempts);
+        crate::exponential_backoff(attempts, 0.1, 1.0).await;
+        attempts += 1;
+    }
+}
+
 /// The name of the metadata file pageserver creates per timeline.
 /// Full path: `tenants/<tenant_id>/timelines/<timeline_id>/metadata`.
 pub const METADATA_FILE_NAME: &str = "metadata";

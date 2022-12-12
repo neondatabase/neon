@@ -2262,41 +2262,51 @@ impl Timeline {
                 .context("wait for layer upload ops to complete")?;
         }
 
-        let mut layers = self.layers.write().unwrap();
-        let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
-        for l in new_layers {
-            let new_delta_path = l.path();
+        {
+            let mut layers = self.layers.write().unwrap();
+            let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
+            for l in new_layers {
+                let new_delta_path = l.path();
 
-            let metadata = new_delta_path.metadata()?;
+                let metadata = new_delta_path.metadata()?;
 
-            if let Some(remote_client) = &self.remote_client {
-                remote_client.schedule_layer_file_upload(
-                    &new_delta_path,
-                    &LayerFileMetadata::new(metadata.len()),
-                )?;
+                if let Some(remote_client) = &self.remote_client {
+                    remote_client.schedule_layer_file_upload(
+                        &new_delta_path,
+                        &LayerFileMetadata::new(metadata.len()),
+                    )?;
+                }
+
+                // update the timeline's physical size
+                self.metrics.current_physical_size_gauge.add(metadata.len());
+
+                new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
+                layers.insert_historic(Arc::new(l));
             }
 
-            // update the timeline's physical size
-            self.metrics.current_physical_size_gauge.add(metadata.len());
-
-            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            layers.insert_historic(Arc::new(l));
+            // Now that we have reshuffled the data to set of new delta layers, we can
+            // delete the old ones
+            for l in &deltas_to_compact {
+                if let Some(path) = l.local_path() {
+                    self.metrics
+                        .current_physical_size_gauge
+                        .sub(path.metadata()?.len());
+                }
+                layers.remove_historic(&l);
+            }
+            drop(layers);
         }
 
-        // Now that we have reshuffled the data to set of new delta layers, we can
-        // delete the old ones
         let mut layer_paths_to_delete = Vec::with_capacity(deltas_to_compact.len());
-        for l in deltas_to_compact {
+        for l in deltas_to_compact.into_iter() {
             if let Some(path) = l.local_path() {
-                self.metrics
-                    .current_physical_size_gauge
-                    .sub(path.metadata()?.len());
                 layer_paths_to_delete.push(path);
             }
+            crate::wait_arc_refcount(&l, |l, attempt| {
+                info!("layer file {:?} is still in use, waiting ({} attempt)", l.local_path(), attempt)
+            }).await;
             l.delete()?;
-            layers.remove_historic(l);
         }
-        drop(layers);
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
@@ -2483,113 +2493,121 @@ impl Timeline {
         // 3. it doesn't need to be retained for 'retain_lsns';
         // 4. newer on-disk image layers cover the layer's whole key range
         //
-        let mut layers = self.layers.write().unwrap();
-        'outer: for l in layers.iter_historic_layers() {
-            // This layer is in the process of being flushed to disk.
-            // It will be swapped out of the layer map, replaced with
-            // on-disk layers containing the same data.
-            // We can't GC it, as it's not on disk. We can't remove it
-            // from the layer map yet, as it would make its data
-            // inaccessible.
-            if l.is_in_memory() {
-                continue;
-            }
+        {
+            let layers = self.layers.read().unwrap();
+            'outer: for l in layers.iter_historic_layers() {
+                // This layer is in the process of being flushed to disk.
+                // It will be swapped out of the layer map, replaced with
+                // on-disk layers containing the same data.
+                // We can't GC it, as it's not on disk. We can't remove it
+                // from the layer map yet, as it would make its data
+                // inaccessible.
+                if l.is_in_memory() {
+                    continue;
+                }
 
-            result.layers_total += 1;
+                result.layers_total += 1;
 
-            // 1. Is it newer than GC horizon cutoff point?
-            if l.get_lsn_range().end > horizon_cutoff {
-                debug!(
-                    "keeping {} because it's newer than horizon_cutoff {}",
-                    l.filename().display(),
-                    horizon_cutoff
-                );
-                result.layers_needed_by_cutoff += 1;
-                continue 'outer;
-            }
-
-            // 2. It is newer than PiTR cutoff point?
-            if l.get_lsn_range().end > pitr_cutoff {
-                debug!(
-                    "keeping {} because it's newer than pitr_cutoff {}",
-                    l.filename().display(),
-                    pitr_cutoff
-                );
-                result.layers_needed_by_pitr += 1;
-                continue 'outer;
-            }
-
-            // 3. Is it needed by a child branch?
-            // NOTE With that we would keep data that
-            // might be referenced by child branches forever.
-            // We can track this in child timeline GC and delete parent layers when
-            // they are no longer needed. This might be complicated with long inheritance chains.
-            for retain_lsn in &retain_lsns {
-                // start_lsn is inclusive
-                if &l.get_lsn_range().start <= retain_lsn {
+                // 1. Is it newer than GC horizon cutoff point?
+                if l.get_lsn_range().end > horizon_cutoff {
                     debug!(
-                        "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
+                        "keeping {} because it's newer than horizon_cutoff {}",
                         l.filename().display(),
-                        retain_lsn,
-                        l.is_incremental(),
+                        horizon_cutoff
                     );
-                    result.layers_needed_by_branches += 1;
+                    result.layers_needed_by_cutoff += 1;
                     continue 'outer;
                 }
-            }
 
-            // 4. Is there a later on-disk layer for this relation?
-            //
-            // The end-LSN is exclusive, while disk_consistent_lsn is
-            // inclusive. For example, if disk_consistent_lsn is 100, it is
-            // OK for a delta layer to have end LSN 101, but if the end LSN
-            // is 102, then it might not have been fully flushed to disk
-            // before crash.
-            //
-            // For example, imagine that the following layers exist:
-            //
-            // 1000      - image (A)
-            // 1000-2000 - delta (B)
-            // 2000      - image (C)
-            // 2000-3000 - delta (D)
-            // 3000      - image (E)
-            //
-            // If GC horizon is at 2500, we can remove layers A and B, but
-            // we cannot remove C, even though it's older than 2500, because
-            // the delta layer 2000-3000 depends on it.
-            if !layers
-                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
-            {
+                // 2. It is newer than PiTR cutoff point?
+                if l.get_lsn_range().end > pitr_cutoff {
+                    debug!(
+                        "keeping {} because it's newer than pitr_cutoff {}",
+                        l.filename().display(),
+                        pitr_cutoff
+                    );
+                    result.layers_needed_by_pitr += 1;
+                    continue 'outer;
+                }
+
+                // 3. Is it needed by a child branch?
+                // NOTE With that we would keep data that
+                // might be referenced by child branches forever.
+                // We can track this in child timeline GC and delete parent layers when
+                // they are no longer needed. This might be complicated with long inheritance chains.
+                for retain_lsn in &retain_lsns {
+                    // start_lsn is inclusive
+                    if &l.get_lsn_range().start <= retain_lsn {
+                        debug!(
+                            "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
+                            l.filename().display(),
+                            retain_lsn,
+                            l.is_incremental(),
+                        );
+                        result.layers_needed_by_branches += 1;
+                        continue 'outer;
+                    }
+                }
+
+                // 4. Is there a later on-disk layer for this relation?
+                //
+                // The end-LSN is exclusive, while disk_consistent_lsn is
+                // inclusive. For example, if disk_consistent_lsn is 100, it is
+                // OK for a delta layer to have end LSN 101, but if the end LSN
+                // is 102, then it might not have been fully flushed to disk
+                // before crash.
+                //
+                // For example, imagine that the following layers exist:
+                //
+                // 1000      - image (A)
+                // 1000-2000 - delta (B)
+                // 2000      - image (C)
+                // 2000-3000 - delta (D)
+                // 3000      - image (E)
+                //
+                // If GC horizon is at 2500, we can remove layers A and B, but
+                // we cannot remove C, even though it's older than 2500, because
+                // the delta layer 2000-3000 depends on it.
+                if !layers
+                    .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
+                {
+                    debug!(
+                        "keeping {} because it is the latest layer",
+                        l.filename().display()
+                    );
+                    result.layers_not_updated += 1;
+                    continue 'outer;
+                }
+
+                // We didn't find any reason to keep this file, so remove it.
                 debug!(
-                    "keeping {} because it is the latest layer",
-                    l.filename().display()
+                    "garbage collecting {} is_dropped: xx is_incremental: {}",
+                    l.filename().display(),
+                    l.is_incremental(),
                 );
-                result.layers_not_updated += 1;
-                continue 'outer;
+                layers_to_remove.push(Arc::clone(&l));
             }
-
-            // We didn't find any reason to keep this file, so remove it.
-            debug!(
-                "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.filename().display(),
-                l.is_incremental(),
-            );
-            layers_to_remove.push(Arc::clone(&l));
         }
 
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
         let mut layer_paths_to_delete = Vec::with_capacity(layers_to_remove.len());
-        for doomed_layer in layers_to_remove {
+        for doomed_layer in layers_to_remove.into_iter() {
             if let Some(path) = doomed_layer.local_path() {
                 self.metrics
                     .current_physical_size_gauge
                     .sub(path.metadata()?.len());
                 layer_paths_to_delete.push(path);
             }
+            {
+                let mut layers = self.layers.write().unwrap();
+                layers.remove_historic(&doomed_layer);
+            }
+            crate::wait_arc_refcount(&doomed_layer, |l, attempt| {
+                info!("layer file {:?} is still in use, waiting ({} attempt)", l.local_path(), attempt)
+            }).await;
             doomed_layer.delete()?;
-            layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
         }
 

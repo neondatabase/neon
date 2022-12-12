@@ -357,7 +357,7 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
+    pub fn remove_historic(&mut self, layer: &Arc<dyn Layer>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             let len_before = self.l0_delta_layers.len();
 
@@ -372,7 +372,7 @@ impl LayerMap {
         }
         assert!(self
             .historic_layers
-            .remove(&LayerRTreeObject::new(layer))
+            .remove(&LayerRTreeObject::new(Arc::clone(layer)))
             .is_some());
         NUM_ONDISK_LAYERS.dec();
     }
