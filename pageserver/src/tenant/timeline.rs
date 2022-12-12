@@ -1033,11 +1033,13 @@ impl Timeline {
                 .unwrap_or(LayerFileMetadata::MISSING);
 
             // Is the local layer's size different from the size stored in the
-            // remote index file? If so, rename_to_backup those files & remove
-            // local_layer form the layer map.
-            // We'll download a fresh copy of the layer file below.
+            // remote index file?
+            // If so, rename_to_backup those files & replace their local layer with
+            // a RemoteLayer in the laye rmap so that we re-download them on-demand.
             if let Some(local_layer) = local_layer {
-                let local_layer_path = local_layer.local_path();
+                let local_layer_path = local_layer
+                    .local_path()
+                    .expect("caller must ensure that local_layers only contains local layers");
                 ensure!(
                     local_layer_path.exists(),
                     "every layer from local_layers must exist on disk: {}",
@@ -1212,7 +1214,10 @@ impl Timeline {
 
         // Are there local files that don't exist remotely? Schedule uploads for them
         for (layer_name, layer) in &local_only_layers {
-            let layer_path = layer.local_path();
+            // XXX solve this in the type system
+            let layer_path = layer
+                .local_path()
+                .expect("local_only_layers only contains local layers");
             let layer_size = layer_path
                 .metadata()
                 .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
@@ -1452,12 +1457,21 @@ trait TraversalLayerExt {
 
 impl TraversalLayerExt for Arc<dyn PersistentLayer> {
     fn traversal_id(&self) -> String {
-        debug_assert!(
-            self.local_path().to_str().unwrap()
-                .contains(&format!("{}", self.get_timeline_id())),
-            "need timeline ID to uniquely identify the layer when tranversal crosses ancestor boundary",
-        );
-        format!("{}", self.local_path().display())
+        match self.local_path() {
+            Some(local_path) => {
+                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", self.get_timeline_id())),
+                    "need timeline ID to uniquely identify the layer when tranversal crosses ancestor boundary",
+                );
+                format!("{}", local_path.display())
+            }
+            None => {
+                format!(
+                    "remote {}/{}",
+                    self.get_timeline_id(),
+                    self.filename().file_name()
+                )
+            }
+        }
     }
 }
 
@@ -2445,10 +2459,11 @@ impl Timeline {
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
-            let path = l.local_path();
-            self.metrics
-                .current_physical_size_gauge
-                .sub(path.metadata()?.len());
+            if let Some(path) = l.local_path() {
+                self.metrics
+                    .current_physical_size_gauge
+                    .sub(path.metadata()?.len());
+            }
             layer_names_to_delete.push(l.filename());
             l.delete()?;
             layers.remove_historic(l);
@@ -2731,10 +2746,11 @@ impl Timeline {
             // while iterating it. BTreeMap::retain() would be another option)
             let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
             for doomed_layer in layers_to_remove {
-                let path = doomed_layer.local_path();
-                self.metrics
-                    .current_physical_size_gauge
-                    .sub(path.metadata()?.len());
+                if let Some(path) = doomed_layer.local_path() {
+                    self.metrics
+                        .current_physical_size_gauge
+                        .sub(path.metadata()?.len());
+                }
                 layer_names_to_delete.push(doomed_layer.filename());
                 doomed_layer.delete()?;
                 layers.remove_historic(doomed_layer);

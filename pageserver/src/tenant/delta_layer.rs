@@ -387,8 +387,8 @@ impl PersistentLayer for DeltaLayer {
         self.layer_name().into()
     }
 
-    fn local_path(&self) -> PathBuf {
-        self.path()
+    fn local_path(&self) -> Option<PathBuf> {
+        Some(self.path())
     }
 
     fn iter(&self) -> Result<LayerIter<'_>> {
