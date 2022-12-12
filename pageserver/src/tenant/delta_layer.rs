@@ -385,8 +385,8 @@ impl Layer for DeltaLayer {
         self.layer_name().into()
     }
 
-    fn local_path(&self) -> Option<LayerFileName> {
-        Some(self.filename())
+    fn local_path(&self) -> PathBuf {
+        self.path()
     }
 
     fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {

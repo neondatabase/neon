@@ -206,8 +206,8 @@ impl Layer for ImageLayer {
         self.layer_name().into()
     }
 
-    fn local_path(&self) -> Option<LayerFileName> {
-        Some(self.filename())
+    fn local_path(&self) -> PathBuf {
+        self.path()
     }
 
     fn get_tenant_id(&self) -> TenantId {

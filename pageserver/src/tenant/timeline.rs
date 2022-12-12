@@ -11,7 +11,7 @@ use tokio::task::spawn_blocking;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -1001,9 +1001,9 @@ impl Timeline {
         &self,
         index_part: &IndexPart,
         remote_client: &RemoteTimelineClient,
-        local_layers: HashSet<LayerFileName>,
+        local_layers: HashMap<LayerFileName, Arc<dyn Layer>>,
         up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashSet<LayerFileName>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn Layer>>> {
         // Are we missing some files that are present in remote storage?
         // Download them now.
         // TODO Downloading many files this way is not efficient.
@@ -1159,18 +1159,13 @@ impl Timeline {
 
         let disk_consistent_lsn = up_to_date_metadata.disk_consistent_lsn();
 
-        // Build a map of local layers for quick lookups
         let local_layers = self
             .layers
             .read()
             .unwrap()
             .iter_historic_layers()
-            .map(|historic_layer| {
-                historic_layer
-                    .local_path()
-                    .expect("Historic layers should have a path")
-            })
-            .collect::<HashSet<_>>();
+            .map(|l| (l.filename(), l))
+            .collect::<HashMap<_, _>>();
 
         let local_only_layers = match index_part {
             Some(index_part) => {
@@ -1179,6 +1174,7 @@ impl Timeline {
                     index_part.timeline_layers.len()
                 );
                 remote_client.init_upload_queue(index_part)?;
+
                 self.download_missing(index_part, remote_client, local_layers, disk_consistent_lsn)
                     .await?
             }
@@ -1190,9 +1186,8 @@ impl Timeline {
         };
 
         // Are there local files that don't exist remotely? Schedule uploads for them
-        let timeline_dir = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
-        for layer_name in &local_only_layers {
-            let layer_path = timeline_dir.join(layer_name.file_name());
+        for (layer_name, layer) in &local_only_layers {
+            let layer_path = layer.local_path();
             let layer_size = layer_path
                 .metadata()
                 .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
@@ -2308,18 +2303,13 @@ impl Timeline {
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
-        let mut layer_paths_to_delete = Vec::with_capacity(deltas_to_compact.len());
+        let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
-            if let Some(fname) = l.local_path() {
-                let path = self
-                    .conf
-                    .timeline_path(&self.timeline_id, &self.tenant_id)
-                    .join(fname.file_name());
-                self.metrics
-                    .current_physical_size_gauge
-                    .sub(path.metadata()?.len());
-                layer_paths_to_delete.push(fname);
-            }
+            let path = l.local_path();
+            self.metrics
+                .current_physical_size_gauge
+                .sub(path.metadata()?.len());
+            layer_names_to_delete.push(l.filename());
             l.delete()?;
             layers.remove_historic(l);
         }
@@ -2327,7 +2317,7 @@ impl Timeline {
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
+            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
         }
 
         Ok(())
@@ -2597,18 +2587,13 @@ impl Timeline {
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
-        let mut layer_paths_to_delete = Vec::with_capacity(layers_to_remove.len());
+        let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
-            if let Some(fname) = doomed_layer.local_path() {
-                let path = self
-                    .conf
-                    .timeline_path(&self.timeline_id, &self.tenant_id)
-                    .join(fname.file_name());
-                self.metrics
-                    .current_physical_size_gauge
-                    .sub(path.metadata()?.len());
-                layer_paths_to_delete.push(fname);
-            }
+            let path = doomed_layer.local_path();
+            self.metrics
+                .current_physical_size_gauge
+                .sub(path.metadata()?.len());
+            layer_names_to_delete.push(doomed_layer.filename());
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
@@ -2624,7 +2609,7 @@ impl Timeline {
         }
 
         if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
+            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
         }
 
         result.elapsed = now.elapsed()?;

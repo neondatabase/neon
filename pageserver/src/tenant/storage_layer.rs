@@ -7,6 +7,7 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -139,11 +140,8 @@ pub trait Layer: Send + Sync + PureLayer {
     /// state as well as in the remote storage.
     fn filename(&self) -> LayerFileName;
 
-    /// If the layer has a corresponding file on a local filesystem, return its filename.
-    /// `None` otherwise.
-    /// NB: all current implementations return `Some`, but with on-demand download,
-    /// a new `RemoteLayer` type will be added that returns `None` here.
-    fn local_path(&self) -> Option<LayerFileName>;
+    // Path to the layer file in the local filesystem.
+    fn local_path(&self) -> PathBuf;
 
     /// Iterate through all keys and values stored in the layer
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
