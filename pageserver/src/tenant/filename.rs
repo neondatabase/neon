@@ -271,15 +271,6 @@ impl<'de> serde::de::Visitor<'de> for LayerFileNameVisitor {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for LayerFileName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        deserializer.deserialize_str(LayerFileNameVisitor)
-    }
-}
-
 /// Helper enum to hold a PageServerConf, or a path
 ///
 /// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the

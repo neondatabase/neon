@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use tracing::warn;
 
 use crate::tenant::{filename::LayerFileName, metadata::TimelineMetadata};
 
@@ -158,7 +159,8 @@ impl IndexPartUnclean {
         let IndexPartUnclean {
             version,
             timeline_layers,
-            missing_layers,
+            // this is an unused field, ignore it on cleaning
+            missing_layers: _,
             layer_metadata,
             disk_consistent_lsn,
             metadata_bytes,
@@ -168,14 +170,18 @@ impl IndexPartUnclean {
             version,
             timeline_layers: timeline_layers
                 .into_iter()
-                .filter_map(UncleanLayerFileName::into_clean)
+                .filter_map(|unclean_file_name| match unclean_file_name {
+                    UncleanLayerFileName::Clean(clean_name) => Some(clean_name),
+                    UncleanLayerFileName::BackupFile(backup_file_name) => {
+                        // For details see https://github.com/neondatabase/neon/issues/3024
+                        warn!(
+                            "got backup file on the remote storage, ignoring it {backup_file_name}"
+                        );
+                        None
+                    }
+                })
                 .collect(),
-            missing_layers: missing_layers.map(|missing_layers| {
-                missing_layers
-                    .into_iter()
-                    .filter_map(UncleanLayerFileName::into_clean)
-                    .collect()
-            }),
+            missing_layers: None,
             layer_metadata: layer_metadata
                 .into_iter()
                 .filter_map(|(l, m)| l.into_clean().map(|l| (l, m)))
@@ -253,7 +259,7 @@ mod tests {
         let expected = IndexPart {
             version: 0,
             timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
-            missing_layers: Some(HashSet::from([LayerFileName::new_test("not_a_real_layer_but_adding_coverage")])),
+            missing_layers: None, // disabled fields should not carry unused values further
             layer_metadata: HashMap::default(),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: [113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
@@ -282,7 +288,7 @@ mod tests {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
             timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
-            missing_layers: Some(HashSet::from([LayerFileName::new_test("not_a_real_layer_but_adding_coverage")])),
+            missing_layers: None,
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: Some(25600000),
@@ -297,7 +303,9 @@ mod tests {
             metadata_bytes: [113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
         };
 
-        let part = serde_json::from_str::<IndexPart>(example).unwrap();
+        let part = serde_json::from_str::<IndexPartUnclean>(example)
+            .unwrap()
+            .remove_unclean_layer_file_names();
         assert_eq!(part, expected);
     }
 

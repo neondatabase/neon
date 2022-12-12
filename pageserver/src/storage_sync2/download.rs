@@ -6,7 +6,7 @@ use anyhow::{bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::debug;
+use tracing::{debug, info_span, Instrument};
 
 use crate::config::PageServerConf;
 use crate::storage_sync::index::LayerFileMetadata;
@@ -176,7 +176,9 @@ pub async fn list_remote_timelines<'a>(
             part_downloads.push(async move {
                 (
                     timeline_id,
-                    download_index_part(conf, &storage_clone, tenant_id, timeline_id).await,
+                    download_index_part(conf, &storage_clone, tenant_id, timeline_id)
+                        .instrument(info_span!("download_index_part", timeline=%timeline_id))
+                        .await,
                 )
             });
         }
