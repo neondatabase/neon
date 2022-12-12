@@ -270,8 +270,8 @@ impl LayerMap {
         //      can be avoided in varous ways. Caching latest_image queries is
         //      probably the simplest, but combining the two data structures
         //      might be better.
-        let latest_layer = self.index.query(key.to_i128(), end_lsn.0);
-        let latest_image = self.images.query(key.to_i128(), end_lsn.0);
+        let latest_layer = self.index.query(key.to_i128(), end_lsn.0 - 1);
+        let latest_image = self.images.query(key.to_i128(), end_lsn.0 - 1);
         return Ok(latest_layer.map(|layer| {
             // Compute lsn_floor
             let mut lsn_floor = layer.get_lsn_range().start;
