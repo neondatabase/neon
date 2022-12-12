@@ -7,6 +7,10 @@ on:
       - release
   pull_request:
 
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
 concurrency:
   # Allow only one workflow per any non-`main` branch.
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
@@ -45,6 +49,79 @@ jobs:
         shell: bash
         id: build-tag
 
+  check-codestyle-python:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Cache poetry deps
+        id: cache_poetry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: v1-codestyle-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: Run isort to ensure code format
+        run: poetry run isort --diff --check .
+
+      - name: Run black to ensure code format
+        run: poetry run black --diff --check .
+
+      - name: Run flake8 to ensure code format
+        run: poetry run flake8 .
+
+      - name: Run mypy to check types
+        run: poetry run mypy .
+
+  check-codestyle-rust:
+    runs-on: [ self-hosted, dev, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Restore cargo deps cache
+        id: cache_cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry/
+            !~/.cargo/registry/src
+            ~/.cargo/git/
+            target/
+          key: v1-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+
+      # Some of our rust modules use FFI and need those to be checked
+      - name: Get postgres headers
+        run: make postgres-headers -j$(nproc)
+      - name: Run cargo clippy
+        run: ./run_clippy.sh
+
+      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
+      - name: Check formatting
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all -- --check
+
+      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
+      - name: Check rust dependencies
+        if: ${{ !cancelled() }}
+        run: |
+          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
+          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+
   build-neon:
     runs-on: [ self-hosted, dev, x64 ]
     container:
@@ -79,12 +156,10 @@ jobs:
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
-        shell: bash -euxo pipefail {0}
 
       - name: Set pg 15 revision for caching
         id: pg_v15_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
-        shell: bash -euxo pipefail {0}
 
       # Set some environment variables used by all the steps.
       #
@@ -101,16 +176,15 @@ jobs:
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_FEATURES="--features testing"
-            CARGO_FLAGS="--locked --timings $CARGO_FEATURES"
+            CARGO_FLAGS="--locked $CARGO_FEATURES"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FEATURES="--features testing,profiling"
-            CARGO_FLAGS="--locked --timings --release $CARGO_FEATURES"
+            CARGO_FLAGS="--locked --release $CARGO_FEATURES"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
-        shell: bash -euxo pipefail {0}
 
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
@@ -127,8 +201,8 @@ jobs:
             target/
           # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
-            v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
-            v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-
+            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -147,26 +221,21 @@ jobs:
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
         run: mold -run make postgres-v14 -j$(nproc)
-        shell: bash -euxo pipefail {0}
 
       - name: Build postgres v15
         if: steps.cache_pg_15.outputs.cache-hit != 'true'
         run: mold -run make postgres-v15 -j$(nproc)
-        shell: bash -euxo pipefail {0}
 
       - name: Build neon extensions
         run: mold -run make neon-pg-ext -j$(nproc)
-        shell: bash -euxo pipefail {0}
 
       - name: Run cargo build
         run: |
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
-        shell: bash -euxo pipefail {0}
 
       - name: Run cargo test
         run: |
           ${cov_prefix} cargo test $CARGO_FLAGS
-        shell: bash -euxo pipefail {0}
 
       - name: Install rust binaries
         run: |
@@ -207,28 +276,15 @@ jobs:
               echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
           fi
-        shell: bash -euxo pipefail {0}
 
       - name: Install postgres binaries
         run: cp -a pg_install /tmp/neon/pg_install
-        shell: bash -euxo pipefail {0}
 
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
         with:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
-
-      - name: Prepare cargo build timing stats for storing
-        run: |
-          mkdir -p "/tmp/neon/cargo-timings/$BUILD_TYPE/"
-          cp -r ./target/cargo-timings/* "/tmp/neon/cargo-timings/$BUILD_TYPE/"
-        shell: bash -euxo pipefail {0}
-      - name: Upload cargo build stats
-        uses: ./.github/actions/upload
-        with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-build-stats
-          path: /tmp/neon/cargo-timings/
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
@@ -250,7 +306,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: true
-          fetch-depth: 2
+          fetch-depth: 1
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
@@ -284,7 +340,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: true
-          fetch-depth: 2
+          fetch-depth: 1
 
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
@@ -330,7 +386,6 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           REPORT_URL: ${{ steps.create-allure-report.outputs.report-url }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
-        shell: bash -euxo pipefail {0}
         run: |
           curl --fail --output suites.json ${REPORT_URL%/index.html}/data/suites.json
           ./scripts/pysync
@@ -363,7 +418,7 @@ jobs:
             !~/.cargo/registry/src
             ~/.cargo/git/
             target/
-          key: v10-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
@@ -379,7 +434,6 @@ jobs:
 
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
-        shell: bash -euxo pipefail {0}
 
       - name: Build and upload coverage report
         run: |
@@ -412,7 +466,6 @@ jobs:
               \"description\": \"Coverage report is ready\",
               \"target_url\": \"$REPORT_URL\"
             }"
-        shell: bash -euxo pipefail {0}
 
   trigger-e2e-tests:
     runs-on: [ self-hosted, dev, x64 ]
@@ -463,6 +516,9 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    defaults:
+      run:
+        shell: sh -eu {0}
 
     steps:
       - name: Checkout
@@ -481,6 +537,9 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    defaults:
+      run:
+        shell: sh -eu {0}
 
     steps:
       - name: Checkout
@@ -496,6 +555,10 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
+    defaults:
+      run:
+        shell: sh -eu {0}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v1 # v3 won't work with kaniko
@@ -513,6 +576,10 @@ jobs:
     runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
+    defaults:
+      run:
+        shell: sh -eu {0}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v1 # v3 won't work with kaniko
@@ -780,7 +847,7 @@ jobs:
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, tag, regress-tests ]
     if: |
-      contains(github.event.pull_request.labels.*.name, 'deploy-test-storage') && 
+      contains(github.event.pull_request.labels.*.name, 'deploy-test-storage') &&
       github.event_name != 'workflow_dispatch'
     defaults:
       run:
@@ -1100,7 +1167,6 @@ jobs:
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Promote compatibility snapshot for the release
-        shell: bash -euxo pipefail {0}
         env:
           BUCKET: neon-github-public-dev
           PREFIX: artifacts/latest
