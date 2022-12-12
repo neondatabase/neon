@@ -27,12 +27,12 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use super::storage_layer::PureLayer;
+use super::storage_layer::Layer;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-pub struct LayerMap<PersistentLayerT: ?Sized> {
+pub struct LayerMap<L: ?Sized> {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
     // records. If it is None, 'next_open_layer_at' will be set instead, indicating
@@ -53,14 +53,14 @@ pub struct LayerMap<PersistentLayerT: ?Sized> {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// All the historic layers are kept here
-    historic_layers: RTree<LayerRTreeObject<PersistentLayerT>>,
+    historic_layers: RTree<LayerRTreeObject<L>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<Arc<PersistentLayerT>>,
+    l0_delta_layers: Vec<Arc<L>>,
 }
 
-impl<T: ?Sized> Default for LayerMap<T> {
+impl<L: ?Sized> Default for LayerMap<L> {
     fn default() -> Self {
         Self {
             open_layer: None,
@@ -72,8 +72,8 @@ impl<T: ?Sized> Default for LayerMap<T> {
     }
 }
 
-struct LayerRTreeObject<PersistentLayerT: ?Sized> {
-    layer: Arc<PersistentLayerT>,
+struct LayerRTreeObject<L: ?Sized> {
+    layer: Arc<L>,
 
     envelope: AABB<[IntKey; 2]>,
 }
@@ -208,9 +208,9 @@ impl<T: ?Sized> PartialEq for LayerRTreeObject<T> {
     }
 }
 
-impl<PersistentLayerT> RTreeObject for LayerRTreeObject<PersistentLayerT>
+impl<L> RTreeObject for LayerRTreeObject<L>
 where
-    PersistentLayerT: ?Sized,
+    L: ?Sized,
 {
     type Envelope = AABB<[IntKey; 2]>;
     fn envelope(&self) -> Self::Envelope {
@@ -218,11 +218,11 @@ where
     }
 }
 
-impl<PersistentLayerT> LayerRTreeObject<PersistentLayerT>
+impl<L> LayerRTreeObject<L>
 where
-    PersistentLayerT: ?Sized + PureLayer,
+    L: ?Sized + Layer,
 {
-    fn new(layer: Arc<PersistentLayerT>) -> Self {
+    fn new(layer: Arc<L>) -> Self {
         let key_range = layer.get_key_range();
         let lsn_range = layer.get_lsn_range();
 
@@ -241,14 +241,14 @@ where
 }
 
 /// Return value of LayerMap::search
-pub struct SearchResult<PersistentLayerT: ?Sized> {
-    pub layer: Arc<PersistentLayerT>,
+pub struct SearchResult<L: ?Sized> {
+    pub layer: Arc<L>,
     pub lsn_floor: Lsn,
 }
 
-impl<PersistentLayerT> LayerMap<PersistentLayerT>
+impl<L> LayerMap<L>
 where
-    PersistentLayerT: ?Sized + PureLayer,
+    L: ?Sized + Layer,
 {
     ///
     /// Find the latest layer that covers the given 'key', with lsn <
@@ -261,10 +261,10 @@ where
     /// contain the version, even if it's missing from the returned
     /// layer.
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult<PersistentLayerT>>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult<L>>> {
         // linear search
         // Find the latest image layer that covers the given key
-        let mut latest_img: Option<Arc<PersistentLayerT>> = None;
+        let mut latest_img: Option<Arc<L>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
         let envelope = AABB::from_corners(
             [IntKey::from(key.to_i128()), IntKey::from(0i128)],
@@ -298,7 +298,7 @@ where
         }
 
         // Search the delta layers
-        let mut latest_delta: Option<Arc<PersistentLayerT>> = None;
+        let mut latest_delta: Option<Arc<L>> = None;
         for e in self
             .historic_layers
             .locate_in_envelope_intersecting(&envelope)
@@ -365,7 +365,7 @@ where
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<PersistentLayerT>) {
+    pub fn insert_historic(&mut self, layer: Arc<L>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
         }
@@ -378,7 +378,7 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<PersistentLayerT>) {
+    pub fn remove_historic(&mut self, layer: Arc<L>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             let len_before = self.l0_delta_layers.len();
 
@@ -447,13 +447,13 @@ where
         }
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<PersistentLayerT>> {
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
         self.historic_layers.iter().map(|e| e.layer.clone())
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
-    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<PersistentLayerT>> {
+    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<L>> {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         let envelope = AABB::from_corners(
@@ -495,7 +495,7 @@ where
         &self,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<Vec<(Range<Key>, Option<Arc<PersistentLayerT>>)>> {
+    ) -> Result<Vec<(Range<Key>, Option<Arc<L>>)>> {
         let mut points = vec![key_range.start];
         let envelope = AABB::from_corners(
             [IntKey::from(key_range.start.to_i128()), IntKey::from(0)],
@@ -580,7 +580,7 @@ where
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<PersistentLayerT>>> {
+    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<L>>> {
         Ok(self.l0_delta_layers.clone())
     }
 

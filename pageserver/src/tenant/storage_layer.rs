@@ -72,7 +72,7 @@ pub enum ValueReconstructResult {
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
-pub trait PureLayer: Send + Sync {
+pub trait Layer: Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -130,7 +130,7 @@ pub trait PureLayer: Send + Sync {
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN
 ///
-pub trait Layer: Send + Sync + PureLayer {
+pub trait PersistentLayer: Layer {
     fn get_tenant_id(&self) -> TenantId;
 
     /// Identify the timeline this layer belongs to

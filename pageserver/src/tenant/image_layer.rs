@@ -26,7 +26,9 @@ use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::filename::{ImageFileName, PathOrConf};
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{
+    PersistentLayer, ValueReconstructResult, ValueReconstructState,
+};
 use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
@@ -49,7 +51,7 @@ use utils::{
 };
 
 use super::filename::LayerFileName;
-use super::storage_layer::PureLayer;
+use super::storage_layer::Layer;
 
 ///
 /// Header stored in the beginning of the file
@@ -122,7 +124,7 @@ pub struct ImageLayerInner {
     file: Option<FileBlockReader<VirtualFile>>,
 }
 
-impl PureLayer for ImageLayer {
+impl Layer for ImageLayer {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -201,7 +203,7 @@ impl PureLayer for ImageLayer {
     }
 }
 
-impl Layer for ImageLayer {
+impl PersistentLayer for ImageLayer {
     fn filename(&self) -> LayerFileName {
         self.layer_name().into()
     }

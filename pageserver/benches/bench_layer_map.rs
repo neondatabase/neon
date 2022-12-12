@@ -3,7 +3,7 @@ use pageserver::repository::Key;
 use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::ValueReconstructState;
-use pageserver::tenant::storage_layer::{PureLayer, ValueReconstructResult};
+use pageserver::tenant::storage_layer::{Layer, ValueReconstructResult};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
@@ -23,7 +23,7 @@ struct DummyDelta {
     lsn_range: Range<Lsn>,
 }
 
-impl PureLayer for DummyDelta {
+impl Layer for DummyDelta {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -58,7 +58,7 @@ struct DummyImage {
     lsn: Lsn,
 }
 
-impl PureLayer for DummyImage {
+impl Layer for DummyImage {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -90,8 +90,8 @@ impl PureLayer for DummyImage {
     }
 }
 
-fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn PureLayer> {
-    let mut layer_map = LayerMap::<dyn PureLayer>::default();
+fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
+    let mut layer_map = LayerMap::<dyn Layer>::default();
 
     let mut min_lsn = Lsn(u64::MAX);
     let mut max_lsn = Lsn(0);
@@ -127,7 +127,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn PureLayer> {
 }
 
 /// Construct a layer map query pattern for benchmarks
-fn uniform_query_pattern(layer_map: &LayerMap<dyn PureLayer>) -> Vec<(Key, Lsn)> {
+fn uniform_query_pattern(layer_map: &LayerMap<dyn Layer>) -> Vec<(Key, Lsn)> {
     // For each image layer we query one of the pages contained, at LSN right
     // before the image layer was created. This gives us a somewhat uniform
     // coverage of both the lsn and key space because image layers have
@@ -200,7 +200,7 @@ fn bench_from_real_project(c: &mut Criterion) {
 
 // Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
 fn bench_sequential(c: &mut Criterion) {
-    let mut layer_map: LayerMap<dyn PureLayer> = LayerMap::default();
+    let mut layer_map: LayerMap<dyn Layer> = LayerMap::default();
 
     // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
     //

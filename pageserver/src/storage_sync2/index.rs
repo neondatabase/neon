@@ -93,6 +93,8 @@ where
     metadata_bytes: Vec<u8>,
 }
 
+// TODO seems like another part of the remote storage file format
+// compatibility issue, see https://github.com/neondatabase/neon/issues/3072
 pub type IndexPart = IndexPartImpl<LayerFileName>;
 
 pub type IndexPartUnclean = IndexPartImpl<UncleanLayerFileName>;
@@ -315,7 +317,7 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: ["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()].into_iter().collect(),
+            timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: Some(25600000),

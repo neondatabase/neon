@@ -30,7 +30,7 @@ use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
-    storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
+    storage_layer::{PersistentLayer, ValueReconstructResult, ValueReconstructState},
 };
 
 use crate::config::PageServerConf;
@@ -63,7 +63,7 @@ use crate::{is_temporary, task_mgr};
 use crate::{page_cache, storage_sync::index::LayerFileMetadata};
 
 use super::filename::LayerFileName;
-use super::storage_layer::PureLayer;
+use super::storage_layer::Layer;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -81,7 +81,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub layers: RwLock<LayerMap<dyn Layer>>,
+    pub layers: RwLock<LayerMap<dyn PersistentLayer>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -1001,9 +1001,9 @@ impl Timeline {
         &self,
         index_part: &IndexPart,
         remote_client: &RemoteTimelineClient,
-        local_layers: HashMap<LayerFileName, Arc<dyn Layer>>,
+        local_layers: HashMap<LayerFileName, Arc<dyn PersistentLayer>>,
         up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn Layer>>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn PersistentLayer>>> {
         // Are we missing some files that are present in remote storage?
         // Download them now.
         // TODO Downloading many files this way is not efficient.
@@ -1317,7 +1317,7 @@ trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
 }
 
-impl TraversalLayerExt for Arc<dyn Layer> {
+impl TraversalLayerExt for Arc<dyn PersistentLayer> {
     fn traversal_id(&self) -> String {
         debug_assert!(
             self.local_path().to_str().unwrap()
@@ -1359,7 +1359,7 @@ impl Timeline {
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
-        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, String)> = Vec::new();
+        let mut traversal_path = Vec::<(ValueReconstructResult, Lsn, TraversalId)>::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -2002,7 +2002,7 @@ impl Timeline {
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
     new_layers: Vec<DeltaLayer>,
-    deltas_to_compact: Vec<Arc<dyn Layer>>,
+    deltas_to_compact: Vec<Arc<dyn PersistentLayer>>,
 }
 
 impl Timeline {
@@ -2298,7 +2298,7 @@ impl Timeline {
             self.metrics.current_physical_size_gauge.add(metadata.len());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            let x: Arc<dyn Layer + 'static> = Arc::new(l);
+            let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
             layers.insert_historic(x);
         }
 

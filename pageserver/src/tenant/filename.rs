@@ -210,7 +210,7 @@ impl From<DeltaFileName> for LayerFileName {
 // include a `/` in the name as an additional layer of robustness
 // because `/` chars are not allowed in UNIX paths
 #[cfg(test)]
-pub const LAYER_FILE_NAME_TEST_PREFIX: &str = "LAYER_FILE_NAME::test/";
+const LAYER_FILE_NAME_TEST_PREFIX: &str = "LAYER_FILE_NAME::test/";
 
 impl FromStr for LayerFileName {
     type Err = String;

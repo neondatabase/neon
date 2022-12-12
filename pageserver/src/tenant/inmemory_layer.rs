@@ -28,7 +28,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::RwLock;
 
-use super::storage_layer::PureLayer;
+use super::storage_layer::Layer;
 
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
@@ -82,7 +82,7 @@ impl InMemoryLayer {
     }
 }
 
-impl PureLayer for InMemoryLayer {
+impl Layer for InMemoryLayer {
     fn get_key_range(&self) -> Range<Key> {
         Key::MIN..Key::MAX
     }
