@@ -441,12 +441,12 @@ impl std::fmt::Display for UploadOp {
                 write!(
                     f,
                     "UploadLayer({}, size={:?})",
-                    path.display(),
+                    path.file_name(),
                     metadata.file_size()
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
-            UploadOp::Delete(_, path) => write!(f, "Delete({})", path.display()),
+            UploadOp::Delete(_, path) => write!(f, "Delete({})", path.file_name()),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }
@@ -622,7 +622,10 @@ impl RemoteTimelineClient {
         self.update_upload_queue_unfinished_metric(1, &op);
         upload_queue.queued_operations.push_back(op);
 
-        info!("scheduled layer file upload {}", layer_file_name.display());
+        info!(
+            "scheduled layer file upload {}",
+            layer_file_name.file_name()
+        );
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
@@ -672,7 +675,7 @@ impl RemoteTimelineClient {
                 let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone());
                 self.update_upload_queue_unfinished_metric(1, &op);
                 upload_queue.queued_operations.push_back(op);
-                info!("scheduled layer file deletion {}", name.display());
+                info!("scheduled layer file deletion {}", name.file_name());
             }
 
             // Launch the tasks immediately, if possible

@@ -930,7 +930,7 @@ impl Timeline {
                 let layer =
                     ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
 
-                trace!("found layer {}", layer.filename().display());
+                trace!("found layer {}", layer.path().display());
                 total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
@@ -954,7 +954,7 @@ impl Timeline {
                 let layer =
                     DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
 
-                trace!("found layer {}", layer.filename().display());
+                trace!("found layer {}", layer.path().display());
                 total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
@@ -2060,7 +2060,7 @@ impl Timeline {
             level0_deltas.len()
         );
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().display());
+            info!("compact includes {}", l.filename().file_name());
         }
         // We don't need the original list of layers anymore. Drop it so that
         // we don't accidentally use it later in the function.
@@ -2509,7 +2509,7 @@ impl Timeline {
             if l.get_lsn_range().end > horizon_cutoff {
                 debug!(
                     "keeping {} because it's newer than horizon_cutoff {}",
-                    l.filename().display(),
+                    l.filename().file_name(),
                     horizon_cutoff
                 );
                 result.layers_needed_by_cutoff += 1;
@@ -2520,7 +2520,7 @@ impl Timeline {
             if l.get_lsn_range().end > pitr_cutoff {
                 debug!(
                     "keeping {} because it's newer than pitr_cutoff {}",
-                    l.filename().display(),
+                    l.filename().file_name(),
                     pitr_cutoff
                 );
                 result.layers_needed_by_pitr += 1;
@@ -2537,7 +2537,7 @@ impl Timeline {
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
-                        l.filename().display(),
+                        l.filename().file_name(),
                         retain_lsn,
                         l.is_incremental(),
                     );
@@ -2570,7 +2570,7 @@ impl Timeline {
             {
                 debug!(
                     "keeping {} because it is the latest layer",
-                    l.filename().display()
+                    l.filename().file_name()
                 );
                 result.layers_not_updated += 1;
                 continue 'outer;
@@ -2579,7 +2579,7 @@ impl Timeline {
             // We didn't find any reason to keep this file, so remove it.
             debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.filename().display(),
+                l.filename().file_name(),
                 l.is_incremental(),
             );
             layers_to_remove.push(Arc::clone(&l));

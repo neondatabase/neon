@@ -236,12 +236,6 @@ impl FromStr for LayerFileName {
     }
 }
 
-impl LayerFileName {
-    pub fn display(&self) -> impl std::fmt::Display {
-        self.file_name()
-    }
-}
-
 impl serde::Serialize for LayerFileName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

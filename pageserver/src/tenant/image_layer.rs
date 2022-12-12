@@ -187,7 +187,7 @@ impl PureLayer for ImageLayer {
             let blob = file.block_cursor().read_blob(offset).with_context(|| {
                 format!(
                     "failed to read value from data file {} at offset {}",
-                    self.filename().display(),
+                    self.path().display(),
                     offset
                 )
             })?;
