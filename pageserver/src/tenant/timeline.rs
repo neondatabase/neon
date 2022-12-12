@@ -1319,11 +1319,12 @@ trait TraversalLayerExt {
 
 impl TraversalLayerExt for Arc<dyn Layer> {
     fn traversal_id(&self) -> String {
-        format!(
-            "timeline {} layer file {}",
-            self.get_timeline_id(),
-            self.filename().file_name()
-        )
+        debug_assert!(
+            self.local_path().to_str().unwrap()
+                .contains(&format!("{}", self.get_timeline_id())),
+            "need timeline ID to uniquely identify the layer when tranversal crosses ancestor boundary",
+        );
+        format!("{}", self.local_path().display())
     }
 }
 
