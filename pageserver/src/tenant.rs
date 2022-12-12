@@ -1691,7 +1691,7 @@ impl Tenant {
         let _enter = info_span!("saving tenantconf").entered();
         info!("persisting tenantconf to {}", target_config_path.display());
 
-        // TODO this will prepend comments endlessly
+        // TODO this will prepend comments endlessly ?
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
 
