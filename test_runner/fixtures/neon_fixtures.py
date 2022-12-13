@@ -34,7 +34,13 @@ from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from fixtures.log_helper import log
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import Fn, allure_attach_from_dir, get_self_dir, subprocess_capture
+from fixtures.utils import (
+    ATTACHMENT_NAME_REGEX,
+    Fn,
+    allure_attach_from_dir,
+    get_self_dir,
+    subprocess_capture,
+)
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -2738,11 +2744,16 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
 
 def pytest_addoption(parser: Parser):
     parser.addoption(
-        "--cleanup-test-output",
+        "--preserve-database-files",
         action="store_true",
         default=False,
-        help="Remove test output directory when done",
+        help="Preserve timeline files after the test suite is over",
     )
+
+
+SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
+    r"config|metadata|.+\.(?:toml|pid|json)"
+)
 
 
 # This is autouse, so the test output directory always gets created, even
@@ -2768,10 +2779,26 @@ def test_output_dir(
 
     yield test_dir
 
-    if pytestconfig.getoption("--cleanup-test-output"):
-        shutil.rmtree(test_dir)
-    else:
-        allure_attach_from_dir(test_dir)
+    if not pytestconfig.getoption("--preserve-database-files"):
+        directories_to_clean: List[Path] = []
+        for test_entry in Path(test_dir).glob("**/*"):
+            if test_entry.is_file():
+                test_file = test_entry
+                if not ATTACHMENT_NAME_REGEX.fullmatch(
+                    test_file.name
+                ) and not SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
+                    log.debug(f"Removing large database {test_file} file")
+                    test_file.unlink()
+            elif test_entry.is_dir():
+                directories_to_clean.append(test_entry)
+
+        while len(directories_to_clean) > 0:
+            directory_to_clean = directories_to_clean.pop()
+            if len(os.listdir(directory_to_clean)) == 0:
+                log.debug(f"Removing empty directory {directory_to_clean}")
+                shutil.rmtree(directory_to_clean)
+
+    allure_attach_from_dir(test_dir)
 
 
 SKIP_DIRS = frozenset(

@@ -9,7 +9,7 @@ NOTE: the `profiling` flag only works on linux because we use linux-specific
 libc APIs like `libc::timer_t`.
 
 Then run the tests
-`NEON_BIN=./target/release poetry run pytest test_runner/performance --cleanup-test-output"`
+`NEON_BIN=./target/release poetry run pytest test_runner/performance"`
 
 Some handy pytest flags for local development:
 - `-x` tells pytest to stop on first error
