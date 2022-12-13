@@ -182,7 +182,7 @@ int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, c
 				if (++busy_loop_iterations % CHECK_WATCHDOG_INTERVAL == 0 && pipe->child_pid != 0)
 				{
 					int wstatus;
-					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) > 0)
+					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) != 0)
 					{
 						/* Child process is terinated */
 						shmem_pipe_reset(pipe);
@@ -283,7 +283,7 @@ int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, c
 				if (++busy_loop_iterations % CHECK_WATCHDOG_INTERVAL == 0 && pipe->child_pid)
 				{
 					int wstatus;
-					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) > 0)
+					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) != 0)
 					{
 						/* Child process is terminated */
 						shmem_pipe_reset(pipe);
@@ -655,7 +655,7 @@ int main(int argc, char** argv)
 {
 	char buf[8192];
 	int n_threads = argc > 2 ? atoi(argv[2]) : 1;
-	int is_client = *argv[1] == 'c';
+	int is_client = argc > 1 ? *argv[1] == 'c': 0;
 	pthread_t thread[MAX_THREADS];
 	char const* tenant = "iam";
 	int i;
