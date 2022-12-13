@@ -272,6 +272,18 @@ impl LayerMap {
         //      might be better.
         let latest_layer = self.index.query(key.to_i128(), end_lsn.0 - 1);
         let latest_image = self.images.query(key.to_i128(), end_lsn.0 - 1);
+
+        // Check for exact match
+        if let Some(image) = &latest_image {
+            let img_lsn = image.get_lsn_range().start;
+            if Lsn(img_lsn.0 + 1) == end_lsn {
+                return Ok(Some(SearchResult {
+                    layer: Arc::clone(&image),
+                    lsn_floor: img_lsn,
+                }));
+            }
+        }
+
         return Ok(latest_layer.map(|layer| {
             // Compute lsn_floor
             let mut lsn_floor = layer.get_lsn_range().start;

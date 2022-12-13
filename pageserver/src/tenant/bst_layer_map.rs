@@ -55,8 +55,6 @@ impl<Value: Clone> PersistentLayerMap<Value> {
     }
 
     pub fn insert(self: &mut Self, key: Range<i128>, lsn: Range<u64>, value: Value) {
-        // TODO check for off-by-one errors
-
         // It's only a persistent map, not a retroactive one
         if let Some(last_entry) = self.historic.iter().rev().next() {
             let last_lsn = last_entry.0;
@@ -112,8 +110,6 @@ impl<Value: Clone> PersistentLayerMap<Value> {
     }
 
     pub fn query(self: &Self, key: i128, lsn: u64) -> Option<Value> {
-        // TODO check for off-by-one errors
-
         let version = self.historic.range(0..=lsn).rev().next()?.1;
         version
             .range(0..=key)
