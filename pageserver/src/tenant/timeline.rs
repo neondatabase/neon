@@ -1013,9 +1013,8 @@ impl Timeline {
         //       1) if there was another pageserver that came and generated new files
         //       2) during attach of a timeline with big history which we currently do not do
         let mut local_only_layers = local_layers;
-        let timeline_dir = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for remote_layer_name in &index_part.timeline_layers {
-            local_only_layers.remove(remote_layer_name);
+            let local_layer = local_only_layers.remove(remote_layer_name);
 
             let remote_layer_metadata = index_part
                 .layer_metadata
@@ -1023,40 +1022,56 @@ impl Timeline {
                 .map(LayerFileMetadata::from)
                 .unwrap_or(LayerFileMetadata::MISSING);
 
-            let local_layer_path = timeline_dir.join(remote_layer_name.file_name());
+            // Is the local layer's size different from the size stored in the
+            // remote index file? If so, rename_to_backup those files & remove
+            // local_layer form the layer map.
+            // We'll download a fresh copy of the layer file below.
+            if let Some(local_layer) = local_layer {
+                let local_layer_path = local_layer.local_path();
+                ensure!(
+                    local_layer_path.exists(),
+                    "every layer from local_layers must exist on disk: {}",
+                    local_layer_path.display()
+                );
 
-            if local_layer_path.exists() {
-                let mut already_downloaded = true;
-                // Are there any local files that exist, with a size that doesn't match
-                // with the size stored in the remote index file?
-                // If so, rename_to_backup those files so that we re-download them later.
                 if let Some(remote_size) = remote_layer_metadata.file_size() {
-                    match local_layer_path.metadata() {
-                        Ok(metadata) => {
-                            let local_size = metadata.len();
-
-                            if local_size != remote_size {
-                                warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
-                                if let Err(err) = rename_to_backup(&local_layer_path) {
-                                    error!("could not rename file {local_layer_path:?}: {err:?}");
-                                } else {
-                                    self.metrics.current_physical_size_gauge.sub(local_size);
-                                    already_downloaded = false;
-                                }
-                            }
+                    let metadata = local_layer_path.metadata().with_context(|| {
+                        format!(
+                            "get file size of local layer {}",
+                            local_layer_path.display()
+                        )
+                    })?;
+                    let local_size = metadata.len();
+                    if local_size != remote_size {
+                        warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
+                        if let Err(err) = rename_to_backup(&local_layer_path) {
+                            assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
+                            anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
+                        } else {
+                            self.metrics.current_physical_size_gauge.sub(local_size);
+                            self.layers.write().unwrap().remove_historic(local_layer);
+                            // fall-through to adding the remote layer
                         }
-                        Err(err) => {
-                            error!("could not get size of local file {local_layer_path:?}: {err:?}")
-                        }
+                    } else {
+                        debug!(
+                            "layer is present locally and file size matches remote, using it: {}",
+                            local_layer_path.display()
+                        );
+                        continue;
                     }
-                }
-
-                if already_downloaded {
+                } else {
+                    debug!(
+                        "layer is present locally and remote does not have file size, using it: {}",
+                        local_layer_path.display()
+                    );
                     continue;
                 }
-            } else {
-                info!("remote layer {remote_layer_name:?} does not exist locally");
             }
+
+            info!(
+                "remote layer does not exist locally, downloading it now: {}",
+                remote_layer_name.file_name()
+            );
 
             match remote_layer_name {
                 LayerFileName::Image(imgfilename) => {
