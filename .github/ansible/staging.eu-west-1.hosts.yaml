@@ -16,6 +16,7 @@ storage:
     ansible_aws_ssm_region: eu-west-1
     ansible_aws_ssm_bucket_name: neon-dev-storage-eu-west-1
     console_region_id: aws-eu-west-1
+    sentry_environment: development
 
   children:
     pageservers:

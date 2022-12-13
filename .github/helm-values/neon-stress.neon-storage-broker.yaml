@@ -52,3 +52,5 @@ extraManifests:
         matchNames:
           - "{{ .Release.Namespace }}"
 
+settings:
+  sentryEnvironment: "development"

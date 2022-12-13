@@ -22,3 +22,6 @@ metrics:
     enabled: true
     selector:
       release: kube-prometheus-stack
+
+settings:
+  sentryEnvironment: "production"

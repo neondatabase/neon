@@ -8,6 +8,7 @@ settings:
   authBackend: "console"
   authEndpoint: "http://console-staging.local/management/api/v2"
   domain: "*.cloud.stage.neon.tech"
+  sentryEnvironment: "development"
 
 # -- Additional labels for neon-proxy pods
 podLabels:
