@@ -15,6 +15,11 @@ pub struct PersistentLayerMap<Value> {
     /// Mapping key to the latest layer (if any) until the next key.
     /// We use the Sync version of the map because we want Self to
     /// be Sync.
+    ///
+    /// TODO Separate Head into its own struct LatestLayerMap
+    /// TODO Merge historic with retroactive, into HistoricLayerMap
+    /// TODO Maintain a pair of heads, one for images, one for deltas.
+    ///      This way we can query both of them with one BTreeMap query.
     head: RedBlackTreeMapSync<i128, Option<(u64, Value)>>,
 
     /// All previous states of `self.head`
@@ -275,24 +280,8 @@ fn test_persistent_overlapping() {
 ///
 /// Layer type is abstracted as Value to make unit testing easier.
 pub struct RetroactiveLayerMap<Value> {
-    /// Using Arc and Vec allows us to hack around the lack of retroactive
-    /// insert/delete functionality in PersistentLayerMap:
-    /// - For normal append-only updates, we insert Arc::new(vec![value]).
-    /// - For retroactive deletion (during gc) we empty the vector. The use
-    ///   of Arc gives us a useful indirection layer so that the delete would
-    ///   effectively retroactively update future versions, instead of creating
-    ///   a new branch.
-    /// - For retroactive updates (during compaction), we find all layers below
-    ///   the layer we're inserting, and append to their Vec-s. This is O(N), but
-    ///   also amortized O(log N). Here's why: We don't insert image layers
-    ///   retroactively, only deltas. And after an image gets covered by K (currently
-    ///   K = 3) deltas, we do compaction.
-    ///
-    /// This complexity might be a limitation, or a feature. Here's how it might
-    /// actually help: It gives us the option to store the entire reconstruction
-    /// result in a single colocated Vec, and get the initial image and all necessary
-    /// deltas in one query.
-    map: PersistentLayerMap<Arc<Vec<Value>>>,
+    /// A persistent layer map that we rebuild when we need to retroactively update
+    map: PersistentLayerMap<Value>,
 
     /// We buffer insertion into the PersistentLayerMap to decrease the number of rebuilds.
     /// A value of None means we want to delete this item.
@@ -317,7 +306,7 @@ impl<T: Clone> Default for RetroactiveLayerMap<T> {
 impl<Value: Clone> RetroactiveLayerMap<Value> {
     pub fn new() -> Self {
         Self {
-            map: PersistentLayerMap::<Arc<Vec<Value>>>::new(),
+            map: PersistentLayerMap::<Value>::new(),
             buffer: BTreeMap::new(),
             layers: BTreeMap::new(),
         }
@@ -366,9 +355,8 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         for ((lsn_start, lsn_end, key_start, key_end), layer) in
             self.layers.range((rebuild_since, 0, 0, 0)..)
         {
-            let wrapped = Arc::new(vec![layer.clone()]);
             self.map
-                .insert(*key_start..*key_end, *lsn_start..*lsn_end, wrapped);
+                .insert(*key_start..*key_end, *lsn_start..*lsn_end, layer.clone());
         }
     }
 
@@ -382,11 +370,7 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         }
 
         match self.map.query(key, lsn) {
-            Some(vec) => match vec.len().cmp(&1) {
-                std::cmp::Ordering::Less => todo!(),
-                std::cmp::Ordering::Equal => Some(vec[0].clone()),
-                std::cmp::Ordering::Greater => todo!(),
-            },
+            Some(layer) => Some(layer.clone()),
             None => None,
         }
     }
