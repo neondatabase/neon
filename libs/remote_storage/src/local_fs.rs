@@ -283,10 +283,6 @@ impl RemoteStorage for LocalFs {
             bail!("File {file_path:?} either does not exist or is not a file")
         }
     }
-
-    fn as_local(&self) -> Option<&LocalFs> {
-        Some(self)
-    }
 }
 
 fn storage_metadata_path(original_path: &Path) -> PathBuf {
