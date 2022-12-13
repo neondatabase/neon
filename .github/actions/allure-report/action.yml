@@ -186,14 +186,14 @@ runs:
         REPORT_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html
 
         # Generate redirect
-        cat <<EOF > ./index.html
+        cat <<EOF > ${TEST_OUTPUT}/allure/index.html
           <!DOCTYPE html>
 
           <meta charset="utf-8">
           <title>Redirecting to ${REPORT_URL}</title>
           <meta http-equiv="refresh" content="0; URL=${REPORT_URL}">
         EOF
-        aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
+        aws s3 cp --only-show-errors ${TEST_OUTPUT}/allure/index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
         echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
@@ -211,6 +211,14 @@ runs:
         if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TEST_SELECTION}" ]; then
           aws s3 rm "s3://${BUCKET}/${LOCK_FILE}"
         fi
+
+    - name: Cleanup
+      if: always()
+      env:
+        TEST_OUTPUT: /tmp/test_output
+      shell: bash -euxo pipefail {0}
+      run: |
+        rm -rf ${TEST_OUTPUT}/allure
 
     - uses: actions/github-script@v6
       if: ${{ inputs.action == 'generate' && always() }}

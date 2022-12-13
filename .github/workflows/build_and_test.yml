@@ -378,35 +378,50 @@ jobs:
       options: --init
     needs: [ regress-tests, benchmarks ]
     if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: false
 
-      - name: Create Allure report
-        id: create-allure-report
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Create Allure report (debug)
+        if: ${{ !cancelled() }}
+        id: create-allure-report-debug
         uses: ./.github/actions/allure-report
         with:
           action: generate
-          build_type: ${{ matrix.build_type }}
+          build_type: debug
+
+      - name: Create Allure report (release)
+        if: ${{ !cancelled() }}
+        id: create-allure-report-release
+        uses: ./.github/actions/allure-report
+        with:
+          action: generate
+          build_type: release
 
       - name: Store Allure test stat in the DB
-        if: ${{ steps.create-allure-report.outputs.report-url }}
+        if: ${{ steps.create-allure-report-debug.outputs.report-url || steps.create-allure-report-release.outputs.report-url }}
         env:
-          BUILD_TYPE: ${{ matrix.build_type }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_URL: ${{ steps.create-allure-report.outputs.report-url }}
+          REPORT_URL_DEBUG: ${{ steps.create-allure-report-debug.outputs.report-url }}
+          REPORT_URL_RELEASE: ${{ steps.create-allure-report-release.outputs.report-url }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
         run: |
-          curl --fail --output suites.json ${REPORT_URL%/index.html}/data/suites.json
           ./scripts/pysync
 
-          DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
+          for report_url in $REPORT_URL_DEBUG $REPORT_URL_RELEASE; do
+            if [ -z "$report_url" ]; then
+              continue
+            fi
+
+            if [[ "$report_url" == "$REPORT_URL_DEBUG" ]]; then
+              BUILD_TYPE=debug
+            else
+              BUILD_TYPE=release
+            fi
+
+            curl --fail --output suites.json ${report_url%/index.html}/data/suites.json
+            DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
+          done
 
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]
