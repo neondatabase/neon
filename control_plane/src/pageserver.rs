@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::path::PathBuf;
+use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, ensure, Context};
@@ -129,6 +130,8 @@ impl PageServerNode {
         overrides
     }
 
+    /// Initializes a pageserver node by creating its config with the overrides provided,
+    /// and creating an initial tenant and timeline afterwards.
     pub fn initialize(
         &self,
         create_tenant: Option<TenantId>,
@@ -136,11 +139,28 @@ impl PageServerNode {
         config_overrides: &[&str],
         pg_version: u32,
     ) -> anyhow::Result<TimelineId> {
+        // First, run `pageserver --init` and wait for it to write a config into FS and exit.
+        self.pageserver_init(config_overrides).with_context(|| {
+            format!(
+                "Failed to run init for pageserver node {}",
+                self.env.pageserver.id,
+            )
+        })?;
+
+        // Then, briefly start it fully to run HTTP commands on it,
+        // to create initial tenant and timeline.
+        // We disable the remote storage, since we stop pageserver right after the timeline creation,
+        // hence most of the uploads will either aborted or not started: no point to start them at all.
+        let disabled_remote_storage_override = "remote_storage={}";
         let mut pageserver_process = self
-            .start_node(config_overrides, &self.env.base_data_dir, true)
+            .start_node(
+                &[disabled_remote_storage_override],
+                // Previous overrides will be taken from the config created before, don't overwrite them.
+                false,
+            )
             .with_context(|| {
                 format!(
-                    "Failed to start a process for pageserver {}",
+                    "Failed to start a process for pageserver node {}",
                     self.env.pageserver.id,
                 )
             })?;
@@ -201,55 +221,73 @@ impl PageServerNode {
     }
 
     pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
-        self.start_node(config_overrides, &self.repo_path(), false)
+        self.start_node(config_overrides, false)
     }
 
-    fn start_node(
-        &self,
-        config_overrides: &[&str],
-        datadir: &Path,
-        update_config: bool,
-    ) -> anyhow::Result<Child> {
-        let mut overrides = self.neon_local_overrides();
-        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
-
-        print!(
-            "Starting pageserver at '{}' in '{}'",
+    fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        let datadir = self.repo_path();
+        let node_id = self.env.pageserver.id;
+        println!(
+            "Initializing pageserver node {} at '{}' in {:?}",
+            node_id,
             self.pg_connection_config.raw_address(),
-            datadir.display()
+            datadir
         );
         io::stdout().flush()?;
 
-        let mut args = vec![
-            "-D",
-            datadir.to_str().with_context(|| {
-                format!("Datadir path {datadir:?} cannot be represented as a unicode string")
-            })?,
-        ];
+        let datadir_path_str = datadir.to_str().with_context(|| {
+            format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
+        })?;
+        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        args.push(Cow::Borrowed("--init"));
 
+        let init_output = Command::new(&self.env.pageserver_bin())
+            .args(args.iter().map(Cow::as_ref))
+            .envs(self.pageserver_env_variables()?)
+            .output()
+            .with_context(|| format!("Failed to run pageserver init for node {node_id}"))?;
+
+        anyhow::ensure!(
+            init_output.status.success(),
+            "Pageserver init for node {} did not finish successfully, stdout: {}, stderr: {}",
+            node_id,
+            String::from_utf8_lossy(&init_output.stdout),
+            String::from_utf8_lossy(&init_output.stderr),
+        );
+
+        Ok(())
+    }
+
+    fn start_node(&self, config_overrides: &[&str], update_config: bool) -> anyhow::Result<Child> {
+        let mut overrides = self.neon_local_overrides();
+        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+
+        let datadir = self.repo_path();
+        print!(
+            "Starting pageserver node {} at '{}' in {:?}",
+            self.env.pageserver.id,
+            self.pg_connection_config.raw_address(),
+            datadir
+        );
+        io::stdout().flush()?;
+
+        let datadir_path_str = datadir.to_str().with_context(|| {
+            format!(
+                "Cannot start pageserver node {} in path that has no string representation: {:?}",
+                self.env.pageserver.id, datadir,
+            )
+        })?;
+        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
         if update_config {
-            args.push("--update-config");
+            args.push(Cow::Borrowed("--update-config"));
         }
 
-        for config_override in &overrides {
-            args.extend(["-c", config_override]);
-        }
-
-        let envs = if self.env.pageserver.auth_type != AuthType::Trust {
-            // Generate a token to connect from the pageserver to a safekeeper
-            let token = self
-                .env
-                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
-            vec![("ZENITH_AUTH_TOKEN".to_owned(), token)]
-        } else {
-            vec![]
-        };
         background_process::start_process(
             "pageserver",
-            datadir,
+            &datadir,
             &self.env.pageserver_bin(),
-            &args,
-            envs,
+            args.iter().map(Cow::as_ref),
+            self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(&self.pid_file()),
             || match self.check_status() {
                 Ok(()) => Ok(true),
@@ -257,6 +295,35 @@ impl PageServerNode {
                 Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
             },
         )
+    }
+
+    fn pageserver_basic_args<'a>(
+        &self,
+        config_overrides: &'a [&'a str],
+        datadir_path_str: &'a str,
+    ) -> Vec<Cow<'a, str>> {
+        let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
+
+        let mut overrides = self.neon_local_overrides();
+        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+        for config_override in overrides {
+            args.push(Cow::Borrowed("-c"));
+            args.push(Cow::Owned(config_override));
+        }
+
+        args
+    }
+
+    fn pageserver_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(if self.env.pageserver.auth_type != AuthType::Trust {
+            // Generate a token to connect from the pageserver to a safekeeper
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+            vec![("ZENITH_AUTH_TOKEN".to_owned(), token)]
+        } else {
+            Vec::new()
+        })
     }
 
     ///

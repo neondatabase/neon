@@ -272,7 +272,7 @@ impl Debug for S3Config {
 }
 
 impl RemoteStorageConfig {
-    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
+    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
         let local_path = toml.get("local_path");
         let bucket_name = toml.get("bucket_name");
         let bucket_region = toml.get("bucket_region");
@@ -296,7 +296,8 @@ impl RemoteStorageConfig {
         .context("Failed to parse 'concurrency_limit' as a positive integer")?;
 
         let storage = match (local_path, bucket_name, bucket_region) {
-            (None, None, None) => bail!("no 'local_path' nor 'bucket_name' option"),
+            // no 'local_path' nor 'bucket_name' options are provided, consider this remote storage disabled
+            (None, None, None) => return Ok(None),
             (_, Some(_), None) => {
                 bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
             }
@@ -322,11 +323,11 @@ impl RemoteStorageConfig {
             (Some(_), Some(_), _) => bail!("local_path and bucket_name are mutually exclusive"),
         };
 
-        Ok(RemoteStorageConfig {
+        Ok(Some(RemoteStorageConfig {
             max_concurrent_syncs,
             max_sync_errors,
             storage,
-        })
+        }))
     }
 }
 

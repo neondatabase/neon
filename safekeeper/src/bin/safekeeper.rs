@@ -318,12 +318,15 @@ fn set_id(workdir: &Path, given_id: Option<NodeId>) -> Result<NodeId> {
 }
 
 // Parse RemoteStorage from TOML table.
-fn parse_remote_storage(storage_conf: &str) -> Result<RemoteStorageConfig> {
+fn parse_remote_storage(storage_conf: &str) -> anyhow::Result<RemoteStorageConfig> {
     // funny toml doesn't consider plain inline table as valid document, so wrap in a key to parse
-    let storage_conf_toml = format!("remote_storage = {}", storage_conf);
+    let storage_conf_toml = format!("remote_storage = {storage_conf}");
     let parsed_toml = storage_conf_toml.parse::<Document>()?; // parse
     let (_, storage_conf_parsed_toml) = parsed_toml.iter().next().unwrap(); // and strip key off again
-    RemoteStorageConfig::from_toml(storage_conf_parsed_toml)
+    RemoteStorageConfig::from_toml(storage_conf_parsed_toml).and_then(|parsed_config| {
+        // XXX: Don't print the original toml here, there might be some sensitive data
+        parsed_config.context("Incorrectly parsed remote storage toml as no remote storage config")
+    })
 }
 
 #[test]
