@@ -2752,7 +2752,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"config|metadata|.+\.(?:toml|pid|json)"
+    r"config|metadata|.+\.(?:toml|pid|json|sql)"
 )
 
 
@@ -2792,11 +2792,11 @@ def test_output_dir(
             elif test_entry.is_dir():
                 directories_to_clean.append(test_entry)
 
-        while len(directories_to_clean) > 0:
+        while directories_to_clean:
             directory_to_clean = directories_to_clean.pop()
-            if len(os.listdir(directory_to_clean)) == 0:
+            if not os.listdir(directory_to_clean):
                 log.debug(f"Removing empty directory {directory_to_clean}")
-                shutil.rmtree(directory_to_clean)
+                directory_to_clean.rmdir()
 
     allure_attach_from_dir(test_dir)
 
