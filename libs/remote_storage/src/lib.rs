@@ -104,11 +104,6 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<Download, DownloadError>;
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
-
-    /// Downcast to LocalFs implementation. For tests.
-    fn as_local(&self) -> Option<&LocalFs> {
-        None
-    }
 }
 
 pub struct Download {
