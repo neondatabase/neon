@@ -16,6 +16,7 @@ storage:
     ansible_aws_ssm_region: ap-southeast-1
     ansible_aws_ssm_bucket_name: neon-prod-storage-ap-southeast-1
     console_region_id: aws-ap-southeast-1
+    sentry_environment: production
 
   children:
     pageservers:

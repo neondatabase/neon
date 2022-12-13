@@ -10,11 +10,13 @@ pub fn init_sentry(
     extra_options: &[(&str, &str)],
 ) -> Option<ClientInitGuard> {
     let dsn = env::var("SENTRY_DSN").ok()?;
+    let environment = env::var("SENTRY_ENVIRONMENT").unwrap_or_else(|_| "development".into());
 
     let guard = sentry::init((
         dsn,
         sentry::ClientOptions {
             release: release_name,
+            environment: Some(environment.into()),
             ..Default::default()
         },
     ));

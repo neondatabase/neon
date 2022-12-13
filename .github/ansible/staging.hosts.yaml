@@ -13,6 +13,7 @@ storage:
     safekeeper_s3_prefix: us-stage/wal
     hostname_suffix: ".local"
     remote_user: admin
+    sentry_environment: development
 
   children:
     pageservers:
