@@ -16,6 +16,7 @@ storage:
     ansible_aws_ssm_region: us-west-2
     ansible_aws_ssm_bucket_name: neon-prod-storage-us-west-2
     console_region_id: aws-us-west-2-new
+    sentry_environment: production
 
   children:
     pageservers:
