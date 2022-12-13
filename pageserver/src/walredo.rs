@@ -286,12 +286,16 @@ impl PostgresRedoManager {
 
         let mut page = [0u8; BLCKSZ as usize];
         unsafe {
-            shmem_pipe_process_request(
+            if !shmem_pipe_process_request(
                 self.pipe,
                 writebuf.as_ptr(),
                 writebuf.len(),
                 page.as_mut_ptr(),
-            );
+            ) {
+                let mut process_guard = self.process.lock().unwrap();
+                *process_guard = None; /* restart walredo next time */
+                return Err(WalRedoError::InvalidState);
+            }
         }
         WAL_REDO_TIME.observe(start_time.elapsed().as_secs_f64());
         Ok(Bytes::copy_from_slice(&page))

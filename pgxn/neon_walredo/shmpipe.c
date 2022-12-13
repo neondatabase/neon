@@ -34,6 +34,7 @@ You can specify different number of producers, for example to test shmpipe with 
 #include <assert.h>
 #include <unistd.h>
 #include <sys/fcntl.h>
+#include <sys/wait.h>
 #include <stdatomic.h>
 #include "shmpipe.h"
 
@@ -82,6 +83,7 @@ typedef struct pipe_t {
 	queue_t req;
 	queue_t resp;
 	u32  msg_id; /* generator of message ids, protected by request queue mutex */
+	int  child_pid;    /* process identifier of child process (used to detect child crash) */
 } pipe_t;
 
 
@@ -147,15 +149,16 @@ static void latch_release(latch_t* latch)
 }
 
 #define ALIGN(x,y) (((x) + (y) - 1) & ~((y) - 1))
+#define CHECK_WATCHDOG_INTERVAL (1024*1024) /* better be power of two */
 
-void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, char* resp)
+int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, char* resp)
 {
 	message_header_t req_hdr;
 	message_header_t resp_hdr;
 	int header_sent = 0;
 	int header_received = 0;
 	size_t resp_size = sizeof(resp_hdr);
-
+	size_t busy_loop_iterations = 0;
 	latch_acquire(&pipe->req.cs);
 
 	/* append data to queue head */
@@ -173,25 +176,31 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 				pipe->req.head.n_blocked = 0;
 				event_signal(&pipe->req.head.event); /* notify receiver that head is advanced */
 			}
-#ifndef BUSY_WAIT_RESPONSES
 			do
 			{
 				/* Wait until tail is advanced */
+				if (++busy_loop_iterations % CHECK_WATCHDOG_INTERVAL == 0 && pipe->child_pid != 0)
+				{
+					int wstatus;
+					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) > 0)
+					{
+						/* Child process is terinated */
+						shmem_pipe_reset(pipe);
+						return 0;
+					}
+				}
+#ifndef BUSY_WAIT_RESPONSES
 				pipe->req.tail.n_blocked += 1;
 				event_reset(&pipe->req.tail.event);
 				latch_release(&pipe->req.cs);
 				event_wait(&pipe->req.tail.event);
 				latch_acquire(&pipe->req.cs);
-			} while (!header_sent && pipe->req.busy);
 #else
-			do
-			{
-				/* Wait until tail is advanced */
 				latch_release(&pipe->req.cs);
 				RELEASE_CPU();
 				latch_acquire(&pipe->req.cs);
-			} while (!header_sent && pipe->req.busy);
 #endif
+			} while (!header_sent && pipe->req.busy);
 		}
 		else
 		{
@@ -253,6 +262,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 	latch_acquire(&pipe->resp.cs);
 
 	/* Get response from queue tail */
+	busy_loop_iterations = 0;
 	while (resp_size != 0)
 	{
 		size_t available = pipe->resp.head.pos >= pipe->resp.tail.pos
@@ -270,6 +280,16 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 			do
 			{
 				/* wait until head is advanced */
+				if (++busy_loop_iterations % CHECK_WATCHDOG_INTERVAL == 0 && pipe->child_pid)
+				{
+					int wstatus;
+					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) > 0)
+					{
+						/* Child process is terminated */
+						shmem_pipe_reset(pipe);
+						return 0;
+					}
+				}
 #ifndef BUSY_WAIT_RESPONSES
 				pipe->resp.head.n_blocked += 1;
 				event_reset(&pipe->resp.head.event);
@@ -348,6 +368,7 @@ void shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, 
 	pipe->resp.busy = 0;
 
 	latch_release(&pipe->resp.cs);
+	return 1;
 }
 
 void shmem_pipe_get_request(pipe_t* pipe, char** data, u32* size, u32* msg_id)
@@ -538,6 +559,14 @@ void shmem_pipe_reset(pipe_t* pipe)
 	pipe->resp.busy = 0;
 
 	pipe->msg_id = 0;
+	pipe->child_pid = 0;
+
+#ifndef BUSY_WAIT_RESPONSES
+	event_init(&pipe->resp.head.event);
+	event_init(&pipe->resp.tail.event);
+	event_init(&pipe->req.tail.event);
+#endif
+	event_init(&pipe->req.head.event);
 }
 
 pipe_t* shmem_pipe_init(char const* name)
@@ -567,13 +596,6 @@ pipe_t* shmem_pipe_init(char const* name)
 	}
 	close(fd);
 
-#ifndef BUSY_WAIT_RESPONSES
-	event_init(&pipe->resp.head.event);
-	event_init(&pipe->resp.tail.event);
-	event_init(&pipe->req.tail.event);
-#endif
-	event_init(&pipe->req.head.event);
-
 	shmem_pipe_reset(pipe);
 
 	return pipe;
@@ -596,6 +618,8 @@ pipe_t* shmem_pipe_open(char const* name)
 		perror("mmap");
 	}
 	close(fd);
+
+	pipe->child_pid = getpid();
 	return pipe;
 }
 
