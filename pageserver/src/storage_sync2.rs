@@ -210,10 +210,9 @@ use utils::lsn::Lsn;
 
 use self::index::IndexPart;
 
-use crate::metrics::MeasureRemoteOp;
 use crate::metrics::RemoteOpFileKind;
 use crate::metrics::RemoteOpKind;
-use crate::metrics::REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS;
+use crate::metrics::{MeasureRemoteOp, RemoteTimelineClientMetrics};
 use crate::tenant::filename::LayerFileName;
 use crate::{
     config::PageServerConf,
@@ -255,6 +254,8 @@ pub struct RemoteTimelineClient {
     timeline_id: TimelineId,
 
     upload_queue: Mutex<UploadQueue>,
+
+    metrics: Arc<RemoteTimelineClientMetrics>,
 
     storage_impl: GenericRemoteStorage,
 }
@@ -501,6 +502,7 @@ impl RemoteTimelineClient {
             self.timeline_id,
             RemoteOpFileKind::Index,
             RemoteOpKind::Download,
+            Arc::clone(&self.metrics),
         )
         .await
     }
@@ -528,6 +530,7 @@ impl RemoteTimelineClient {
             self.timeline_id,
             RemoteOpFileKind::Layer,
             RemoteOpKind::Download,
+            Arc::clone(&self.metrics),
         )
         .await?;
 
@@ -847,6 +850,7 @@ impl RemoteTimelineClient {
                         self.timeline_id,
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
+                        Arc::clone(&self.metrics),
                     )
                     .await
                 }
@@ -863,6 +867,7 @@ impl RemoteTimelineClient {
                         self.timeline_id,
                         RemoteOpFileKind::Index,
                         RemoteOpKind::Upload,
+                        Arc::clone(&self.metrics),
                     )
                     .await
                 }
@@ -877,6 +882,7 @@ impl RemoteTimelineClient {
                             self.timeline_id,
                             *metric_file_kind,
                             RemoteOpKind::Delete,
+                            Arc::clone(&self.metrics),
                         )
                         .await
                 }
@@ -977,14 +983,8 @@ impl RemoteTimelineClient {
                 return;
             }
         };
-        REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS
-            .get_metric_with_label_values(&[
-                &self.tenant_id.to_string(),
-                &self.timeline_id.to_string(),
-                file_kind.as_str(),
-                op_kind.as_str(),
-            ])
-            .unwrap()
+        self.metrics
+            .unfinished_tasks(&file_kind, &op_kind)
             .add(delta)
     }
 
@@ -1068,6 +1068,7 @@ pub fn create_remote_timeline_client(
         timeline_id,
         storage_impl: remote_storage,
         upload_queue: Mutex::new(UploadQueue::Uninitialized),
+        metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
     })
 }
 
@@ -1180,6 +1181,10 @@ mod tests {
             timeline_id: TIMELINE_ID,
             storage_impl,
             upload_queue: Mutex::new(UploadQueue::Uninitialized),
+            metrics: Arc::new(RemoteTimelineClientMetrics::new(
+                &harness.tenant_id,
+                &TIMELINE_ID,
+            )),
         });
 
         let remote_timeline_dir =
