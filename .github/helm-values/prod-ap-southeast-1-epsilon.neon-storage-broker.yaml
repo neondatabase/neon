@@ -10,6 +10,8 @@ ingress:
     nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # we have basically infinite streams, disable body size limit
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
     cert-manager.io/cluster-issuer: "cert-manager-clusterissuer"
 
   hosts:
