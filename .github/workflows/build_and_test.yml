@@ -740,7 +740,7 @@ jobs:
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "storage_broker_ns": "neon-storage-broker", "storage_broker_config": "staging.neon-storage-broker", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA", "console_api_key_secret": "NEON_STAGING_API_KEY"}'
-            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "storage_broker_ns": "neon-stress-storage-broker", "storage_broker_config": "neon-stress.neon-storage-broker", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA", "console_api_key_secret": "NEON_CAPTEST_API_KEY", storage_broker_config: }'
+            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "storage_broker_ns": "neon-stress-storage-broker", "storage_broker_config": "neon-stress.neon-storage-broker", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA", "console_api_key_secret": "NEON_CAPTEST_API_KEY"}'
             echo "include=[$STAGING, $NEON_STRESS]" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "storage_broker_ns": "neon-storage-broker", "storage_broker_config": "production.neon-storage-broker", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
