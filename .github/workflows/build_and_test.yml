@@ -792,7 +792,7 @@ jobs:
           chmod 0600 ssh-key
           ssh-add ssh-key
           rm -f ssh-key ssh-key-cert.pub
-          ansible-galaxy collection install sivel.toiletwater
+          ANSIBLE_CONFIG=./ansible.cfg ansible-galaxy collection install sivel.toiletwater
           ANSIBLE_CONFIG=./ansible.cfg ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts.yaml -e CONSOLE_API_TOKEN=${{ secrets[matrix.console_api_key_secret] }} -e SENTRY_URL_PAGESERVER=${{ secrets.SENTRY_URL_PAGESERVER }} -e SENTRY_URL_SAFEKEEPER=${{ secrets.SENTRY_URL_SAFEKEEPER }}
           rm -f neon_install.tar.gz .neon_current_version
 
