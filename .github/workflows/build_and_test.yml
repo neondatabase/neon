@@ -752,7 +752,7 @@ jobs:
 
   deploy:
     runs-on: [ self-hosted, dev, x64 ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -771,16 +771,6 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Setup ansible
-        run: |
-          export PATH="/root/.local/bin:$PATH"
-          pip install --progress-bar off --user ansible boto3 toml
 
       - name: Redeploy
         run: |
