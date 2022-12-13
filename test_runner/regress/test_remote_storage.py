@@ -384,7 +384,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             metrics,
             re.MULTILINE,
         )
-        assert matches
+        if matches is None:
+            return None
         return int(matches[1])
 
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
@@ -436,8 +437,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 
     assert not timeline_path.exists()
 
-    # timeline deletion should kill ongoing uploads
-    assert get_queued_count(file_kind="index", op_kind="upload") == 0
+    # timeline deletion should kill ongoing uploads, so, the metric will be gone
+    assert get_queued_count(file_kind="index", op_kind="upload") is None
 
     # timeline deletion should be unblocking checkpoint ops
     checkpoint_thread.join(2.0)

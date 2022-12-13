@@ -201,7 +201,7 @@ pub static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
 
 // remote storage metrics
 
-pub static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|| {
+static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_remote_upload_queue_unfinished_tasks",
         "Number of tasks in the upload queue that are not finished yet.",
@@ -210,14 +210,14 @@ pub static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
     Download,
     Delete,
 }
 impl RemoteOpKind {
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Upload => "upload",
             Self::Download => "download",
@@ -226,13 +226,13 @@ impl RemoteOpKind {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum RemoteOpFileKind {
     Layer,
     Index,
 }
 impl RemoteOpFileKind {
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Layer => "layer",
             Self::Index => "index",
@@ -491,9 +491,93 @@ pub fn remove_tenant_metrics(tenant_id: &TenantId) {
 
 use futures::Future;
 use pin_project_lite::pin_project;
+use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
+
+pub struct RemoteTimelineClientMetrics {
+    tenant_id: String,
+    timeline_id: String,
+    remote_operation_time: Mutex<HashMap<(&'static str, &'static str, &'static str), Histogram>>,
+    unfinished_tasks: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
+}
+
+impl RemoteTimelineClientMetrics {
+    pub fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+        RemoteTimelineClientMetrics {
+            tenant_id: tenant_id.to_string(),
+            timeline_id: timeline_id.to_string(),
+            remote_operation_time: Mutex::new(HashMap::default()),
+            unfinished_tasks: Mutex::new(HashMap::default()),
+        }
+    }
+    pub fn remote_operation_time(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+        status: &'static str,
+    ) -> Histogram {
+        // XXX would be nice to have an upgradable RwLock
+        let mut guard = self.remote_operation_time.lock().unwrap();
+        let key = (file_kind.as_str(), op_kind.as_str(), status);
+        let metric = guard.entry(key).or_insert_with(move || {
+            REMOTE_OPERATION_TIME
+                .get_metric_with_label_values(&[
+                    &self.tenant_id.to_string(),
+                    &self.timeline_id.to_string(),
+                    key.0,
+                    key.1,
+                    key.2,
+                ])
+                .unwrap()
+        });
+        metric.clone()
+    }
+    pub fn unfinished_tasks(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+    ) -> IntGauge {
+        // XXX would be nice to have an upgradable RwLock
+        let mut guard = self.unfinished_tasks.lock().unwrap();
+        let key = (file_kind.as_str(), op_kind.as_str());
+        let metric = guard.entry(key).or_insert_with(move || {
+            REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS
+                .get_metric_with_label_values(&[
+                    &self.tenant_id.to_string(),
+                    &self.timeline_id.to_string(),
+                    key.0,
+                    key.1,
+                ])
+                .unwrap()
+        });
+        metric.clone()
+    }
+}
+
+impl Drop for RemoteTimelineClientMetrics {
+    fn drop(&mut self) {
+        let RemoteTimelineClientMetrics {
+            tenant_id,
+            timeline_id,
+            remote_operation_time,
+            unfinished_tasks,
+        } = self;
+        for ((a, b, c), _) in remote_operation_time.get_mut().unwrap().drain() {
+            let _ = REMOTE_OPERATION_TIME.remove_label_values(&[tenant_id, timeline_id, a, b, c]);
+        }
+        for ((a, b), _) in unfinished_tasks.get_mut().unwrap().drain() {
+            let _ = REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS.remove_label_values(&[
+                tenant_id,
+                timeline_id,
+                a,
+                b,
+            ]);
+        }
+    }
+}
 
 /// Wrapper future that measures the time spent by a remote storage operation,
 /// and records the time and success/failure as a prometheus metric.
@@ -504,6 +588,7 @@ pub trait MeasureRemoteOp: Sized {
         timeline_id: TimelineId,
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
+        metrics: Arc<RemoteTimelineClientMetrics>,
     ) -> MeasuredRemoteOp<Self> {
         let start = Instant::now();
         MeasuredRemoteOp {
@@ -513,6 +598,7 @@ pub trait MeasureRemoteOp: Sized {
             file_kind,
             op,
             start,
+            metrics,
         }
     }
 }
@@ -529,6 +615,7 @@ pin_project! {
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
         start: Instant,
+        metrics: Arc<RemoteTimelineClientMetrics>,
     }
 }
 
@@ -541,15 +628,8 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
         if let Poll::Ready(ref res) = poll_result {
             let duration = this.start.elapsed();
             let status = if res.is_ok() { &"success" } else { &"failure" };
-            REMOTE_OPERATION_TIME
-                .get_metric_with_label_values(&[
-                    &this.tenant_id.to_string(),
-                    &this.timeline_id.to_string(),
-                    this.file_kind.as_str(),
-                    this.op.as_str(),
-                    status,
-                ])
-                .unwrap()
+            this.metrics
+                .remote_operation_time(this.file_kind, this.op, status)
                 .observe(duration.as_secs_f64());
         }
         poll_result

@@ -39,6 +39,13 @@ def parse_metrics(text: str, name: str = "") -> Metrics:
     return metrics
 
 
+PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
+    "pageserver_remote_upload_queue_unfinished_tasks",
+    "pageserver_remote_operation_seconds_bucket",
+    "pageserver_remote_operation_seconds_count",
+    "pageserver_remote_operation_seconds_sum",
+)
+
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_current_logical_size",
     "pageserver_current_physical_size",
@@ -62,4 +69,5 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_wait_lsn_seconds_sum",
     "pageserver_created_persistent_files_total",
     "pageserver_written_persistent_bytes_total",
+    *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
 )
