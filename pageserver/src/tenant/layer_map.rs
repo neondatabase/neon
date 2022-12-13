@@ -274,15 +274,21 @@ impl LayerMap {
         let latest_image = self.images.query(key.to_i128(), end_lsn.0 - 1);
 
         // Check for exact match
-        if let Some(image) = &latest_image {
+        let latest_image = if let Some(image) = latest_image {
             let img_lsn = image.get_lsn_range().start;
             if Lsn(img_lsn.0 + 1) == end_lsn {
                 return Ok(Some(SearchResult {
-                    layer: Arc::clone(&image),
+                    layer: image,
                     lsn_floor: img_lsn,
                 }));
             }
-        }
+
+            // HACK just to give back ownership of latest_image to parent scope.
+            //      There's definitely a cleaner way to do it.
+            Some(image)
+        } else {
+            None
+        };
 
         return Ok(latest_layer.map(|layer| {
             // Compute lsn_floor
@@ -293,7 +299,7 @@ impl LayerMap {
                 }
             }
             SearchResult {
-                layer: Arc::clone(&layer),
+                layer,
                 lsn_floor,
             }
         }));

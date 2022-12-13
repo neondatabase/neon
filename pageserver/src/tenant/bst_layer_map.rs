@@ -369,10 +369,7 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
             panic!("rebuild pls")
         }
 
-        match self.map.query(key, lsn) {
-            Some(layer) => Some(layer.clone()),
-            None => None,
-        }
+        self.map.query(key, lsn)
     }
 }
 
