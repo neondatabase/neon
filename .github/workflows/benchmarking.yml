@@ -115,13 +115,10 @@ jobs:
         # neon-captest-prefetch: Same, with prefetching enabled (new project)
         # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
         # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-new, neon-captest-prefetch, rds-postgres ]
+        platform: [ neon-captest-new, neon-captest-reuse, neon-captest-prefetch, rds-postgres ]
         db_size: [ 10gb ]
         runner: [ us-east-2 ]
         include:
-          - platform: neon-captest-reuse
-            db_size: 10gb
-            runner: dev  # TODO: Switch to us-east-2 after dry-bonus-223539 migration to staging
           - platform: neon-captest-new
             db_size: 50gb
             runner: us-east-2
