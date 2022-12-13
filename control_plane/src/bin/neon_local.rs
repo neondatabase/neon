@@ -341,7 +341,7 @@ fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
         .get_many::<String>("pageserver-config-override")
         .into_iter()
         .flatten()
-        .map(|s| s.as_str())
+        .map(String::as_str)
         .collect()
 }
 

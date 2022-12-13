@@ -524,7 +524,7 @@ impl PageServerConf {
                 )),
                 "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
-                    builder.remote_storage_config(Some(RemoteStorageConfig::from_toml(item)?))
+                    builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
                 "tenant_config" => {
                     t_conf = Self::parse_toml_tenant_conf(item)?;

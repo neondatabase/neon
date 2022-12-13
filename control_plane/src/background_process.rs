@@ -51,21 +51,21 @@ pub enum InitialPidFile<'t> {
 }
 
 /// Start a background child process using the parameters given.
-pub fn start_process<
-    F,
-    S: AsRef<OsStr>,
-    EI: IntoIterator<Item = (String, String)>, // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
->(
+pub fn start_process<F, AI, A, EI>(
     process_name: &str,
     datadir: &Path,
     command: &Path,
-    args: &[S],
+    args: AI,
     envs: EI,
     initial_pid_file: InitialPidFile,
     process_status_check: F,
 ) -> anyhow::Result<Child>
 where
     F: Fn() -> anyhow::Result<bool>,
+    AI: IntoIterator<Item = A>,
+    A: AsRef<OsStr>,
+    // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
+    EI: IntoIterator<Item = (String, String)>,
 {
     let log_path = datadir.join(format!("{process_name}.log"));
     let process_log_file = fs::OpenOptions::new()
