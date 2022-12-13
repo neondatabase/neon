@@ -106,9 +106,8 @@ static void event_destroy(event_t* event)
 {
 	/* See https://stackoverflow.com/questions/20439404/pthread-conditions-and-process-termination */
 	/* pthread_cond_broadcast(&event->cond); doesn't help in this case */
-#if 0
+	memset(&event->cond, 0, sizeof(event->cond));
 	pthread_cond_destroy(&event->cond);
-#endif
 	pthread_mutex_destroy(&event->mutex);
 }
 
@@ -185,6 +184,7 @@ int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, c
 					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) != 0)
 					{
 						/* Child process is terinated */
+						shmem_pipe_destroy(pipe);
 						shmem_pipe_reset(pipe);
 						return 0;
 					}
@@ -286,6 +286,7 @@ int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, c
 					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) != 0)
 					{
 						/* Child process is terminated */
+						shmem_pipe_destroy(pipe);
 						shmem_pipe_reset(pipe);
 						return 0;
 					}
@@ -623,7 +624,7 @@ pipe_t* shmem_pipe_open(char const* name)
 	return pipe;
 }
 
-void shmem_pipe_close(pipe_t* pipe)
+void shmem_pipe_destroy(pipe_t* pipe)
 {
 #ifndef BUSY_WAIT_RESPONSES
 	event_destroy(&pipe->resp.head.event);
@@ -631,6 +632,11 @@ void shmem_pipe_close(pipe_t* pipe)
 	event_destroy(&pipe->req.tail.event);
 #endif
 	event_destroy(&pipe->req.head.event);
+}
+
+void shmem_pipe_close(pipe_t* pipe)
+{
+	shmem_pipe_destroy(pipe);
 	munmap(pipe, sizeof(pipe_t));
 }
 
