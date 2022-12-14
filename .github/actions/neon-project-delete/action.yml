@@ -27,6 +27,8 @@ runs:
           --header "Accept: application/json" \
           --header "Content-Type: application/json" \
           --header "Authorization: Bearer ${API_KEY}"
+
+        echo "Project ${PROJECT_ID} has been deleted"
       env:
         API_HOST: ${{ inputs.api_host }}
         API_KEY: ${{ inputs.api_key }}
