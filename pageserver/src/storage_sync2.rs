@@ -460,6 +460,7 @@ impl RemoteTimelineClient {
     pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_with_current_remote_index_part(index_part)?;
+        self.update_remote_physical_size_gauge(Some(index_part));
         Ok(())
     }
 
@@ -471,6 +472,7 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_empty_remote(local_metadata)?;
+        self.update_remote_physical_size_gauge(None);
         Ok(())
     }
 
@@ -480,6 +482,20 @@ impl RemoteTimelineClient {
             UploadQueue::Initialized(q) => Some(q.last_uploaded_consistent_lsn),
             UploadQueue::Stopped(q) => Some(q.last_uploaded_consistent_lsn),
         }
+    }
+
+    fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
+        let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
+            current_remote_index_part
+                .layer_metadata
+                .iter()
+                // If we don't have the file size for the layer, don't account for it in the metric.
+                .map(|(_, ilmd)| ilmd.file_size.unwrap_or(0))
+                .sum()
+        } else {
+            0
+        };
+        self.metrics.remote_physical_size_gauge().set(size);
     }
 
     //
@@ -543,6 +559,14 @@ impl RemoteTimelineClient {
             let upload_queue = guard.initialized_mut()?;
             if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
                 upgraded.merge(&new_metadata);
+                // If we don't do an index file upload inbetween here and restart,
+                // the value will go back down after pageserver restart, since we will
+                // have lost this data point.
+                // But, we upload index part fairly frequently, and restart pageserver rarely.
+                // So, by accounting eagerly, we present a most-of-the-time-more-accurate value sooner.
+                self.metrics
+                    .remote_physical_size_gauge()
+                    .add(downloaded_size);
             } else {
                 // The file should exist, since we just downloaded it.
                 warn!(
@@ -855,7 +879,7 @@ impl RemoteTimelineClient {
                     .await
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
-                    upload::upload_index_part(
+                    let res = upload::upload_index_part(
                         self.conf,
                         &self.storage_impl,
                         self.tenant_id,
@@ -869,7 +893,11 @@ impl RemoteTimelineClient {
                         RemoteOpKind::Upload,
                         Arc::clone(&self.metrics),
                     )
-                    .await
+                    .await;
+                    if res.is_ok() {
+                        self.update_remote_physical_size_gauge(Some(index_part));
+                    }
+                    res
                 }
                 UploadOp::Delete(metric_file_kind, ref layer_file_name) => {
                     let path = &self

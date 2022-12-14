@@ -232,7 +232,7 @@ impl IndexPart {
 /// Serialized form of [`LayerFileMetadata`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct IndexLayerMetadata {
-    file_size: Option<u64>,
+    pub(super) file_size: Option<u64>,
 }
 
 impl From<&'_ LayerFileMetadata> for IndexLayerMetadata {

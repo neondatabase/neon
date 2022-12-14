@@ -96,6 +96,16 @@ static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_remote_physical_size",
+        "The size of the layer files present in the remote storage that are listed in the the remote index_part.json.",
+        // Corollary: If any files are missing from the index part, they won't be included here.
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_current_logical_size",
@@ -500,6 +510,7 @@ use std::time::Instant;
 pub struct RemoteTimelineClientMetrics {
     tenant_id: String,
     timeline_id: String,
+    remote_physical_size_gauge: Mutex<Option<UIntGauge>>,
     remote_operation_time: Mutex<HashMap<(&'static str, &'static str, &'static str), Histogram>>,
     unfinished_tasks: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
 }
@@ -511,7 +522,21 @@ impl RemoteTimelineClientMetrics {
             timeline_id: timeline_id.to_string(),
             remote_operation_time: Mutex::new(HashMap::default()),
             unfinished_tasks: Mutex::new(HashMap::default()),
+            remote_physical_size_gauge: Mutex::new(None),
         }
+    }
+    pub fn remote_physical_size_gauge(&self) -> UIntGauge {
+        let mut guard = self.remote_physical_size_gauge.lock().unwrap();
+        guard
+            .get_or_insert_with(|| {
+                REMOTE_PHYSICAL_SIZE
+                    .get_metric_with_label_values(&[
+                        &self.tenant_id.to_string(),
+                        &self.timeline_id.to_string(),
+                    ])
+                    .unwrap()
+            })
+            .clone()
     }
     pub fn remote_operation_time(
         &self,
@@ -562,6 +587,7 @@ impl Drop for RemoteTimelineClientMetrics {
         let RemoteTimelineClientMetrics {
             tenant_id,
             timeline_id,
+            remote_physical_size_gauge,
             remote_operation_time,
             unfinished_tasks,
         } = self;
@@ -575,6 +601,10 @@ impl Drop for RemoteTimelineClientMetrics {
                 a,
                 b,
             ]);
+        }
+        {
+            let _ = remote_physical_size_gauge; // use to avoid 'unused' warning in desctructuring above
+            let _ = REMOTE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         }
     }
 }
