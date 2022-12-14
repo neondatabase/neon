@@ -179,8 +179,15 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
     Ok(res)
 }
 
+/// Type state for the cleanup on drop pointer.
+///
+/// Without any test specific configuration, will call `munmap` afterwards.
 pub struct MMapped;
 
+/// Type state to fully cleanup on drop pointer.
+///
+/// In addition to `munmap` this will tombstone the shared memory segment, maybe run drop in
+/// future.
 pub struct Ready;
 
 pub struct SharedMemPipePtr<Stage> {
