@@ -135,7 +135,7 @@ impl<'de> serde::de::Visitor<'de> for UncleanLayerFileNameVisitor {
         match maybe_clean {
             Ok(clean) => Ok(UncleanLayerFileName::Clean(clean)),
             Err(e) => {
-                if v.ends_with(".old") {
+                if v.ends_with(".old") || v == "metadata_backup" {
                     Ok(UncleanLayerFileName::BackupFile(v.to_owned()))
                 } else {
                     Err(E::custom(e))
