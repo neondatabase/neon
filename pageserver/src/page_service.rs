@@ -541,7 +541,11 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest)?;
+        let exists = crate::tenant::retry_get_with_timeout(
+            || timeline.get_rel_exists(req.rel, lsn, req.latest),
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
@@ -558,7 +562,11 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest)?;
+        let n_blocks = crate::tenant::retry_get_with_timeout(
+            || timeline.get_rel_size(req.rel, lsn, req.latest),
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
@@ -575,9 +583,11 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let total_blocks =
-            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)?;
-
+        let total_blocks = crate::tenant::retry_get_with_timeout(
+            || timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest),
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
@@ -603,11 +613,17 @@ impl PageServerHandler {
         }
         */
 
-        // FIXME: this profiling now happens at different place than it used to. The
-        // current profiling is based on a thread-local variable, so it doesn't work
-        // across awaits
-        let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
-        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
+        let page = crate::tenant::retry_get_with_timeout(
+            || {
+                // FIXME: this profiling now happens at different place than it used to. The
+                // current profiling is based on a thread-local variable, so it doesn't work
+                // across awaits
+                let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
+                timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)
+            },
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,

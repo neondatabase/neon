@@ -8,6 +8,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -15,6 +16,8 @@ use utils::{
 };
 
 use super::filename::LayerFileName;
+use super::remote_layer::RemoteLayer;
+
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -161,4 +164,29 @@ pub trait PersistentLayer: Layer {
 
     /// Permanently remove this layer from disk.
     fn delete(&self) -> Result<()>;
+
+    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
+        None
+    }
+
+    fn is_remote_layer(&self) -> bool {
+        false
+    }
+
+    /// Returns None if the layer file size is not known.
+    ///
+    /// Must not change over the lifetime of the layer object because
+    /// resident_physical_size_guage and s3_physical_size_guage are updated
+    /// for RemoteLayer's in response to this value.
+    fn file_size(&self) -> Option<u64>;
+}
+
+pub fn downcast_remote_layer(
+    layer: &Arc<dyn PersistentLayer>,
+) -> Option<std::sync::Arc<RemoteLayer>> {
+    if layer.is_remote_layer() {
+        Arc::clone(layer).downcast_remote_layer()
+    } else {
+        None
+    }
 }

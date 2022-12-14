@@ -87,9 +87,9 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}"
     )
 
-    # Second timeline has no ancestors, only the metadata file and no layer files.
-    # That is checked explicitly in the pageserver, and causes the tenant to be marked
-    # as broken.
+    # Second timeline has no ancestors, only the metadata file and no layer files locally,
+    # and we don't have the remote storage enabled. It is loaded into memory, but getting
+    # the basebackup from it will fail.
     with pytest.raises(
         Exception, match=f"Tenant {tenant2} will not become active. Current state: Broken"
     ) as err:

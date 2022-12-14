@@ -84,13 +84,10 @@ static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-// Metrics for determining timeline's physical size.
-// A layered timeline's physical is defined as the total size of
-// (delta/image) layer files on disk.
-static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
-        "pageserver_current_physical_size",
-        "Current physical size grouped by timeline",
+        "pageserver_resident_physical_size",
+        "The size of the layer files present in the pageserver's filesystem.",
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
@@ -146,8 +143,9 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     1.0,      // 1 sec
 ];
 
-const STORAGE_IO_TIME_OPERATIONS: &[&str] =
-    &["open", "close", "read", "write", "seek", "fsync", "gc"];
+const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
+    "open", "close", "read", "write", "seek", "fsync", "gc", "metadata",
+];
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
@@ -375,7 +373,7 @@ pub struct TimelineMetrics {
     pub load_layer_map_histo: Histogram,
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
-    pub current_physical_size_gauge: UIntGauge,
+    pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
@@ -416,7 +414,7 @@ impl TimelineMetrics {
         let wait_lsn_time_histo = WAIT_LSN_TIME
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let current_physical_size_gauge = CURRENT_PHYSICAL_SIZE
+        let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
@@ -442,7 +440,7 @@ impl TimelineMetrics {
             load_layer_map_histo,
             last_record_gauge,
             wait_lsn_time_histo,
-            current_physical_size_gauge,
+            resident_physical_size_gauge,
             current_logical_size_gauge,
             num_persistent_files_created,
             persistent_bytes_written,
@@ -458,7 +456,7 @@ impl Drop for TimelineMetrics {
         let _ = MATERIALIZED_PAGE_CACHE_HIT.remove_label_values(&[tenant_id, timeline_id]);
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = CURRENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);

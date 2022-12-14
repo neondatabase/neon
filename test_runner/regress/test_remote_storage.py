@@ -14,7 +14,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PageserverApiException,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_flush_lsn,
     wait_for_last_record_lsn,
@@ -62,9 +61,9 @@ def test_remote_storage_backup_and_restore(
     neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
     data_id = 1
-    data_secret = "very secret secret"
+    data = "just some data"
 
-    ##### First start, insert secret data and upload it to the remote storage
+    ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
     # FIXME: Is this expected?
@@ -97,8 +96,8 @@ def test_remote_storage_backup_and_restore(
         with pg.cursor() as cur:
             cur.execute(
                 f"""
-                CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
-                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
+                CREATE TABLE t{checkpoint_number}(id int primary key, data text);
+                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data}|{checkpoint_number}');
             """
             )
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -134,21 +133,31 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # Introduce failpoint in download
-    pageserver_http.configure_failpoints(("remote-storage-download-pre-rename", "return"))
+    pageserver_http.configure_failpoints(("storage-sync-list-remote-timelines", "return"))
+    env.pageserver.allowed_errors.append(
+        ".*error attaching tenant: storage-sync-list-remote-timelines",
+    )
 
+    # Attach doesn't download anything, so, this should succeed
     client.tenant_attach(tenant_id)
+
+    detail = client.tenant_status(tenant_id)
+    log.info("Tenant status with active failpoint: %s", detail)
 
     # is there a better way to assert that failpoint triggered?
     wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
 
     # assert cannot attach timeline that is scheduled for download
-    # FIXME implement layer download retries
+    # FIXME: we used to keep retrying the initial download on failure.
+    # (We need to download some layers to calculate the logical size.)
+    # Now we mark the timeline as broken, instead.
+    # with pytest.raises(Exception, match="attach is already in progress"):
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
         client.tenant_attach(tenant_id)
 
     tenant_status = client.tenant_status(tenant_id)
     log.info("Tenant status with active failpoint: %s", tenant_status)
-    # FIXME implement layer download retries
+    # FIXME see above
     # assert tenant_status["has_in_progress_downloads"] is True
 
     # trigger temporary download files removal
@@ -158,11 +167,18 @@ def test_remote_storage_backup_and_restore(
     # ensure that an initiated attach operation survives pageserver restart
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
         client.tenant_attach(tenant_id)
-    log.info("waiting for timeline redownload")
+    log.info("waiting for tenant to become active. this should be quick with on-demand download")
+
+    def tenant_active():
+        all_states = client.tenant_list()
+        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
+        assert tenant["has_in_progress_downloads"] is False
+        assert tenant["state"] == "Active"
+
     wait_until(
-        number_of_iterations=20,
+        number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=tenant_active,
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
@@ -171,12 +187,14 @@ def test_remote_storage_backup_and_restore(
         Lsn(detail["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
 
+    log.info("select some data, this will cause layers to be downloaded")
+    # FIXME exercise code path where download fails
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
             assert (
-                query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
-                == f"{data_secret}|{checkpoint_number}"
+                query_scalar(cur, f"SELECT data FROM t{checkpoint_number} WHERE id = {data_id};")
+                == f"{data}|{checkpoint_number}"
             )
 
 

@@ -186,7 +186,7 @@ pub async fn collect_metrics_task(
                 timeline_written_size,
             ));
 
-            let timeline_size = timeline.get_physical_size();
+            let timeline_size = timeline.get_resident_physical_size();
             tenant_physical_size += timeline_size;
 
             debug!(
