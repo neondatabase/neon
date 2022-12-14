@@ -1,0 +1,13 @@
+[package]
+name = "shmempipe"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+memmap = "0.7.0"
+ringbuf = "0.3.1"
+
+nix = { version = "0.26.1", features = ["mman", "fs"] }
+libc = { version = "0.2.138" }
