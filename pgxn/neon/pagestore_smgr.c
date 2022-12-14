@@ -1759,6 +1759,9 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
+	if (lfc_cached(reln->smgr_rnode.node, forknum, blocknum))
+		return false;
+
 	tag = (BufferTag) {
 		.rnode = reln->smgr_rnode.node,
 		.forkNum = forknum,

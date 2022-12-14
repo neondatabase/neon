@@ -259,6 +259,32 @@ lfc_init(void)
 	shmem_startup_hook = lfc_shmem_startup;
 }
 
+bool
+lfc_cached(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
+{
+	BufferTag tag;
+	FileCacheEntry* entry;
+	int chunk_offs = blkno & (CHUNK_SIZE-1);
+
+	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+		return false;
+
+	tag.rnode = rnode;
+	tag.forkNum = forkNum;
+	tag.blockNum = blkno & ~(CHUNK_SIZE-1);
+
+	LWLockAcquire(lfc_lock, LW_SHARED);
+	entry = hash_search(lfc_hash, &tag, HASH_FIND, NULL);
+	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
+	{
+		/* Page is not cached */
+		LWLockRelease(lfc_lock);
+		return false;
+	}
+	LWLockRelease(lfc_lock);
+	return true;
+}
+
 /*
  * Try to read page from local cache.
  * Returns true if page is found in local cache.
