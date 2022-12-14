@@ -728,24 +728,26 @@ class NeonEnvBuilder:
         )
 
     def cleanup_local_storage(self):
-        if not self.preserve_database_files:
-            directories_to_clean: List[Path] = []
-            for test_entry in Path(self.repo_dir).glob("**/*"):
-                if test_entry.is_file():
-                    test_file = test_entry
-                    if not ATTACHMENT_NAME_REGEX.fullmatch(
-                        test_file.name
-                    ) and not SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
-                        log.debug(f"Removing large database {test_file} file")
-                        test_file.unlink()
-                elif test_entry.is_dir():
-                    directories_to_clean.append(test_entry)
+        if self.preserve_database_files:
+            return
 
-            while directories_to_clean:
-                directory_to_clean = directories_to_clean.pop()
-                if not os.listdir(directory_to_clean):
-                    log.debug(f"Removing empty directory {directory_to_clean}")
-                    directory_to_clean.rmdir()
+        directories_to_clean: List[Path] = []
+        for test_entry in Path(self.repo_dir).glob("**/*"):
+            if test_entry.is_file():
+                test_file = test_entry
+                if ATTACHMENT_NAME_REGEX.fullmatch(test_file.name):
+                    continue
+                if SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
+                    continue
+                log.debug(f"Removing large database {test_file} file")
+                test_file.unlink()
+            elif test_entry.is_dir():
+                directories_to_clean.append(test_entry)
+
+        for directory_to_clean in reversed(directories_to_clean):
+            if not os.listdir(directory_to_clean):
+                log.debug(f"Removing empty directory {directory_to_clean}")
+                directory_to_clean.rmdir()
 
     def cleanup_remote_storage(self):
         # here wee check for true remote storage, no the local one
