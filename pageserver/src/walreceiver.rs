@@ -126,15 +126,21 @@ impl<E: Clone> TaskHandle<E> {
         match self.events_receiver.changed().await {
             Ok(()) => TaskEvent::Update((self.events_receiver.borrow()).clone()),
             Err(_task_channel_part_dropped) => {
-                TaskEvent::End(match self.join_handle.take() {
+                TaskEvent::End(match self.join_handle.as_mut() {
                     Some(jh) => {
                         if !jh.is_finished() {
                             warn!("sender is dropped while join handle is still alive");
                         }
 
-                        jh.await
+                        let res = jh
+                            .await
                             .map_err(|e| anyhow::anyhow!("Failed to join task: {e}"))
-                            .and_then(|x| x)
+                            .and_then(|x| x);
+
+                        // For cancellation-safety, drop join_handle only after successful .await.
+                        self.join_handle = None;
+
+                        res
                     }
                     None => {
                         // Another option is to have an enum, join handle or result and give away the reference to it
