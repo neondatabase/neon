@@ -44,6 +44,7 @@ PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
     "pageserver_remote_operation_seconds_bucket",
     "pageserver_remote_operation_seconds_count",
     "pageserver_remote_operation_seconds_sum",
+    "pageserver_remote_physical_size",
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
