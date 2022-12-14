@@ -84,6 +84,7 @@ typedef struct pipe_t {
 	queue_t resp;
 	u32  msg_id; /* generator of message ids, protected by request queue mutex */
 	int  child_pid;    /* process identifier of child process (used to detect child crash) */
+	u32  generation; /* pipe generation: incremented on reset to break busy loops */
 } pipe_t;
 
 
@@ -158,6 +159,7 @@ int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, c
 	int header_received = 0;
 	size_t resp_size = sizeof(resp_hdr);
 	size_t busy_loop_iterations = 0;
+	u32 generation = pipe->generation;
 	latch_acquire(&pipe->req.cs);
 
 	/* append data to queue head */
@@ -177,18 +179,22 @@ int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, c
 			}
 			do
 			{
-				/* Wait until tail is advanced */
+				/* Check if peer is crashed */
+				if (generation != pipe->generation)
+					return 0;
+
 				if (++busy_loop_iterations % CHECK_WATCHDOG_INTERVAL == 0 && pipe->child_pid != 0)
 				{
 					int wstatus;
-					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) != 0)
+					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) > 0)
 					{
-						/* Child process is terinated */
+						/* Child process is terminated */
 						shmem_pipe_destroy(pipe);
 						shmem_pipe_reset(pipe);
 						return 0;
 					}
 				}
+				/* Wait until tail is advanced */
 #ifndef BUSY_WAIT_RESPONSES
 				pipe->req.tail.n_blocked += 1;
 				event_reset(&pipe->req.tail.event);
@@ -279,11 +285,14 @@ int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, c
 #endif
 			do
 			{
-				/* wait until head is advanced */
+				/* Check if peer is crashed */
+				if (generation != pipe->generation)
+					return 0;
+
 				if (++busy_loop_iterations % CHECK_WATCHDOG_INTERVAL == 0 && pipe->child_pid)
 				{
 					int wstatus;
-					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) != 0)
+					if (waitpid(pipe->child_pid, &wstatus, WNOHANG) > 0)
 					{
 						/* Child process is terminated */
 						shmem_pipe_destroy(pipe);
@@ -291,6 +300,7 @@ int shmem_pipe_process_request(pipe_t* pipe, char const* req, size_t req_size, c
 						return 0;
 					}
 				}
+				/* Wait until head is advanced */
 #ifndef BUSY_WAIT_RESPONSES
 				pipe->resp.head.n_blocked += 1;
 				event_reset(&pipe->resp.head.event);
@@ -561,6 +571,7 @@ void shmem_pipe_reset(pipe_t* pipe)
 
 	pipe->msg_id = 0;
 	pipe->child_pid = 0;
+	pipe->generation += 1;
 
 #ifndef BUSY_WAIT_RESPONSES
 	event_init(&pipe->resp.head.event);
