@@ -18,6 +18,7 @@
 #include <fcntl.h>
 
 #include "postgres.h"
+#include "funcapi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "pagestore_client.h"
@@ -432,4 +433,176 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (--entry->access_count == 0)
 		lfc_link(&lfc_ctl->lru, entry);
 	LWLockRelease(lfc_lock);
+}
+
+
+/*
+ * Record structure holding the to be exposed cache data.
+ */
+typedef struct
+{
+	uint32		pageoffs;
+	Oid			relfilenode;
+	Oid			reltablespace;
+	Oid			reldatabase;
+	ForkNumber	forknum;
+	BlockNumber blocknum;
+	uint16		accesscount;
+} LocalCachePagesRec;
+
+/*
+ * Function context for data persisting over repeated calls.
+ */
+typedef struct
+{
+	TupleDesc	tupdesc;
+	LocalCachePagesRec *record;
+} LocalCachePagesContext;
+
+/*
+ * Function returning data from the local file cache
+ * relation node/tablespace/database/blocknum and access_counter
+ */
+PG_FUNCTION_INFO_V1(local_cache_pages);
+
+#define NUM_LOCALCACHE_PAGES_ELEM	7
+
+Datum
+local_cache_pages(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	Datum		result;
+	MemoryContext oldcontext;
+	LocalCachePagesContext *fctx;	/* User function context. */
+	TupleDesc	tupledesc;
+	TupleDesc	expected_tupledesc;
+	HeapTuple	tuple;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+        HASH_SEQ_STATUS status;
+		FileCacheEntry* entry;
+		uint32 n_pages = 0;
+		uint32 i;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* Switch context when allocating stuff to be used in later calls */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* Create a user function context for cross-call persistence */
+		fctx = (LocalCachePagesContext *) palloc(sizeof(LocalCachePagesContext));
+
+		/*
+		 * To smoothly support upgrades from version 1.0 of this extension
+		 * transparently handle the (non-)existence of the pinning_backends
+		 * column. We unfortunately have to get the result type for that... -
+		 * we can't use the result type determined by the function definition
+		 * without potentially crashing when somebody uses the old (or even
+		 * wrong) function definition though.
+		 */
+		if (get_call_result_type(fcinfo, NULL, &expected_tupledesc) != TYPEFUNC_COMPOSITE)
+			elog(ERROR, "return type must be a row type");
+
+		if (expected_tupledesc->natts != NUM_LOCALCACHE_PAGES_ELEM)
+			elog(ERROR, "incorrect number of output arguments");
+
+		/* Construct a tuple descriptor for the result rows. */
+		tupledesc = CreateTemplateTupleDesc(expected_tupledesc->natts);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 1, "pageoffs",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "relfilenode",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 3, "reltablespace",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 4, "reldatabase",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 5, "relforknumber",
+						   INT2OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 6, "relblocknumber",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 7, "accesscount",
+						   INT4OID, -1, 0);
+
+		fctx->tupdesc = BlessTupleDesc(tupledesc);
+
+		LWLockAcquire(lfc_lock, LW_SHARED);
+
+        hash_seq_init(&status, lfc_hash);
+        while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			for (int i = 0; i < CHUNK_SIZE; i++)
+				n_pages += (entry->bitmap[i >> 5] & (1 << (i & 31))) != 0;
+		}
+		fctx->record = (LocalCachePagesRec *)
+			MemoryContextAllocHuge(CurrentMemoryContext,
+								   sizeof(LocalCachePagesRec) * n_pages);
+
+		/* Set max calls and remember the user function context. */
+		funcctx->max_calls = n_pages;
+		funcctx->user_fctx = fctx;
+
+		/* Return to original context when allocating transient memory */
+		MemoryContextSwitchTo(oldcontext);
+
+		/*
+		 * Scan through all the buffers, saving the relevant fields in the
+		 * fctx->record structure.
+		 *
+		 * We don't hold the partition locks, so we don't get a consistent
+		 * snapshot across all buffers, but we do grab the buffer header
+		 * locks, so the information of each buffer is self-consistent.
+		 */
+		n_pages = 0;
+        hash_seq_init(&status, lfc_hash);
+        while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			for (int i = 0; i < CHUNK_SIZE; i++)
+			{
+				if (entry->bitmap[i >> 5] & (1 << (i & 31)))
+				{
+					fctx->record[n_pages].pageoffs = entry->offset*CHUNK_SIZE + i;
+					fctx->record[n_pages].relfilenode = entry->key.rnode.relNode;
+					fctx->record[n_pages].reltablespace = entry->key.rnode.spcNode;
+					fctx->record[n_pages].reldatabase = entry->key.rnode.dbNode;
+					fctx->record[n_pages].forknum = entry->key.forkNum;
+					fctx->record[n_pages].blocknum = entry->key.blockNum + i;
+					fctx->record[n_pages].accesscount = entry->access_count;
+					n_pages += 1;
+				}
+			}
+		}
+		Assert(n_pages == funcctx->max_calls);
+		LWLockRelease(lfc_lock);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	/* Get the saved state */
+	fctx = funcctx->user_fctx;
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		uint32		i = funcctx->call_cntr;
+		Datum		values[NUM_LOCALCACHE_PAGES_ELEM];
+		bool		nulls[NUM_LOCALCACHE_PAGES_ELEM] = {
+			false, false, false, false, false, false, false
+		};
+
+		values[0] = Int64GetDatum((int64) fctx->record[i].pageoffs);
+		values[1] = ObjectIdGetDatum(fctx->record[i].relfilenode);
+		values[2] = ObjectIdGetDatum(fctx->record[i].reltablespace);
+		values[3] = ObjectIdGetDatum(fctx->record[i].reldatabase);
+		values[4] = ObjectIdGetDatum(fctx->record[i].forknum);
+		values[5] = Int64GetDatum((int64) fctx->record[i].blocknum);
+		values[6] = Int32GetDatum(fctx->record[i].accesscount);
+
+		/* Build and return the tuple. */
+		tuple = heap_form_tuple(fctx->tupdesc, values, nulls);
+		result = HeapTupleGetDatum(tuple);
+
+		SRF_RETURN_NEXT(funcctx, result);
+	}
+	else
+		SRF_RETURN_DONE(funcctx);
 }
