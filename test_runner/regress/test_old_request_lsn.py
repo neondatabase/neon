@@ -45,7 +45,7 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     # will cause GetPage requests.
     cur.execute(
         """
-        select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('foo') as tbl_ize
+        select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('foo') as tbl_size
         from pg_settings where name = 'shared_buffers'
     """
     )
