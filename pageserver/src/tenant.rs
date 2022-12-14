@@ -1705,7 +1705,7 @@ impl Tenant {
         let mut target_config_file = VirtualFile::open_with_options(
             target_config_path,
             OpenOptions::new()
-                .truncate(true)
+                .truncate(true) // This needed for overwriting with small config files
                 .write(true)
                 .create_new(first_save),
         )?;
