@@ -34,3 +34,28 @@ metrics:
     enabled: true
     selector:
       release: kube-prometheus-stack
+
+extraManifests:
+  - apiVersion: operator.victoriametrics.com/v1beta1
+    kind: VMServiceScrape
+    metadata:
+      name: "{{ include \"neon-proxy.fullname\" . }}"
+      labels:
+        helm.sh/chart: neon-proxy-{{ .Chart.Version }}
+        app.kubernetes.io/name: neon-proxy
+        app.kubernetes.io/instance: "{{ include \"neon-proxy.fullname\" . }}"
+        app.kubernetes.io/version: "{{ .Chart.AppVersion }}"
+        app.kubernetes.io/managed-by: Helm
+      namespace: "{{ .Release.Namespace }}"
+    spec:
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: "neon-proxy"
+      endpoints:
+        - port: http
+          path: /metrics
+          interval: 10s
+          scrapeTimeout: 10s
+      namespaceSelector:
+        matchNames:
+          - "{{ .Release.Namespace }}"
