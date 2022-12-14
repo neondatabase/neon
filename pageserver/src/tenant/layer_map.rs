@@ -248,19 +248,19 @@ impl LayerMap {
     /// layer.
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
-        // let old = self.search_old(key, end_lsn)?;
+        let old = self.search_old(key, end_lsn)?;
         let new = self.search_new(key, end_lsn)?;
-        // match (&old, &new) {
-        //     (None, None) => {}
-        //     (None, Some(_)) => panic!("returned Some, expected None"),
-        //     (Some(_), None) => panic!("returned None, expected Some"),
-        //     (Some(old), Some(new)) => {
-        //         // TODO be more verbose and flexible
-        //         let context = format!("query: key {}, end_lsn: {}", key, end_lsn);
-        //         assert_eq!(old.layer.filename(), new.layer.filename(), "{}", context);
-        //         assert_eq!(old.lsn_floor, new.lsn_floor, "{}", context);
-        //     }
-        // }
+        match (&old, &new) {
+            (None, None) => {}
+            (None, Some(_)) => panic!("returned Some, expected None"),
+            (Some(_), None) => panic!("returned None, expected Some"),
+            (Some(old), Some(new)) => {
+                // TODO be more verbose and flexible
+                let context = format!("query: key {}, end_lsn: {}", key, end_lsn);
+                assert_eq!(old.layer.filename(), new.layer.filename(), "{}", context);
+                assert_eq!(old.lsn_floor, new.lsn_floor, "{}", context);
+            }
+        }
         return Ok(new);
     }
 

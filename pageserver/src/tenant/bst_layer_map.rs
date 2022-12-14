@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::Arc;
 
-// TODO the `im` crate has 20x more downloads and also has
-// persistent/immutable BTree. See if it's better.
+// TODO drop rpds. So far `im` looks 30% faster.
 use rpds::RedBlackTreeMapSync;
+use im::OrdMap;
 
 /// Layer map implemented using persistent/immutable binary search tree.
 /// It supports historical queries, but no retroactive inserts. For that
@@ -20,12 +19,12 @@ pub struct PersistentLayerMap<Value> {
     /// TODO Merge historic with retroactive, into HistoricLayerMap
     /// TODO Maintain a pair of heads, one for images, one for deltas.
     ///      This way we can query both of them with one BTreeMap query.
-    head: RedBlackTreeMapSync<i128, Option<(u64, Value)>>,
+    head: OrdMap<i128, Option<(u64, Value)>>,
 
     /// All previous states of `self.head`
     ///
     /// TODO: Sorted Vec + binary search could be slightly faster.
-    historic: BTreeMap<u64, RedBlackTreeMapSync<i128, Option<(u64, Value)>>>,
+    historic: BTreeMap<u64, OrdMap<i128, Option<(u64, Value)>>>,
 }
 
 impl<Value: std::fmt::Debug> std::fmt::Debug for PersistentLayerMap<Value> {
@@ -44,7 +43,7 @@ impl<T: Clone> Default for PersistentLayerMap<T> {
 impl<Value: Clone> PersistentLayerMap<Value> {
     pub fn new() -> Self {
         Self {
-            head: RedBlackTreeMapSync::default(),
+            head: OrdMap::default(),
             historic: BTreeMap::default(),
         }
     }
@@ -56,7 +55,7 @@ impl<Value: Clone> PersistentLayerMap<Value> {
             Some((_, None)) => None,
             None => None,
         };
-        self.head.insert_mut(key, value);
+        self.head.insert(key, value);
     }
 
     pub fn insert(self: &mut Self, key: Range<i128>, lsn: Range<u64>, value: Value) {
@@ -104,10 +103,10 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         }
         for k in to_update {
             self.head
-                .insert_mut(k.clone(), Some((lsn.end.clone(), value.clone())));
+                .insert(k.clone(), Some((lsn.end.clone(), value.clone())));
         }
         for k in to_remove {
-            self.head.remove_mut(&k);
+            self.head.remove(&k);
         }
 
         // Remember history. Clone is O(1)
@@ -117,9 +116,11 @@ impl<Value: Clone> PersistentLayerMap<Value> {
     pub fn query(self: &Self, key: i128, lsn: u64) -> Option<Value> {
         let version = self.historic.range(0..=lsn).rev().next()?.1;
         version
-            .range(0..=key)
-            .rev()
-            .next()?
+            .get_prev(&key)?
+            // .range(0..=key).rev().next()?
+            // NOTE The canonical way to do this in other crates is
+            //      `.range(0..=key).rev.next()` and `im` supports this
+            //      API but it's 2x slower than `.get_prev(&key)`.
             .1
             .as_ref()
             .map(|(_, v)| v.clone())
