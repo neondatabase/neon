@@ -45,7 +45,7 @@ def test_seqscans(env: PgCompare, scale: int, rows: int, iters: int, workers: in
             # Verify that the table is larger than shared_buffers
             cur.execute(
                 """
-            select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('t') as tbl_ize
+            select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('t') as tbl_size
             from pg_settings where name = 'shared_buffers'
             """
             )
