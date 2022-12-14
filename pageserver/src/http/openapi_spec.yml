@@ -82,11 +82,6 @@ paths:
         schema:
           type: string
           description: Controls calculation of current_logical_size_non_incremental
-      - name: include-non-incremental-physical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_physical_size_non_incremental
     get:
       description: Get timelines for tenant
       responses:
@@ -145,11 +140,6 @@ paths:
           schema:
             type: string
           description: Controls calculation of current_logical_size_non_incremental
-        - name: include-non-incremental-physical-size
-          in: query
-          schema:
-            type: string
-            description: Controls calculation of current_physical_size_non_incremental
       responses:
         "200":
           description: TimelineInfo
@@ -266,6 +256,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: |
+        Spawns a task that downloads all layer files of the timeline.
+        This should not be necessary during normal operation because layer files
+        are downloaded on-demand.
+      responses:
+        "202":
+          description: |
+            Task scheduled successfully.
+            The returned token identifies the operation.
+            Use it to poll the GET endpoint for completion.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadRemoteLayersTaskInfo"
+        "409":
+          description: |
+            Task already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadRemoteLayersTaskInfo"
+    get:
+      description: Get current status of the task.
+      parameters:
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadRemoteLayersTaskInfo"
+        "404":
+          description: |
+            Tenant / Timeline not found, or no task has been scheduled
+            for the timeline since pageserver process started.
   /v1/tenant/{tenant_id}/attach:
     parameters:
       - name: tenant_id
@@ -781,8 +820,6 @@ components:
           type: integer
         current_logical_size_non_incremental:
           type: integer
-        current_physical_size_non_incremental:
-          type: integer
         wal_source_connstr:
           type: string
         last_received_msg_lsn:
@@ -795,6 +832,27 @@ components:
         latest_gc_cutoff_lsn:
           type: string
           format: hex
+    DownloadRemoteLayersTaskInfo:
+      type: object
+      required:
+        - task_id 
+        - state 
+        - error_count
+      properties:
+        task_id:
+          type: string
+          description: Opaque string that uniquely identifies the operation.
+        state:
+          type: string
+          description: State of the operation.
+        total_layer_count:
+          type: integer
+        successful_download_bytes:
+          type: integer
+        successful_download_count:
+          type: integer
+        failed_download_count:
+          type: integer
     Error:
       type: object
       required:

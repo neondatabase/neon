@@ -97,8 +97,6 @@ pub(super) async fn gather_inputs(
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
-    // this will probably conflict with on-demand downloaded layers, or at least force them all
-    // to be downloaded
     for timeline in timelines {
         let last_record_lsn = timeline.get_last_record_lsn();
 

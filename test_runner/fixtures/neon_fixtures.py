@@ -26,6 +26,7 @@ import asyncpg
 import backoff  # type: ignore
 import boto3
 import jwt
+import prometheus_client
 import psycopg2
 import pytest
 import requests
@@ -41,6 +42,7 @@ from fixtures.utils import (
     get_self_dir,
     subprocess_capture,
 )
+from prometheus_client.parser import text_string_to_metric_families
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -1204,8 +1206,22 @@ class PageserverHttpClient(requests.Session):
         # there are no tests for those right now.
         return size
 
-    def timeline_list(self, tenant_id: TenantId) -> List[Dict[str, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline")
+    def timeline_list(
+        self,
+        tenant_id: TenantId,
+        include_non_incremental_logical_size: bool = False,
+        include_timeline_dir_layer_file_size_sum: bool = False,
+    ) -> List[Dict[str, Any]]:
+
+        params = {}
+        if include_non_incremental_logical_size:
+            params["include-non-incremental-logical-size"] = "yes"
+        if include_timeline_dir_layer_file_size_sum:
+            params["include-timeline-dir-layer-file-size-sum"] = "yes"
+
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", params=params
+        )
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
@@ -1239,13 +1255,13 @@ class PageserverHttpClient(requests.Session):
         tenant_id: TenantId,
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
-        include_non_incremental_physical_size: bool = False,
+        include_timeline_dir_layer_file_size_sum: bool = False,
     ) -> Dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "yes"
-        if include_non_incremental_physical_size:
-            params["include-non-incremental-physical-size"] = "yes"
+        if include_timeline_dir_layer_file_size_sum:
+            params["include-timeline-dir-layer-file-size-sum"] = "yes"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
@@ -1320,10 +1336,87 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         assert res_json is None
 
+    def timeline_spawn_download_remote_layers(
+        self, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> dict[str, Any]:
+
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_poll_download_remote_layers_status(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        spawn_response: dict[str, Any],
+        poll_state=None,
+    ) -> None | dict[str, Any]:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+
+        # assumption in this API client here is that nobody else spawns the task
+        assert res_json["task_id"] == spawn_response["task_id"]
+
+        if poll_state is None or res_json["state"] == poll_state:
+            return res_json
+        return None
+
+    def timeline_download_remote_layers(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        errors_ok=False,
+        at_least_one_download=True,
+    ):
+        res = self.timeline_spawn_download_remote_layers(tenant_id, timeline_id)
+        while True:
+            completed = self.timeline_poll_download_remote_layers_status(
+                tenant_id, timeline_id, res, poll_state="Completed"
+            )
+            if not completed:
+                time.sleep(0.1)
+                continue
+            if not errors_ok:
+                assert completed["failed_download_count"] == 0
+            if at_least_one_download:
+                assert completed["successful_download_count"] > 0
+            return completed
+
     def get_metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
         self.verbose_error(res)
         return res.text
+
+    def get_timeline_metric(self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str):
+        raw = self.get_metrics()
+        family: List[prometheus_client.Metric] = list(text_string_to_metric_families(raw))
+        [metric] = [m for m in family if m.name == metric_name]
+        [sample] = [
+            s
+            for s in metric.samples
+            if s.labels["tenant_id"] == str(tenant_id)
+            and s.labels["timeline_id"] == str(timeline_id)
+        ]
+        return sample.value
+
+    def get_metric_value(self, name: str) -> Optional[str]:
+        metrics = self.get_metrics()
+        relevant = [line for line in metrics.splitlines() if line.startswith(name)]
+        if len(relevant) == 0:
+            log.info(f'could not find metric "{name}"')
+            return None
+        assert len(relevant) == 1
+        return relevant[0].lstrip(name).strip()
 
 
 @dataclass
@@ -1622,7 +1715,12 @@ class NeonCli(AbstractNeonCli):
                 pageserver_config_override=self.env.pageserver.config_override,
             )
 
-            res = self.raw_cli(cmd)
+            s3_env_vars = None
+            if self.env.remote_storage is not None and isinstance(
+                self.env.remote_storage, S3Storage
+            ):
+                s3_env_vars = self.env.remote_storage.access_env_vars()
+            res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
             return res
 
@@ -1839,6 +1937,9 @@ class NeonPageserver(PgProtocol):
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
+            # FIXME: on-demand download causes these, need to triage
+            ".*could not compact, repartitioning keyspace failed: layer file needs to be downloaded",
+            ".*Gc failed, retrying in .*: layer file needs to be downloaded",
         ]
 
     def start(
@@ -2996,13 +3097,55 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def assert_no_in_progress_downloads_for_tenant(
-    pageserver_http_client: PageserverHttpClient,
-    tenant: TenantId,
+def wait_until(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns successfully, without exception. Returns the
+    last return value from the function.
+    """
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            res = func()
+        except Exception as e:
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            last_exception = e
+            time.sleep(interval)
+            continue
+        return res
+    raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def wait_while(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns false, or throws an exception.
+    """
+    for i in range(number_of_iterations):
+        try:
+            if not func():
+                return
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            time.sleep(interval)
+            continue
+        except Exception:
+            return
+    raise Exception("timed out while waiting for %s" % func)
+
+
+def assert_tenant_status(
+    pageserver_http_client: PageserverHttpClient, tenant: TenantId, expected_status: str
 ):
     tenant_status = pageserver_http_client.tenant_status(tenant)
-    assert tenant_status["has_in_progress_downloads"] is False, tenant_status
-    assert tenant_status["state"] == "Active"
+    log.info(f"tenant_status: {tenant_status}")
+    assert tenant_status["state"] == expected_status, tenant_status
+
+
+def tenant_exists(ps_http: PageserverHttpClient, tenant_id: TenantId):
+    tenants = ps_http.tenant_list()
+    matching = [t for t in tenants if TenantId(t["id"]) == tenant_id]
+    assert len(matching) < 2
+    if len(matching) == 0:
+        return None
+    return matching[0]
 
 
 def remote_consistent_lsn(
@@ -3010,14 +3153,15 @@ def remote_consistent_lsn(
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail["remote_consistent_lsn"]
-    if lsn_str is None:
+    if detail["remote_consistent_lsn"] is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return Lsn(0)
-    assert isinstance(lsn_str, str)
-    return Lsn(lsn_str)
+    else:
+        lsn_str = detail["remote_consistent_lsn"]
+        assert isinstance(lsn_str, str)
+        return Lsn(lsn_str)
 
 
 def wait_for_upload(
@@ -3030,6 +3174,7 @@ def wait_for_upload(
     for i in range(20):
         current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
+            log.info("wait finished")
             return
         log.info(
             "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(

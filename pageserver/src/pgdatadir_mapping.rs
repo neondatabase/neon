@@ -439,23 +439,23 @@ impl Timeline {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
-    pub fn get_current_logical_size_non_incremental(
+    pub async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
         cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn)?;
+        let buf = self.get_download(DBDIR_KEY, lsn).await?;
         let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self.list_rels(*spcnode, *dbnode, lsn)? {
+            for rel in crate::tenant::retry_get(|| self.list_rels(*spcnode, *dbnode, lsn)).await? {
                 if cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self.get(relsize_key, lsn)?;
+                let mut buf = self.get_download(relsize_key, lsn).await?;
                 let relsize = buf.get_u32_le();
 
                 total_size += relsize as u64;
@@ -468,7 +468,7 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    pub fn collect_keyspace(&self, lsn: Lsn) -> anyhow::Result<KeySpace> {
+    pub async fn collect_keyspace(&self, lsn: Lsn) -> anyhow::Result<KeySpace> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -476,8 +476,8 @@ impl Timeline {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let buf = self.get_download(DBDIR_KEY, lsn).await?;
+        let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
@@ -493,7 +493,7 @@ impl Timeline {
             rels.sort_unstable();
             for rel in rels {
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self.get(relsize_key, lsn)?;
+                let mut buf = self.get_download(relsize_key, lsn).await?;
                 let relsize = buf.get_u32_le();
 
                 result.add_range(rel_block_to_key(rel, 0)..rel_block_to_key(rel, relsize));
@@ -509,13 +509,13 @@ impl Timeline {
         ] {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
-            let buf = self.get(slrudir_key, lsn)?;
-            let dir = SlruSegmentDirectory::des(&buf)?;
+            let buf = self.get_download(slrudir_key, lsn).await?;
+            let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
                 let segsize_key = slru_segment_size_to_key(kind, segno);
-                let mut buf = self.get(segsize_key, lsn)?;
+                let mut buf = self.get_download(segsize_key, lsn).await?;
                 let segsize = buf.get_u32_le();
 
                 result.add_range(
@@ -527,8 +527,8 @@ impl Timeline {
 
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
-        let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
-        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
+        let buf = self.get_download(TWOPHASEDIR_KEY, lsn).await?;
+        let twophase_dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
         for xid in xids {

@@ -78,25 +78,23 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 }
 
 // Helper function to construct a TimelineInfo struct for a timeline
-fn build_timeline_info(
+async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
-    include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<TimelineInfo> {
     let mut info = build_timeline_info_common(timeline)?;
     if include_non_incremental_logical_size {
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
         // Otherwise, if someone deletes the timeline / detaches the tenant while
         // we're executing this function, we will outlive the timeline on-disk state.
-        info.current_logical_size_non_incremental =
-            Some(timeline.get_current_logical_size_non_incremental(
-                info.last_record_lsn,
-                CancellationToken::new(),
-            )?);
-    }
-    if include_non_incremental_physical_size {
-        info.current_physical_size_non_incremental =
-            Some(timeline.get_physical_size_non_incremental()?)
+        info.current_logical_size_non_incremental = Some(
+            timeline
+                .get_current_logical_size_non_incremental(
+                    info.last_record_lsn,
+                    CancellationToken::new(),
+                )
+                .await?,
+        );
     }
     Ok(info)
 }
@@ -128,7 +126,7 @@ fn build_timeline_info_common(timeline: &Arc<Timeline>) -> anyhow::Result<Timeli
             None
         }
     };
-    let current_physical_size = Some(timeline.get_physical_size());
+    let current_physical_size = Some(timeline.layer_size_sum().approximate_is_ok());
     let state = timeline.current_state();
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
@@ -145,7 +143,7 @@ fn build_timeline_info_common(timeline: &Arc<Timeline>) -> anyhow::Result<Timeli
         current_logical_size,
         current_physical_size,
         current_logical_size_non_incremental: None,
-        current_physical_size_non_incremental: None,
+        timeline_dir_layer_file_size_sum: None,
         wal_source_connstr,
         last_received_msg_lsn,
         last_received_msg_ts,
@@ -198,8 +196,6 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
-    let include_non_incremental_physical_size =
-        query_param_present(&request, "include-non-incremental-physical-size");
     check_permission(&request, Some(tenant_id))?;
 
     let response_data = async {
@@ -210,17 +206,16 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
-            let timeline_info = build_timeline_info(
-                &timeline,
-                include_non_incremental_logical_size,
-                include_non_incremental_physical_size,
-            )
-            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
-            .map_err(ApiError::InternalServerError)?;
+            let timeline_info =
+                build_timeline_info(&timeline, include_non_incremental_logical_size)
+                    .await
+                    .context(
+                        "Failed to convert tenant timeline {timeline_id} into the local one: {e:?}",
+                    )
+                    .map_err(ApiError::InternalServerError)?;
 
             response_data.push(timeline_info);
         }
-
         Ok(response_data)
     }
     .instrument(info_span!("timeline_list", tenant = %tenant_id))
@@ -264,8 +259,6 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
-    let include_non_incremental_physical_size =
-        query_param_present(&request, "include-non-incremental-physical-size");
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_info = async {
@@ -277,13 +270,10 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             .get_timeline(timeline_id, false)
             .map_err(ApiError::NotFound)?;
 
-        let timeline_info = build_timeline_info(
-            &timeline,
-            include_non_incremental_logical_size,
-            include_non_incremental_physical_size,
-        )
-        .context("Failed to get local timeline info: {e:#}")
-        .map_err(ApiError::InternalServerError)?;
+        let timeline_info = build_timeline_info(&timeline, include_non_incremental_logical_size)
+            .await
+            .context("Failed to get local timeline info: {e:#}")
+            .map_err(ApiError::InternalServerError)?;
 
         Ok::<_, ApiError>(timeline_info)
     }
@@ -308,11 +298,14 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
         .map_err(ApiError::NotFound)?;
-    let result = match timeline
-        .find_lsn_for_timestamp(timestamp_pg)
-        .context("find_lsn_for_timestamp")
-        .map_err(ApiError::InternalServerError)?
-    {
+    let result = crate::tenant::retry_get_with_timeout(
+        || timeline.find_lsn_for_timestamp(timestamp_pg),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .map_err(ApiError::InternalServerError)?;
+
+    let result = match result {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),
         LsnForTimestamp::Future(_lsn) => "future".into(),
         LsnForTimestamp::Past(_lsn) => "past".into(),
@@ -434,7 +427,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
         for timeline in tenant.list_timelines().iter() {
-            current_physical_size += timeline.get_physical_size();
+            current_physical_size += timeline.layer_size_sum().approximate_is_ok();
         }
 
         let state = tenant.current_state();
@@ -787,6 +780,45 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     json_response(StatusCode::OK, ())
 }
 
+async fn timeline_download_remote_layers_handler_post(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(ApiError::NotFound)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)?;
+    match timeline.spawn_download_all_remote_layers().await {
+        Ok(st) => json_response(StatusCode::CREATED, st),
+        Err(st) => json_response(StatusCode::CONFLICT, st),
+    }
+}
+
+async fn timeline_download_remote_layers_handler_get(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(ApiError::NotFound)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)?;
+    let info = timeline
+        .get_download_all_remote_layers_task_info()
+        .context("task never started since last pageserver process start")
+        .map_err(ApiError::NotFound)?;
+    json_response(StatusCode::OK, info)
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -870,6 +902,14 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
             testing_api!("run timeline checkpoint", timeline_checkpoint_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
+            timeline_download_remote_layers_handler_post,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
+            timeline_download_remote_layers_handler_get,
         )
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",

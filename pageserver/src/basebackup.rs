@@ -22,7 +22,8 @@ use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 use tracing::*;
 
-use crate::tenant::Timeline;
+use crate::task_mgr;
+use crate::tenant::{PageReconstructError, Timeline};
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
@@ -152,23 +153,25 @@ where
             SlruKind::MultiXactOffsets,
             SlruKind::MultiXactMembers,
         ] {
-            for segno in self.timeline.list_slru_segments(kind, self.lsn)? {
+            for segno in retry_get(|| self.timeline.list_slru_segments(kind, self.lsn))? {
                 self.add_slru_segment(kind, segno)?;
             }
         }
 
         // Create tablespace directories
-        for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn)? {
+        for ((spcnode, dbnode), has_relmap_file) in
+            retry_get(|| self.timeline.list_dbdirs(self.lsn))?
+        {
             self.add_dbdir(spcnode, dbnode, has_relmap_file)?;
 
             // Gather and send relational files in each database if full backup is requested.
             if self.full_backup {
-                for rel in self.timeline.list_rels(spcnode, dbnode, self.lsn)? {
+                for rel in retry_get(|| self.timeline.list_rels(spcnode, dbnode, self.lsn))? {
                     self.add_rel(rel)?;
                 }
             }
         }
-        for xid in self.timeline.list_twophase_files(self.lsn)? {
+        for xid in retry_get(|| self.timeline.list_twophase_files(self.lsn))? {
             self.add_twophase_file(xid)?;
         }
 
@@ -185,7 +188,7 @@ where
     }
 
     fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
-        let nblocks = self.timeline.get_rel_size(tag, self.lsn, false)?;
+        let nblocks = retry_get(|| self.timeline.get_rel_size(tag, self.lsn, false))?;
 
         // Function that adds relation segment data to archive
         let mut add_file = |segment_index, data: &Vec<u8>| -> anyhow::Result<()> {
@@ -222,13 +225,14 @@ where
     // Generate SLRU segment files from repository.
     //
     fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let nblocks = self.timeline.get_slru_segment_size(slru, segno, self.lsn)?;
+        let nblocks = retry_get(|| self.timeline.get_slru_segment_size(slru, segno, self.lsn))?;
 
         let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
         for blknum in 0..nblocks {
-            let img = self
-                .timeline
-                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
+            let img = retry_get(|| {
+                self.timeline
+                    .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)
+            })?;
 
             if slru == SlruKind::Clog {
                 ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
@@ -260,7 +264,7 @@ where
         has_relmap_file: bool,
     ) -> anyhow::Result<()> {
         let relmap_img = if has_relmap_file {
-            let img = self.timeline.get_relmap_file(spcnode, dbnode, self.lsn)?;
+            let img = retry_get(|| self.timeline.get_relmap_file(spcnode, dbnode, self.lsn))?;
             ensure!(img.len() == 512);
             Some(img)
         } else {
@@ -327,7 +331,7 @@ where
     // Extract twophase state files
     //
     fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
-        let img = self.timeline.get_twophase_file(xid, self.lsn)?;
+        let img = retry_get(|| self.timeline.get_twophase_file(xid, self.lsn))?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -361,13 +365,9 @@ where
             zenith_signal.as_bytes(),
         )?;
 
-        let checkpoint_bytes = self
-            .timeline
-            .get_checkpoint(self.lsn)
+        let checkpoint_bytes = retry_get(|| self.timeline.get_checkpoint(self.lsn))
             .context("failed to get checkpoint bytes")?;
-        let pg_control_bytes = self
-            .timeline
-            .get_control_file(self.lsn)
+        let pg_control_bytes = retry_get(|| self.timeline.get_control_file(self.lsn))
             .context("failed get control bytes")?;
 
         let (pg_control_bytes, system_identifier) = postgres_ffi::generate_pg_control(
@@ -488,5 +488,21 @@ where
         } else {
             self.w.flush()
         }
+    }
+}
+
+/// Like crate::tenant::retry_get, but synchronous.
+fn retry_get<F, T>(f: F) -> Result<T, anyhow::Error>
+where
+    F: Send + Fn() -> Result<T, PageReconstructError>,
+    T: Send,
+{
+    loop {
+        let result = f();
+        let future = match result {
+            Err(PageReconstructError::NeedDownload(future)) => future,
+            _ => return Ok(result?),
+        };
+        task_mgr::COMPUTE_REQUEST_RUNTIME.block_on(future)?;
     }
 }

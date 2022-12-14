@@ -148,31 +148,43 @@
 //! following two cases:
 //! - (1) We had the file locally, deleted it locally, scheduled a remote delete,
 //!   but crashed before it finished remotely.
-//! - (2) We never had the file locally because we were still in tenant attach
-//!   when we crashed. (Similar case for on-demand download in the future.)
+//! - (2) We never had the file locally because we haven't on-demand downloaded
+//!   it yet.
 //!
-//! # Downloads (= Tenant Attach)
+//! # Downloads
 //!
 //! In addition to the upload queue, [`RemoteTimelineClient`] has functions for
-//! downloading files from the remote storage. Downloads are performed immediately,
-//! independently of the uploads.
+//! downloading files from the remote storage. Downloads are performed immediately
+//! against the `RemoteStorage`, independently of the upload queue.
 //!
 //! When we attach a tenant, we perform the following steps:
 //! - create `Tenant` object in `TenantState::Attaching` state
-//! - List timelines that are present in remote storage, and download their remote [`IndexPart`]s
-//! - For each timeline, create `Timeline` struct and a `RemoteTimelineClient`, and initialize the client's upload queue with its `IndexPart`
-//! - eagerly download all the remote layers using the client's download APIs
-//! - transition tenant from `TenantState::Attaching` to `TenantState::Active` state.
+//! - List timelines that are present in remote storage, and for each:
+//!   - download their remote [`IndexPart`]s
+//!   - create `Timeline` struct and a `RemoteTimelineClient`
+//!   - initialize the client's upload queue with its `IndexPart`
+//!   - create [`RemoteLayer`] instances for layers that are referenced by `IndexPart`
+//!     but not present locally
+//!   - schedule uploads for layers that are only present locally.
+//!   - if the remote `IndexPart`'s metadata was newer than the metadata in
+//!     the local filesystem, write the remote metadata to the local filesystem
+//! - After the above is done for each timeline, open the tenant for business by
+//!   transitioning it from `TenantState::Attaching` to `TenantState::Active` state.
+//!   This starts the timelines' WAL-receivers and the tenant's GC & Compaction loops.
 //!
-//! Most of the above happens in [`Timeline::reconcile_with_remote`].
+//! Most of the above steps happen in [`Timeline::reconcile_with_remote`] or its callers.
 //! We keep track of the fact that a client is in `Attaching` state in a marker
-//! file on the local disk.
-//! However, the distinction is moot for storage sync since we call
-//! `reconcile_with_remote` for tenants both with and without the marker file.
-//!
-//! In the future, downloading will be done on-demand and `reconcile_with_remote`
-//! will only be responsible for re-scheduling upload ops after a crash of an
-//! `Active` tenant.
+//! file on the local disk. This is critical because, when we restart the pageserver,
+//! we do not want to do the `List timelines` step for each tenant that has already
+//! been successfully attached (for performance & cost reasons).
+//! Instead, for a tenant without the attach marker file, we assume that the
+//! local state is in sync or ahead of the remote state. This includes the list
+//! of all of the tenant's timelines, which is particularly critical to be up-to-date:
+//! if there's a timeline on the remote that the pageserver doesn't know about,
+//! the GC will not consider its branch point, leading to data loss.
+//! So, for a tenant with the attach marker file, we know that we do not yet have
+//! persisted all the remote timeline's metadata files locally. To exclude the
+//! risk above, we re-run the procedure for such tenants
 //!
 //! # Operating Without Remote Storage
 //!
