@@ -1690,7 +1690,7 @@ impl Tenant {
         let _enter = info_span!("saving tenantconf").entered();
         info!("persisting tenantconf to {}", target_config_path.display());
 
-        // TODO this will prepend comments endlessly
+        // TODO this will prepend comments endlessly ?
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
 
@@ -1703,7 +1703,10 @@ impl Tenant {
 
         let mut target_config_file = VirtualFile::open_with_options(
             target_config_path,
-            OpenOptions::new().write(true).create_new(first_save),
+            OpenOptions::new()
+                .truncate(true) // This needed for overwriting with small config files
+                .write(true)
+                .create_new(first_save),
         )?;
 
         target_config_file
