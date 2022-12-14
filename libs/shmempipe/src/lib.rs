@@ -1,8 +1,12 @@
 #![allow(dead_code)]
-use std::{
-    alloc::Layout, mem::MaybeUninit, num::NonZeroUsize, os::unix::io::AsRawFd, path::Path,
-    ptr::NonNull, sync::atomic::AtomicU32,
-};
+use std::alloc::Layout;
+use std::mem::MaybeUninit;
+use std::num::NonZeroUsize;
+use std::os::unix::io::AsRawFd;
+use std::path::Path;
+use std::ptr::NonNull;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::SeqCst;
 
 use nix::sys::mman::{MapFlags, ProtFlags};
 
@@ -25,8 +29,9 @@ pub struct RawSharedMemPipe {
     pub ref_count: AtomicU32,
 
     pub participants: [shared::PinnedMutex<Option<u32>>; 2],
-    // to_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; 128 * 1024]>,
-    // from_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; 8192 * 2]>,
+    // this wouldn't be too difficult to make a generic parameter, but let's hold off still.
+    // pub to_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; 128 * 1024]>,
+    // pub from_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; 8192 * 2]>,
 }
 
 // Ideas:
@@ -84,6 +89,10 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
     // fd's, unless the mmap's hold an "fd" to the shared
     drop(handle);
 
+    initialize_at(res)
+}
+
+fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPipePtr<Ready>> {
     let inner = res.ptr();
     // Safety: lot of requirements, TODO
     let place = unsafe { inner.cast::<MaybeUninit<RawSharedMemPipe>>().as_mut() };
@@ -102,6 +111,19 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
         // we can now be raced by some other process due to shm_open, so write that we are
         // initializing
         magic.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    {
+        let ref_count = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).ref_count)
+                .cast::<MaybeUninit<AtomicU32>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        let ref_count = unsafe { ref_count.assume_init_mut() };
+
+        ref_count.store(0, SeqCst);
     }
 
     {
@@ -165,6 +187,8 @@ pub struct SharedMemPipePtr<Stage> {
     ptr: Option<NonNull<RawSharedMemPipe>>,
     size: NonZeroUsize,
     attempt_drop: bool,
+    #[cfg(test)]
+    munmap: bool,
     _marker: std::marker::PhantomData<Stage>,
 }
 
@@ -174,6 +198,19 @@ impl SharedMemPipePtr<MMapped> {
             ptr: Some(ptr),
             size,
             attempt_drop: false,
+            #[cfg(test)]
+            munmap: true,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(test)]
+    fn post_mmap_but_no_munmap(ptr: NonNull<RawSharedMemPipe>, size: NonZeroUsize) -> Self {
+        SharedMemPipePtr {
+            ptr: Some(ptr),
+            size,
+            attempt_drop: false,
+            munmap: false,
             _marker: std::marker::PhantomData,
         }
     }
@@ -185,19 +222,21 @@ impl SharedMemPipePtr<MMapped> {
     fn post_initialization(mut self) -> SharedMemPipePtr<Ready> {
         let ptr = self.ptr.take();
         let size = self.size;
-        std::mem::forget(self);
-        SharedMemPipePtr {
+        let ret = SharedMemPipePtr {
             ptr,
             size,
             attempt_drop: true,
+            #[cfg(test)]
+            munmap: self.munmap,
             _marker: std::marker::PhantomData,
-        }
+        };
+        std::mem::forget(self);
+        ret
     }
 }
 
 impl<Stage> Drop for SharedMemPipePtr<Stage> {
     fn drop(&mut self) {
-        use std::sync::atomic::Ordering::SeqCst;
         let _res = {
             if let Some(ptr) = self.ptr.take() {
                 if self.attempt_drop {
@@ -216,7 +255,17 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
                         debug_assert!(ref_count_was < 100, "did someone mess up the refcounting");
                     }
                 }
-                unsafe { nix::sys::mman::munmap(ptr.as_ptr().cast(), self.size.get()) }
+
+                #[allow(unused)]
+                let do_unmap = true;
+                #[cfg(test)]
+                let do_unmap = self.munmap;
+
+                if do_unmap {
+                    unsafe { nix::sys::mman::munmap(ptr.as_ptr().cast(), self.size.get()) }
+                } else {
+                    Ok(())
+                }
             } else {
                 Ok(())
             }
@@ -239,7 +288,6 @@ pub fn open_existing(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
     use nix::sys::mman;
     use nix::sys::stat::Mode;
     use std::os::unix::io::FromRawFd;
-    use std::sync::atomic::Ordering::SeqCst;
 
     assert!(path.is_absolute());
     assert!(path.as_os_str().len() < 255);
@@ -284,6 +332,10 @@ pub fn open_existing(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
     // use this on stack for panics until init is complete, then Arc it?
     let res = SharedMemPipePtr::post_mmap(ptr, size);
 
+    join_initialized_at(res)
+}
+
+fn join_initialized_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPipePtr<Ready>> {
     let inner = res.ptr();
     let place = unsafe { inner.cast::<MaybeUninit<RawSharedMemPipe>>().as_mut() };
 
@@ -310,7 +362,6 @@ pub fn open_existing(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
         let ref_count = unsafe { ref_count.assume_init_ref() };
 
         let count_was = ref_count.fetch_add(1, SeqCst);
-
         let _g = RefCountDropGuard(ref_count);
 
         if count_was == 0 {
@@ -368,5 +419,81 @@ struct RefCountDropGuard<'a>(&'a AtomicU32);
 impl Drop for RefCountDropGuard<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::{mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull};
+
+    use crate::SharedMemPipePtr;
+
+    use super::RawSharedMemPipe;
+
+    /// This is a test for miri to detect any UB, or valgrind memcheck.
+    ///
+    /// With miri, `parking_lot` simpler mutexes are used.
+    #[test]
+    fn initialize_at_on_boxed() {
+        let mem = Box::new(MaybeUninit::<RawSharedMemPipe>::uninit());
+        let ptr = Box::into_raw(mem);
+
+        let _guard = DropRawBoxOnDrop(ptr);
+
+        let ptr = NonNull::new(ptr).unwrap();
+        let size = std::mem::size_of::<RawSharedMemPipe>();
+        let size = NonZeroUsize::new(size).unwrap();
+
+        // TODO: maybe add Stage::Target = { MaybeUninit<_>, _ }? it is what the types basically
+        // do.
+        let ready = {
+            let ptr = SharedMemPipePtr::post_mmap_but_no_munmap(ptr.cast(), size);
+            super::initialize_at(ptr).unwrap()
+        };
+
+        {
+            assert_eq!(0xcafebabe, ready.magic.load(SeqCst));
+            assert_eq!(1, ready.ref_count.load(SeqCst));
+        }
+
+        // first allowing for initialization then allowing joining already initialized shouldn't
+        // cause any more problems, but we might suffer the wait. TODO: make it configurable.
+
+        let joined = {
+            let ptr = SharedMemPipePtr::post_mmap_but_no_munmap(ptr.cast(), size);
+            super::join_initialized_at(ptr).unwrap()
+        };
+
+        {
+            assert_eq!(0xcafe_babe, joined.magic.load(SeqCst));
+            assert_eq!(2, joined.ref_count.load(SeqCst));
+        }
+
+        drop(joined);
+
+        {
+            assert_eq!(0xcafe_babe, ready.magic.load(SeqCst));
+            assert_eq!(1, ready.ref_count.load(SeqCst));
+        }
+
+        drop(ready);
+
+        // the memory is still valid, it hasn't been dropped, the guard will drop it
+        {
+            let target = ptr.cast::<RawSharedMemPipe>();
+            let target = unsafe { target.as_ref() };
+            assert_eq!(0xffff_ffff, target.magic.load(SeqCst));
+            assert_eq!(0, target.ref_count.load(SeqCst));
+        }
+    }
+
+    struct DropRawBoxOnDrop<T>(*mut T);
+
+    impl<T> Drop for DropRawBoxOnDrop<T> {
+        fn drop(&mut self) {
+            // Safety: we never deallocate (might munmap) in tests
+            unsafe { Box::from_raw(self.0) };
+        }
     }
 }

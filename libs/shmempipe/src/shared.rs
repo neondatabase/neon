@@ -18,21 +18,24 @@
 
 use std::{cell::UnsafeCell, mem::MaybeUninit, pin::Pin};
 
+/// Return value for the robust pthread_mutex [`Mutex::lock`] and [`Mutex::try_lock`].
+#[cfg_attr(test, derive(Debug))]
+enum Locked {
+    /// Mutex is now locked.
+    Ok,
+
+    /// The process which had previously locked the mutex has died while holding the lock.
+    ///
+    /// The lock has been made consistent with `pthread_mutex_consistent`, but any
+    /// protected data structure has not been fixed.
+    PreviousOwnerDied,
+}
+
+#[cfg(not(miri))]
 mod pthread {
     use std::{mem::MaybeUninit, pin::Pin};
 
-    /// Return value for the robust pthread_mutex [`Mutex::lock`] and [`Mutex::try_lock`].
-    #[cfg_attr(test, derive(Debug))]
-    pub(super) enum Locked {
-        /// Mutex is now locked.
-        Ok,
-
-        /// The process which had previously locked the mutex has died while holding the lock.
-        ///
-        /// The lock has been made consistent with `pthread_mutex_consistent`, but any
-        /// protected data structure has not been fixed.
-        PreviousOwnerDied,
-    }
+    use super::Locked;
 
     #[repr(transparent)]
     pub struct Mutex(libc::pthread_mutex_t, std::marker::PhantomPinned);
@@ -279,12 +282,66 @@ mod pthread {
     }
 }
 
+/// Used for miri
+#[cfg(miri)]
+mod parking_lot_shim {
+    use std::{mem::MaybeUninit, pin::Pin};
+
+    use super::Locked;
+
+    use parking_lot::lock_api::RawMutex as _;
+    use parking_lot::RawMutex;
+
+    pub struct Mutex(RawMutex, std::marker::PhantomPinned);
+
+    impl Mutex {
+        pub(super) fn initialize_at(
+            place: &mut MaybeUninit<Mutex>,
+        ) -> std::io::Result<Pin<&mut Mutex>> {
+            let mutex = unsafe { std::ptr::addr_of_mut!((*place.as_mut_ptr()).0) };
+
+            unsafe { mutex.write(RawMutex::INIT) };
+
+            unsafe { Ok(Pin::new_unchecked(place.assume_init_mut())) }
+        }
+
+        pub(super) fn lock(self: Pin<&Self>) -> Locked {
+            self.0.lock();
+            Locked::Ok
+        }
+
+        pub(super) fn try_lock(self: Pin<&Self>) -> Option<Locked> {
+            if self.0.try_lock() {
+                Some(Locked::Ok)
+            } else {
+                None
+            }
+        }
+
+        pub(super) fn unlock(self: Pin<&Self>) {
+            unsafe { self.0.unlock() }
+        }
+    }
+
+    impl Drop for Mutex {
+        fn drop(&mut self) {
+            // dunno how to make this not optimized out
+        }
+    }
+}
+
+#[cfg(miri)]
+use parking_lot_shim as imp;
+
+#[cfg(not(miri))]
+use pthread as imp;
+
 /// Pthread mutex which cannot be moved once initialized.
 ///
 /// repr(c): this is shared between compilations.
 #[repr(C)]
 pub struct PinnedMutex<T> {
-    mutex: pthread::Mutex,
+    mutex: imp::Mutex,
     inner: UnsafeCell<T>,
 }
 
@@ -306,7 +363,7 @@ impl<T> PinnedMutex<T> {
                 std::ptr::addr_of_mut!((*place.as_mut_ptr()).mutex)
             };
 
-            let mutex: *mut MaybeUninit<pthread::Mutex> = mutex.cast();
+            let mutex: *mut MaybeUninit<imp::Mutex> = mutex.cast();
 
             // Safety:
             // - assume that addr_of_mut! gives aligned pointers
@@ -314,7 +371,7 @@ impl<T> PinnedMutex<T> {
             // - initialized MaybeUninit<_>
             // - &mut does not escape
             let mutex: &mut MaybeUninit<_> = unsafe { mutex.as_mut() }.expect("not null");
-            pthread::Mutex::initialize_at(mutex)?;
+            imp::Mutex::initialize_at(mutex)?;
         }
 
         // again, symbolic pinning
@@ -328,8 +385,6 @@ impl<T> PinnedMutex<T> {
     pub fn lock<'a>(
         self: Pin<&'a Self>,
     ) -> Result<MutexGuard<'a, T>, PreviousOwnerDied<MutexGuard<'a, T>>> {
-        use pthread::Locked;
-
         // Safety: pinning is structural
         let mutex = unsafe { Pin::new_unchecked(&self.mutex) };
         let res = mutex.lock();
@@ -344,8 +399,6 @@ impl<T> PinnedMutex<T> {
     pub fn try_lock<'a>(
         self: Pin<&'a Self>,
     ) -> Result<MutexGuard<'a, T>, TryLockError<MutexGuard<'a, T>>> {
-        use pthread::Locked;
-
         // Safety: pinning is structural
         let mutex = unsafe { Pin::new_unchecked(&self.mutex) };
 
@@ -361,17 +414,6 @@ impl<T> PinnedMutex<T> {
             Locked::Ok => Ok(guard),
             Locked::PreviousOwnerDied => Err(TryLockError::PreviousOwnerDied(guard)),
         }
-    }
-
-    /// Access the mutex-guarded value.
-    ///
-    /// Safe only if the mutex has been previously locked.
-    pub(super) unsafe fn inner(self: Pin<&Self>) -> *mut T {
-        self.inner.get()
-    }
-
-    pub(super) fn mutex<'a>(self: Pin<&'a Self>) -> Pin<&'a pthread::Mutex> {
-        unsafe { self.map_unchecked(|x| &x.mutex) }
     }
 }
 
