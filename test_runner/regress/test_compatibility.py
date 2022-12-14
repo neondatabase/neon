@@ -47,6 +47,7 @@ def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_o
     neon_env_builder.pg_version = "14"
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.preserve_database_files = True
 
     env = neon_env_builder.init_start()
     pg = env.postgres.create_start("main")
@@ -331,6 +332,7 @@ def check_neon_works(
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.neon_binpath = neon_binpath
     config.pg_distrib_dir = pg_distrib_dir
+    config.preserve_database_files = True
 
     cli = NeonCli(config)
     cli.raw_cli(["start"])

@@ -597,6 +597,7 @@ class NeonEnvBuilder:
         auth_enabled: bool = False,
         rust_log_override: Optional[str] = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
+        preserve_database_files: bool = False,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -618,6 +619,7 @@ class NeonEnvBuilder:
         self.neon_binpath = neon_binpath
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
+        self.preserve_database_files = preserve_database_files
 
     def init(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -725,6 +727,26 @@ class NeonEnvBuilder:
             prefix_in_bucket=self.remote_storage_prefix,
         )
 
+    def cleanup_local_storage(self):
+        if not self.preserve_database_files:
+            directories_to_clean: List[Path] = []
+            for test_entry in Path(self.repo_dir).glob("**/*"):
+                if test_entry.is_file():
+                    test_file = test_entry
+                    if not ATTACHMENT_NAME_REGEX.fullmatch(
+                        test_file.name
+                    ) and not SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
+                        log.debug(f"Removing large database {test_file} file")
+                        test_file.unlink()
+                elif test_entry.is_dir():
+                    directories_to_clean.append(test_entry)
+
+            while directories_to_clean:
+                directory_to_clean = directories_to_clean.pop()
+                if not os.listdir(directory_to_clean):
+                    log.debug(f"Removing empty directory {directory_to_clean}")
+                    directory_to_clean.rmdir()
+
     def cleanup_remote_storage(self):
         # here wee check for true remote storage, no the local one
         # local cleanup is not needed after test because in ci all env will be destroyed anyway
@@ -790,7 +812,22 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
 
-            self.cleanup_remote_storage()
+            cleanup_error = None
+            try:
+                self.cleanup_remote_storage()
+            except Exception as e:
+                log.error(f"Error during remote storage cleanup: {e}")
+                cleanup_error = e
+
+            try:
+                self.cleanup_local_storage()
+            except Exception as e:
+                log.error(f"Error during local storage cleanup: {e}")
+                if cleanup_error is not None:
+                    cleanup_error = e
+
+            if cleanup_error is not None:
+                raise cleanup_error
 
             self.env.pageserver.assert_no_errors()
 
@@ -956,6 +993,7 @@ class NeonEnv:
 @pytest.fixture(scope=shareable_scope)
 def _shared_simple_env(
     request: FixtureRequest,
+    pytestconfig: Config,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
     default_broker: NeonBroker,
@@ -987,6 +1025,7 @@ def _shared_simple_env(
         pg_distrib_dir=pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
+        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
     ) as builder:
         env = builder.init_start()
 
@@ -1013,6 +1052,7 @@ def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
 
 @pytest.fixture(scope="function")
 def neon_env_builder(
+    pytestconfig: Config,
     test_output_dir: str,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
@@ -1048,6 +1088,7 @@ def neon_env_builder(
         pg_version=pg_version,
         broker=default_broker,
         run_id=run_id,
+        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
     ) as builder:
         yield builder
 
@@ -2766,9 +2807,7 @@ SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
 @pytest.fixture(scope="function", autouse=True)
-def test_output_dir(
-    request: FixtureRequest, top_output_dir: Path, pytestconfig: Config
-) -> Iterator[Path]:
+def test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
     # one directory per test
@@ -2778,25 +2817,6 @@ def test_output_dir(
     test_dir.mkdir()
 
     yield test_dir
-
-    if not pytestconfig.getoption("--preserve-database-files"):
-        directories_to_clean: List[Path] = []
-        for test_entry in Path(test_dir).glob("**/*"):
-            if test_entry.is_file():
-                test_file = test_entry
-                if not ATTACHMENT_NAME_REGEX.fullmatch(
-                    test_file.name
-                ) and not SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
-                    log.debug(f"Removing large database {test_file} file")
-                    test_file.unlink()
-            elif test_entry.is_dir():
-                directories_to_clean.append(test_entry)
-
-        while directories_to_clean:
-            directory_to_clean = directories_to_clean.pop()
-            if not os.listdir(directory_to_clean):
-                log.debug(f"Removing empty directory {directory_to_clean}")
-                directory_to_clean.rmdir()
 
     allure_attach_from_dir(test_dir)
 
