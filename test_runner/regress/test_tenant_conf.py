@@ -133,7 +133,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "pitr_interval": 2592000,
                 }.items()
             )
-    
+
     # update the config with very short config and make sure no trailing chars are left from previous config
     env.neon_cli.config_tenant(
         tenant_id=tenant,
