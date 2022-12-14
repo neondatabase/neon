@@ -2,6 +2,7 @@ settings:
   authBackend: "console"
   authEndpoint: "http://console-release.local/management/api/v2"
   domain: "*.cloud.neon.tech"
+  sentryEnvironment: "production"
 
 podLabels:
   zenith_service: proxy-scram
@@ -22,6 +23,3 @@ metrics:
     enabled: true
     selector:
       release: kube-prometheus-stack
-
-settings:
-  sentryEnvironment: "production"
