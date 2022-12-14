@@ -134,7 +134,9 @@ mod pthread {
             {
                 let me = unsafe { Pin::new_unchecked(&*self) };
                 match me.try_lock() {
-                    Some(Locked::Ok | Locked::PreviousOwnerDied) => {}
+                    Some(Locked::Ok | Locked::PreviousOwnerDied) => {
+                        me.unlock();
+                    }
                     None => {
                         let lock = &self.0 as *const _;
 

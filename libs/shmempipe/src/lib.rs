@@ -257,6 +257,8 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
                         // in case anyone still joins, they'll first find this tombstone
                         shared.magic.store(0xffff_ffff, SeqCst);
 
+                        unsafe { std::ptr::drop_in_place(ptr.as_ptr()) };
+
                         // now we are good to drop in place, if need be
                     } else {
                         debug_assert!(ref_count_was < 100, "did someone mess up the refcounting");
