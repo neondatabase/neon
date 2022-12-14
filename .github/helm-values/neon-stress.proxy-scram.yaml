@@ -4,6 +4,7 @@ settings:
   authBackend: "console"
   authEndpoint: "http://neon-stress-console.local/management/api/v2"
   domain: "*.stress.neon.tech"
+  sentryEnvironment: "development"
 
 podLabels:
   zenith_service: proxy-scram
@@ -24,6 +25,3 @@ metrics:
     enabled: true
     selector:
       release: kube-prometheus-stack
-
-settings:
-  sentryEnvironment: "development"
