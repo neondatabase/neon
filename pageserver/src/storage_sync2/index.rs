@@ -104,6 +104,7 @@ pub type IndexPartUnclean = IndexPartImpl<UncleanLayerFileName>;
 pub enum UncleanLayerFileName {
     Clean(LayerFileName),
     BackupFile(String),
+    UnknownFile(String),
 }
 
 impl<'de> serde::Deserialize<'de> for UncleanLayerFileName {
@@ -134,11 +135,11 @@ impl<'de> serde::de::Visitor<'de> for UncleanLayerFileNameVisitor {
         let maybe_clean: Result<LayerFileName, _> = v.parse();
         match maybe_clean {
             Ok(clean) => Ok(UncleanLayerFileName::Clean(clean)),
-            Err(e) => {
+            Err(_) => {
                 if v.ends_with(".old") {
                     Ok(UncleanLayerFileName::BackupFile(v.to_owned()))
                 } else {
-                    Err(E::custom(e))
+                    Ok(UncleanLayerFileName::UnknownFile(v.to_owned()))
                 }
             }
         }
@@ -150,6 +151,7 @@ impl UncleanLayerFileName {
         match self {
             UncleanLayerFileName::Clean(clean) => Some(clean),
             UncleanLayerFileName::BackupFile(_) => None,
+            UncleanLayerFileName::UnknownFile(_) => None,
         }
     }
 }
@@ -176,6 +178,13 @@ impl IndexPartUnclean {
                         // For details see https://github.com/neondatabase/neon/issues/3024
                         warn!(
                             "got backup file on the remote storage, ignoring it {backup_file_name}"
+                        );
+                        None
+                    }
+                    UncleanLayerFileName::UnknownFile(unknown_file_name) => {
+                        // For details see https://github.com/neondatabase/neon/issues/3024
+                        warn!(
+                            "got unknown file name \"{unknown_file_name}\" on the remote storage, ignoring it"
                         );
                         None
                     }
