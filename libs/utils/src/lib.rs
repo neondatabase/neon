@@ -34,6 +34,7 @@ pub mod sock_split;
 pub mod logging;
 
 pub mod lock_file;
+pub mod pid_file;
 
 // Misc
 pub mod accum;
@@ -46,7 +47,29 @@ pub mod tcp_listener;
 pub mod nonblock;
 
 // Default signal handling
+pub mod sentry_init;
 pub mod signals;
+
+pub mod fs_ext;
+
+/// use with fail::cfg("$name", "return(2000)")
+#[macro_export]
+macro_rules! failpoint_sleep_millis_async {
+    ($name:literal) => {{
+        let should_sleep: Option<std::time::Duration> = (|| {
+            fail::fail_point!($name, |v: Option<_>| {
+                let millis = v.unwrap().parse::<u64>().unwrap();
+                Some(Duration::from_millis(millis))
+            });
+            None
+        })();
+        if let Some(d) = should_sleep {
+            tracing::info!("failpoint {:?}: sleeping for {:?}", $name, d);
+            tokio::time::sleep(d).await;
+            tracing::info!("failpoint {:?}: sleep done", $name);
+        }
+    }};
+}
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///

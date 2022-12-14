@@ -1,11 +1,12 @@
 //! Main entry point for the Page Server executable.
 
+use std::env::{var, VarError};
+use std::sync::Arc;
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
-use nix::unistd::Pid;
 use tracing::*;
 
 use metrics::set_build_info_metric;
@@ -21,9 +22,10 @@ use pageserver::{
 use remote_storage::GenericRemoteStorage;
 use utils::{
     auth::JwtAuth,
-    lock_file, logging,
+    logging,
     postgres_backend::AuthType,
     project_git_version,
+    sentry_init::{init_sentry, release_name},
     signals::{self, Signal},
     tcp_listener,
 };
@@ -82,6 +84,9 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(release_name!(), &[("node_id", &conf.id.to_string())]);
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
@@ -199,29 +204,28 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     logging::init(conf.log_format)?;
     info!("version: {}", version());
 
+    // If any failpoints were set from FAILPOINTS environment variable,
+    // print them to the log for debugging purposes
+    let failpoints = fail::list();
+    if !failpoints.is_empty() {
+        info!(
+            "started with failpoints: {}",
+            failpoints
+                .iter()
+                .map(|(name, actions)| format!("{name}={actions}"))
+                .collect::<Vec<String>>()
+                .join(";")
+        )
+    }
+
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
-    let lock_file = match lock_file::create_lock_file(&lock_file_path, Pid::this().to_string()) {
-        lock_file::LockCreationResult::Created {
-            new_lock_contents,
-            file,
-        } => {
-            info!("Created lock file at {lock_file_path:?} with contenst {new_lock_contents}");
-            file
-        }
-        lock_file::LockCreationResult::AlreadyLocked {
-            existing_lock_contents,
-        } => anyhow::bail!(
-            "Could not lock pid file; pageserver is already running in {:?} with PID {}",
-            conf.workdir,
-            existing_lock_contents
-        ),
-        lock_file::LockCreationResult::CreationFailed(e) => {
-            return Err(e.context(format!("Failed to create lock file at {lock_file_path:?}")))
-        }
-    };
+    let lock_file =
+        utils::pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
+    info!("Claimed pid file at {lock_file_path:?}");
+
     // ensure that the lock file is held even if the main thread of the process is panics
     // we need to release the lock file only when the current process is gone
-    let _ = Box::leak(Box::new(lock_file));
+    std::mem::forget(lock_file);
 
     // TODO: Check that it looks like a valid repository before going further
 
@@ -243,7 +247,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     // start profiler (if enabled)
     let profiler_guard = profiling::init_profiler(conf);
 
-    WALRECEIVER_RUNTIME.block_on(pageserver::walreceiver::init_etcd_client(conf))?;
+    WALRECEIVER_RUNTIME.block_on(pageserver::walreceiver::init_broker_client(conf))?;
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
@@ -256,18 +260,43 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
+    match var("ZENITH_AUTH_TOKEN") {
+        Ok(v) => {
+            info!("Loaded JWT token for authentication with Safekeeper");
+            pageserver::config::SAFEKEEPER_AUTH_TOKEN
+                .set(Arc::new(v))
+                .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
+        }
+        Err(VarError::NotPresent) => {
+            info!("No JWT token for authentication with Safekeeper detected");
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                "Failed to either load to detect non-present ZENITH_AUTH_TOKEN environment variable"
+            })
+        }
+    };
+
     let remote_storage = conf
         .remote_storage_config
         .as_ref()
-        .map(|storage_config| {
-            GenericRemoteStorage::from_config(conf.workdir.clone(), storage_config)
-        })
+        .map(GenericRemoteStorage::from_config)
         .transpose()
         .context("Failed to init generic remote storage")?;
-    let remote_index = {
-        let _rt_guard = BACKGROUND_RUNTIME.enter();
-        tenant_mgr::init_tenant_mgr(conf, remote_storage.clone())?
-    };
+
+    let (init_result_sender, init_result_receiver) =
+        std::sync::mpsc::channel::<anyhow::Result<()>>();
+    let storage_for_spawn = remote_storage.clone();
+    let _handler = BACKGROUND_RUNTIME.spawn(async move {
+        let result = tenant_mgr::init_tenant_mgr(conf, storage_for_spawn).await;
+        init_result_sender.send(result)
+    });
+    match init_result_receiver.recv() {
+        Ok(init_result) => init_result.context("Failed to init tenant_mgr")?,
+        Err(_sender_dropped_err) => {
+            anyhow::bail!("Failed to init tenant_mgr: no init status was returned");
+        }
+    }
 
     // Spawn all HTTP related tasks in the MGMT_REQUEST_RUNTIME.
     // bind before launching separate thread so the error reported before startup exits
@@ -276,7 +305,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, auth.clone(), remote_index, remote_storage)?;
+        let router = http::make_router(conf, auth.clone(), remote_storage)?;
         let service =
             utils::http::RouterService::new(router.build().map_err(|err| anyhow!(err))?).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?

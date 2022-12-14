@@ -71,7 +71,7 @@ use crate::shutdown_pageserver;
 //
 // WAL receiver runtime:
 //  - used to handle WAL receiver connections.
-//  - and to receiver updates from etcd
+//  - and to receiver updates from storage_broker
 //
 // Background runtime
 //  - layer flushing
@@ -139,7 +139,7 @@ pub struct PageserverTaskId(u64);
 
 /// Each task that we track is associated with a "task ID". It's just an
 /// increasing number that we assign. Note that it is different from tokio::task::Id.
-static NEXT_TASK_ID: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(1));
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Global registry of tasks
 static TASKS: Lazy<Mutex<HashMap<u64, Arc<PageServerTask>>>> =
@@ -178,7 +178,7 @@ pub enum TaskKind {
     PageRequestHandler,
 
     // Manages the WAL receiver connection for one timeline. It subscribes to
-    // events from etcd, decides which safekeeper to connect to. It spawns a
+    // events from storage_broker, decides which safekeeper to connect to. It spawns a
     // separate WalReceiverConnection task to handle each connection.
     WalReceiverManager,
 
@@ -197,8 +197,8 @@ pub enum TaskKind {
     // Task that flushes frozen in-memory layers to disk
     LayerFlushTask,
 
-    // Task that manages the remote upload queue
-    StorageSync,
+    // Task that uploads a file to remote storage
+    RemoteUploadTask,
 
     // task that handles the initial downloading of all tenants
     InitialLoad,

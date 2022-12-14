@@ -1,13 +1,7 @@
-import time
 from typing import List, Tuple
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-    PageserverApiException,
-    wait_for_last_flush_lsn,
-)
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
 
 
@@ -44,8 +38,8 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     Operate on single branch reading the tenants size after each transaction.
     """
 
-    # gc and compaction is not wanted automatically
-    # the pitr_interval here is quite problematic, so we cannot really use it.
+    # Disable automatic gc and compaction.
+    # The pitr_interval here is quite problematic, so we cannot really use it.
     # it'd have to be calibrated per test executing env.
 
     # there was a bug which was hidden if the create table and first batch of
@@ -53,7 +47,7 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     # that there next_gc_cutoff could be smaller than initdb_lsn, which will
     # obviously lead to issues when calculating the size.
     gc_horizon = 0x30000
-    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
+    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
 
     env = neon_env_builder.init_start()
 
@@ -162,9 +156,13 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
 
     gc_horizon = 128 * 1024
 
-    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='1h', gc_period='1h', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
+    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
 
     env = neon_env_builder.init_start()
+
+    # FIXME: we have a race condition between GC and delete timeline. GC might fail with this
+    # error. Similar to https://github.com/neondatabase/neon/issues/2671
+    env.pageserver.allowed_errors.append(".*InternalServerError\\(No such file or directory.*")
 
     tenant_id = env.initial_tenant
     main_branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
@@ -188,10 +186,8 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         "first-branch", main_branch_name, tenant_id
     )
 
-    # unsure why this happens, the size difference is more than a page alignment
     size_after_first_branch = http_client.tenant_size(tenant_id)
-    assert size_after_first_branch > size_at_branch
-    assert size_after_first_branch - size_at_branch == gc_horizon
+    assert size_after_first_branch == size_at_branch
 
     first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
 
@@ -217,7 +213,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
         "second-branch", main_branch_name, tenant_id
     )
     size_after_second_branch = http_client.tenant_size(tenant_id)
-    assert size_after_second_branch > size_after_continuing_on_main
+    assert size_after_second_branch == size_after_continuing_on_main
 
     second_branch_pg = env.postgres.create_start("second-branch", tenant_id=tenant_id)
 
@@ -254,20 +250,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     assert size_after == size_after_thinning_branch
 
     # teardown, delete branches, and the size should be going down
-    deleted = False
-    for _ in range(10):
-        try:
-            http_client.timeline_delete(tenant_id, first_branch_timeline_id)
-            deleted = True
-            break
-        except PageserverApiException as e:
-            # compaction is ok but just retry if this fails; related to #2442
-            if "cannot lock compaction critical section" in str(e):
-                time.sleep(1)
-                continue
-            raise
-
-    assert deleted
+    http_client.timeline_delete(tenant_id, first_branch_timeline_id)
 
     size_after_deleting_first = http_client.tenant_size(tenant_id)
     assert size_after_deleting_first < size_after_thinning_branch

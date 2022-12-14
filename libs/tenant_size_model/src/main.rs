@@ -174,7 +174,7 @@ fn graphviz_recurse(segments: &[Segment], node: &SegmentSize) {
     let seg_id = node.seg_id;
     let seg = segments.get(seg_id).unwrap();
     let lsn = seg.end_lsn;
-    let size = seg.end_size;
+    let size = seg.end_size.unwrap_or(0);
     let method = node.method;
 
     println!("  {{");
@@ -226,7 +226,7 @@ fn graphviz_recurse(segments: &[Segment], node: &SegmentSize) {
             print!(
                 " label=\"{} / {}\"",
                 next.end_lsn - seg.end_lsn,
-                (next.end_size as i128 - seg.end_size as i128)
+                (next.end_size.unwrap_or(0) as i128 - seg.end_size.unwrap_or(0) as i128)
             );
         } else {
             print!(" label=\"{}: {}\"", next.op, next.end_lsn - seg.end_lsn);

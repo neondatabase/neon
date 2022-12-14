@@ -2,29 +2,20 @@
 
 Neon is a serverless open-source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes the PostgreSQL storage layer by redistributing data across a cluster of nodes.
 
-The project used to be called "Zenith". Many of the commands and code comments
-still refer to "zenith", but we are in the process of renaming things.
-
 ## Quick start
-[Join the waitlist](https://neon.tech/) for our free tier to receive your serverless postgres instance. Then connect to it with your preferred postgres client (psql, dbeaver, etc) or use the online SQL editor.
+Try the [Neon Free Tier](https://neon.tech/docs/introduction/technical-preview-free-tier/) to create a serverless Postgres instance. Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or use the online [SQL Editor](https://neon.tech/docs/get-started-with-neon/query-with-neon-sql-editor/). See [Connect from any application](https://neon.tech/docs/connect/connect-from-any-app/) for connection instructions.
 
 Alternatively, compile and run the project [locally](#running-local-installation).
 
 ## Architecture overview
 
-A Neon installation consists of compute nodes and a Neon storage engine.
-
-Compute nodes are stateless PostgreSQL nodes backed by the Neon storage engine.
+A Neon installation consists of compute nodes and the Neon storage engine. Compute nodes are stateless PostgreSQL nodes backed by the Neon storage engine.
 
 The Neon storage engine consists of two major components:
 - Pageserver. Scalable storage backend for the compute nodes.
-- WAL service. The service receives WAL from the compute node and ensures that it is stored durably.
+- Safekeepers. The safekeepers form a redundant WAL service that received WAL from the compute node, and stores it durably until it has been processed by the pageserver and uploaded to cloud storage.
 
-Pageserver consists of:
-- Repository - Neon storage implementation.
-- WAL receiver - service that receives WAL from WAL service and stores it in the repository.
-- Page service - service that communicates with compute nodes and responds with pages from the repository.
-- WAL redo - service that builds pages from base images and WAL records on Page service request
+See developer documentation in [/docs/SUMMARY.md](/docs/SUMMARY.md) for more information.
 
 ## Running local installation
 
@@ -35,12 +26,12 @@ Pageserver consists of:
 * On Ubuntu or Debian, this set of packages should be sufficient to build the code:
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev etcd cmake postgresql-client
+libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler
 ```
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
-  libseccomp-devel perl clang cmake etcd postgresql postgresql-contrib
+  libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -53,7 +44,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 1. Install XCode and dependencies
 ```
 xcode-select --install
-brew install protobuf etcd openssl
+brew install protobuf openssl flex bison
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -132,12 +123,12 @@ Stopped pageserver 1 process with pid 2545906
 
 # start pageserver and safekeeper
 > ./target/debug/neon_local start
-Starting etcd broker using "/usr/bin/etcd"
-etcd started, pid: 2545996
+Starting neon broker at 127.0.0.1:50051
+storage_broker started, pid: 2918372
 Starting pageserver at '127.0.0.1:64000' in '.neon'.
-pageserver started, pid: 2546005
+pageserver started, pid: 2918386
 Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'.
-safekeeper 1 started, pid: 2546041
+safekeeper 1 started, pid: 2918437
 
 # start postgres compute node
 > ./target/debug/neon_local pg start main
@@ -229,11 +220,19 @@ CARGO_BUILD_FLAGS="--features=testing" make
 
 ## Documentation
 
-Now we use README files to cover design ideas and overall architecture for each module and `rustdoc` style documentation comments. See also [/docs/](/docs/) a top-level overview of all available markdown documentation.
+[/docs/](/docs/) Contains a top-level overview of all available markdown documentation.
 
 - [/docs/sourcetree.md](/docs/sourcetree.md) contains overview of source tree layout.
 
 To view your `rustdoc` documentation in a browser, try running `cargo doc --no-deps --open`
+
+See also README files in some source directories, and `rustdoc` style documentation comments.
+
+Other resources:
+
+- [SELECT 'Hello, World'](https://neon.tech/blog/hello-world/): Blog post by Nikita Shamgunov on the high level architecture
+- [Architecture decisions in Neon](https://neon.tech/blog/architecture-decisions-in-neon/): Blog post by Heikki Linnakangas
+- [Neon: Serverless PostgreSQL!](https://www.youtube.com/watch?v=rES0yzeERns): Presentation on storage system by Heikki Linnakangas in the CMU Database Group seminar series
 
 ### Postgres-specific terms
 

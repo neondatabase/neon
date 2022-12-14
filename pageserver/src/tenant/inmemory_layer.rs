@@ -10,9 +10,9 @@ use crate::tenant::blob_io::{BlobCursor, BlobWriter};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::tenant::ephemeral_file::EphemeralFile;
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -26,8 +26,9 @@ use utils::{
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::RwLock;
+
+use super::storage_layer::Layer;
 
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
@@ -75,33 +76,13 @@ impl InMemoryLayerInner {
     }
 }
 
-impl Layer for InMemoryLayer {
-    // An in-memory layer can be spilled to disk into ephemeral file,
-    // This function is used only for debugging, so we don't need to be very precise.
-    // Construct a filename as if it was a delta layer.
-    fn filename(&self) -> PathBuf {
-        let inner = self.inner.read().unwrap();
-
-        let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
-
-        PathBuf::from(format!(
-            "inmem-{:016X}-{:016X}",
-            self.start_lsn.0, end_lsn.0
-        ))
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        None
-    }
-
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
+impl InMemoryLayer {
+    pub fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
+}
 
+impl Layer for InMemoryLayer {
     fn get_key_range(&self) -> Range<Key> {
         Key::MIN..Key::MAX
     }
@@ -116,73 +97,16 @@ impl Layer for InMemoryLayer {
         };
         self.start_lsn..end_lsn
     }
-
-    /// Look up given value in the layer.
-    fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        ensure!(lsn_range.start >= self.start_lsn);
-        let mut need_image = true;
-
-        let inner = self.inner.read().unwrap();
-
-        let mut reader = inner.file.block_cursor();
-
-        // Scan the page versions backwards, starting from `lsn`.
-        if let Some(vec_map) = inner.index.get(&key) {
-            let slice = vec_map.slice_range(lsn_range);
-            for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos)?;
-                let value = Value::des(&buf)?;
-                match value {
-                    Value::Image(img) => {
-                        reconstruct_state.img = Some((*entry_lsn, img));
-                        return Ok(ValueReconstructResult::Complete);
-                    }
-                    Value::WalRecord(rec) => {
-                        let will_init = rec.will_init();
-                        reconstruct_state.records.push((*entry_lsn, rec));
-                        if will_init {
-                            // This WAL record initializes the page, so no need to go further back
-                            need_image = false;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // release lock on 'inner'
-
-        // If an older page image is needed to reconstruct the page, let the
-        // caller know.
-        if need_image {
-            Ok(ValueReconstructResult::Continue)
-        } else {
-            Ok(ValueReconstructResult::Complete)
-        }
-    }
-
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
-        todo!();
-    }
-
-    /// Nothing to do here. When you drop the last reference to the layer, it will
-    /// be deallocated.
-    fn delete(&self) -> Result<()> {
-        bail!("can't delete an InMemoryLayer")
-    }
-
     fn is_incremental(&self) -> bool {
         // in-memory layer is always considered incremental.
         true
     }
 
-    fn is_in_memory(&self) -> bool {
-        true
+    fn short_id(&self) -> String {
+        let inner = self.inner.read().unwrap();
+
+        let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
+        format!("inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
 
     /// debugging function to print out the contents of the layer
@@ -234,6 +158,55 @@ impl Layer for InMemoryLayer {
         }
 
         Ok(())
+    }
+
+    /// Look up given value in the layer.
+    fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        ensure!(lsn_range.start >= self.start_lsn);
+        let mut need_image = true;
+
+        let inner = self.inner.read().unwrap();
+
+        let mut reader = inner.file.block_cursor();
+
+        // Scan the page versions backwards, starting from `lsn`.
+        if let Some(vec_map) = inner.index.get(&key) {
+            let slice = vec_map.slice_range(lsn_range);
+            for (entry_lsn, pos) in slice.iter().rev() {
+                let buf = reader.read_blob(*pos)?;
+                let value = Value::des(&buf)?;
+                match value {
+                    Value::Image(img) => {
+                        reconstruct_state.img = Some((*entry_lsn, img));
+                        return Ok(ValueReconstructResult::Complete);
+                    }
+                    Value::WalRecord(rec) => {
+                        let will_init = rec.will_init();
+                        reconstruct_state.records.push((*entry_lsn, rec));
+                        if will_init {
+                            // This WAL record initializes the page, so no need to go further back
+                            need_image = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // release lock on 'inner'
+
+        // If an older page image is needed to reconstruct the page, let the
+        // caller know.
+        if need_image {
+            Ok(ValueReconstructResult::Continue)
+        } else {
+            Ok(ValueReconstructResult::Complete)
+        }
     }
 }
 

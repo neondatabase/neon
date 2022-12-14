@@ -8,9 +8,8 @@
 //
 
 mod background_process;
+pub mod broker;
 pub mod compute;
-pub mod connection;
-pub mod etcd;
 pub mod local_env;
 pub mod pageserver;
 pub mod postgresql_conf;

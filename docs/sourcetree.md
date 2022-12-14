@@ -2,6 +2,11 @@
 
 Below you will find a brief overview of each subdir in the source tree in alphabetical order.
 
+`storage_broker`:
+
+Neon storage broker, providing messaging between safekeepers and pageservers.
+[storage_broker.md](./storage_broker.md)
+
 `/control_plane`:
 
 Local control plane.
@@ -40,9 +45,9 @@ and create new databases and accounts (control plane API in our case).
 
 Integration tests, written in Python using the `pytest` framework.
 
-`/vendor/postgres-v14`:
+`/vendor/postgres-v14` and `/vendor/postgres-v15`:
 
-PostgreSQL source tree, with the modifications needed for Neon.
+PostgreSQL source tree per version, with the modifications needed for Neon.
 
 `/pgxn/neon`:
 
@@ -82,6 +87,16 @@ A subject for future modularization.
 
 `/libs/metrics`:
 Helpers for exposing Prometheus metrics from the server.
+
+### Adding dependencies
+When you add a Cargo dependency, you should update hakari manifest by running commands below and committing the updated `Cargo.lock` and `workspace_hack/`. There may be no changes, that's fine.
+
+```bash
+cargo hakari generate
+cargo hakari manage-deps
+```
+
+If you don't have hakari installed (`error: no such subcommand: hakari`), install it by running `cargo install cargo-hakari`.
 
 ## Using Python
 Note that Debian/Ubuntu Python packages are stale, as it commonly happens,

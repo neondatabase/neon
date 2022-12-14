@@ -16,6 +16,7 @@ members = [
     "pageserver",
     "proxy",
     "safekeeper",
+    "storage_broker",
     "workspace_hack",
     "libs/*",
 ]

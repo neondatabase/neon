@@ -10,7 +10,6 @@ the values in the config file, if any are specified for the same key and get int
 
 ```toml
 # Initial configuration file created by 'pageserver --init'
-
 listen_pg_addr = '127.0.0.1:64000'
 listen_http_addr = '127.0.0.1:9898'
 
@@ -25,13 +24,12 @@ max_file_descriptors = '100'
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'cloud_admin'
 
-broker_etcd_prefix = 'neon'
-broker_endpoints = ['some://etcd']
+broker_endpoint = 'http://127.0.0.1:50051'
 
 # [remote_storage]
 ```
 
-The config above shows default values for all basic pageserver settings, besides `broker_endpoints`: that one has to be set by the user,
+The config above shows default values for all basic pageserver settings, besides `broker_endpoint`: that one has to be set by the user,
 see the corresponding section below.
 Pageserver uses default values for all files that are missing in the config, so it's not a hard error to leave the config blank.
 Yet, it validates the config values it can (e.g. postgres install dir) and errors if the validation fails, refusing to start.
@@ -50,16 +48,10 @@ Example: `${PAGESERVER_BIN} -c "checkpoint_timeout = '10 m'" -c "remote_storage=
 
 Note that TOML distinguishes between strings and integers, the former require single or double quotes around them.
 
-#### broker_endpoints
+#### broker_endpoint
 
-A list of endpoints (etcd currently) to connect and pull the information from.
-Mandatory, does not have a default, since requires etcd to be started as a separate process,
-and its connection url should be specified separately.
-
-#### broker_etcd_prefix
-
-A prefix to add for every etcd key used, to separate one group of related instances from another, in the same cluster.
-Default is `neon`.
+A storage broker endpoint to connect and pull the information from. Default is
+`'http://127.0.0.1:50051'`. 
 
 #### checkpoint_distance
 

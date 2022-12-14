@@ -6,7 +6,7 @@
 //! hence WAL receiver needs to react on such events.
 //!
 //! * get a broker subscription, stream data from it to determine that a timeline needs WAL streaming.
-//! For that, it watches specific keys in etcd broker and pulls the relevant data periodically.
+//! For that, it watches specific keys in storage_broker and pulls the relevant data periodically.
 //! The data is produced by safekeepers, that push it periodically and pull it to synchronize between each other.
 //! Without this data, no WAL streaming is possible currently.
 //!
@@ -26,57 +26,49 @@ mod walreceiver_connection;
 use crate::config::PageServerConf;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
 
-use anyhow::{ensure, Context};
-use etcd_broker::Client;
-use itertools::Itertools;
+use anyhow::Context;
 use once_cell::sync::OnceCell;
 use std::future::Future;
+use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tracing::*;
-use url::Url;
 
 pub use connection_manager::spawn_connection_manager_task;
 
-static ETCD_CLIENT: OnceCell<Client> = OnceCell::new();
+static BROKER_CLIENT: OnceCell<BrokerClientChannel> = OnceCell::new();
 
 ///
-/// Initialize the etcd client. This must be called once at page server startup.
+/// Initialize the broker client. This must be called once at page server startup.
 ///
-pub async fn init_etcd_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
-    let etcd_endpoints = conf.broker_endpoints.clone();
-    ensure!(
-        !etcd_endpoints.is_empty(),
-        "Cannot start wal receiver: etcd endpoints are empty"
-    );
+pub async fn init_broker_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
+    let broker_endpoint = conf.broker_endpoint.clone();
 
-    let etcd_client = Client::connect(etcd_endpoints.clone(), None)
-        .await
-        .context("Failed to connect to etcd")?;
+    // Note: we do not attempt connecting here (but validate endpoints sanity).
+    let broker_client = storage_broker::connect(broker_endpoint.clone()).context(format!(
+        "Failed to create broker client to {}",
+        &conf.broker_endpoint
+    ))?;
 
-    // FIXME: Should we still allow the pageserver to start, if etcd
-    // doesn't work? It could still serve GetPage requests, with the
-    // data it has locally and from what it can download from remote
-    // storage
-    if ETCD_CLIENT.set(etcd_client).is_err() {
-        panic!("etcd already initialized");
+    if BROKER_CLIENT.set(broker_client).is_err() {
+        panic!("broker already initialized");
     }
 
     info!(
-        "Initialized etcd client with endpoints: {}",
-        etcd_endpoints.iter().map(Url::to_string).join(", ")
+        "Initialized broker client with endpoints: {}",
+        broker_endpoint
     );
     Ok(())
 }
 
 ///
-/// Get a handle to the etcd client
+/// Get a handle to the broker client
 ///
-pub fn get_etcd_client() -> &'static etcd_broker::Client {
-    ETCD_CLIENT.get().expect("etcd client not initialized")
+pub fn get_broker_client() -> &'static BrokerClientChannel {
+    BROKER_CLIENT.get().expect("broker client not initialized")
 }
 
-pub fn is_etcd_client_initialized() -> bool {
-    ETCD_CLIENT.get().is_some()
+pub fn is_broker_client_initialized() -> bool {
+    BROKER_CLIENT.get().is_some()
 }
 
 /// A handle of an asynchronous task.

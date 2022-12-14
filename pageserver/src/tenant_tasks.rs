@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::TENANT_TASK_EVENTS;
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr;
+use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use crate::tenant_mgr;
 use tracing::*;
@@ -65,13 +66,17 @@ async fn compaction_loop(tenant_id: TenantId) {
                 },
             };
 
-            // Run blocking part of the task
-
-            // Run compaction
             let mut sleep_duration = tenant.get_compaction_period();
-            if let Err(e) = tenant.compaction_iteration() {
-                sleep_duration = wait_duration;
-                error!("Compaction failed, retrying in {:?}: {e:#}", sleep_duration);
+            if sleep_duration == Duration::ZERO {
+                info!("automatic compaction is disabled");
+                // check again in 10 seconds, in case it's been enabled again.
+                sleep_duration = Duration::from_secs(10);
+            } else {
+                // Run compaction
+                if let Err(e) = tenant.compaction_iteration().await {
+                    sleep_duration = wait_duration;
+                    error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
+                }
             }
 
             // Sleep
@@ -112,15 +117,21 @@ async fn gc_loop(tenant_id: TenantId) {
                 },
             };
 
-            // Run gc
             let gc_period = tenant.get_gc_period();
             let gc_horizon = tenant.get_gc_horizon();
             let mut sleep_duration = gc_period;
-            if gc_horizon > 0 {
-                if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false).await
-                {
-                    sleep_duration = wait_duration;
-                    error!("Gc failed, retrying in {:?}: {e:#}", sleep_duration);
+            if sleep_duration == Duration::ZERO {
+                info!("automatic GC is disabled");
+                // check again in 10 seconds, in case it's been enabled again.
+                sleep_duration = Duration::from_secs(10);
+            } else {
+                // Run gc
+                if gc_horizon > 0 {
+                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false).await
+                    {
+                        sleep_duration = wait_duration;
+                        error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);
+                    }
                 }
             }
 
@@ -144,7 +155,7 @@ async fn wait_for_active_tenant(
     wait: Duration,
 ) -> ControlFlow<(), Arc<Tenant>> {
     let tenant = loop {
-        match tenant_mgr::get_tenant(tenant_id, false) {
+        match tenant_mgr::get_tenant(tenant_id, false).await {
             Ok(tenant) => break tenant,
             Err(e) => {
                 error!("Failed to get a tenant {tenant_id}: {e:#}");
@@ -154,7 +165,7 @@ async fn wait_for_active_tenant(
     };
 
     // if the tenant has a proper status already, no need to wait for anything
-    if tenant.should_run_tasks() {
+    if tenant.current_state() == TenantState::Active {
         ControlFlow::Continue(tenant)
     } else {
         let mut tenant_state_updates = tenant.subscribe_for_state_updates();
@@ -163,14 +174,12 @@ async fn wait_for_active_tenant(
                 Ok(()) => {
                     let new_state = *tenant_state_updates.borrow();
                     match new_state {
-                        TenantState::Active {
-                            background_jobs_running: true,
-                        } => {
-                            debug!("Tenant state changed to active with background jobs enabled, continuing the task loop");
+                        TenantState::Active => {
+                            debug!("Tenant state changed to active, continuing the task loop");
                             return ControlFlow::Continue(tenant);
                         }
                         state => {
-                            debug!("Not running the task loop, tenant is not active with background jobs enabled: {state:?}");
+                            debug!("Not running the task loop, tenant is not active: {state:?}");
                             continue;
                         }
                     }

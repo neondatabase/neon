@@ -26,7 +26,9 @@ use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::filename::{ImageFileName, PathOrConf};
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{
+    PersistentLayer, ValueReconstructResult, ValueReconstructState,
+};
 use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
@@ -47,6 +49,9 @@ use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
+
+use super::filename::LayerFileName;
+use super::storage_layer::Layer;
 
 ///
 /// Header stored in the beginning of the file
@@ -120,22 +125,6 @@ pub struct ImageLayerInner {
 }
 
 impl Layer for ImageLayer {
-    fn filename(&self) -> PathBuf {
-        PathBuf::from(self.layer_name().to_string())
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        Some(self.path())
-    }
-
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
-
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -144,58 +133,12 @@ impl Layer for ImageLayer {
         // End-bound is exclusive
         self.lsn..(self.lsn + 1)
     }
-
-    /// Look up given page in the file
-    fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        assert!(self.key_range.contains(&key));
-        assert!(lsn_range.start >= self.lsn);
-        assert!(lsn_range.end >= self.lsn);
-
-        let inner = self.load()?;
-
-        let file = inner.file.as_ref().unwrap();
-        let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
-
-        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-        key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf)? {
-            let blob = file.block_cursor().read_blob(offset).with_context(|| {
-                format!(
-                    "failed to read value from data file {} at offset {}",
-                    self.filename().display(),
-                    offset
-                )
-            })?;
-            let value = Bytes::from(blob);
-
-            reconstruct_state.img = Some((self.lsn, value));
-            Ok(ValueReconstructResult::Complete)
-        } else {
-            Ok(ValueReconstructResult::Missing)
-        }
-    }
-
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
-        todo!();
-    }
-
-    fn delete(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
-    }
-
     fn is_incremental(&self) -> bool {
         false
     }
 
-    fn is_in_memory(&self) -> bool {
-        false
+    fn short_id(&self) -> String {
+        self.filename().file_name()
     }
 
     /// debugging function to print out the contents of the layer
@@ -221,6 +164,68 @@ impl Layer for ImageLayer {
             true
         })?;
 
+        Ok(())
+    }
+
+    /// Look up given page in the file
+    fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        assert!(self.key_range.contains(&key));
+        assert!(lsn_range.start >= self.lsn);
+        assert!(lsn_range.end >= self.lsn);
+
+        let inner = self.load()?;
+
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
+
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        if let Some(offset) = tree_reader.get(&keybuf)? {
+            let blob = file.block_cursor().read_blob(offset).with_context(|| {
+                format!(
+                    "failed to read value from data file {} at offset {}",
+                    self.path().display(),
+                    offset
+                )
+            })?;
+            let value = Bytes::from(blob);
+
+            reconstruct_state.img = Some((self.lsn, value));
+            Ok(ValueReconstructResult::Complete)
+        } else {
+            Ok(ValueReconstructResult::Missing)
+        }
+    }
+}
+
+impl PersistentLayer for ImageLayer {
+    fn filename(&self) -> LayerFileName {
+        self.layer_name().into()
+    }
+
+    fn local_path(&self) -> PathBuf {
+        self.path()
+    }
+
+    fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    fn get_timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
+        unimplemented!();
+    }
+
+    fn delete(&self) -> Result<()> {
+        // delete underlying file
+        fs::remove_file(self.path())?;
         Ok(())
     }
 }
@@ -314,8 +319,8 @@ impl ImageLayer {
                 }
             }
             PathOrConf::Path(path) => {
-                let actual_filename = Path::new(path.file_name().unwrap());
-                let expected_filename = self.filename();
+                let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+                let expected_filename = self.filename().file_name();
 
                 if actual_filename != expected_filename {
                     println!(

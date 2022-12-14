@@ -160,6 +160,26 @@ def test_tenants_attached_after_download(
 
     ##### Stop the pageserver, erase its layer file to force it being downloaded from S3
     env.postgres.stop_all()
+
+    sk_commit_lsns = [
+        sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn
+        for sk in env.safekeepers
+    ]
+    log.info("wait for pageserver to process all the WAL")
+    wait_for_last_record_lsn(client, tenant_id, timeline_id, max(sk_commit_lsns))
+    log.info("wait for it to reach remote storage")
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(client, tenant_id, timeline_id, max(sk_commit_lsns))
+    log.info("latest safekeeper_commit_lsn reached remote storage")
+
+    detail_before = client.timeline_detail(
+        tenant_id, timeline_id, include_non_incremental_physical_size=True
+    )
+    assert (
+        detail_before["current_physical_size_non_incremental"]
+        == detail_before["current_physical_size"]
+    )
+
     env.pageserver.stop()
 
     timeline_dir = Path(env.repo_dir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
@@ -186,10 +206,16 @@ def test_tenants_attached_after_download(
     assert (
         len(restored_timelines) == 1
     ), f"Tenant {tenant_id} should have its timeline reattached after its layer is downloaded from the remote storage"
-    retored_timeline = restored_timelines[0]
-    assert retored_timeline["timeline_id"] == str(
+    restored_timeline = restored_timelines[0]
+    assert restored_timeline["timeline_id"] == str(
         timeline_id
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
+
+    # Check that the physical size matches after re-downloading
+    detail_after = client.timeline_detail(
+        tenant_id, timeline_id, include_non_incremental_physical_size=True
+    )
+    assert detail_before["current_physical_size"] == detail_after["current_physical_size"]
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
@@ -221,15 +247,6 @@ def test_tenant_upgrades_index_json_from_v0(
     # launch pageserver, populate the default tenants timeline, wait for it to be uploaded,
     # then go ahead and modify the "remote" version as if it was downgraded, needing upgrade
     env = neon_env_builder.init_start()
-
-    # FIXME: Are these expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
-    env.pageserver.allowed_errors.append(
-        ".*Failed to get local tenant state: Tenant .* not found in the local state.*"
-    )
 
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
@@ -327,6 +344,80 @@ def test_tenant_upgrades_index_json_from_v0(
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_tenant_ignores_backup_file(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    # getting a too eager compaction happening for this test would not play
+    # well with the strict assertions.
+    neon_env_builder.pageserver_config_override = "tenant_config.compaction_period='1h'"
+
+    neon_env_builder.enable_remote_storage(remote_storage_kind, "test_tenant_ignores_backup_file")
+
+    # launch pageserver, populate the default tenants timeline, wait for it to be uploaded,
+    # then go ahead and modify the "remote" version as if it was downgraded, needing upgrade
+    env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.append(".*got backup file on the remote storage, ignoring it.*")
+
+    pageserver_http = env.pageserver.http_client()
+    pg = env.postgres.create_start("main")
+
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+
+    with pg.cursor() as cur:
+        cur.execute("CREATE TABLE t0 AS VALUES (123, 'second column as text');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    # flush, wait until in remote storage
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    env.postgres.stop_all()
+    env.pageserver.stop()
+
+    # change the remote file to have entry with .0.old suffix
+    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
+    with open(timeline_path, "r+") as timeline_file:
+        # keep the deserialized for later inspection
+        orig_index_part = json.load(timeline_file)
+        backup_layer_name = orig_index_part["timeline_layers"][0] + ".0.old"
+        orig_index_part["timeline_layers"].append(backup_layer_name)
+
+        timeline_file.seek(0)
+        json.dump(orig_index_part, timeline_file)
+
+    env.pageserver.start()
+    pageserver_http = env.pageserver.http_client()
+
+    wait_until(
+        number_of_iterations=5,
+        interval=1,
+        func=lambda: assert_no_in_progress_downloads_for_tenant(pageserver_http, tenant_id),
+    )
+
+    pg = env.postgres.create_start("main")
+
+    with pg.cursor() as cur:
+        cur.execute("INSERT INTO t0 VALUES (234, 'test data');")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    # not needed anymore
+    env.postgres.stop_all()
+    env.pageserver.stop()
+
+    # the .old file is gone from newly serialized index_part
+    new_index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    backup_layers = filter(lambda x: x.endswith(".old"), new_index_part["timeline_layers"])
+    assert len(list(backup_layers)) == 0
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_tenant_redownloads_truncated_file_on_startup(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
@@ -339,10 +430,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.append(
-        ".*Redownloading locally existing .* due to size mismatch.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*Downloaded layer exists already but layer file metadata mismatches.*"
+        ".*removing local file .* because it has unexpected length.*"
     )
 
     # FIXME: Are these expected?

@@ -3,7 +3,7 @@ storage:
     bucket_name: neon-staging-storage-us-east-2
     bucket_region: us-east-2
     console_mgmt_base_url: http://console-staging.local
-    etcd_endpoints: etcd-0.us-east-2.aws.neon.build:2379
+    broker_endpoint: https://storage-broker.beta.us-east-2.internal.aws.neon.build:443
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
       remote_storage:
@@ -16,12 +16,15 @@ storage:
     ansible_aws_ssm_region: us-east-2
     ansible_aws_ssm_bucket_name: neon-staging-storage-us-east-2
     console_region_id: aws-us-east-2
+    sentry_environment: development
 
   children:
     pageservers:
       hosts:
         pageserver-0.us-east-2.aws.neon.build:
           ansible_host: i-0c3e70929edb5d691
+        pageserver-1.us-east-2.aws.neon.build:
+          ansible_host: i-0565a8b4008aa3f40
 
     safekeepers:
       hosts:

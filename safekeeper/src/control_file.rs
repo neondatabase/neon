@@ -231,7 +231,7 @@ mod test {
         let workdir = tempfile::tempdir().unwrap().into_path();
         SafeKeeperConf {
             workdir,
-            ..Default::default()
+            ..SafeKeeperConf::dummy()
         }
     }
 

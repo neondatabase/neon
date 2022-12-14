@@ -32,11 +32,6 @@
 
 #define PageStoreTrace DEBUG5
 
-#define NEON_TAG "[NEON_SMGR] "
-#define neon_log(tag, fmt, ...) ereport(tag,                                  \
-										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
-										 errhidestmt(true), errhidecontext(true)))
-
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
 
@@ -49,6 +44,7 @@ PGconn	   *pageserver_conn = NULL;
 WaitEventSet *pageserver_conn_wes = NULL;
 
 char	   *page_server_connstring_raw;
+char	   *safekeeper_token_env;
 
 int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
@@ -97,11 +93,10 @@ pageserver_connect()
 
 	while (PQisBusy(pageserver_conn))
 	{
-		int			wc;
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		wc = WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -141,11 +136,10 @@ retry:
 
 	if (ret == 0)
 	{
-		int			wc;
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		wc = WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -239,6 +233,9 @@ pageserver_receive(void)
 	StringInfoData resp_buff;
 	NeonResponse *resp;
 
+	if (!connected)
+		return NULL;
+
 	PG_TRY();
 	{
 		/* read response */
@@ -248,7 +245,10 @@ pageserver_receive(void)
 		if (resp_buff.len < 0)
 		{
 			if (resp_buff.len == -1)
-				neon_log(ERROR, "end of COPY");
+			{
+				pageserver_disconnect();
+				return NULL;
+			}
 			else if (resp_buff.len == -2)
 				neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
 		}
@@ -419,6 +419,15 @@ pg_init_libpagestore(void)
 							   0,	/* no flags required */
 							   NULL, NULL, NULL);
 
+    DefineCustomStringVariable("neon.safekeeper_token_env",
+                               "the environment variable containing JWT token for authentication with Safekeepers, the convention is to either unset or set to $ZENITH_AUTH_TOKEN",
+                               NULL,
+                               &safekeeper_token_env,
+                               NULL,
+                               PGC_POSTMASTER,
+                               0,	/* no flags required */
+                               NULL, NULL, NULL);
+
 	DefineCustomStringVariable("neon.timeline_id",
 							   "Neon timeline_id the server is running on",
 							   NULL,
@@ -455,12 +464,12 @@ pg_init_libpagestore(void)
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.readahead_buffer_size",
 							"number of prefetches to buffer",
-							"This buffer is used to store prefetched data; so "
-							"it is important that this buffer is at least as "
-							"large as the configured value of all tablespaces' "
-							"effective_io_concurrency and maintenance_io_concurrency, "
-							"your sessions' values of these, and the value for "
-							"seqscan_prefetch_buffers.",
+							"This buffer is used to hold and manage prefetched "
+							"data; so it is important that this buffer is at "
+							"least as large as the configured value of all "
+							"tablespaces' effective_io_concurrency and "
+							"maintenance_io_concurrency, and your sessions' "
+							"values for these settings.",
 							&readahead_buffer_size,
 							128, 16, 1024,
 							PGC_USERSET,
@@ -481,6 +490,24 @@ pg_init_libpagestore(void)
 	/* Is there more correct way to pass CustomGUC to postgres code? */
 	neon_timeline_walproposer = neon_timeline;
 	neon_tenant_walproposer = neon_tenant;
+
+	/* retrieve the token for Safekeeper, if present */
+	if (safekeeper_token_env != NULL) {
+		if (safekeeper_token_env[0] != '$') {
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_EXCEPTION),
+							errmsg("expected safekeeper auth token environment variable's name starting with $ but found: %s",
+								   safekeeper_token_env)));
+		}
+		neon_safekeeper_token_walproposer = getenv(&safekeeper_token_env[1]);
+		if (!neon_safekeeper_token_walproposer) {
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_EXCEPTION),
+							errmsg("cannot get safekeeper auth token, environment variable %s is not set",
+								   &safekeeper_token_env[1])));
+		}
+		neon_log(LOG, "using safekeeper auth token from environment variable");
+	}
 
 	if (page_server_connstring && page_server_connstring[0])
 	{

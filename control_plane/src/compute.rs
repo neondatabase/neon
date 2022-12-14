@@ -322,6 +322,9 @@ impl PostgresNode {
         conf.append("shared_preload_libraries", "neon");
         conf.append_line("");
         conf.append("neon.pageserver_connstring", &pageserver_connstr);
+        if let AuthType::NeonJWT = auth_type {
+            conf.append("neon.safekeeper_token_env", "$ZENITH_AUTH_TOKEN");
+        }
         conf.append("neon.tenant_id", &self.tenant_id.to_string());
         conf.append("neon.timeline_id", &self.timeline_id.to_string());
         if let Some(lsn) = self.lsn {
@@ -343,7 +346,7 @@ impl PostgresNode {
         //   To be able to restore database in case of pageserver node crash, safekeeper should not
         //   remove WAL beyond this point. Too large lag can cause space exhaustion in safekeepers
         //   (if they are not able to upload WAL to S3).
-        conf.append("max_replication_write_lag", "500MB");
+        conf.append("max_replication_write_lag", "15MB");
         conf.append("max_replication_flush_lag", "10GB");
 
         if !self.env.safekeepers.is_empty() {
