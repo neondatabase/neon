@@ -1,4 +1,4 @@
-use std::{collections::HashSet, ffi::OsString};
+use std::{collections::HashSet, ffi::OsString, pin::Pin};
 
 fn main() {
     let mut args = std::env::args_os().fuse();
@@ -40,6 +40,7 @@ where
 
     while won.is_none() {
         for (i, slot) in shm.participants.iter().enumerate() {
+            // if slot == 0 { check refcount and go away? }
             let slot = unsafe { std::pin::Pin::new_unchecked(slot) };
             match slot.try_lock() {
                 Ok(g) => {
@@ -58,6 +59,8 @@ where
             };
         }
 
+        // because of the longer sleep here, it's likely that outer is able to launch subprocesses
+        // faster than this get's to react, and loses constantly.
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 
@@ -67,9 +70,7 @@ where
 
     println!("child#{:?} now entering asleep", *g);
 
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1000));
-    }
+    std::thread::sleep(std::time::Duration::from_secs(10));
 }
 
 /// Starts the child process, sending requests and receiving responses.
@@ -80,17 +81,18 @@ fn as_outer() {
 
     let shm = shmempipe::create(some_path).unwrap();
 
+    let lock = unsafe { Pin::new_unchecked(&shm.participants[0]) };
+    let mut g = lock
+        .try_lock()
+        .expect("should be the first locker after creation");
+    *g = Some(std::process::id());
+
+    // leave the lock open, but don't forget the guard, because ... well, that should work actually
+    // ok if any one of the processes stays alive, it should work, perhaps
+
     let myself = std::env::args_os().nth(0).expect("already checked");
 
-    let child = std::process::Command::new(myself)
-        .arg("inner")
-        .arg(some_path.as_os_str())
-        .stdin(std::process::Stdio::null())
-        // rest can be inherited
-        .spawn()
-        .unwrap();
-
-    let mut child = Some(child);
+    let mut child: Option<std::process::Child> = None;
 
     let mut previously_died_slots = HashSet::new();
     let mut previous_locked_slot = HashSet::new();
@@ -107,6 +109,19 @@ fn as_outer() {
             }
         }
 
+        if child.is_none() {
+            child = Some(
+                std::process::Command::new(&myself)
+                    .arg("inner")
+                    .arg(some_path.as_os_str())
+                    .stdin(std::process::Stdio::null())
+                    // rest can be inherited
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+
+        // we must not try to lock our own slot
         for (i, slot) in shm.participants.iter().enumerate().skip(1) {
             let slot = unsafe { std::pin::Pin::new_unchecked(slot) };
 

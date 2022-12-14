@@ -67,7 +67,8 @@ mod pthread {
                 // Safety: it is now initialized, and we hope it doesn't move
                 // Pin here is more "symbolic"
                 //
-                // TODO: does a ZST field need initialization?
+                // TODO: does a ZST field need initialization? probably not because it's okay in
+                // repr(transparent).
                 Ok(Pin::new_unchecked(place.assume_init_mut()))
             }
         }
@@ -112,7 +113,7 @@ mod pthread {
             cvt_nz(res)
         }
 
-        pub(crate) fn unlock(self: std::pin::Pin<&Self>) {
+        pub fn unlock(self: std::pin::Pin<&Self>) {
             let ptr = self.inner();
             let res = unsafe { libc::pthread_mutex_unlock(ptr) };
             cvt_nz(res).expect("unlock failed")
@@ -125,6 +126,35 @@ mod pthread {
 
     impl Drop for Mutex {
         fn drop(&mut self) {
+            // FIXME: it's forbidden to destroy locked mutex, so there should be a check? or
+            // lock+unlock?
+            {
+                let me = unsafe { Pin::new_unchecked(&*self) };
+                match me.try_lock() {
+                    Some(Locked::Ok | Locked::PreviousOwnerDied) => {}
+                    None => {
+                        let lock = &self.0 as *const _;
+
+                        #[allow(unreachable_code)]
+                        {
+                            debug_assert!(
+                                false,
+                                "a lock at {:?} is locked in Drop -- it shouldn't be",
+                                lock
+                            );
+
+                            let here = file!();
+                            let line = line!();
+
+                            eprintln!(
+                                "{here}:{line}: a lock at {:?} is locked In Drop -- it shouldn't be",
+                                lock
+                            );
+                        }
+                    }
+                }
+            }
+
             let res = unsafe { libc::pthread_mutex_destroy(&mut self.0 as *mut _) };
             debug_assert_eq!(res, 0);
         }
@@ -155,6 +185,8 @@ mod pthread {
         }
 
         /// Configures the mutex to be poisoned when a process dies holding it.
+        ///
+        /// Background: https://www.kernel.org/doc/Documentation/robust-futexes.txt
         fn set_robust(&mut self) -> std::io::Result<()> {
             let res = unsafe {
                 libc::pthread_mutexattr_setrobust(self.0.as_mut_ptr(), libc::PTHREAD_MUTEX_ROBUST)
