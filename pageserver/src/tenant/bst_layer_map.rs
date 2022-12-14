@@ -51,7 +51,7 @@ impl<Value: Clone> PersistentLayerMap<Value> {
 
     /// Helper function to subdivide the key range without changing any values
     fn add_node(self: &mut Self, key: i128) {
-        let value = match self.head.range(0..=key).last() {
+        let value = match self.head.range(..=key).last() {
             Some((_, Some(v))) => Some(v.clone()),
             Some((_, None)) => None,
             None => None,
@@ -115,9 +115,9 @@ impl<Value: Clone> PersistentLayerMap<Value> {
     }
 
     pub fn query(self: &Self, key: i128, lsn: u64) -> Option<Value> {
-        let version = self.historic.range(0..=lsn).rev().next()?.1;
+        let version = self.historic.range(..=lsn).rev().next()?.1;
         version
-            .range(0..=key)
+            .range(..=key)
             .rev()
             .next()?
             .1
