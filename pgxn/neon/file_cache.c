@@ -21,6 +21,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "pagestore_client.h"
+#include "access/parallel.h"
 #include "postmaster/bgworker.h"
 #include "storage/relfilenode.h"
 #include "storage/buf_internals.h"
@@ -30,7 +31,8 @@
 #include "utils/dynahash.h"
 #include "utils/guc.h"
 #include "storage/fd.h"
-#include <storage/buf_internals.h>
+#include "storage/pg_shmem.h"
+#include "storage/buf_internals.h"
 
 /*
  * Local file cache is used to temporary store relations pages in local file system.
@@ -52,6 +54,7 @@
  * 2. Improve access locality, subsequent pages will be allocated together improving seqscan speed
  */
 #define CHUNK_SIZE 128 /* 1Mb chunk */
+#define MB         ((uint64)1024*1024)
 
 typedef struct FileCacheEntry
 {
@@ -73,7 +76,8 @@ typedef struct FileCacheControl
 static HTAB* lfc_hash;
 static int   lfc_desc;
 static LWLockId lfc_lock;
-static int   lfc_size;
+static int   lfc_max_size;
+static int   lfc_size_limit;
 static char* lfc_path;
 static  FileCacheControl* lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
@@ -134,6 +138,7 @@ lfc_shmem_startup(void)
 	lfc_ctl = (FileCacheControl*)ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
 	{
+		uint32 lfc_size = (uint32)(lfc_max_size*MB/BLCKSZ/CHUNK_SIZE);
 		lfc_lock = (LWLockId)GetNamedLWLockTranche("lfc_lock");
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(FileCacheEntry);
@@ -151,6 +156,52 @@ lfc_shmem_startup(void)
 	LWLockRelease(AddinShmemInitLock);
 }
 
+bool
+lfc_check_limit_hook(int *newval, void **extra, GucSource source)
+{
+	if (*newval > lfc_max_size)
+	{
+		elog(ERROR, "neon.file_cache_size_limit can not be larger than neon.max_file_cache_size");
+		return false;
+	}
+	return true;
+}
+
+void
+lfc_change_limit_hook(int newval, void *extra)
+{
+	uint32 new_size = (uint32)(newval*MB/BLCKSZ/CHUNK_SIZE);
+	if (!lfc_ctl || !UsedShmemSegAddr || IsParallelWorker())
+		return;
+
+	/* Open cache file if not done yet */
+	if (lfc_desc == 0)
+	{
+		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
+		if (lfc_desc < 0) {
+			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
+			lfc_size_limit = 0; /* disable file cache */
+			return;
+		}
+	}
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+	while (new_size < lfc_ctl->size && !lfc_is_empty(&lfc_ctl->lru))
+	{
+		/* Shrink cache by throwing away least recently accessed chunks and returning their space to file system */
+		FileCacheEntry* victim = lfc_ctl->lru.prev;
+		Assert(victim->access_count == 0);
+		lfc_unlink(victim);
+#ifdef FALLOC_FL_PUNCH_HOLE
+		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)victim->offset*CHUNK_SIZE*BLCKSZ, CHUNK_SIZE*BLCKSZ) < 0)
+			elog(LOG, "Failed to punch hole in file: %m");
+#endif
+		hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
+		lfc_ctl->size -= 1;
+	}
+	elog(LOG, "set local file cache limit to %d", new_size);
+	LWLockRelease(lfc_lock);
+}
+
 void
 lfc_init(void)
 {
@@ -161,17 +212,30 @@ lfc_init(void)
 	if (!process_shared_preload_libraries_in_progress)
 		elog(ERROR, "Neon module should be loaded via shared_preload_libraries");
 
-	DefineCustomIntVariable("neon.file_cache_size",
-							"Maximal size of neon local file cache (chunks)",
+	DefineCustomIntVariable("neon.max_file_cache_size",
+							"Maximal size of Neon local file cache",
 							NULL,
-							&lfc_size,
+							&lfc_max_size,
 							0, /* disabled by default */
 							0,
 							INT_MAX,
 							PGC_POSTMASTER,
+							GUC_UNIT_MB,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("neon.file_cache_size_limit",
+							"Current limit for size of Neon local file cache",
+							NULL,
+							&lfc_size_limit,
+							0, /* disabled by default */
 							0,
+							INT_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MB,
 							NULL,
-							NULL,
+							lfc_change_limit_hook,
 							NULL);
 
 	DefineCustomStringVariable("neon.file_cache_path",
@@ -185,10 +249,10 @@ lfc_init(void)
 							   NULL,
 							   NULL);
 
-	if (lfc_size == 0)
+	if (lfc_max_size == 0)
 		return;
 
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(lfc_size+1, sizeof(FileCacheEntry)));
+	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(lfc_max_size*MB/BLCKSZ/CHUNK_SIZE+1, sizeof(FileCacheEntry)));
 	RequestNamedLWLockTranche("lfc_lock", 1);
 
 	prev_shmem_startup_hook = shmem_startup_hook;
@@ -198,7 +262,7 @@ lfc_init(void)
 /*
  * Try to read page from local cache.
  * Returns true if page is found in local cache.
- * In case of error lfc_size is set to zero to disable any further opera-tins with cache.
+ * In case of error lfc_size_limit is set to zero to disable any further opera-tins with cache.
  */
 bool
 lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
@@ -209,7 +273,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	ssize_t rc;
 	int chunk_offs = blkno & (CHUNK_SIZE-1);
 
-	if (lfc_size == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
 
 	tag.rnode = rnode;
@@ -235,7 +299,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
 		if (lfc_desc < 0) {
 			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
-			lfc_size = 0; /* disable file cache */
+			lfc_size_limit = 0; /* disable file cache */
 			return false;
 		}
 	}
@@ -244,7 +308,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (rc != BLCKSZ)
 	{
 		elog(INFO, "Failed to read file cache: %m");
-		lfc_size = 0; /* disable file cache */
+		lfc_size_limit = 0; /* disable file cache */
 		return false;
 	}
 
@@ -272,7 +336,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	bool found;
 	int chunk_offs = blkno & (CHUNK_SIZE-1);
 
-	if (lfc_size == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return;
 
 	tag.rnode = rnode;
@@ -298,7 +362,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		 * there are should be very large number of concurrent IO operations and them are limited by max_connections,
 		 * we prefer not to complicate code and use second approach.
 		 */
-		if (lfc_ctl->size >= (uint64)lfc_size && !lfc_is_empty(&lfc_ctl->lru))
+		if (lfc_ctl->size >= lfc_size_limit*MB/BLCKSZ/CHUNK_SIZE && !lfc_is_empty(&lfc_ctl->lru))
 		{
 			/* Cache overflow: evict least recently used chunk */
 			FileCacheEntry* victim = lfc_ctl->lru.prev;
@@ -323,7 +387,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
 		if (lfc_desc < 0) {
 			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
-			lfc_size = 0; /* disable file cache */
+			lfc_size_limit = 0; /* disable file cache */
 			return;
 		}
 	}
@@ -332,7 +396,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (rc != BLCKSZ)
 	{
 		elog(INFO, "Failed to write file cache: %m");
-		lfc_size = 0; /* disable file cache */
+		lfc_size_limit = 0; /* disable file cache */
 		return;
 	}
 
