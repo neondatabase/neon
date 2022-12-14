@@ -76,8 +76,14 @@ Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION="14"`
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 `NEON_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
-`--pageserver-config-override=${value}` parameter values when neon_local cli is invoked
 `RUST_LOG`: logging configuration to pass into Neon CLI
+
+Useful parameters and commands:
+
+`--pageserver-config-override=${value}` `-c` values to pass into pageserver through neon_local cli
+
+`--preserve-database-files` to preserve pageserver (layer) and safekeer (segment) timeline files on disk
+after running a test suite. Such files might be large, so removed by default; but might be useful for debugging or creation of svg images with layer file contents.
 
 Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
 `./scripts/pytest -s --log-cli-level=INFO ...`
