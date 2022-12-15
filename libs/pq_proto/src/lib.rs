@@ -463,13 +463,38 @@ pub enum BeMessage<'a> {
     EncryptionResponse(bool),
     NoData,
     ParameterDescription,
-    ParameterStatus(BeParameterStatusMessage<'a>),
+    ParameterStatus {
+        name: &'a [u8],
+        value: &'a [u8],
+    },
     ParseComplete,
     ReadyForQuery,
     RowDescription(&'a [RowDescriptor<'a>]),
     XLogData(XLogDataBody<'a>),
     NoticeResponse(&'a str),
     KeepAlive(WalSndKeepAlive),
+}
+
+/// Common shorthands.
+impl<'a> BeMessage<'a> {
+    /// A [`BeMessage::ParameterStatus`] holding the client encoding, i.e. UTF-8.
+    /// This is a sensible default, given that:
+    ///  * rust strings only support this encoding out of the box.
+    ///  * tokio-postgres, postgres-jdbc (and probably more) mandate it.
+    ///
+    /// TODO: do we need to report `server_encoding` as well?
+    pub const CLIENT_ENCODING: Self = Self::ParameterStatus {
+        name: b"client_encoding",
+        value: b"UTF8",
+    };
+
+    /// Build a [`BeMessage::ParameterStatus`] holding the server version.
+    pub fn server_version(version: &'a str) -> Self {
+        Self::ParameterStatus {
+            name: b"server_version",
+            value: version.as_bytes(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -483,12 +508,6 @@ pub enum BeAuthenticationSaslMessage<'a> {
 pub enum BeParameterStatusMessage<'a> {
     Encoding(&'a str),
     ServerVersion(&'a str),
-}
-
-impl BeParameterStatusMessage<'static> {
-    pub fn encoding() -> BeMessage<'static> {
-        BeMessage::ParameterStatus(Self::Encoding("UTF8"))
-    }
 }
 
 // One row description in RowDescription packet.
@@ -587,14 +606,15 @@ fn write_body<R>(buf: &mut BytesMut, f: impl FnOnce(&mut BytesMut) -> R) -> R {
 }
 
 /// Safe write of s into buf as cstring (String in the protocol).
-fn write_cstr(s: &[u8], buf: &mut BytesMut) -> Result<(), io::Error> {
-    if s.contains(&0) {
+fn write_cstr(s: impl AsRef<[u8]>, buf: &mut BytesMut) -> Result<(), io::Error> {
+    let bytes = s.as_ref();
+    if bytes.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "string contains embedded null",
         ));
     }
-    buf.put_slice(s);
+    buf.put_slice(bytes);
     buf.put_u8(0);
     Ok(())
 }
@@ -644,7 +664,7 @@ impl<'a> BeMessage<'a> {
                         Methods(methods) => {
                             buf.put_i32(10); // Specifies that SASL auth method is used.
                             for method in methods.iter() {
-                                write_cstr(method.as_bytes(), buf)?;
+                                write_cstr(method, buf)?;
                             }
                             buf.put_u8(0); // zero terminator for the list
                         }
@@ -759,7 +779,7 @@ impl<'a> BeMessage<'a> {
                     buf.put_slice(b"CXX000\0");
 
                     buf.put_u8(b'M'); // the message
-                    write_cstr(error_msg.as_bytes(), buf)?;
+                    write_cstr(error_msg, buf)?;
 
                     buf.put_u8(0); // terminator
                     Ok::<_, io::Error>(())
@@ -799,24 +819,12 @@ impl<'a> BeMessage<'a> {
                 buf.put_u8(response);
             }
 
-            BeMessage::ParameterStatus(param) => {
-                use std::io::{IoSlice, Write};
-                use BeParameterStatusMessage::*;
-
-                let [name, value] = match param {
-                    Encoding(name) => [b"client_encoding", name.as_bytes()],
-                    ServerVersion(version) => [b"server_version", version.as_bytes()],
-                };
-
-                // Parameter names and values are passed as null-terminated strings
-                let iov = &mut [name, b"\0", value, b"\0"].map(IoSlice::new);
-                let mut buffer = [0u8; 64]; // this should be enough
-                let cnt = buffer.as_mut().write_vectored(iov).unwrap();
-
+            BeMessage::ParameterStatus { name, value } => {
                 buf.put_u8(b'S');
                 write_body(buf, |buf| {
-                    buf.put_slice(&buffer[..cnt]);
-                });
+                    write_cstr(name, buf)?;
+                    write_cstr(value, buf)
+                })?;
             }
 
             BeMessage::ParameterDescription => {

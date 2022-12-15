@@ -33,7 +33,7 @@ sha2 = "0.10.2"
 socket2 = "0.4.4"
 thiserror = "1.0.30"
 tokio = { version = "1.17", features = ["macros"] }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="69c1ef71cd5418cf063d4ca21eadc3427980caea" }
 tokio-rustls = "0.23.0"
 tracing = "0.1.36"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

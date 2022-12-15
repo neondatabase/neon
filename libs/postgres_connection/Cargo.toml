@@ -8,8 +8,8 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 itertools = "0.10.3"
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "69c1ef71cd5418cf063d4ca21eadc3427980caea" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="69c1ef71cd5418cf063d4ca21eadc3427980caea" }
 url = "2.2.2"
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 

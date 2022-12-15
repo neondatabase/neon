@@ -255,15 +255,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         // Note that we do this only (for the most part) after we've connected
         // to a compute (see above) which performs its own authentication.
         if !auth_result.reported_auth_ok {
-            stream
-                .write_message_noflush(&Be::AuthenticationOk)?
-                .write_message_noflush(&BeParameterStatusMessage::encoding())?;
+            stream.write_message_noflush(&Be::AuthenticationOk)?;
+        }
+
+        // Forward all postgres connection params to the client.
+        // Right now the implementation is very hacky and inefficent (ideally,
+        // we don't need an intermediate hashmap), but at least it should be correct.
+        for (name, value) in &db.params {
+            // TODO: Theoretically, this could result in a big pile of params...
+            stream.write_message_noflush(&Be::ParameterStatus {
+                name: name.as_bytes(),
+                value: value.as_bytes(),
+            })?;
         }
 
         stream
-            .write_message_noflush(&BeMessage::ParameterStatus(
-                BeParameterStatusMessage::ServerVersion(&db.version),
-            ))?
             .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
             .write_message(&BeMessage::ReadyForQuery)
             .await?;
