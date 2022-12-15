@@ -369,7 +369,9 @@ impl BrokerService for Broker {
                     Err(RecvError::Lagged(skipped_msg)) => {
                         missed_msgs += skipped_msg;
                         if let Poll::Ready(_) = futures::poll!(Box::pin(warn_interval.tick())) {
-                            warn!("dropped {} messages, channel is full", missed_msgs);
+                            warn!("subscription id={}, key={:?}, addr={:?} dropped {} messages, channel is full",
+                            subscriber.id, subscriber.key, subscriber.remote_addr, missed_msgs);
+                            Err(Status::new(Code::Internal, "full channel"))?;
                             missed_msgs = 0;
                         }
                     }
