@@ -496,7 +496,7 @@ pub async fn immediate_gc(
         async move {
             fail::fail_point!("immediate_gc_task_pre");
             let result = tenant
-                .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
+                .gc_iteration(Some(timeline_id), gc_horizon, pitr)
                 .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it

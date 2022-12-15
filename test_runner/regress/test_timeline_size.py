@@ -326,7 +326,6 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
-
     pageserver_http.timeline_gc(env.initial_tenant, new_timeline_id, gc_horizon=None)
 
     assert_physical_size(env, env.initial_tenant, new_timeline_id)

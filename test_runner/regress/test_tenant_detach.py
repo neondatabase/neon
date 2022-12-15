@@ -24,6 +24,7 @@ def do_gc_target(
     """Hack to unblock main, see https://github.com/neondatabase/neon/issues/2211"""
     try:
         log.info("sending gc http request")
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
     except Exception as e:
         log.error("do_gc failed: %s", e)

@@ -35,12 +35,13 @@ async def gc(env: NeonEnv, timeline: TimelineId):
 
     loop = asyncio.get_running_loop()
 
+    def do_gc():
+        pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
+        pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+
     with concurrent.futures.ThreadPoolExecutor() as pool:
         while updates_performed < updates_to_perform:
-            await loop.run_in_executor(
-                pool, lambda: pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
-            )
-
+            await loop.run_in_executor(pool, do_gc)
 
 # At the same time, run UPDATEs and GC
 async def update_and_gc(env: NeonEnv, pg: Postgres, timeline: TimelineId):
