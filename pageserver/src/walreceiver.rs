@@ -44,10 +44,13 @@ pub async fn init_broker_client(conf: &'static PageServerConf) -> anyhow::Result
     let broker_endpoint = conf.broker_endpoint.clone();
 
     // Note: we do not attempt connecting here (but validate endpoints sanity).
-    let broker_client = storage_broker::connect(broker_endpoint.clone()).context(format!(
-        "Failed to create broker client to {}",
-        &conf.broker_endpoint
-    ))?;
+    let broker_client =
+        storage_broker::connect(broker_endpoint.clone(), conf.broker_keepalive_interval).context(
+            format!(
+                "Failed to create broker client to {}",
+                &conf.broker_endpoint
+            ),
+        )?;
 
     if BROKER_CLIENT.set(broker_client).is_err() {
         panic!("broker already initialized");

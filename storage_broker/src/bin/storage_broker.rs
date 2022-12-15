@@ -39,7 +39,9 @@ use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
 use storage_broker::proto::{SafekeeperTimelineInfo, SubscribeSafekeeperInfoRequest};
-use storage_broker::{parse_proto_ttid, EitherBody, DEFAULT_LISTEN_ADDR};
+use storage_broker::{
+    parse_proto_ttid, EitherBody, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
+};
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
 use utils::project_git_version;
@@ -48,7 +50,6 @@ use utils::sentry_init::{init_sentry, release_name};
 project_git_version!(GIT_VERSION);
 
 const DEFAULT_CHAN_SIZE: usize = 128;
-const DEFAULT_HTTP2_KEEPALIVE_INTERVAL: &str = "5000ms";
 
 #[derive(Parser, Debug)]
 #[command(version = GIT_VERSION, about = "Broker for neon storage nodes communication", long_about = None)]
@@ -60,7 +61,7 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_CHAN_SIZE)]
     chan_size: usize,
     /// HTTP/2 keepalive interval.
-    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HTTP2_KEEPALIVE_INTERVAL)]
+    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_KEEPALIVE_INTERVAL)]
     http2_keepalive_interval: Duration,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
