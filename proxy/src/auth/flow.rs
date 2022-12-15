@@ -2,7 +2,7 @@
 
 use super::{AuthErrorImpl, PasswordHackPayload};
 use crate::{sasl, scram, stream::PqStream};
-use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
+use pq_proto::{BeMessage, BeMessage as Be, SaslMessage};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -22,7 +22,7 @@ pub struct Scram<'a>(pub &'a scram::ServerSecret);
 impl AuthMethod for Scram<'_> {
     #[inline(always)]
     fn first_message(&self) -> BeMessage<'_> {
-        Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS))
+        Be::AuthenticationSasl(SaslMessage::Methods(scram::METHODS))
     }
 }
 

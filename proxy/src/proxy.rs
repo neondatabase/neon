@@ -257,12 +257,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         if !auth_result.reported_auth_ok {
             stream
                 .write_message_noflush(&Be::AuthenticationOk)?
-                .write_message_noflush(&BeParameterStatusMessage::encoding())?;
+                .write_message_noflush(&ParameterStatusMessage::encoding())?;
         }
 
         stream
             .write_message_noflush(&BeMessage::ParameterStatus(
-                BeParameterStatusMessage::ServerVersion(&db.version),
+                ParameterStatusMessage::ServerVersion(&db.version),
             ))?
             .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
             .write_message(&BeMessage::ReadyForQuery)

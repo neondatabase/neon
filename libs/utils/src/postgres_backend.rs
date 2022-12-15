@@ -6,7 +6,7 @@
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
-use pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage, FeStartupPacket};
+use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ParameterStatusMessage};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -361,10 +361,10 @@ impl PostgresBackend {
                         match self.auth_type {
                             AuthType::Trust => {
                                 self.write_message_noflush(&BeMessage::AuthenticationOk)?
-                                    .write_message_noflush(&BeParameterStatusMessage::encoding())?
+                                    .write_message_noflush(&ParameterStatusMessage::encoding())?
                                     // The async python driver requires a valid server_version
                                     .write_message_noflush(&BeMessage::ParameterStatus(
-                                        BeParameterStatusMessage::ServerVersion("14.1"),
+                                        ParameterStatusMessage::ServerVersion("14.1"),
                                     ))?
                                     .write_message(&BeMessage::ReadyForQuery)?;
                                 self.state = ProtoState::Established;
@@ -413,7 +413,7 @@ impl PostgresBackend {
                     }
                 }
                 self.write_message_noflush(&BeMessage::AuthenticationOk)?
-                    .write_message_noflush(&BeParameterStatusMessage::encoding())?
+                    .write_message_noflush(&ParameterStatusMessage::encoding())?
                     .write_message(&BeMessage::ReadyForQuery)?;
                 self.state = ProtoState::Established;
             }

@@ -444,7 +444,7 @@ impl FeCloseMessage {
 pub enum BeMessage<'a> {
     AuthenticationOk,
     AuthenticationMD5Password([u8; 4]),
-    AuthenticationSasl(BeAuthenticationSaslMessage<'a>),
+    AuthenticationSasl(SaslMessage<'a>),
     AuthenticationCleartextPassword,
     BackendKeyData(CancelKeyData),
     BindComplete,
@@ -463,7 +463,7 @@ pub enum BeMessage<'a> {
     EncryptionResponse(bool),
     NoData,
     ParameterDescription,
-    ParameterStatus(BeParameterStatusMessage<'a>),
+    ParameterStatus(ParameterStatusMessage<'a>),
     ParseComplete,
     ReadyForQuery,
     RowDescription(&'a [RowDescriptor<'a>]),
@@ -473,19 +473,19 @@ pub enum BeMessage<'a> {
 }
 
 #[derive(Debug)]
-pub enum BeAuthenticationSaslMessage<'a> {
+pub enum SaslMessage<'a> {
     Methods(&'a [&'a str]),
     Continue(&'a [u8]),
     Final(&'a [u8]),
 }
 
 #[derive(Debug)]
-pub enum BeParameterStatusMessage<'a> {
+pub enum ParameterStatusMessage<'a> {
     Encoding(&'a str),
     ServerVersion(&'a str),
 }
 
-impl BeParameterStatusMessage<'static> {
+impl ParameterStatusMessage<'static> {
     pub fn encoding() -> BeMessage<'static> {
         BeMessage::ParameterStatus(Self::Encoding("UTF8"))
     }
@@ -639,7 +639,7 @@ impl<'a> BeMessage<'a> {
             BeMessage::AuthenticationSasl(msg) => {
                 buf.put_u8(b'R');
                 write_body(buf, |buf| {
-                    use BeAuthenticationSaslMessage::*;
+                    use SaslMessage::*;
                     match msg {
                         Methods(methods) => {
                             buf.put_i32(10); // Specifies that SASL auth method is used.
@@ -801,7 +801,7 @@ impl<'a> BeMessage<'a> {
 
             BeMessage::ParameterStatus(param) => {
                 use std::io::{IoSlice, Write};
-                use BeParameterStatusMessage::*;
+                use ParameterStatusMessage::*;
 
                 let [name, value] = match param {
                     Encoding(name) => [b"client_encoding", name.as_bytes()],

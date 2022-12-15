@@ -1,7 +1,7 @@
 //! Definitions for SASL messages.
 
 use crate::parse::{split_at_const, split_cstr};
-use pq_proto::{BeAuthenticationSaslMessage, BeMessage};
+use pq_proto::{BeMessage, SaslMessage};
 
 /// SASL-specific payload of [`PasswordMessage`](pq_proto::FeMessage::PasswordMessage).
 #[derive(Debug)]
@@ -42,10 +42,9 @@ pub(super) enum ServerMessage<T> {
 
 impl<'a> ServerMessage<&'a str> {
     pub(super) fn to_reply(&self) -> BeMessage<'a> {
-        use BeAuthenticationSaslMessage::*;
         BeMessage::AuthenticationSasl(match self {
-            ServerMessage::Continue(s) => Continue(s.as_bytes()),
-            ServerMessage::Final(s) => Final(s.as_bytes()),
+            Self::Continue(s) => SaslMessage::Continue(s.as_bytes()),
+            Self::Final(s) => SaslMessage::Final(s.as_bytes()),
         })
     }
 }
