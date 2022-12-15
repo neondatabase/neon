@@ -3,27 +3,22 @@ podLabels:
   neon_env: production
   neon_service: storage-broker
 
-ingress:
-  enabled: true
+# Use L4 LB
+service:
+  # service.annotations -- Annotations to add to the service
   annotations:
-    kubernetes.io/ingress.class: nginx-internal
-    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    # we have basically infinite streams, disable body size limit
-    nginx.ingress.kubernetes.io/proxy-body-size: "0"
-    cert-manager.io/cluster-issuer: "cert-manager-clusterissuer"
+    service.beta.kubernetes.io/aws-load-balancer-type: external  # use newer AWS Load Balancer Controller
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal  # deploy LB to private subnet
+    # assign service to this name at external-dns
+    external-dns.alpha.kubernetes.io/hostname: storage-broker-lb.eta.us-west-2.internal.aws.neon.tech
+  # service.type -- Service type
+  type: LoadBalancer
+  # service.port -- broker listen port
+  port: 50051
 
-  hosts:
-    - host: storage-broker.eta.us-west-2.internal.aws.neon.tech
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - hosts:
-        - storage-broker.eta.us-west-2.internal.aws.neon.tech
-      secretName: storage-broker-tls
-
+ingress:
+  enabled: false
 
 metrics:
   enabled: false
