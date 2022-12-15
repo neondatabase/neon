@@ -1321,6 +1321,27 @@ impl Timeline {
             "Calculating logical size for timeline {} at {}",
             self.timeline_id, up_to_lsn
         );
+        // These failpoints are used by python tests to ensure that we don't delete
+        // the timeline while the logical size computation is ongoing.
+        // The first failpoint is used to make this function pause.
+        // Then the python test initiates timeline delete operation in a thread.
+        // It waits for a few seconds, then arms the second failpoint and disables
+        // the first failpoint. The second failpoint prints an error if the timeline
+        // delete code has deleted the on-disk state while we're still running here.
+        // It shouldn't do that. If it does it anyway, the error will be caught
+        // by the test suite, highlighting the problem.
+        fail::fail_point!("timeline-calculate-logical-size-pause");
+        fail::fail_point!("timeline-calculate-logical-size-check-dir-exists", |_| {
+            if !self
+                .conf
+                .metadata_path(self.timeline_id, self.tenant_id)
+                .exists()
+            {
+                error!("timeline-calculate-logical-size-pre metadata file does not exist")
+            }
+            // need to return something
+            Ok(0)
+        });
         let timer = if up_to_lsn == self.initdb_lsn {
             if let Some(size) = self.current_logical_size.initialized_size() {
                 if size != 0 {

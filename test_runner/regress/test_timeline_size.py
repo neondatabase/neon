@@ -1,6 +1,8 @@
 import math
+import queue
 import random
 import re
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -11,6 +13,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    PageserverApiException,
     PageserverHttpClient,
     PgBin,
     PortDistributor,
@@ -19,7 +22,7 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.types import TenantId, TimelineId
-from fixtures.utils import get_timeline_dir_size
+from fixtures.utils import get_timeline_dir_size, wait_until
 
 
 def test_timeline_size(neon_simple_env: NeonEnv):
@@ -211,6 +214,85 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     assert (
         new_res["current_logical_size"] == new_res["current_logical_size_non_incremental"]
     ), "after the WAL is streamed, current_logical_size is expected to be calculated and to be equal its non-incremental value"
+
+
+def test_timeline_initial_logical_size_calculation_cancellation(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+
+    tenant_id, timeline_id = env.neon_cli.create_tenant()
+
+    # load in some data
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    pg.safe_psql_many(
+        [
+            "CREATE TABLE foo (x INTEGER)",
+            "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
+        ]
+    )
+    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    pg.stop()
+
+    # restart with failpoint inside initial size calculation task
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
+    )
+
+    def tenant_active():
+        all_states = client.tenant_list()
+        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
+        assert tenant["state"] == "Active"
+
+    wait_until(30, 1, tenant_active)
+
+    # kick off initial size calculation task (the response we get here is the estimated size)
+    def assert_size_calculation_not_done():
+        details = client.timeline_detail(
+            tenant_id, timeline_id, include_non_incremental_logical_size=True
+        )
+        assert details["current_logical_size"] != details["current_logical_size_non_incremental"]
+
+    assert_size_calculation_not_done()
+    # ensure we're really stuck
+    time.sleep(5)
+    assert_size_calculation_not_done()
+
+    log.info(
+        "try to delete the timeline, this should cancel size computation tasks and wait for them to finish"
+    )
+    env.pageserver.allowed_errors.append(
+        f".*initial size calculation.*{tenant_id}.*{timeline_id}.*aborted because task_mgr shutdown requested"
+    )
+    delete_timeline_success: queue.Queue[bool] = queue.Queue(maxsize=1)
+
+    def delete_timeline_thread_fn():
+        try:
+            client.tenant_detach(tenant_id)
+            delete_timeline_success.put(True)
+        except PageserverApiException:
+            delete_timeline_success.put(False)
+            raise
+
+    delete_timeline_thread = threading.Thread(target=delete_timeline_thread_fn)
+    delete_timeline_thread.start()
+    # give it some time to settle in the state where it waits for size computation task
+    time.sleep(5)
+    assert (
+        not delete_timeline_success.empty()
+    ), "delete timeline should be stuck waiting for size computation task"
+
+    log.info(
+        "resume the size calculation. The failpoint checks that the timeline directory still exists."
+    )
+    client.configure_failpoints(("timeline-calculate-logical-size-check-dir-exists", "return"))
+    client.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
+
+    log.info("wait for delete timeline thread to finish and assert that it succeeded")
+    assert delete_timeline_success.get()
+
+    # if the implementation is incorrect, the teardown would complain about an error log
+    # message emitted by the code behind failpoint "timeline-calculate-logical-size-check-dir-exists"
 
 
 def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
