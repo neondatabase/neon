@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use remote_storage::GenericRemoteStorage;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use super::models::{
@@ -86,8 +87,14 @@ fn build_timeline_info(
 ) -> anyhow::Result<TimelineInfo> {
     let mut info = build_timeline_info_common(timeline)?;
     if include_non_incremental_logical_size {
+        // XXX we should be using spawn_ondemand_logical_size_calculation here.
+        // Otherwise, if someone deletes the timeline / detaches the tenant while
+        // we're executing this function, we will outlive the timeline on-disk state.
         info.current_logical_size_non_incremental =
-            Some(timeline.get_current_logical_size_non_incremental(info.last_record_lsn)?);
+            Some(timeline.get_current_logical_size_non_incremental(
+                info.last_record_lsn,
+                CancellationToken::new(),
+            )?);
     }
     if include_non_incremental_physical_size {
         info.current_physical_size_non_incremental =
