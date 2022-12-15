@@ -7,6 +7,8 @@
 //! because we want to support unixes (mac os), even though we run production on linux. Raw futexes
 //! could be prototyped, since on linux pthreads work on top of them.
 //!
+//! Apparently mac os x doesn't support robust mutexes.
+//!
 //! Poisoning is not interesting for us either, because we cannot run code while child process is
 //! being killed. We do however want robust pthread mutexes which know when their owner has died
 //! while holding the lock.
