@@ -1290,6 +1290,9 @@ impl Timeline {
                 }
                 Ok(())
             },
+            _ = task_mgr::shutdown_watcher() => {
+                anyhow::bail!("aborted because task_mgr shutdown requested");
+            }
             new_event = async {
                 loop {
                     match timeline_state_updates.changed().await {
