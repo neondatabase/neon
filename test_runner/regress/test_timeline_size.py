@@ -9,6 +9,7 @@ from pathlib import Path
 
 import psycopg2.errors
 import psycopg2.extras
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -216,7 +217,10 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     ), "after the WAL is streamed, current_logical_size is expected to be calculated and to be equal its non-incremental value"
 
 
-def test_timeline_initial_logical_size_calculation_cancellation(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("deletion_method", ["tenant_detach", "timeline_delete"])
+def test_timeline_initial_logical_size_calculation_cancellation(
+    neon_env_builder: NeonEnvBuilder, deletion_method: str
+):
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
@@ -259,16 +263,20 @@ def test_timeline_initial_logical_size_calculation_cancellation(neon_env_builder
     assert_size_calculation_not_done()
 
     log.info(
-        "try to delete the timeline, this should cancel size computation tasks and wait for them to finish"
+        f"try to delete the timeline using {deletion_method}, this should cancel size computation tasks and wait for them to finish"
     )
-    env.pageserver.allowed_errors.append(
-        f".*initial size calculation.*{tenant_id}.*{timeline_id}.*aborted because task_mgr shutdown requested"
-    )
+    if deletion_method == "timeline_delete":
+        env.pageserver.allowed_errors.append(
+            f".*initial size calculation.*{tenant_id}.*{timeline_id}.*aborted because task_mgr shutdown requested"
+        )
     delete_timeline_success: queue.Queue[bool] = queue.Queue(maxsize=1)
 
     def delete_timeline_thread_fn():
         try:
-            client.tenant_detach(tenant_id)
+            if deletion_method == "tenant_detach":
+                client.tenant_detach(tenant_id)
+            elif deletion_method == "timeline_delete":
+                client.timeline_delete(tenant_id, timeline_id)
             delete_timeline_success.put(True)
         except PageserverApiException:
             delete_timeline_success.put(False)
@@ -278,9 +286,10 @@ def test_timeline_initial_logical_size_calculation_cancellation(neon_env_builder
     delete_timeline_thread.start()
     # give it some time to settle in the state where it waits for size computation task
     time.sleep(5)
-    assert (
-        not delete_timeline_success.empty()
-    ), "delete timeline should be stuck waiting for size computation task"
+    if not delete_timeline_success.empty():
+        assert (
+            False
+        ), f"test is broken, the {deletion_method} should be stuck waiting for size computation task, got result {delete_timeline_success.get()}"
 
     log.info(
         "resume the size calculation. The failpoint checks that the timeline directory still exists."
