@@ -82,6 +82,9 @@ static int   lfc_size_limit;
 static char* lfc_path;
 static  FileCacheControl* lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
+#if PG_VERSION_NUM>=150000
+static shmem_request_hook_type prev_shmem_request_hook;
+#endif
 
 /*
  * Prune L2 list
@@ -157,6 +160,18 @@ lfc_shmem_startup(void)
 	LWLockRelease(AddinShmemInitLock);
 }
 
+static void
+lfc_shmem_request(void)
+{
+#if PG_VERSION_NUM>=150000
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+#endif
+
+	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(lfc_max_size*MB/BLCKSZ/CHUNK_SIZE+1, sizeof(FileCacheEntry)));
+	RequestNamedLWLockTranche("lfc_lock", 1);
+}
+
 bool
 lfc_check_limit_hook(int *newval, void **extra, GucSource source)
 {
@@ -172,6 +187,10 @@ void
 lfc_change_limit_hook(int newval, void *extra)
 {
 	uint32 new_size = (uint32)(newval*MB/BLCKSZ/CHUNK_SIZE);
+	/*
+	 * Stats collector detach shared memory, so we should not try to access shared memory here.
+	 * Parallel workers first assign default value (0), so not perform truncation in parallel workers.
+	 */
 	if (!lfc_ctl || !UsedShmemSegAddr || IsParallelWorker())
 		return;
 
@@ -253,19 +272,27 @@ lfc_init(void)
 	if (lfc_max_size == 0)
 		return;
 
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(lfc_max_size*MB/BLCKSZ/CHUNK_SIZE+1, sizeof(FileCacheEntry)));
-	RequestNamedLWLockTranche("lfc_lock", 1);
-
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = lfc_shmem_startup;
+#if PG_VERSION_NUM>=150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = lfc_shmem_request;
+#else
+	lfc_shmem_request();
+#endif
 }
 
+/*
+ * Check if page is present in the cache.
+ * Returns true if page is found in local cache.
+ */
 bool
 lfc_cached(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 {
 	BufferTag tag;
 	FileCacheEntry* entry;
 	int chunk_offs = blkno & (CHUNK_SIZE-1);
+	bool found;
 
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
@@ -276,14 +303,9 @@ lfc_cached(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
 	entry = hash_search(lfc_hash, &tag, HASH_FIND, NULL);
-	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
-	{
-		/* Page is not cached */
-		LWLockRelease(lfc_lock);
-		return false;
-	}
+	found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) != 0;
 	LWLockRelease(lfc_lock);
-	return true;
+	return found;
 }
 
 /*
