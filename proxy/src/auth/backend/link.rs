@@ -1,6 +1,6 @@
 use super::{AuthSuccess, NodeInfo};
 use crate::{auth, compute, error::UserFacingError, stream::PqStream, waiters};
-use pq_proto::{BeMessage as Be, BeParameterStatusMessage};
+use pq_proto::BeMessage as Be;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span};
@@ -60,7 +60,7 @@ pub async fn handle_user(
         info!(parent: &span, "sending the auth URL to the user");
         client
             .write_message_noflush(&Be::AuthenticationOk)?
-            .write_message_noflush(&BeParameterStatusMessage::encoding())?
+            .write_message_noflush(&Be::CLIENT_ENCODING)?
             .write_message(&Be::NoticeResponse(&greeting))
             .await?;
 
