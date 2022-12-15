@@ -3,7 +3,7 @@ storage:
     bucket_name: neon-prod-storage-us-west-2
     bucket_region: us-west-2
     console_mgmt_base_url: http://console-release.local
-    broker_endpoint: https://storage-broker.eta.us-west-2.internal.aws.neon.tech:443
+    broker_endpoint: http://storage-broker-lb.eta.us-west-2.internal.aws.neon.tech:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
       remote_storage:
