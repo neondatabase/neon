@@ -10,7 +10,7 @@ use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
 use crate::tenant::Timeline;
 use crate::walrecord::NeonWalRecord;
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, Bytes};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
@@ -19,6 +19,7 @@ use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::Range;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -31,6 +32,14 @@ pub enum LsnForTimestamp {
     Future(Lsn),
     Past(Lsn),
     NoData(Lsn),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CalculateLogicalSizeError {
+    #[error("cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 ///
@@ -376,14 +385,21 @@ impl Timeline {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
-    pub fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<u64> {
+    pub fn get_current_logical_size_non_incremental(
+        &self,
+        lsn: Lsn,
+        cancel: CancellationToken,
+    ) -> std::result::Result<u64, CalculateLogicalSizeError> {
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
             for rel in self.list_rels(*spcnode, *dbnode, lsn)? {
+                if cancel.is_cancelled() {
+                    return Err(CalculateLogicalSizeError::Cancelled);
+                }
                 let relsize_key = rel_size_to_key(rel);
                 let mut buf = self.get(relsize_key, lsn)?;
                 let relsize = buf.get_u32_le();

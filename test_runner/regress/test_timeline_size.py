@@ -265,10 +265,6 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     log.info(
         f"try to delete the timeline using {deletion_method}, this should cancel size computation tasks and wait for them to finish"
     )
-    if deletion_method == "timeline_delete":
-        env.pageserver.allowed_errors.append(
-            f".*initial size calculation.*{tenant_id}.*{timeline_id}.*aborted because task_mgr shutdown requested"
-        )
     delete_timeline_success: queue.Queue[bool] = queue.Queue(maxsize=1)
 
     def delete_timeline_thread_fn():
