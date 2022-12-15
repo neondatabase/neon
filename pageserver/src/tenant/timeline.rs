@@ -2487,9 +2487,6 @@ impl Timeline {
             );
             write_guard.store_and_unlock(new_gc_cutoff).wait();
         }
-        // Persist the new GC cutoff value in the metadata file, before
-        // we actually remove anything.
-        self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())?;
 
         info!("GC starting");
 
@@ -2600,33 +2597,39 @@ impl Timeline {
             layers_to_remove.push(Arc::clone(&l));
         }
 
-        // Actually delete the layers from disk and remove them from the map.
-        // (couldn't do this in the loop above, because you cannot modify a collection
-        // while iterating it. BTreeMap::retain() would be another option)
-        let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
-        for doomed_layer in layers_to_remove {
-            let path = doomed_layer.local_path();
-            self.metrics
-                .current_physical_size_gauge
-                .sub(path.metadata()?.len());
-            layer_names_to_delete.push(doomed_layer.filename());
-            doomed_layer.delete()?;
-            layers.remove_historic(doomed_layer);
-            result.layers_removed += 1;
+        if !layers_to_remove.is_empty() {
+            // Persist the new GC cutoff value in the metadata file, before
+            // we actually remove anything.
+            self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())?;
+
+            // Actually delete the layers from disk and remove them from the map.
+            // (couldn't do this in the loop above, because you cannot modify a collection
+            // while iterating it. BTreeMap::retain() would be another option)
+            let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
+            for doomed_layer in layers_to_remove {
+                let path = doomed_layer.local_path();
+                self.metrics
+                    .current_physical_size_gauge
+                    .sub(path.metadata()?.len());
+                layer_names_to_delete.push(doomed_layer.filename());
+                doomed_layer.delete()?;
+                layers.remove_historic(doomed_layer);
+                result.layers_removed += 1;
+            }
+
+            if result.layers_removed != 0 {
+                fail_point!("after-timeline-gc-removed-layers");
+            }
+
+            if let Some(remote_client) = &self.remote_client {
+                remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+            }
         }
 
         info!(
             "GC completed removing {} layers, cutoff {}",
             result.layers_removed, new_gc_cutoff
         );
-
-        if result.layers_removed != 0 {
-            fail_point!("after-timeline-gc-removed-layers");
-        }
-
-        if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
-        }
 
         result.elapsed = now.elapsed()?;
         Ok(result)
