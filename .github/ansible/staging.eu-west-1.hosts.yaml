@@ -3,7 +3,7 @@ storage:
     bucket_name: neon-dev-storage-eu-west-1
     bucket_region: eu-west-1
     console_mgmt_base_url: http://console-staging.local
-    broker_endpoint: https://storage-broker.zeta.eu-west-1.internal.aws.neon.build:443
+    broker_endpoint: http://storage-broker-lb.zeta.eu-west-1.internal.aws.neon.build:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
       remote_storage:
