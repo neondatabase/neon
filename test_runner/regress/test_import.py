@@ -306,6 +306,7 @@ def _import(
 
     # Check that gc works
     pageserver_http = env.pageserver.http_client()
+    pageserver_http.timeline_checkpoint(tenant, timeline)
     pageserver_http.timeline_gc(tenant, timeline, 0)
 
     return tar_output_file

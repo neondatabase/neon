@@ -1164,7 +1164,6 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
-        checkpoint_before_gc: bool,
     ) -> anyhow::Result<GcResult> {
         anyhow::ensure!(
             self.is_active(),
@@ -1179,7 +1178,7 @@ impl Tenant {
             let _timer = STORAGE_TIME
                 .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
                 .start_timer();
-            self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
+            self.gc_iteration_internal(target_timeline_id, horizon, pitr)
                 .await
         }
     }
@@ -1778,7 +1777,6 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
-        checkpoint_before_gc: bool,
     ) -> anyhow::Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
@@ -1805,18 +1803,6 @@ impl Tenant {
                 // made.
                 break;
             }
-
-            // If requested, force flush all in-memory layers to disk first,
-            // so that they too can be garbage collected. That's
-            // used in tests, so we want as deterministic results as possible.
-            if checkpoint_before_gc {
-                timeline.checkpoint(CheckpointConfig::Forced).await?;
-                info!(
-                    "timeline {} checkpoint_before_gc done",
-                    timeline.timeline_id
-                );
-            }
-
             let result = timeline.gc().await?;
             totals += result;
         }
@@ -2877,7 +2863,7 @@ mod tests {
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
             .await?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
@@ -2933,7 +2919,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)?;
         let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
         assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
         match tline.get(*TEST_KEY, Lsn(0x25)) {
@@ -2960,7 +2946,7 @@ mod tests {
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
             .await?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
 
@@ -2985,7 +2971,7 @@ mod tests {
 
         // run gc on parent
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
             .await?;
 
         // Check that the data is still accessible on the branch.
