@@ -73,6 +73,7 @@ reqwest = "0.11.13"
 
 [dev-dependencies]
 criterion = "0.4"
+derivative = "2.2.0"
 hex-literal = "0.3"
 tempfile = "3.2"
 

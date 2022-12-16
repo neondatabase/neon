@@ -32,7 +32,7 @@ use tokio_util::io::SyncIoBridge;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
-    auth::{Claims, JwtAuth, Scope},
+    auth::{Claims, Scope},
     id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
@@ -116,9 +116,7 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
 ///
 pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
-    auth_type: AuthType,
 ) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
     let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
@@ -140,7 +138,6 @@ pub async fn libpq_listener_main(
             Ok((socket, peer_addr)) => {
                 // Connection established. Spawn a new task to handle it.
                 debug!("accepted connection from {}", peer_addr);
-                let local_auth = auth.clone();
 
                 // PageRequestHandler tasks are not associated with any particular
                 // timeline in the task manager. In practice most connections will
@@ -153,7 +150,7 @@ pub async fn libpq_listener_main(
                     None,
                     "serving compute connection task",
                     false,
-                    page_service_conn_main(conf, local_auth, socket, auth_type),
+                    page_service_conn_main(conf, socket),
                 );
             }
             Err(err) => {
@@ -170,9 +167,7 @@ pub async fn libpq_listener_main(
 
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
     socket: tokio::net::TcpStream,
-    auth_type: AuthType,
 ) -> anyhow::Result<()> {
     // Immediately increment the gauge, then create a job to decrement it on task exit.
     // One of the pros of `defer!` is that this will *most probably*
@@ -187,7 +182,11 @@ async fn page_service_conn_main(
         .set_nodelay(true)
         .context("could not set TCP_NODELAY")?;
 
-    let mut conn_handler = PageServerHandler::new(conf, auth);
+    let auth_type = match conf.auth {
+        None => AuthType::Trust,
+        Some(_) => AuthType::NeonJWT,
+    };
+    let mut conn_handler = PageServerHandler::new(conf);
     let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
 
     let result = pgbackend
@@ -254,17 +253,12 @@ impl PageRequestMetrics {
 #[derive(Debug)]
 struct PageServerHandler {
     conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 }
 
 impl PageServerHandler {
-    pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
-        PageServerHandler {
-            conf,
-            auth,
-            claims: None,
-        }
+    pub fn new(conf: &'static PageServerConf) -> Self {
+        PageServerHandler { conf, claims: None }
     }
 
     #[instrument(skip(self, pgb))]
@@ -669,7 +663,7 @@ impl PageServerHandler {
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
     fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<()> {
-        if self.auth.is_none() {
+        if self.conf.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
         }
@@ -694,6 +688,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
+            .conf
             .auth
             .as_ref()
             .unwrap()

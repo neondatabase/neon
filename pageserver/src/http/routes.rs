@@ -16,7 +16,6 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{with_ondemand_download, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
-    auth::JwtAuth,
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
@@ -34,7 +33,6 @@ use super::models::{ConfigureFailpointsRequest, TimelineGcRequest};
 
 struct State {
     conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
 }
@@ -42,7 +40,6 @@ struct State {
 impl State {
     fn new(
         conf: &'static PageServerConf,
-        auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
@@ -51,7 +48,6 @@ impl State {
             .collect::<Vec<_>>();
         Ok(Self {
             conf,
-            auth,
             allowlist_routes,
             remote_storage,
         })
@@ -825,18 +821,17 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 
 pub fn make_router(
     conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
-    if auth.is_some() {
+    if conf.auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             let state = get_state(request);
             if state.allowlist_routes.contains(request.uri()) {
                 None
             } else {
-                state.auth.as_deref()
+                state.conf.auth.as_deref()
             }
         }))
     }
@@ -862,7 +857,7 @@ pub fn make_router(
 
     Ok(router
         .data(Arc::new(
-            State::new(conf, auth, remote_storage).context("Failed to initialize router state")?,
+            State::new(conf, remote_storage).context("Failed to initialize router state")?,
         ))
         .get("/v1/status", status_handler)
         .put(

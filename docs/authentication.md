@@ -102,13 +102,13 @@ Each compute should present a token valid for the timeline's tenant.
 Pageserver also has HTTP API: some parts are per-tenant,
 some parts are server-wide, these are different scopes.
 
-The `auth_type` configuration variable in Pageserver's config may have
-either of three values:
+The `auth_validation_public_key_path` config option, if present, enables JWT validation.
+Tokens are validated using the public key which lies in a PEM file specified in the option.
+If the option is not present, there is no authentication and pageserver trusts everyone.
 
-* `Trust` removes all authentication. The outdated `MD5` value does likewise
-* `NeonJWT` enables JWT validation.
-   Tokens are validated using the public key which lies in a PEM file
-   specified in the `auth_validation_public_key_path` config.
+Note that `neon_local`/`control_panel` use a separate pageserver config file,
+which uses the `auth_type` option instead (either `Trust` or `NeonJWT`)
+and generates the public key itself.
 
 #### Outgoing connections
 Pageserver makes a connection to a Safekeeper for each active timeline.

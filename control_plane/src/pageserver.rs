@@ -106,7 +106,9 @@ impl PageServerNode {
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
+        // TODO: for forward compatibility only, remove after a while
+        let auth_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
+
         let listen_http_addr_param = format!(
             "listen_http_addr='{}'",
             self.env.pageserver.listen_http_addr
@@ -118,15 +120,18 @@ impl PageServerNode {
         let mut overrides = vec![
             id,
             pg_distrib_dir_param,
-            authg_type_param,
+            auth_type_param,
             listen_http_addr_param,
             listen_pg_addr_param,
             broker_endpoint_param,
         ];
 
-        if self.env.pageserver.auth_type != AuthType::Trust {
-            overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
-        }
+        match self.env.pageserver.auth_type {
+            AuthType::Trust => {}
+            AuthType::NeonJWT => {
+                overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
+            }
+        };
         overrides
     }
 

@@ -52,6 +52,9 @@ pub enum ProtoState {
     Established,
 }
 
+/// Type of authentication which is required by the corresponding `PostgresBackend`
+/// for all clients. One should override `check_auth_jwt` to actually authorize client
+/// after authentication.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub enum AuthType {
     Trust,
