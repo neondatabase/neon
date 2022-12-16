@@ -25,7 +25,6 @@
 //! the current task has been requested to shut down. You can use that with
 //! Tokio select!().
 //!
-//!
 //! TODO: This would be a good place to also handle panics in a somewhat sane way.
 //! Depending on what task panics, we might want to kill the whole server, or
 //! only a single tenant or timeline.
@@ -458,7 +457,7 @@ pub fn shutdown_token() -> CancellationToken {
 
 /// Has the current task been requested to shut down?
 pub fn is_shutdown_requested() -> bool {
-    if let Ok(cancel) = SHUTDOWN_TOKEN.try_with(|rx| rx.clone()) {
+    if let Ok(cancel) = SHUTDOWN_TOKEN.try_with(|t| t.clone()) {
         cancel.is_cancelled()
     } else {
         if !cfg!(test) {
