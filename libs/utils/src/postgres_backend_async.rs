@@ -7,7 +7,6 @@ use crate::postgres_backend::AuthType;
 use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
-use rand::Rng;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -33,11 +32,6 @@ pub trait Handler {
     /// to override whole init logic in implementations.
     fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupPacket) -> Result<()> {
         Ok(())
-    }
-
-    /// Check auth md5
-    fn check_auth_md5(&mut self, _pgb: &mut PostgresBackend, _md5_response: &[u8]) -> Result<()> {
-        bail!("MD5 auth failed")
     }
 
     /// Check auth jwt
@@ -125,7 +119,6 @@ pub struct PostgresBackend {
 
     pub state: ProtoState,
 
-    md5_salt: [u8; 4],
     auth_type: AuthType,
 
     peer_addr: SocketAddr,
@@ -160,7 +153,6 @@ impl PostgresBackend {
             stream: Stream::Unencrypted(BufReader::new(socket)),
             buf_out: BytesMut::with_capacity(10 * 1024),
             state: ProtoState::Initialization,
-            md5_salt: [0u8; 4],
             auth_type,
             tls_config,
             peer_addr,
@@ -337,13 +329,6 @@ impl PostgresBackend {
                                     .write_message(&BeMessage::ReadyForQuery)?;
                                 self.state = ProtoState::Established;
                             }
-                            AuthType::MD5 => {
-                                rand::thread_rng().fill(&mut self.md5_salt);
-                                self.write_message(&BeMessage::AuthenticationMD5Password(
-                                    self.md5_salt,
-                                ))?;
-                                self.state = ProtoState::Authentication;
-                            }
                             AuthType::NeonJWT => {
                                 self.write_message(&BeMessage::AuthenticationCleartextPassword)?;
                                 self.state = ProtoState::Authentication;
@@ -364,14 +349,6 @@ impl PostgresBackend {
 
                 match self.auth_type {
                     AuthType::Trust => unreachable!(),
-                    AuthType::MD5 => {
-                        let (_, md5_response) = m.split_last().context("protocol violation")?;
-
-                        if let Err(e) = handler.check_auth_md5(self, md5_response) {
-                            self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
-                            bail!("auth failed: {}", e);
-                        }
-                    }
                     AuthType::NeonJWT => {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 

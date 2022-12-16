@@ -7,7 +7,6 @@ use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Write};
@@ -33,11 +32,6 @@ pub trait Handler {
         Ok(())
     }
 
-    /// Check auth md5
-    fn check_auth_md5(&mut self, _pgb: &mut PostgresBackend, _md5_response: &[u8]) -> Result<()> {
-        bail!("MD5 auth failed")
-    }
-
     /// Check auth jwt
     fn check_auth_jwt(&mut self, _pgb: &mut PostgresBackend, _jwt_response: &[u8]) -> Result<()> {
         bail!("JWT auth failed")
@@ -61,7 +55,6 @@ pub enum ProtoState {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub enum AuthType {
     Trust,
-    MD5,
     // This mimics postgres's AuthenticationCleartextPassword but instead of password expects JWT
     NeonJWT,
 }
@@ -72,7 +65,6 @@ impl FromStr for AuthType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Trust" => Ok(Self::Trust),
-            "MD5" => Ok(Self::MD5),
             "NeonJWT" => Ok(Self::NeonJWT),
             _ => bail!("invalid value \"{s}\" for auth type"),
         }
@@ -83,7 +75,6 @@ impl fmt::Display for AuthType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             AuthType::Trust => "Trust",
-            AuthType::MD5 => "MD5",
             AuthType::NeonJWT => "NeonJWT",
         })
     }
@@ -134,7 +125,6 @@ pub struct PostgresBackend {
 
     pub state: ProtoState,
 
-    md5_salt: [u8; 4],
     auth_type: AuthType,
 
     peer_addr: SocketAddr,
@@ -187,7 +177,6 @@ impl PostgresBackend {
             stream: Some(Stream::Bidirectional(BidiStream::from_tcp(socket))),
             buf_out: BytesMut::with_capacity(10 * 1024),
             state: ProtoState::Initialization,
-            md5_salt: [0u8; 4],
             auth_type,
             tls_config,
             peer_addr,
@@ -367,13 +356,6 @@ impl PostgresBackend {
                                     .write_message(&BeMessage::ReadyForQuery)?;
                                 self.state = ProtoState::Established;
                             }
-                            AuthType::MD5 => {
-                                rand::thread_rng().fill(&mut self.md5_salt);
-                                self.write_message(&BeMessage::AuthenticationMD5Password(
-                                    self.md5_salt,
-                                ))?;
-                                self.state = ProtoState::Authentication;
-                            }
                             AuthType::NeonJWT => {
                                 self.write_message(&BeMessage::AuthenticationCleartextPassword)?;
                                 self.state = ProtoState::Authentication;
@@ -393,14 +375,6 @@ impl PostgresBackend {
 
                 match self.auth_type {
                     AuthType::Trust => unreachable!(),
-                    AuthType::MD5 => {
-                        let (_, md5_response) = m.split_last().context("protocol violation")?;
-
-                        if let Err(e) = handler.check_auth_md5(self, md5_response) {
-                            self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
-                            bail!("auth failed: {}", e);
-                        }
-                    }
                     AuthType::NeonJWT => {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 

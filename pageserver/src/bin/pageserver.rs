@@ -255,7 +255,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
 
     // Initialize authentication for incoming connections
     let auth = match &conf.auth_type {
-        AuthType::Trust | AuthType::MD5 => None,
+        AuthType::Trust => None,
         AuthType::NeonJWT => {
             // unwrap is ok because check is performed when creating config, so path is set and file exists
             let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
