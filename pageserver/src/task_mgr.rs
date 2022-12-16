@@ -45,6 +45,7 @@ use futures::FutureExt;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task_local;
+use tokio_util::sync::CancellationToken;
 
 use tracing::{debug, error, info, warn};
 
@@ -145,10 +146,10 @@ static TASKS: Lazy<Mutex<HashMap<u64, Arc<PageServerTask>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 task_local! {
-    // This is a cancellation token which will be cancelled when a task needs to shut down. This
-    // task local variable holds the receiving end of the channel. The sender is kept in the global
-    // registry, so that anyone can send the signal to request task shutdown.
-    static SHUTDOWN_TOKEN: tokio_util::sync::CancellationToken;
+    // This is a cancellation token which will be cancelled when a task needs to shut down. The
+    // root token is kept in the global registry, so that anyone can send the signal to request
+    // task shutdown.
+    static SHUTDOWN_TOKEN: CancellationToken;
 
     // Each task holds reference to its own PageServerTask here.
     static CURRENT_TASK: Arc<PageServerTask>;
@@ -225,7 +226,7 @@ struct PageServerTask {
     name: String,
 
     // To request task shutdown, send 'true' to the channel to notify the task.
-    cancel: tokio_util::sync::CancellationToken,
+    cancel: CancellationToken,
 
     mutable: Mutex<MutableTaskState>,
 }
@@ -245,7 +246,7 @@ pub fn spawn<F>(
 where
     F: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
-    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel = CancellationToken::new();
     let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
     let task = Arc::new(PageServerTask {
         task_id: PageserverTaskId(task_id),
@@ -286,7 +287,7 @@ async fn task_wrapper<F>(
     task_name: String,
     task_id: u64,
     task: Arc<PageServerTask>,
-    shutdown_token: tokio_util::sync::CancellationToken,
+    shutdown_token: CancellationToken,
     shutdown_process_on_error: bool,
     future: F,
 ) where
@@ -444,8 +445,12 @@ pub async fn shutdown_watcher() {
     token.cancelled().await;
 }
 
-/// Create a cancellation token, which can be moved across tasks.
-pub fn shutdown_token() -> tokio_util::sync::CancellationToken {
+/// Clone the current task's cancellation token, which can be moved across tasks.
+///
+/// When the task which is currently executing is shutdown, the cancellation token will be
+/// cancelled. It can however be moved to other tasks, such as `tokio::task::spawn_blocking` or
+/// `tokio::task::JoinSet::spawn`.
+pub fn shutdown_token() -> CancellationToken {
     SHUTDOWN_TOKEN
         .try_with(|t| t.clone())
         .expect("shutdown_token() called in an unexpected task or thread")
