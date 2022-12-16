@@ -122,30 +122,18 @@ impl S3Bucket {
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
         );
-        let mut config_builder = Config::builder()
-            .region(Region::new(aws_config.bucket_region.clone()))
-            .credentials_provider(provide_credentials_fn(|| async {
-                match var("AWS_ACCESS_KEY_ID").is_ok() && var("AWS_SECRET_ACCESS_KEY").is_ok() {
-                    true => {
-                        EnvironmentVariableCredentialsProvider::new()
-                            .provide_credentials()
-                            .await
-                    }
-                    false => {
-                        let imds_client = imds::Client::builder()
-                            .connect_timeout(DEFAULT_IMDS_TIMEOUT)
-                            .read_timeout(DEFAULT_IMDS_TIMEOUT)
-                            .build()
-                            .await
-                            .map_err(CredentialsError::unhandled)?;
-                        ImdsCredentialsProvider::builder()
-                            .imds_client(imds_client)
-                            .build()
-                            .provide_credentials()
-                            .await
-                    }
+
+        let config_builder =
+            Config::builder().region(Region::new(aws_config.bucket_region.clone()));
+
+        let mut config_builder =
+            match var("AWS_ACCESS_KEY_ID").is_ok() && var("AWS_SECRET_ACCESS_KEY").is_ok() {
+                true => config_builder
+                    .credentials_provider(EnvironmentVariableCredentialsProvider::new()),
+                false => {
+                    config_builder.credentials_provider(ImdsCredentialsProvider::builder().build())
                 }
-            }));
+            };
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
             let endpoint = Endpoint::immutable(
