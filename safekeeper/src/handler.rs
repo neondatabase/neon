@@ -15,9 +15,8 @@ use regex::Regex;
 
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use std::str;
-use std::sync::Arc;
 use tracing::info;
-use utils::auth::{Claims, JwtAuth, Scope};
+use utils::auth::{Claims, Scope};
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -32,7 +31,6 @@ pub struct SafekeeperPostgresHandler {
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
     pub ttid: TenantTimelineId,
-    auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 }
 
@@ -107,6 +105,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
+            .conf
             .auth
             .as_ref()
             .unwrap()
@@ -166,14 +165,13 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf, auth: Option<Arc<JwtAuth>>) -> Self {
+    pub fn new(conf: SafeKeeperConf) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
             tenant_id: None,
             timeline_id: None,
             ttid: TenantTimelineId::empty(),
-            auth,
             claims: None,
         }
     }
@@ -181,7 +179,7 @@ impl SafekeeperPostgresHandler {
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
     fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<()> {
-        if self.auth.is_none() {
+        if self.conf.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
         }
