@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: neondatabase/rust:pinned
-      options: --init
+      options: --init --user root
 
     steps:
       - name: Checkout
