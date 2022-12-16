@@ -1669,7 +1669,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	 * (leaving holes). But this rule is violated in PG-15 where CreateAndCopyRelationData
 	 * call smgrextend for destination relation n using size of source relation
 	 */
-	get_cached_relsize(reln->smgr_rnode.node, forkNum, &n_blocks);
+	n_blocks = neon_nblocks(reln, forkNum);
 	while (n_blocks < blkno)
 		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
 
