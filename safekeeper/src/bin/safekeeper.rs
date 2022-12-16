@@ -129,9 +129,6 @@ fn main() -> anyhow::Result<()> {
     logging::init(LogFormat::from_config(&args.log_format)?)?;
     info!("version: {GIT_VERSION}");
 
-    // Change into the data directory.
-    std::env::set_current_dir(&args.datadir)?;
-
     // Set or read our ID.
     let id = set_id(&args.datadir, args.id.map(NodeId))?;
     if args.init {
