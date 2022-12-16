@@ -726,6 +726,7 @@ impl RemoteTimelineClient {
 
     ///
     /// Launch a delete operation in the background.
+    /// No-op if `names` is empty.
     ///
     /// The deletion won't actually be performed, until all preceding
     /// upload operations have completed succesfully.
@@ -733,6 +734,10 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         names: &[LayerFileName],
     ) -> anyhow::Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -761,6 +766,10 @@ impl RemoteTimelineClient {
             let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
             self.update_upload_queue_unfinished_metric(1, &op);
             upload_queue.queued_operations.push_back(op);
+            info!(
+                "scheduled metadata file upload after scheduling {} layer file deletions",
+                names.len()
+            );
 
             // schedule the actual deletions
             for name in names {
@@ -1360,6 +1369,18 @@ mod tests {
         runtime.block_on(client.wait_completion())?;
 
         assert_remote_files(&["bar", "baz", "index_part.json"], &remote_timeline_dir);
+
+        client.schedule_layer_file_deletion(&[])?;
+        {
+            let mut guard = client.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut().unwrap();
+
+            // Empty layer list doesn not schedule index file update
+            assert_eq!(upload_queue.queued_operations.len(), 0);
+            assert_eq!(upload_queue.inprogress_tasks.len(), 0);
+        }
+        // Finish them
+        runtime.block_on(client.wait_completion())?;
 
         let content_batch1 = dummy_contents("batch1");
         let content_batch2 = dummy_contents("batch2");
