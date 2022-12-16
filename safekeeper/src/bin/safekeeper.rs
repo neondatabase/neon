@@ -143,6 +143,19 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let auth = match args.auth_validation_public_key_path.as_ref() {
+        None => {
+            info!("auth is disabled");
+            None
+        }
+        Some(path) => {
+            info!("loading JWT auth key from {}", path.display());
+            Some(Arc::new(
+                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+            ))
+        }
+    };
+
     let conf = SafeKeeperConf {
         workdir,
         my_id: id,
@@ -156,7 +169,7 @@ fn main() -> anyhow::Result<()> {
         max_offloader_lag_bytes: args.max_offloader_lag,
         backup_runtime_threads: args.wal_backup_threads,
         wal_backup_enabled: !args.disable_wal_backup,
-        auth_validation_public_key_path: args.auth_validation_public_key_path,
+        auth,
     };
 
     // initialize sentry if SENTRY_DSN is provided
@@ -186,19 +199,6 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         e
     })?;
 
-    let auth = match conf.auth_validation_public_key_path.as_ref() {
-        None => {
-            info!("auth is disabled");
-            None
-        }
-        Some(path) => {
-            info!("loading JWT auth key from {}", path.display());
-            Some(Arc::new(
-                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-            ))
-        }
-    };
-
     // Register metrics collector for active timelines. It's important to do this
     // after daemonizing, otherwise process collector will be upset.
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
@@ -212,12 +212,11 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
 
     let conf_ = conf.clone();
-    let auth_ = auth.clone();
     threads.push(
         thread::Builder::new()
             .name("http_endpoint_thread".into())
             .spawn(|| {
-                let router = http::make_router(conf_, auth_);
+                let router = http::make_router(conf_);
                 endpoint::serve_thread_main(
                     router,
                     http_listener,
@@ -231,7 +230,7 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let safekeeper_thread = thread::Builder::new()
         .name("safekeeper thread".into())
         .spawn(|| {
-            if let Err(e) = wal_service::thread_main(conf_cloned, pg_listener, auth) {
+            if let Err(e) = wal_service::thread_main(conf_cloned, pg_listener) {
                 info!("safekeeper thread terminated: {e}");
             }
         })
@@ -244,7 +243,6 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         thread::Builder::new()
             .name("broker thread".into())
             .spawn(|| {
-                // TODO: add auth?
                 broker::thread_main(conf_);
             })?,
     );
