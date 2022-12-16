@@ -625,6 +625,7 @@ impl RemoteTimelineClient {
 
     ///
     /// Launch an upload operation in the background.
+    /// NB: caller is responsible for scheduling an IndexPart upload.
     ///
     pub fn schedule_layer_file_upload(
         self: &Arc<Self>,
@@ -633,13 +634,36 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
+        Self::verify_layer_file_upload(layer_file_name, layer_metadata)?;
+        self.schedule_layer_file_upload_impl(upload_queue, layer_file_name, layer_metadata);
+        Ok(())
+    }
 
+    fn verify_layer_file_upload(
+        name: &LayerFileName,
+        layer_metadata: &LayerFileMetadata,
+    ) -> anyhow::Result<()> {
         // The file size can be missing for files that were created before we tracked that
         // in the metadata, but it should be present for any new files we create.
         ensure!(
             layer_metadata.file_size().is_some(),
-            "file size not initialized in metadata"
+            "file size not initialized in metadata for file {}",
+            name.file_name()
         );
+
+        Ok(())
+    }
+
+    fn schedule_layer_file_upload_impl(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        layer_file_name: &LayerFileName,
+        layer_metadata: &LayerFileMetadata,
+    ) {
+        // Callers return errors for this, but for robustness, let's check again.
+        // Not least because the accounting for the REMOTE_PHYSICAL_SIZE metric relies
+        // on new uploads having this metadata.
+        assert!(Self::verify_layer_file_upload(layer_file_name, layer_metadata).is_ok());
 
         upload_queue
             .latest_files
@@ -656,6 +680,47 @@ impl RemoteTimelineClient {
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
+    }
+
+    /// Schedule a batch of layer file uploads with subsequent IndexPart upload.
+    /// No-op if layer_files is empty.
+    /// If an error is returned, none of the uploads have been scheduled.
+    /// If Ok(()) is returned, all uploads have been scheduled.
+    pub fn schedule_layer_file_uploads(
+        self: &Arc<Self>,
+        layer_files: &HashMap<LayerFileName, LayerFileMetadata>,
+    ) -> anyhow::Result<()> {
+        if layer_files.is_empty() {
+            return Ok(());
+        }
+
+        layer_files
+            .iter()
+            .try_for_each(|(n, md)| Self::verify_layer_file_upload(n, md))?;
+
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        for (name, md) in layer_files {
+            self.schedule_layer_file_upload_impl(upload_queue, name, md);
+        }
+
+        let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
+        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
+        let index_part = IndexPart::new(
+            upload_queue.latest_files.clone(), // updated by schedule_layer_file_upload_impl
+            disk_consistent_lsn,
+            metadata_bytes,
+        );
+
+        let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
+        self.update_upload_queue_unfinished_metric(1, &op);
+        upload_queue.queued_operations.push_back(op);
+        info!(
+            "scheduled metadata file upload after scheduling {} layer file uploads",
+            layer_files.len()
+        );
+
         Ok(())
     }
 
@@ -1295,6 +1360,44 @@ mod tests {
         runtime.block_on(client.wait_completion())?;
 
         assert_remote_files(&["bar", "baz", "index_part.json"], &remote_timeline_dir);
+
+        let content_batch1 = dummy_contents("batch1");
+        let content_batch2 = dummy_contents("batch2");
+        std::fs::write(timeline_path.join("batch1"), &content_batch1)?;
+        std::fs::write(timeline_path.join("batch2"), &content_batch2)?;
+        let batch: HashMap<_, _> = [
+            (
+                LayerFileName::Test("batch1".to_owned()),
+                LayerFileMetadata::new(content_batch1.len() as u64),
+            ),
+            (
+                LayerFileName::Test("batch2".to_owned()),
+                LayerFileMetadata::new(content_batch2.len() as u64),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        client.schedule_layer_file_uploads(&batch)?;
+        {
+            let mut guard = client.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut().unwrap();
+            assert_eq!(upload_queue.queued_operations.len(), 1, "index part");
+            assert_eq!(upload_queue.inprogress_tasks.len(), 2, "layer uploads");
+            assert_eq!(upload_queue.num_inprogress_layer_uploads, 2);
+            assert_eq!(upload_queue.num_inprogress_metadata_uploads, 0);
+        }
+        // Finish them
+        runtime.block_on(client.wait_completion())?;
+
+        assert_remote_files(
+            &["batch1", "batch2", "bar", "baz", "index_part.json"],
+            &remote_timeline_dir,
+        );
+        let index_part = runtime.block_on(client.download_index_file())?;
+        assert_file_list(
+            &index_part.timeline_layers,
+            &["batch1", "batch2", "bar", "baz"],
+        );
 
         Ok(())
     }
