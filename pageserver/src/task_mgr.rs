@@ -225,7 +225,7 @@ struct PageServerTask {
 
     name: String,
 
-    // To request task shutdown, send 'true' to the channel to notify the task.
+    // To request task shutdown, just cancel this token.
     cancel: CancellationToken,
 
     mutable: Mutex<MutableTaskState>,
