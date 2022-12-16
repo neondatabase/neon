@@ -575,9 +575,7 @@ impl Timeline {
                 // "enough".
                 let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
                 if let Some(remote_client) = &self.remote_client {
-                    for (path, layer_metadata) in layer_paths_to_upload {
-                        remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
-                    }
+                    remote_client.schedule_layer_file_uploads(&layer_paths_to_upload)?;
                 }
 
                 // 3. Compact
@@ -1201,19 +1199,18 @@ impl Timeline {
         };
 
         // Are there local files that don't exist remotely? Schedule uploads for them
-        for (layer_name, layer) in &local_only_layers {
+        let mut batch = HashMap::with_capacity(local_only_layers.len());
+        for (layer_name, layer) in local_only_layers {
             let layer_path = layer.local_path();
             let layer_size = layer_path
                 .metadata()
                 .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
                 .len();
-            info!("scheduling {layer_path:?} for upload");
-            remote_client
-                .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
+            batch.insert(layer_name, LayerFileMetadata::new(layer_size));
         }
-        if !local_only_layers.is_empty() {
-            remote_client.schedule_index_upload(up_to_date_metadata)?;
-        }
+        remote_client
+            .schedule_layer_file_uploads(&batch)
+            .context("schedule layer file uploads")?;
 
         info!("Done");
 
@@ -1808,6 +1805,8 @@ impl Timeline {
         .context("save_metadata")?;
 
         if let Some(remote_client) = &self.remote_client {
+            // Don't use schedule_layer_file_uploads here as we need to ship
+            // the updated `metadata` anyways.
             for (path, layer_metadata) in layer_paths_to_upload {
                 remote_client
                     .schedule_layer_file_upload(&path, &layer_metadata)
@@ -2296,25 +2295,29 @@ impl Timeline {
         }
 
         let mut layers = self.layers.write().unwrap();
-        let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
+        let mut new_layer_names = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
             let new_delta_path = l.path();
 
-            let metadata = new_delta_path.metadata()?;
-
-            if let Some(remote_client) = &self.remote_client {
-                remote_client.schedule_layer_file_upload(
-                    &l.filename(),
-                    &LayerFileMetadata::new(metadata.len()),
-                )?;
-            }
+            let metadata = new_delta_path.metadata()?; // XXX schedule upload for previous iterations
 
             // update the timeline's physical size
             self.metrics.current_physical_size_gauge.add(metadata.len());
 
-            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
+            new_layer_names.insert(l.filename(), LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
             layers.insert_historic(x);
+        }
+
+        // Now that we've successfully scheduled all the layer uploads,
+        // point the IndexPart to them as well.
+        // If we crash before that is done, the pageserver startup procedure
+        // will re-schedule the uploads.
+        if let Some(remote_client) = &self.remote_client {
+            remote_client
+                .schedule_layer_file_uploads(&new_layer_names)
+                // If we early-exit here, a subsequent then
+                .context("schedule layer file uploads")?;
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
