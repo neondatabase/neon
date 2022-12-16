@@ -36,7 +36,7 @@ pytest-httpserver = "^1.0.6"
 
 [tool.poetry.dev-dependencies]
 flake8 = "^5.0.4"
-mypy = "==0.971"
+mypy = "==0.991"
 black = "^22.6.0"
 isort = "^5.10.1"
 
