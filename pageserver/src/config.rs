@@ -137,6 +137,7 @@ pub struct PageServerConf {
 
     /// Storage broker endpoints to connect to.
     pub broker_endpoint: Uri,
+    pub broker_keepalive_interval: Duration,
 
     pub log_format: LogFormat,
 
@@ -215,6 +216,7 @@ struct PageServerConfigBuilder {
 
     profiling: BuilderValue<ProfilingConfig>,
     broker_endpoint: BuilderValue<Uri>,
+    broker_keepalive_interval: BuilderValue<Duration>,
 
     log_format: BuilderValue<LogFormat>,
 
@@ -247,6 +249,10 @@ impl Default for PageServerConfigBuilder {
             broker_endpoint: Set(storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint")),
+            broker_keepalive_interval: Set(humantime::parse_duration(
+                storage_broker::DEFAULT_KEEPALIVE_INTERVAL,
+            )
+            .expect("cannot parse default keepalive interval")),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
             concurrent_tenant_size_logical_size_queries: Set(ConfigurableSemaphore::default()),
@@ -310,6 +316,10 @@ impl PageServerConfigBuilder {
         self.broker_endpoint = BuilderValue::Set(broker_endpoint)
     }
 
+    pub fn broker_keepalive_interval(&mut self, broker_keepalive_interval: Duration) {
+        self.broker_keepalive_interval = BuilderValue::Set(broker_keepalive_interval)
+    }
+
     pub fn id(&mut self, node_id: NodeId) {
         self.id = BuilderValue::Set(node_id)
     }
@@ -365,6 +375,9 @@ impl PageServerConfigBuilder {
             broker_endpoint: self
                 .broker_endpoint
                 .ok_or(anyhow!("No broker endpoints provided"))?,
+            broker_keepalive_interval: self
+                .broker_keepalive_interval
+                .ok_or(anyhow!("No broker keepalive interval provided"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
             concurrent_tenant_size_logical_size_queries: self
                 .concurrent_tenant_size_logical_size_queries
@@ -532,6 +545,7 @@ impl PageServerConf {
                 "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
+                "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
                     LogFormat::from_config(&parse_toml_string(key, item)?)?
                 ),
@@ -659,6 +673,7 @@ impl PageServerConf {
             profiling: ProfilingConfig::Disabled,
             default_tenant_conf: TenantConf::dummy_conf(),
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+            broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
         }
@@ -829,6 +844,9 @@ log_format = 'json'
                 profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+                broker_keepalive_interval: humantime::parse_duration(
+                    storage_broker::DEFAULT_KEEPALIVE_INTERVAL
+                )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
             },
@@ -872,6 +890,7 @@ log_format = 'json'
                 profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+                broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
             },

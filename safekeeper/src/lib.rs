@@ -51,6 +51,7 @@ pub struct SafeKeeperConf {
     pub listen_http_addr: String,
     pub no_sync: bool,
     pub broker_endpoint: Uri,
+    pub broker_keepalive_interval: Duration,
     pub heartbeat_timeout: Duration,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
@@ -83,6 +84,7 @@ impl SafeKeeperConf {
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint"),
+            broker_keepalive_interval: Duration::from_secs(5),
             backup_runtime_threads: None,
             wal_backup_enabled: true,
             auth_validation_public_key_path: None,

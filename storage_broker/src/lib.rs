@@ -1,6 +1,7 @@
 use hyper::body::HttpBody;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tonic::codegen::StdError;
 use tonic::transport::{ClientTlsConfig, Endpoint};
 use tonic::{transport::Channel, Code, Status};
@@ -26,6 +27,8 @@ pub use hyper::Uri;
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 pub const DEFAULT_ENDPOINT: &str = const_format::formatcp!("http://{DEFAULT_LISTEN_ADDR}");
 
+pub const DEFAULT_KEEPALIVE_INTERVAL: &str = "5000 ms";
+
 // BrokerServiceClient charged with tonic provided Channel transport; helps to
 // avoid depending on tonic directly in user crates.
 pub type BrokerClientChannel = BrokerServiceClient<Channel>;
@@ -33,7 +36,7 @@ pub type BrokerClientChannel = BrokerServiceClient<Channel>;
 // Create connection object configured to run TLS if schema starts with https://
 // and plain text otherwise. Connection is lazy, only endpoint sanity is
 // validated here.
-pub fn connect<U>(endpoint: U) -> anyhow::Result<BrokerClientChannel>
+pub fn connect<U>(endpoint: U, keepalive_interval: Duration) -> anyhow::Result<BrokerClientChannel>
 where
     U: std::convert::TryInto<Uri>,
     U::Error: std::error::Error + Send + Sync + 'static,
@@ -46,6 +49,10 @@ where
         let tls = ClientTlsConfig::new();
         tonic_endpoint = tonic_endpoint.tls_config(tls)?;
     }
+    tonic_endpoint = tonic_endpoint
+        .http2_keep_alive_interval(keepalive_interval)
+        .keep_alive_while_idle(true);
+    //  keep_alive_timeout is 20s by default on both client and server side
     let channel = tonic_endpoint.connect_lazy();
     Ok(BrokerClientChannel::new(channel))
 }

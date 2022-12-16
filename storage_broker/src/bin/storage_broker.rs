@@ -39,7 +39,9 @@ use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
 use storage_broker::proto::{SafekeeperTimelineInfo, SubscribeSafekeeperInfoRequest};
-use storage_broker::{parse_proto_ttid, EitherBody, DEFAULT_LISTEN_ADDR};
+use storage_broker::{
+    parse_proto_ttid, EitherBody, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
+};
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
 use utils::project_git_version;
@@ -47,8 +49,8 @@ use utils::sentry_init::{init_sentry, release_name};
 
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_CHAN_SIZE: usize = 128;
-const DEFAULT_HTTP2_KEEPALIVE_INTERVAL: &str = "5000ms";
+const DEFAULT_CHAN_SIZE: usize = 32;
+const DEFAULT_ALL_KEYS_CHAN_SIZE: usize = 16384;
 
 #[derive(Parser, Debug)]
 #[command(version = GIT_VERSION, about = "Broker for neon storage nodes communication", long_about = None)]
@@ -56,11 +58,14 @@ struct Args {
     /// Endpoint to listen on.
     #[arg(short, long, default_value = DEFAULT_LISTEN_ADDR)]
     listen_addr: SocketAddr,
-    /// Size of the queue to the subscriber.
+    /// Size of the queue to the per timeline subscriber.
     #[arg(long, default_value_t = DEFAULT_CHAN_SIZE)]
-    chan_size: usize,
+    timeline_chan_size: usize,
+    /// Size of the queue to the all keys subscriber.
+    #[arg(long, default_value_t = DEFAULT_ALL_KEYS_CHAN_SIZE)]
+    all_keys_chan_size: usize,
     /// HTTP/2 keepalive interval.
-    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HTTP2_KEEPALIVE_INTERVAL)]
+    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_KEEPALIVE_INTERVAL)]
     http2_keepalive_interval: Duration,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
@@ -108,7 +113,7 @@ struct SharedState {
 }
 
 impl SharedState {
-    pub fn new(chan_size: usize) -> Self {
+    pub fn new(all_keys_chan_size: usize) -> Self {
         SharedState {
             next_pub_id: 0,
             num_pubs: 0,
@@ -116,7 +121,7 @@ impl SharedState {
             num_subs_to_timelines: 0,
             chans_to_timeline_subs: HashMap::new(),
             num_subs_to_all: 0,
-            chan_to_all_subs: broadcast::channel(chan_size).0,
+            chan_to_all_subs: broadcast::channel(all_keys_chan_size).0,
         }
     }
 
@@ -139,7 +144,7 @@ impl SharedState {
     pub fn register_subscriber(
         &mut self,
         sub_key: SubscriptionKey,
-        chan_size: usize,
+        timeline_chan_size: usize,
     ) -> (SubId, broadcast::Receiver<SafekeeperTimelineInfo>) {
         let sub_id = self.next_sub_id;
         self.next_sub_id += 1;
@@ -158,7 +163,7 @@ impl SharedState {
                     self.chans_to_timeline_subs
                         .entry(ttid)
                         .or_insert(ChanToTimelineSub {
-                            chan: broadcast::channel(chan_size).0,
+                            chan: broadcast::channel(timeline_chan_size).0,
                             num_subscribers: 0,
                         });
                 chan_to_timeline_sub.num_subscribers += 1;
@@ -200,7 +205,7 @@ impl SharedState {
 #[derive(Clone)]
 struct Registry {
     shared_state: Arc<RwLock<SharedState>>,
-    chan_size: usize,
+    timeline_chan_size: usize,
 }
 
 impl Registry {
@@ -232,7 +237,7 @@ impl Registry {
         let (sub_id, sub_rx) = self
             .shared_state
             .write()
-            .register_subscriber(sub_key, self.chan_size);
+            .register_subscriber(sub_key, self.timeline_chan_size);
         info!(
             "subscription started id={}, key={:?}, addr={:?}",
             sub_id, sub_key, remote_addr
@@ -369,7 +374,8 @@ impl BrokerService for Broker {
                     Err(RecvError::Lagged(skipped_msg)) => {
                         missed_msgs += skipped_msg;
                         if let Poll::Ready(_) = futures::poll!(Box::pin(warn_interval.tick())) {
-                            warn!("dropped {} messages, channel is full", missed_msgs);
+                            warn!("subscription id={}, key={:?} addr={:?} dropped {} messages, channel is full",
+                                subscriber.id, subscriber.key, subscriber.remote_addr, missed_msgs);
                             missed_msgs = 0;
                         }
                     }
@@ -427,8 +433,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("version: {GIT_VERSION}");
 
     let registry = Registry {
-        shared_state: Arc::new(RwLock::new(SharedState::new(args.chan_size))),
-        chan_size: args.chan_size,
+        shared_state: Arc::new(RwLock::new(SharedState::new(args.all_keys_chan_size))),
+        timeline_chan_size: args.timeline_chan_size,
     };
     let storage_broker_impl = Broker {
         registry: registry.clone(),
@@ -522,7 +528,7 @@ mod tests {
     async fn test_registry() {
         let registry = Registry {
             shared_state: Arc::new(RwLock::new(SharedState::new(16))),
-            chan_size: 16,
+            timeline_chan_size: 16,
         };
 
         // subscribe to timeline 2

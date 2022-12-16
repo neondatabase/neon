@@ -82,6 +82,9 @@ struct Args {
     /// established; plaintext otherwise.
     #[arg(long, default_value = DEFAULT_ENDPOINT, verbatim_doc_comment)]
     broker_endpoint: Uri,
+    /// Broker keepalive interval.
+    #[arg(long, value_parser= humantime::parse_duration, default_value = storage_broker::DEFAULT_KEEPALIVE_INTERVAL)]
+    broker_keepalive_interval: Duration,
     /// Peer safekeeper is considered dead after not receiving heartbeats from
     /// it during this period passed as a human readable duration.
     #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HEARTBEAT_TIMEOUT)]
@@ -142,6 +145,7 @@ fn main() -> anyhow::Result<()> {
         listen_http_addr: args.listen_http,
         no_sync: args.no_sync,
         broker_endpoint: args.broker_endpoint,
+        broker_keepalive_interval: args.broker_keepalive_interval,
         heartbeat_timeout: args.heartbeat_timeout,
         remote_storage: args.remote_storage,
         max_offloader_lag_bytes: args.max_offloader_lag,
