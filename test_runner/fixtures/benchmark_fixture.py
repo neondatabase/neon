@@ -147,14 +147,14 @@ class PgBenchInitResult:
         "total": re.compile(r"done in (\d+\.\d+) s"),  # Total time printed by pgbench
     }
 
-    total: float
-    drop_tables: float
-    create_tables: float
-    client_side_generate: float
-    server_side_generate: float
-    vacuum: float
-    primary_keys: float
-    foreign_keys: float
+    total: Optional[float]
+    drop_tables: Optional[float]
+    create_tables: Optional[float]
+    client_side_generate: Optional[float]
+    server_side_generate: Optional[float]
+    vacuum: Optional[float]
+    primary_keys: Optional[float]
+    foreign_keys: Optional[float]
     duration: float
     start_timestamp: int
     end_timestamp: int
@@ -172,30 +172,30 @@ class PgBenchInitResult:
 
         last_line = stderr.splitlines()[-1]
 
-        timings: Dict[str, Optional[float]] = {k: None for k in cls.EXTRACTORS.keys()}
+        timings: Dict[str, Optional[float]] = {}
         last_line_items = re.split(r"\(|\)|,", last_line)
         for item in last_line_items:
             for key, regex in cls.EXTRACTORS.items():
                 if (m := regex.match(item.strip())) is not None:
-                    if timings.get(key) is not None:
+                    if key in timings:
                         raise RuntimeError(
                             f"can't store pgbench results for repeated action `{key}`"
                         )
 
                     timings[key] = float(m.group(1))
 
-        if all(v is None for v in timings.values()) or timings["total"] is None:
+        if not timings or "total" not in timings:
             raise RuntimeError(f"can't parse pgbench initialize results from `{last_line}`")
 
         return cls(
             total=timings["total"],
-            drop_tables=timings["drop_tables"] or 0.0,
-            create_tables=timings["create_tables"] or 0.0,
-            client_side_generate=timings["client_side_generate"] or 0.0,
-            server_side_generate=timings["server_side_generate"] or 0.0,
-            vacuum=timings["vacuum"] or 0.0,
-            primary_keys=timings["primary_keys"] or 0.0,
-            foreign_keys=timings["foreign_keys"] or 0.0,
+            drop_tables=timings.get("drop_tables", 0.0),
+            create_tables=timings.get("create_tables", 0.0),
+            client_side_generate=timings.get("client_side_generate", 0.0),
+            server_side_generate=timings.get("server_side_generate", 0.0),
+            vacuum=timings.get("vacuum", 0.0),
+            primary_keys=timings.get("primary_keys", 0.0),
+            foreign_keys=timings.get("foreign_keys", 0.0),
             duration=duration,
             start_timestamp=start_timestamp,
             end_timestamp=end_timestamp,
