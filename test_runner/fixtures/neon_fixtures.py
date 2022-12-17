@@ -623,6 +623,7 @@ class NeonEnvBuilder:
         return self.env
 
     def start(self):
+        assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
     def init_start(self) -> NeonEnv:
@@ -747,7 +748,7 @@ class NeonEnvBuilder:
     def cleanup_remote_storage(self):
         # here wee check for true remote storage, no the local one
         # local cleanup is not needed after test because in ci all env will be destroyed anyway
-        if self.remote_storage_prefix is None:
+        if not isinstance(self.remote_storage, S3Storage) or self.remote_storage_prefix is None:
             log.info("no remote storage was set up, skipping cleanup")
             return
 
@@ -766,7 +767,8 @@ class NeonEnvBuilder:
             Prefix=self.remote_storage_prefix,
         )
 
-        objects_to_delete = {"Objects": []}
+        # Using Any because DeleteTypeDef (from boto3-stubs) doesn't fit our case
+        objects_to_delete: Any = {"Objects": []}
         cnt = 0
         for item in pages.search("Contents"):
             # weirdly when nothing is found it returns [None]
@@ -781,16 +783,17 @@ class NeonEnvBuilder:
                     Bucket=self.remote_storage.bucket_name,
                     Delete=objects_to_delete,
                 )
-                objects_to_delete = dict(Objects=[])
+                objects_to_delete = {"Objects": []}
                 cnt += 1
 
         # flush rest
         if len(objects_to_delete["Objects"]):
             self.remote_storage_client.delete_objects(
-                Bucket=self.remote_storage.bucket_name, Delete=objects_to_delete
+                Bucket=self.remote_storage.bucket_name,
+                Delete=objects_to_delete,
             )
 
-        log.info("deleted %s objects from remote storage", cnt)
+        log.info(f"deleted {cnt} objects from remote storage")
 
     def __enter__(self) -> "NeonEnvBuilder":
         return self
@@ -2772,7 +2775,7 @@ class NeonBroker:
         log.info(f'starting storage_broker to listen incoming connections at "{listen_addr}"')
         with open(self.logfile, "wb") as logfile:
             args = [
-                self.neon_binpath / "storage_broker",
+                str(self.neon_binpath / "storage_broker"),
                 f"--listen-addr={listen_addr}",
             ]
             self.handle = subprocess.Popen(args, stdout=logfile, stderr=logfile)

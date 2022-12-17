@@ -71,6 +71,7 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
 
         log.info("sending session activation message")
         psql = await PSQL(host=link_proxy.host, port=link_proxy.mgmt_port).run(db_info)
+        assert psql.stdout is not None
         out = (await psql.stdout.read()).decode("utf-8").strip()
         assert out == "ok"
 

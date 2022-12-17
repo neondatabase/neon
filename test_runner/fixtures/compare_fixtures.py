@@ -177,7 +177,7 @@ class VanillaCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
-    def pg(self) -> PgProtocol:
+    def pg(self) -> VanillaPostgres:
         return self._pg
 
     @property

@@ -1,5 +1,6 @@
 from contextlib import closing
 from io import BufferedReader, RawIOBase
+from typing import Optional
 
 from fixtures.compare_fixtures import PgCompare
 
@@ -8,7 +9,7 @@ class CopyTestData(RawIOBase):
     def __init__(self, rows: int):
         self.rows = rows
         self.rownum = 0
-        self.linebuf = None
+        self.linebuf: Optional[bytes] = None
         self.ptr = 0
 
     def readable(self):

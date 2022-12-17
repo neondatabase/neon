@@ -450,13 +450,13 @@ def add_missing_rels(base_tar, output_tar, log_dir, pg_bin, tmp_pg_port: int):
 def get_rlsn(pageserver_connstr, tenant_id, timeline_id):
     conn = psycopg2.connect(pageserver_connstr)
     conn.autocommit = True
-    with conn.cursor() as cur:
+    with closing(conn.cursor()) as cur:
         cmd = f"get_last_record_rlsn {tenant_id} {timeline_id}"
         cur.execute(cmd)
         res = cur.fetchone()
+        assert res is not None
         prev_lsn = res[0]
         last_lsn = res[1]
-    conn.close()
 
     return last_lsn, prev_lsn
 
