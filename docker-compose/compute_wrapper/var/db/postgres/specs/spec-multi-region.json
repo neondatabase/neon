@@ -152,6 +152,11 @@
                 "name": "current_region",
                 "value": "REGION",
                 "vartype": "integer"
+            },
+            {
+                "name": "temp_buffers",
+                "value": "4096",
+                "vartype": "integer"
             }
         ]
     },

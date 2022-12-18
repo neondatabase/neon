@@ -202,7 +202,7 @@ services:
     image: ctring/xactserver:${TAG:-latest}
     environment:
       - NODE_ID=1
-      - CONNECT_PG=postgresql://compute-r1:55433
+      - CONNECT_PG=postgresql://cloud_admin@compute-r1:55433/postgres
       - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000
     extra_hosts:
       - xactserver-r1:0.0.0.0
@@ -334,7 +334,7 @@ services:
     <<: *xactserver
     environment:
       - NODE_ID=2
-      - CONNECT_PG=postgresql://compute-r2:55433
+      - CONNECT_PG=postgresql://cloud_admin@compute-r2:55433/postgres
       - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000
     extra_hosts:
       - xactserver-r2:0.0.0.0
