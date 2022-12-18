@@ -8,11 +8,11 @@
 #
 #   - Build the wrapped compute image:
 #
-#       docker compose build
+#       docker compose -f docker-compose-multi-region.yml build
 #
 #   - Start the stack:
 #       
-#       docker compose up -d
+#       docker compose -f docker-compose-multi-region.yml up -d
 #
 #   - The compute node will be available on port 55433:
 #
@@ -20,7 +20,7 @@
 #
 #   - To stop this stack, run:
 #
-#       docker compose down
+#       docker compose -f docker-compose-multi-region.yml down
 #
 # Run with Docker Swarm:
 #   - Follow this tutorial to start a swarm: https://docs.docker.com/engine/swarm/swarm-tutorial/.
@@ -36,12 +36,12 @@
 #   
 #   - Build and push the compute image:
 #
-#       docker compose build
-#       docker compose push
+#       docker compose -f docker-compose-multi-region.yml build
+#       docker compose -f docker-compose-multi-region.yml push
 #
 #   - Start this stack in the swarm:
 #
-#       docker stack deploy --compose-file docker-compose.yml neon
+#       docker stack deploy --compose-file docker-compose-multi-region.yml neon
 #
 #   - (Optional) By default, the services are spread across the nodes in an undeterministic manner.
 #     To control which node a service runs on, we need to place a constraint on it. Examples of such
@@ -76,28 +76,14 @@ networks:
     external: true
 
 services:
-  etcd:
+  storage_broker:
     restart: always
-    image: quay.io/coreos/etcd:v3.5.4
+    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
     ports:
-      - 2379:2379
-      - 2380:2380
-    environment:
-      # This signifficantly speeds up etcd and we anyway don't persistent data there.
-      ETCD_UNSAFE_NO_FSYNC: "1"
+      - 50051:50051
     command:
-      - "etcd"
-      - "--auto-compaction-mode=revision"
-      - "--auto-compaction-retention=1"
-      - "--name=etcd-cluster"
-      - "--initial-cluster-state=new"
-      - "--initial-cluster-token=etcd-cluster-1"
-      - "--initial-cluster=etcd-cluster=http://etcd:2380"
-      - "--initial-advertise-peer-urls=http://etcd:2380"
-      - "--advertise-client-urls=http://etcd:2379"
-      - "--listen-client-urls=http://0.0.0.0:2379"
-      - "--listen-peer-urls=http://0.0.0.0:2380"
-      - "--quota-backend-bytes=134217728" # 128 MB
+      - "storage_broker"
+      - "--listen-addr=0.0.0.0:50051"
     # deploy:
     #   placement:
     #     constraints:
@@ -110,7 +96,7 @@ services:
     restart: always
     image: ctring/neon:${TAG:-latest}
     environment:
-      - BROKER_ENDPOINT='http://etcd:2379'
+      - BROKER_ENDPOINT='http://storage_broker:50051'
       - LISTEN_PG_ADDR=6400
       - LISTEN_HTTP_ADDR=9898
       #- RUST_BACKTRACE=1
@@ -128,12 +114,12 @@ services:
         rm -rf /data/.neon
         /usr/bin/mc cp -r minio/neon/.neon /data
         /usr/local/bin/pageserver -D /data/.neon/                                     \
-                                  -c "broker_endpoints=[$$BROKER_ENDPOINT]"           \
+                                  -c "broker_endpoint=$$BROKER_ENDPOINT"              \
                                   -c "listen_pg_addr='0.0.0.0:$$LISTEN_PG_ADDR'"      \
                                   -c "listen_http_addr='0.0.0.0:$$LISTEN_HTTP_ADDR'"  \
-                                  -c "pg_distrib_dir='/usr/local/'"
+                                  -c "pg_distrib_dir='/usr/local/'" 
     depends_on:
-      - etcd
+      - storage_broker
     # deploy:
     #   placement:
     #     constraints:
@@ -146,7 +132,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper-r1-1:5454
       - SAFEKEEPER_ID=1
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       #- RUST_BACKTRACE=1
     extra_hosts:
       # While other services can connect to a safekeeper using its name, the safekeeper
@@ -170,10 +156,10 @@ services:
         safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL \
                    --listen-http='0.0.0.0:7676' \
                    --id=$$SAFEKEEPER_ID \
-                   --broker-endpoints=$$BROKER_ENDPOINT \
+                   --broker-endpoint=$$BROKER_ENDPOINT \
                    -D /data
     depends_on:
-      - etcd
+      - storage_broker
     # deploy:
     #   placement:
     #     constraints:
@@ -185,7 +171,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper-r1-2:5454
       - SAFEKEEPER_ID=2
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       #- RUST_BACKTRACE=1
     extra_hosts:
       - safekeeper-r1-2:0.0.0.0
@@ -201,7 +187,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper-r1-3:5454
       - SAFEKEEPER_ID=3
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       #- RUST_BACKTRACE=1
     extra_hosts:
       - safekeeper-r1-3:0.0.0.0
@@ -283,7 +269,7 @@ services:
   pageserver-r2:
     <<: *pageserver
     environment:
-      - BROKER_ENDPOINT='http://etcd:2379'
+      - BROKER_ENDPOINT='http://storage_broker:50051'
       - LISTEN_PG_ADDR=6400
       - LISTEN_HTTP_ADDR=9898
       #- RUST_BACKTRACE=1
@@ -301,7 +287,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper-r2-1:5454
       - SAFEKEEPER_ID=1
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       #- RUST_BACKTRACE=1
     extra_hosts:
       - safekeeper-r2-1:0.0.0.0
@@ -317,7 +303,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper-r2-2:5454
       - SAFEKEEPER_ID=2
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       #- RUST_BACKTRACE=1
     extra_hosts:
       - safekeeper-r2-2:0.0.0.0
@@ -333,7 +319,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper-r2-3:5454
       - SAFEKEEPER_ID=3
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       #- RUST_BACKTRACE=1
     extra_hosts:
       - safekeeper-r2-3:0.0.0.0
