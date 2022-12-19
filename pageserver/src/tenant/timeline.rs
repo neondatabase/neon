@@ -2309,8 +2309,7 @@ impl Timeline {
             layers.insert_historic(x);
         }
 
-        // Now that we've successfully scheduled all the layer uploads,
-        // point the IndexPart to them as well.
+        // Upload all the layer files & update remote IndexPart.
         // If we crash before that is done, the pageserver startup procedure
         // will re-schedule the uploads.
         if let Some(remote_client) = &self.remote_client {
