@@ -502,13 +502,18 @@ impl WalreceiverState {
 
     /// Adds another broker timeline into the state, if its more recent than the one already added there for the same key.
     fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
-        self.wal_stream_candidates.insert(
-            NodeId(timeline_update.safekeeper_id),
+        let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
+        let old_entry = self.wal_stream_candidates.insert(
+            new_safekeeper_id,
             BrokerSkTimeline {
                 timeline: timeline_update,
                 latest_update: Utc::now().naive_utc(),
             },
         );
+
+        if old_entry.is_none() {
+            info!("New SK node was added: {new_safekeeper_id}");
+        }
     }
 
     /// Cleans up stale broker records and checks the rest for the new connection candidate.
@@ -735,12 +740,13 @@ impl WalreceiverState {
     /// Remove candidates which haven't sent broker updates for a while.
     fn cleanup_old_candidates(&mut self) {
         let mut node_ids_to_remove = Vec::with_capacity(self.wal_stream_candidates.len());
+        let lagging_wal_timeout = self.lagging_wal_timeout;
 
         self.wal_stream_candidates.retain(|node_id, broker_info| {
             if let Ok(time_since_latest_broker_update) =
                 (Utc::now().naive_utc() - broker_info.latest_update).to_std()
             {
-                let should_retain = time_since_latest_broker_update < self.lagging_wal_timeout;
+                let should_retain = time_since_latest_broker_update < lagging_wal_timeout;
                 if !should_retain {
                     node_ids_to_remove.push(*node_id);
                 }
@@ -750,8 +756,11 @@ impl WalreceiverState {
             }
         });
 
-        for node_id in node_ids_to_remove {
-            self.wal_connection_retries.remove(&node_id);
+        if !node_ids_to_remove.is_empty() {
+            info!("Safekeeper nodes {node_ids_to_remove:?} did not send events for over {lagging_wal_timeout:?}, stopping their retries.");
+            for node_id in node_ids_to_remove {
+                self.wal_connection_retries.remove(&node_id);
+            }
         }
     }
 
