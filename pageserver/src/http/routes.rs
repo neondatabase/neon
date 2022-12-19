@@ -7,8 +7,8 @@ use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
 use super::models::{
-    LocalTimelineInfo, RemoteTimelineInfo, StatusResponse, TenantConfigRequest,
-    TenantCreateRequest, TenantCreateResponse, TenantInfo, TimelineCreateRequest, TimelineInfo,
+    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
+    TimelineCreateRequest, TimelineInfo,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::tenant::Timeline;
@@ -147,18 +147,6 @@ fn build_timeline_info_common(timeline: &Arc<Timeline>) -> anyhow::Result<Timeli
         pg_version: timeline.pg_version,
 
         state,
-
-        // Duplicate some fields in 'local' and 'remote' fields, for backwards-compatility
-        // with the control plane.
-        local: LocalTimelineInfo {
-            ancestor_timeline_id,
-            ancestor_lsn,
-            current_logical_size,
-            current_physical_size,
-        },
-        remote: RemoteTimelineInfo {
-            remote_consistent_lsn: Some(remote_consistent_lsn),
-        },
     };
     Ok(info)
 }
