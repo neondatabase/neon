@@ -25,9 +25,6 @@ pub struct RawSharedMemPipe {
     /// - 0xffff_ffff means tearing down
     pub magic: AtomicU32,
 
-    /// Facilitate last one shuts down the lights, should we something drop-worthy.
-    pub ref_count: AtomicU32,
-
     pub participants: [shared::PinnedMutex<Option<u32>>; 2],
     // this wouldn't be too difficult to make a generic parameter, but let's hold off still.
     // pub to_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; 128 * 1024]>,
@@ -111,19 +108,6 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
         // we can now be raced by some other process due to shm_open, so write that we are
         // initializing
         magic.store(0, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    {
-        let ref_count = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).ref_count)
-                .cast::<MaybeUninit<AtomicU32>>()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
-        let ref_count = unsafe { ref_count.assume_init_mut() };
-
-        ref_count.store(0, SeqCst);
     }
 
     {
@@ -244,24 +228,44 @@ impl SharedMemPipePtr<MMapped> {
 
 impl<Stage> Drop for SharedMemPipePtr<Stage> {
     fn drop(&mut self) {
+        use shared::{MutexGuard, PinnedMutex, TryLockError};
+        use std::pin::Pin;
+
+        // Helper for locking all of the participants.
+        fn lock_all<const N: usize>(
+            particpants: &[PinnedMutex<Option<u32>>; N],
+        ) -> [Option<MutexGuard<'_, Option<u32>>>; N] {
+            const NONE: Option<MutexGuard<'_, Option<u32>>> = None;
+
+            let mut res = [NONE; N];
+
+            for (i, m) in particpants.into_iter().enumerate() {
+                let m = unsafe { Pin::new_unchecked(m) };
+                res[i] = match m.try_lock() {
+                    Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => Some(g),
+                    Err(TryLockError::WouldBlock) => None,
+                }
+            }
+
+            res
+        }
+
         let _res = {
             if let Some(ptr) = self.ptr.take() {
                 if self.attempt_drop {
                     let shared = unsafe { ptr.as_ref() };
 
-                    // FIXME: it might be that the refcount is still being initialized when panic
+                    let locked = lock_all(&shared.participants);
 
-                    let ref_count_was = shared.ref_count.fetch_sub(1, SeqCst);
-
-                    if ref_count_was == 1 {
+                    if locked.iter().all(|x| x.is_some()) {
                         // in case anyone still joins, they'll first find this tombstone
                         shared.magic.store(0xffff_ffff, SeqCst);
+
+                        drop(locked);
 
                         unsafe { std::ptr::drop_in_place(ptr.as_ptr()) };
 
                         // now we are good to drop in place, if need be
-                    } else {
-                        debug_assert!(ref_count_was < 100, "did someone mess up the refcounting");
                     }
                 }
 
