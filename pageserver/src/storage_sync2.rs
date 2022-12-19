@@ -767,7 +767,7 @@ impl RemoteTimelineClient {
             self.update_upload_queue_unfinished_metric(1, &op);
             upload_queue.queued_operations.push_back(op);
             info!(
-                "scheduled metadata file upload after scheduling {} layer file deletions",
+                "scheduled metadata file upload before {} layer file deletions",
                 names.len()
             );
 
