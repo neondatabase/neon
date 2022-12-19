@@ -95,6 +95,8 @@ pub fn spawn_connection_manager_task(
     );
 }
 
+const MAX_BROKER_IDLE_WAIT: Duration = Duration::from_secs(60);
+
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
 /// Based on the updates, desides whether to start, keep or stop a WAL receiver task.
 /// If storage broker subscription is cancelled, exits.
@@ -145,21 +147,17 @@ async fn connection_manager_loop_step(
                 let wal_connection = walreceiver_state.wal_connection.as_mut()
                     .expect("Should have a connection, as checked by the corresponding select! guard");
                 match wal_connection_update {
-                    TaskEvent::Update(c) => {
-                        match c {
-                            TaskStateUpdate::Init | TaskStateUpdate::Started => {},
-                            TaskStateUpdate::Progress(status) => {
-                                if status.has_processed_wal {
-                                    // We have advanced last_record_lsn by processing the WAL received
-                                    // from this safekeeper. This is good enough to clean unsuccessful
-                                    // retries history and allow reconnecting to this safekeeper without
-                                    // sleeping for a long time.
-                                    walreceiver_state.wal_connection_retries.remove(&wal_connection.sk_id);
-                                }
-                                wal_connection.status = status.to_owned();
-                            }
+                    TaskEvent::Update(TaskStateUpdate::Init | TaskStateUpdate::Started) => {},
+                    TaskEvent::Update(TaskStateUpdate::Progress(new_status)) => {
+                        if new_status.has_processed_wal {
+                            // We have advanced last_record_lsn by processing the WAL received
+                            // from this safekeeper. This is good enough to clean unsuccessful
+                            // retries history and allow reconnecting to this safekeeper without
+                            // sleeping for a long time.
+                            walreceiver_state.wal_connection_retries.remove(&wal_connection.sk_id);
                         }
-                    },
+                        wal_connection.status = new_status;
+                    }
                     TaskEvent::End(walreceiver_task_result) => {
                         match walreceiver_task_result {
                             Ok(()) => debug!("WAL receiving task finished"),
@@ -210,7 +208,24 @@ async fn connection_manager_loop_step(
                 }
             },
 
-            _ = async { tokio::time::sleep(time_until_next_retry.unwrap()).await }, if time_until_next_retry.is_some() => {}
+            timed_out = async {
+                match time_until_next_retry {
+                    Some(time_until_next_retry) => {
+                        tokio::time::sleep(time_until_next_retry).await;
+                        false
+                    },
+                    None => {
+                        tokio::time::sleep(MAX_BROKER_IDLE_WAIT).await;
+                        true
+                    }
+                }
+            } => {
+                if timed_out {
+                    warn!("Got no broker or walreceiver events after waiting for {MAX_BROKER_IDLE_WAIT:?}")
+                } else {
+                    debug!("Waking up for the next retry after waiting for {time_until_next_retry:?}")
+                }
+            }
         }
 
         if let Some(new_candidate) = walreceiver_state.next_connection_candidate() {
@@ -480,9 +495,9 @@ impl WalreceiverState {
             .values()
             .filter_map(|retry| retry.next_retry_at)
             .filter(|next_retry_at| next_retry_at > &now)
-            .min();
+            .min()?;
 
-        next_retry_at.and_then(|next_retry_at| (next_retry_at - now).to_std().ok())
+        (next_retry_at - now).to_std().ok()
     }
 
     /// Adds another broker timeline into the state, if its more recent than the one already added there for the same key.
@@ -883,10 +898,10 @@ mod tests {
         state.wal_connection = Some(WalConnection {
             started_at: now,
             sk_id: connected_sk_id,
-            status: connection_status.clone(),
+            status: connection_status,
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
-                    .send(TaskStateUpdate::Progress(connection_status.clone()))
+                    .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
                 Ok(())
             }),
@@ -1045,10 +1060,10 @@ mod tests {
         state.wal_connection = Some(WalConnection {
             started_at: now,
             sk_id: connected_sk_id,
-            status: connection_status.clone(),
+            status: connection_status,
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
-                    .send(TaskStateUpdate::Progress(connection_status.clone()))
+                    .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
                 Ok(())
             }),
@@ -1110,10 +1125,10 @@ mod tests {
         state.wal_connection = Some(WalConnection {
             started_at: now,
             sk_id: NodeId(1),
-            status: connection_status.clone(),
+            status: connection_status,
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
-                    .send(TaskStateUpdate::Progress(connection_status.clone()))
+                    .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
                 Ok(())
             }),
