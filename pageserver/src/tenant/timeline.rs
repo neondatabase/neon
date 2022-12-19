@@ -1587,7 +1587,7 @@ impl Timeline {
                 }
             }
 
-            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
+            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);

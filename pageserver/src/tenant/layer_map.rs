@@ -261,7 +261,7 @@ where
     /// contain the version, even if it's missing from the returned
     /// layer.
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult<L>>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
         // linear search
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<Arc<L>> = None;
@@ -286,10 +286,10 @@ where
             assert!(img_lsn < end_lsn);
             if Lsn(img_lsn.0 + 1) == end_lsn {
                 // found exact match
-                return Ok(Some(SearchResult {
+                return Some(SearchResult {
                     layer: Arc::clone(l),
                     lsn_floor: img_lsn,
-                }));
+                });
             }
             if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
                 latest_img = Some(Arc::clone(l));
@@ -346,19 +346,19 @@ where
                 Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
                 l.get_lsn_range().start,
             );
-            Ok(Some(SearchResult {
+            Some(SearchResult {
                 lsn_floor,
                 layer: l,
-            }))
+            })
         } else if let Some(l) = latest_img {
             trace!("found img layer and no deltas for request on {key} at {end_lsn}");
-            Ok(Some(SearchResult {
+            Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
                 layer: l,
-            }))
+            })
         } else {
             trace!("no layer found for request on {key} at {end_lsn}");
-            Ok(None)
+            None
         }
     }
 
