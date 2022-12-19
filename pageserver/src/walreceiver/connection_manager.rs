@@ -757,8 +757,8 @@ impl WalreceiverState {
         });
 
         if !node_ids_to_remove.is_empty() {
-            info!("Safekeeper nodes {node_ids_to_remove:?} did not send events for over {lagging_wal_timeout:?}, stopping their retries.");
             for node_id in node_ids_to_remove {
+                info!("Safekeeper node {node_id} did not send events for over {lagging_wal_timeout:?}, not retrying the connections");
                 self.wal_connection_retries.remove(&node_id);
             }
         }

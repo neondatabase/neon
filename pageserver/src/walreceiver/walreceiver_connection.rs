@@ -191,9 +191,9 @@ pub async fn handle_walreceiver_connection(
                     info!("Replication stream got closed");
                     return Ok(());
                 } else {
-                    return Err(anyhow::anyhow!(
-                        "Replication stream error: {replication_error}"
-                    ));
+                    return Err(
+                        anyhow::Error::new(replication_error).context("replication stream error")
+                    );
                 }
             }
         };
