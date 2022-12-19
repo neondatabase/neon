@@ -900,6 +900,7 @@ fn cli() -> Command {
     let stop_mode_arg = Arg::new("stop-mode")
         .short('m')
         .value_parser(["fast", "immediate"])
+        .default_value("fast")
         .help("If 'immediate', don't flush repository data at shutdown")
         .required(false)
         .value_name("stop-mode");
