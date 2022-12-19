@@ -293,7 +293,7 @@ struct UploadQueueInitialized {
 
     /// How many file uploads or deletions been scheduled, since the
     /// last (scheduling of) metadata index upload?
-    latest_files_changes: u64,
+    latest_files_changes_since_metadata_upload_scheduled: u64,
 
     /// Metadata stored in the remote storage, taking into account all
     /// in-progress and queued operations.
@@ -344,7 +344,7 @@ impl UploadQueue {
         let state = UploadQueueInitialized {
             // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
             latest_files: HashMap::new(),
-            latest_files_changes: 0,
+            latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: metadata.clone(),
             // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
             // safekeepers from garbage-collecting anything.
@@ -391,7 +391,7 @@ impl UploadQueue {
 
         let state = UploadQueueInitialized {
             latest_files: files,
-            latest_files_changes: 0,
+            latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: index_part_metadata.clone(),
             last_uploaded_consistent_lsn: index_part_metadata.disk_consistent_lsn(),
             // what follows are boring default initializations
@@ -566,7 +566,7 @@ impl RemoteTimelineClient {
             let upload_queue = guard.initialized_mut()?;
             if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
                 if upgraded.merge(&new_metadata) {
-                    upload_queue.latest_files_changes += 1;
+                    upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
                 }
                 // If we don't do an index file upload inbetween here and restart,
                 // the value will go back down after pageserver restart, since we will
@@ -636,7 +636,7 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        if upload_queue.latest_files_changes > 0 {
+        if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
             let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
             self.schedule_index_upload(upload_queue, metadata_bytes);
         }
@@ -653,7 +653,7 @@ impl RemoteTimelineClient {
         info!(
             "scheduling metadata upload with {} files ({} changed)",
             upload_queue.latest_files.len(),
-            upload_queue.latest_files_changes,
+            upload_queue.latest_files_changes_since_metadata_upload_scheduled,
         );
 
         let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
@@ -666,7 +666,7 @@ impl RemoteTimelineClient {
         let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
         self.update_upload_queue_unfinished_metric(1, &op);
         upload_queue.queued_operations.push_back(op);
-        upload_queue.latest_files_changes = 0;
+        upload_queue.latest_files_changes_since_metadata_upload_scheduled = 0;
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
@@ -693,7 +693,7 @@ impl RemoteTimelineClient {
         upload_queue
             .latest_files
             .insert(layer_file_name.clone(), layer_metadata.clone());
-        upload_queue.latest_files_changes += 1;
+        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
 
         let op = UploadOp::UploadLayer(layer_file_name.clone(), layer_metadata.clone());
         self.update_upload_queue_unfinished_metric(1, &op);
@@ -738,10 +738,10 @@ impl RemoteTimelineClient {
         let no_bail_here = || {
             for name in names {
                 upload_queue.latest_files.remove(name);
-                upload_queue.latest_files_changes += 1;
+                upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
             }
 
-            if upload_queue.latest_files_changes > 0 {
+            if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
                 self.schedule_index_upload(upload_queue, metadata_bytes);
             }
 
@@ -1294,7 +1294,7 @@ mod tests {
             assert!(upload_queue.num_inprogress_layer_uploads == 2);
 
             // also check that `latest_file_changes` was updated
-            assert!(upload_queue.latest_files_changes == 2);
+            assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 2);
         }
 
         // Schedule upload of index. Check that it is queued
@@ -1304,7 +1304,7 @@ mod tests {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();
             assert!(upload_queue.queued_operations.len() == 1);
-            assert!(upload_queue.latest_files_changes == 0);
+            assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 0);
         }
 
         // Wait for the uploads to finish
@@ -1340,7 +1340,7 @@ mod tests {
             assert!(upload_queue.inprogress_tasks.len() == 1);
             assert!(upload_queue.num_inprogress_layer_uploads == 1);
             assert!(upload_queue.num_inprogress_deletions == 0);
-            assert!(upload_queue.latest_files_changes == 0);
+            assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 0);
         }
         assert_remote_files(&["foo", "bar", "index_part.json"], &remote_timeline_dir);
 
