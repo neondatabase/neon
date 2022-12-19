@@ -170,6 +170,8 @@ impl OwnedRequester {
     }
 }
 
+/// This type is movable.
+#[repr(C)]
 pub struct OwnedResponder {
     // self referential, has to be, also must be above ptr to get dropped first
     locked_mutex: shared::MutexGuard<'static, Option<u32>>,
@@ -177,43 +179,33 @@ pub struct OwnedResponder {
 }
 
 impl OwnedResponder {
-    pub fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        use std::io::Read;
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
         let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
 
         let mut read = 0;
 
         loop {
-            match c.read(&mut buf[read..]) {
-                Ok(n) => {
-                    read += n;
+            let n = c.pop_slice(&mut buf[read..]);
 
-                    if read == buf.len() {
-                        cond.notify_one();
-                        return Ok(n);
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    cond.notify_one();
-                    std::thread::yield_now();
-                    continue;
-                }
-                Err(e) => {
-                    // unexpected, a new impl sends out these?
-                    return Err(e);
-                }
+            read += n;
+
+            cond.notify_one();
+            if read == buf.len() {
+                return n;
             }
+
+            std::thread::yield_now();
         }
     }
 
-    pub fn write_all(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
+    pub fn write_all(&mut self, mut buf: &[u8]) -> usize {
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
         let mutex = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
         let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
         if buf.is_empty() {
-            return Ok(0);
+            return 0;
         }
 
         // let mut busy = 0;
@@ -223,13 +215,94 @@ impl OwnedResponder {
             buf = &buf[wrote..];
 
             if buf.is_empty() {
-                return Ok(0);
+                return 0;
             } else {
                 // busy += 1;
                 let g = mutex.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = cond.wait_while(g, |_| p.free_len() == 0);
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern "C" fn shmempipe_open_via_env() -> *mut OwnedResponder {
+    use std::os::unix::ffi::OsStrExt;
+
+    let id = match std::env::var_os("WALREDO_TENANT") {
+        Some(x) if x.len() == 32 => x,
+        Some(_) | None => return std::ptr::null_mut(),
+    };
+
+    let mut buf = [0u8; 9 + 32 + 1];
+    b"/walredo-"
+        .into_iter()
+        .copied()
+        .chain(id.as_bytes().into_iter().copied())
+        .chain(std::iter::once(0))
+        .enumerate()
+        .for_each(|(i, b)| buf[i] = b);
+
+    let path = match std::ffi::CStr::from_bytes_with_nul(&buf) {
+        Ok(path) => path,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match open_existing(path).map(|joined| joined.try_acquire_responder()) {
+        Ok(Some(responder)) => Box::into_raw(Box::new(responder)),
+        Ok(None) | Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn shmempipe_read_exact(
+    resp: *mut OwnedResponder,
+    buffer: *mut u8,
+    len: usize,
+) -> isize {
+    if resp.is_null() || buffer.is_null() {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+    if len > isize::MAX as usize {
+        return -2;
+    }
+    let mut target = unsafe { Box::from_raw(resp) };
+    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len) };
+    let ret = target.read_exact(buffer);
+    std::mem::forget(target);
+    ret as isize
+}
+
+#[no_mangle]
+pub extern "C" fn shmempipe_write_all(
+    resp: *mut OwnedResponder,
+    buffer: *mut u8,
+    len: usize,
+) -> isize {
+    if resp.is_null() || buffer.is_null() {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+    if len > isize::MAX as usize {
+        return -2;
+    }
+    let mut target = unsafe { Box::from_raw(resp) };
+    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len) };
+    let ret = target.write_all(buffer);
+    std::mem::forget(target);
+    ret as isize
+}
+
+#[no_mangle]
+pub extern "C" fn shmempipe_destroy(resp: *mut OwnedResponder) {
+    if !resp.is_null() {
+        unsafe { Box::from_raw(resp) };
     }
 }
 
@@ -587,14 +660,16 @@ impl std::ops::Deref for SharedMemPipePtr<Joined> {
     }
 }
 
-pub fn open_existing(path: &Path) -> std::io::Result<SharedMemPipePtr<Joined>> {
+pub fn open_existing<P: nix::NixPath + ?Sized>(
+    path: &P,
+) -> std::io::Result<SharedMemPipePtr<Joined>> {
     use nix::fcntl::OFlag;
     use nix::sys::mman;
     use nix::sys::stat::Mode;
     use std::os::unix::io::FromRawFd;
 
-    assert!(path.is_absolute());
-    assert!(path.as_os_str().len() < 255);
+    // assert!(path.is_absolute());
+    // assert!(path.as_os_str().len() < 255);
 
     let flags = OFlag::O_RDWR;
     let mode = Mode::S_IRUSR | Mode::S_IWUSR;
