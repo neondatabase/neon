@@ -129,17 +129,22 @@ fn main() -> anyhow::Result<()> {
     logging::init(LogFormat::from_config(&args.log_format)?)?;
     info!("version: {GIT_VERSION}");
 
+    let args_workdir = &args.datadir;
+    let workdir = args_workdir.canonicalize().with_context(|| {
+        format!("Failed to get the absolute path for input workdir {args_workdir:?}")
+    })?;
+
     // Change into the data directory.
-    std::env::set_current_dir(&args.datadir)?;
+    std::env::set_current_dir(&workdir)?;
 
     // Set or read our ID.
-    let id = set_id(&args.datadir, args.id.map(NodeId))?;
+    let id = set_id(&workdir, args.id.map(NodeId))?;
     if args.init {
         return Ok(());
     }
 
     let conf = SafeKeeperConf {
-        workdir: args.datadir,
+        workdir,
         my_id: id,
         listen_pg_addr: args.listen_pg,
         listen_http_addr: args.listen_http,
@@ -308,7 +313,8 @@ fn set_id(workdir: &Path, given_id: Option<NodeId>) -> Result<NodeId> {
                 } else {
                     bail!("safekeeper id is not specified");
                 };
-                let mut f = File::create(&id_file_path)?;
+                let mut f = File::create(&id_file_path)
+                    .with_context(|| format!("Failed to create id file at {id_file_path:?}"))?;
                 f.write_all(my_id.to_string().as_bytes())?;
                 f.sync_all()?;
                 info!("initialized safekeeper id {}", my_id);
