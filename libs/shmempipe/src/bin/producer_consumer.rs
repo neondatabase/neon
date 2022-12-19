@@ -1,4 +1,4 @@
-use std::{collections::HashSet, ffi::OsString, pin::Pin};
+use std::{collections::HashSet, ffi::OsString};
 
 use shmempipe::shared::TryLockError;
 
@@ -42,7 +42,7 @@ where
 
     loop {
         buffer.resize(4, 0);
-        responder.read_exact(&mut buffer).unwrap();
+        responder.read_exact(&mut buffer);
         let len = buffer.get_u32();
 
         buffer.resize(len as usize, 0);
@@ -52,7 +52,7 @@ where
         response.clear();
         response.extend(sha);
         response.resize(8192, 0);
-        responder.write_all(&response).unwrap();
+        responder.write_all(&response);
     }
 }
 
@@ -137,7 +137,7 @@ fn as_outer() {
 
         let reqs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        let jhs = (0..4)
+        let _jhs = (0..4)
             .map(|_| (owned.clone(), reqs.clone()))
             .map(|(owned, reqs)| {
                 std::thread::spawn(move || {
@@ -159,11 +159,11 @@ fn as_outer() {
                         resp.clear();
                         resp.resize(8192, 1);
 
-                        let started = std::time::Instant::now();
+                        // let started = std::time::Instant::now();
 
                         owned.request_response(&req, &mut resp);
 
-                        let elapsed = started.elapsed();
+                        // let elapsed = started.elapsed();
                         reqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                         let expected =
@@ -188,7 +188,7 @@ fn as_outer() {
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,
                 ) {
-                    Ok(x) => break,
+                    Ok(_) => break,
                     Err(y) => read = y,
                 }
             }

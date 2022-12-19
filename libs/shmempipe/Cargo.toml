@@ -5,15 +5,27 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+demo = ["bytes", "rand", "sha2"]
+
+[lib]
+crate-type = ["staticlib"]
+
 [dependencies]
-memmap = "0.7.0"
+# memmap = "0.7.0"
 ringbuf = "0.3.1"
 
 nix = { version = "0.26.1", features = ["mman", "fs"] }
 libc = { version = "0.2.138" }
-rand = "0.8.3"
-bytes = "1"
-sha2 = "0.10.6"
+
+bytes = { version = "1", optional = true }
+rand = { version = "0.8.3", optional = true }
+sha2 = { version = "0.10.6", optional = true }
 
 [target.'cfg(miri)'.dependencies]
 parking_lot = "0.12.1"
+
+[[bin]]
+name = "producer_consumer"
+required-features = ["demo"]

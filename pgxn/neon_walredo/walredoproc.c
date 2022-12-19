@@ -43,6 +43,10 @@
 
 #include "postgres.h"
 
+#ifdef HAVE_SHMEMPIPE
+#include "shmempipe.h"
+#endif
+
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
@@ -106,6 +110,10 @@ static BufferTag target_redo_tag;
 
 static XLogReaderState *reader_state;
 
+#ifdef HAVE_SHMEMPIPE
+static shmempipe_t* pipe;
+#endif
+
 #define TRACE DEBUG5
 
 #ifdef HAVE_LIBSECCOMP
@@ -167,6 +175,13 @@ WalRedoMain(int argc, char *argv[])
 	StringInfoData input_message;
 #ifdef HAVE_LIBSECCOMP
 	bool		enable_seccomp;
+#endif
+
+#ifdef HAVE_SHMEMPIPE
+	pipe = shmempipe_open_via_env();
+	if (pipe == NULL) {
+		elog(WARNING, "No shmempipe configuration detected");
+	}
 #endif
 
 	am_wal_redo_postgres = true;
@@ -766,11 +781,17 @@ GetPage(StringInfo input_message)
 	/* single thread, so don't bother locking the page */
 
 	/* Response: Page content */
+
 	tot_written = 0;
 	do {
 		ssize_t		rc;
 
-		rc = write(STDOUT_FILENO, &page[tot_written], BLCKSZ - tot_written);
+#ifdef HAVE_SHMEMPIPE
+		if (pipe != NULL)
+			rc = shmempipe_write_all(&page[tot_written], BLCKSZ - tot_written);
+		else
+#endif
+			rc = write(STDOUT_FILENO, &page[tot_written], BLCKSZ - tot_written);
 		if (rc < 0) {
 			/* If interrupted by signal, just retry */
 			if (errno == EINTR)
@@ -810,6 +831,12 @@ static size_t stdin_ptr = 0;	/* # of bytes already consumed */
 static ssize_t
 buffered_read(void *buf, size_t count)
 {
+#ifdef HAVE_SHMEMPIPE
+	if (pipe != NULL)
+	{
+		return shmempipe_read_exact(pipe, buf, count);
+	}
+#endif
 	char	   *dst = buf;
 
 	while (count > 0)

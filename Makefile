@@ -24,6 +24,7 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
 	PG_CONFIGURE_OPTS += --with-libseccomp
+	WALREDO_EXTRA_CFLAGS = -DHAVE_SHMEMPIPE -I$(ROOT_PROJECT_DIR)/libs/shmempipe -L$(ROOT_PROJECT_DIR)/target/$(BUILD_TYPE) -lshmempipe
 else ifeq ($(UNAME_S),Darwin)
 	# macOS with brew-installed openssl requires explicit paths
 	# It can be configured with OPENSSL_PREFIX variable
@@ -32,6 +33,7 @@ else ifeq ($(UNAME_S),Darwin)
 	# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
 	# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
 	EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:
+	WALREDO_EXTRA_CFLAGS =
 endif
 
 # Use -C option so that when PostgreSQL "make install" installs the
@@ -116,6 +118,9 @@ postgres-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
 
+$(ROOT_PROJECT_DIR)/target/$(BUILD_TYPE)/libshmempipe.a:
+	$(CARGO_CMD_PREFIX) cargo build -p shmempipe $(CARGO_BUILD_FLAGS)
+
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
 	+@echo "Compiling neon $*"
@@ -125,7 +130,7 @@ neon-pg-ext-%: postgres-%
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install
 	+@echo "Compiling neon_walredo $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT) $(WALREDO_EXTRA_CFLAGS)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile install
 	+@echo "Compiling neon_test_utils $*"
