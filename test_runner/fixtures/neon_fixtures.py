@@ -286,24 +286,19 @@ def port_distributor(worker_base_port: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def default_broker(
-    request: FixtureRequest,
     port_distributor: PortDistributor,
-    top_output_dir: Path,
+    test_output_dir: Path,
     neon_binpath: Path,
 ) -> Iterator[NeonBroker]:
     # multiple pytest sessions could get launched in parallel, get them different ports/datadirs
     client_port = port_distributor.get_port()
-    broker_logfile = (
-        get_test_output_dir(request, top_output_dir) / f"storage_broker_{client_port}.log"
-    )
-    broker_logfile.parents[0].mkdir(exist_ok=True, parents=True)
+    broker_logfile = test_output_dir / "repo" / "storage_broker.log"
 
     broker = NeonBroker(logfile=broker_logfile, port=client_port, neon_binpath=neon_binpath)
     yield broker
     broker.stop()
-    allure_attach_from_dir(Path(broker_logfile))
 
 
 @pytest.fixture(scope="session")
@@ -1012,7 +1007,7 @@ def _shared_simple_env(
 
     if os.environ.get("TEST_SHARED_FIXTURES") is None:
         # Create the environment in the per-test output directory
-        repo_dir = get_test_output_dir(request, top_output_dir) / "repo"
+        repo_dir = get_test_repo_dir(request, top_output_dir)
     else:
         # We're running shared fixtures. Share a single directory.
         repo_dir = top_output_dir / "shared_repo"
@@ -2789,6 +2784,10 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     # make mypy happy
     assert isinstance(test_dir, Path)
     return test_dir
+
+
+def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
+    return get_test_output_dir(request, top_output_dir) / "repo"
 
 
 def pytest_addoption(parser: Parser):
