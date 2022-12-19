@@ -22,15 +22,15 @@ use std::{cell::UnsafeCell, mem::MaybeUninit, pin::Pin};
 
 /// Return value for the robust pthread_mutex [`Mutex::lock`] and [`Mutex::try_lock`].
 #[cfg_attr(test, derive(Debug))]
-enum Locked {
+enum Locked<T> {
     /// Mutex is now locked.
-    Ok,
+    Ok(T),
 
     /// The process which had previously locked the mutex has died while holding the lock.
     ///
     /// The lock has been made consistent with `pthread_mutex_consistent`, but any
     /// protected data structure has not been fixed.
-    PreviousOwnerDied,
+    PreviousOwnerDied(T),
 }
 
 #[cfg(not(miri))]
@@ -78,32 +78,32 @@ mod pthread {
             }
         }
 
-        pub(super) fn lock(self: std::pin::Pin<&Self>) -> Locked {
+        pub(super) fn lock(self: std::pin::Pin<&Self>) -> Locked<()> {
             let ptr = self.inner();
             let res = unsafe { libc::pthread_mutex_lock(ptr) };
 
             match res {
-                0 => Locked::Ok,
+                0 => Locked::Ok(()),
                 libc::EOWNERDEAD => {
                     // unsure if this is the right strategy, but it's not the worst?
                     self.make_consistent().expect("failed to repair after lock");
-                    Locked::PreviousOwnerDied
+                    Locked::PreviousOwnerDied(())
                 }
                 other => Err(std::io::Error::from_raw_os_error(other)).expect("lock failed"),
             }
         }
 
-        pub(super) fn try_lock(self: std::pin::Pin<&Self>) -> Option<Locked> {
+        pub(super) fn try_lock(self: std::pin::Pin<&Self>) -> Option<Locked<()>> {
             let ptr = self.inner();
             let res = unsafe { libc::pthread_mutex_trylock(ptr) };
             match res {
-                0 => Some(Locked::Ok),
+                0 => Some(Locked::Ok(())),
                 libc::EBUSY => None,
                 libc::EOWNERDEAD => {
                     // see Mutex::lock
                     self.make_consistent()
                         .expect("failed to repair after try_lock");
-                    Some(Locked::PreviousOwnerDied)
+                    Some(Locked::PreviousOwnerDied(()))
                 }
                 other => Err(std::io::Error::from_raw_os_error(other))
                     .expect("unexpected error from trylock"),
@@ -136,7 +136,7 @@ mod pthread {
             {
                 let me = unsafe { Pin::new_unchecked(&*self) };
                 match me.try_lock() {
-                    Some(Locked::Ok | Locked::PreviousOwnerDied) => {
+                    Some(Locked::Ok(()) | Locked::PreviousOwnerDied(())) => {
                         me.unlock();
                     }
                     None => {
@@ -222,7 +222,7 @@ mod pthread {
     }
 
     /// Following std implementation, but in-place.
-    struct Condvar {
+    pub struct Condvar {
         inner: libc::pthread_cond_t,
         /// Used to check against "using different mutexes is UB".
         mutex: std::sync::atomic::AtomicPtr<libc::pthread_mutex_t>,
@@ -240,6 +240,8 @@ mod pthread {
             // there are others in rust std
             #[cfg(not(target_os = "macos"))]
             attr.set_monotonic_clock();
+
+            attr.set_pshared();
 
             // maybe this does not have to go through maybeuninit, since the aggregate is already
             // maybeuninit?
@@ -288,25 +290,33 @@ mod pthread {
             cvt_nz(res).expect("notify_all failed");
         }
 
-        pub(super) fn wait(self: Pin<&Self>, mutex: Pin<&Mutex>) {
+        pub(super) fn wait(self: Pin<&Self>, mutex: Pin<&Mutex>) -> Locked<()> {
             let mutex = mutex.inner();
             self.verify(mutex);
             let inner = self.inner();
             let res = unsafe { libc::pthread_cond_wait(inner, mutex) };
-            cvt_nz(res).expect("wait failed");
+            match res {
+                0 => Locked::Ok(()),
+                x if x == libc::EOWNERDEAD => Locked::PreviousOwnerDied(()),
+                other => loop {
+                    cvt_nz(other).expect("wait failed")
+                },
+            }
         }
 
-        #[cfg(not(target_os = "macos"))]
         pub(super) fn wait_timeout(
             self: Pin<&Self>,
             dur: std::time::Duration,
             mutex: Pin<&Mutex>,
-        ) -> bool {
+        ) -> Locked<bool> {
             let mutex = mutex.inner();
             self.verify(mutex);
 
             #[cfg(target_pointer_width = "32")]
-            todo!("check all the abi complications with x64_32 or other 32-bit");
+            compile_error!("check all the abi complications with x64_32 or other 32-bit");
+
+            #[cfg(target_os = "macos")]
+            compile_error!("at least mac os requires special handling for max 1y etc.");
 
             // FIXME: this is not y2038 safe! rust std uses clock_gettime64 through a weak symbol
             // which requires some ABI tricks, but libc does not expose it.
@@ -330,11 +340,14 @@ mod pthread {
             let inner = self.inner();
             let res = unsafe { libc::pthread_cond_timedwait(inner, mutex, &until as *const _) };
 
-            if res != 0 && res != libc::ETIMEDOUT {
-                cvt_nz(res).expect("wait_timeout failed");
+            match res {
+                0 => Locked::Ok(true),
+                x if x == libc::ETIMEDOUT => Locked::Ok(false),
+                x if x == libc::EOWNERDEAD => Locked::Ok(true),
+                other => loop {
+                    cvt_nz(other).expect("wait_timeout failed")
+                },
             }
-
-            res == 0
         }
     }
 
@@ -406,6 +419,13 @@ mod pthread {
             };
             assert_eq!(res, 0);
         }
+
+        fn set_pshared(&mut self) {
+            let res = unsafe {
+                libc::pthread_condattr_setpshared(self.0.as_mut_ptr(), libc::PTHREAD_PROCESS_SHARED)
+            };
+            assert_eq!(res, 0);
+        }
     }
 
     impl Drop for CondAttr<'_> {
@@ -421,9 +441,9 @@ mod pthread {
         let m = Mutex::initialize_at(&mut m).unwrap();
         let m = &*m;
         let m = unsafe { Pin::new_unchecked(m) };
-        assert!(matches!(m.lock(), Locked::Ok));
+        assert!(matches!(m.lock(), Locked::Ok(())));
         m.unlock();
-        assert!(matches!(m.try_lock(), Some(Locked::Ok)));
+        assert!(matches!(m.try_lock(), Some(Locked::Ok(()))));
         m.unlock();
 
         // now we cannot send the same mutex to another thread, nor does our rust version have
@@ -436,7 +456,9 @@ mod pthread {
 
         m.lock();
         let started_at = std::time::Instant::now();
-        let woken_up = cv.wait_timeout(std::time::Duration::from_millis(1), m);
+        let woken_up = match cv.wait_timeout(std::time::Duration::from_millis(1), m) {
+            Locked::Ok(woken_up) | Locked::PreviousOwnerDied(woken_up) => woken_up,
+        };
         let elapsed = started_at.elapsed();
         m.unlock();
 
@@ -488,7 +510,7 @@ mod pthread {
                 let m = unsafe { std::pin::Pin::new_unchecked(&pair.0) };
                 let cv = unsafe { std::pin::Pin::new_unchecked(&pair.1) };
 
-                assert!(matches!(m.lock(), Locked::Ok));
+                assert!(matches!(m.lock(), Locked::Ok(())));
                 // using print is actually unsafe without a dropguard
                 println!("hello, from other side");
 
@@ -512,7 +534,7 @@ mod pthread {
         let m = unsafe { std::pin::Pin::new_unchecked(&pair.0) };
         let cv = unsafe { std::pin::Pin::new_unchecked(&pair.1) };
 
-        assert!(matches!(m.lock(), Locked::Ok));
+        assert!(matches!(m.lock(), Locked::Ok(())));
 
         let jh = std::thread::spawn(spawned);
 
@@ -673,8 +695,8 @@ impl<T> PinnedMutex<T> {
         // Safety: have now the lock
         let guard = unsafe { MutexGuard::new(self) };
         match res {
-            Locked::Ok => Ok(guard),
-            Locked::PreviousOwnerDied => Err(PreviousOwnerDied(guard)),
+            Locked::Ok(()) => Ok(guard),
+            Locked::PreviousOwnerDied(()) => Err(PreviousOwnerDied(guard)),
         }
     }
 
@@ -693,8 +715,8 @@ impl<T> PinnedMutex<T> {
         let guard = unsafe { MutexGuard::new(self) };
 
         match res {
-            Locked::Ok => Ok(guard),
-            Locked::PreviousOwnerDied => Err(TryLockError::PreviousOwnerDied(guard)),
+            Locked::Ok(()) => Ok(guard),
+            Locked::PreviousOwnerDied(()) => Err(TryLockError::PreviousOwnerDied(guard)),
         }
     }
 }
@@ -704,6 +726,12 @@ impl<T> PinnedMutex<T> {
 /// Lock has now been repaired pthread-wise, but the protected data structure might be
 /// inconsistent.
 pub struct PreviousOwnerDied<T>(T);
+
+impl<T> PreviousOwnerDied<T> {
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
 
 /// Similar to [`PreviousOwnerDied`] but also covers the failure to lock the [`PinnedMutex`] with
 /// `try_lock` operation.
@@ -724,14 +752,7 @@ impl<T> std::fmt::Debug for TryLockError<T> {
     }
 }
 
-impl<T> PreviousOwnerDied<T> {
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
-
 pub struct MutexGuard<'a, T> {
-    // unsure if we really need all two lifetimes, seems we do at MG::new(mutex)
     mutex: Pin<&'a PinnedMutex<T>>,
 }
 
@@ -762,5 +783,130 @@ impl<T: Unpin> std::ops::DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Safety: this is a & -> &mut conversion but it's only available for Unpin types.
         unsafe { &mut *self.mutex.inner.get() }
+    }
+}
+
+pub struct PinnedCondvar {
+    inner: imp::Condvar,
+}
+
+impl PinnedCondvar {
+    pub fn initialize_at(
+        place: &mut MaybeUninit<PinnedCondvar>,
+    ) -> std::io::Result<Pin<&mut PinnedCondvar>> {
+        let inner = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).inner)
+                .cast::<MaybeUninit<imp::Condvar>>()
+                .as_mut()
+                .unwrap()
+        };
+
+        imp::Condvar::initialize_at(inner)?;
+
+        unsafe { Ok(Pin::new_unchecked(place.assume_init_mut())) }
+    }
+
+    pub fn notify_one(self: Pin<&Self>) {
+        // Safety: structural pinning
+        let inner = unsafe { Pin::new_unchecked(&self.inner) };
+        inner.notify_one();
+    }
+
+    pub fn notify_all(self: Pin<&Self>) {
+        // Safety: structural pinning
+        let inner = unsafe { Pin::new_unchecked(&self.inner) };
+        inner.notify_all();
+    }
+
+    pub fn wait<'a, T>(
+        self: Pin<&Self>,
+        guard: MutexGuard<'a, T>,
+    ) -> Result<MutexGuard<'a, T>, PreviousOwnerDied<MutexGuard<'a, T>>> {
+        // Safety: structural pinning
+        let inner = unsafe { Pin::new_unchecked(&self.inner) };
+        let mutex = unsafe { guard.mutex.map_unchecked(|x| &x.mutex) };
+        match inner.wait(mutex) {
+            Locked::Ok(()) => Ok(guard),
+            Locked::PreviousOwnerDied(()) => Err(PreviousOwnerDied(guard)),
+        }
+    }
+
+    pub fn wait_timeout<'a, T>(
+        self: Pin<&Self>,
+        guard: MutexGuard<'a, T>,
+        timeout: std::time::Duration,
+    ) -> Result<(MutexGuard<'a, T>, bool), PreviousOwnerDied<(MutexGuard<'a, T>, bool)>> {
+        // Safety: structural pinning
+        let inner = unsafe { Pin::new_unchecked(&self.inner) };
+        let mutex = unsafe { guard.mutex.map_unchecked(|x| &x.mutex) };
+        match inner.wait_timeout(timeout, mutex) {
+            Locked::Ok(woken_up) => Ok((guard, woken_up)),
+            Locked::PreviousOwnerDied(woken_up) => Err(PreviousOwnerDied((guard, woken_up))),
+        }
+    }
+
+    pub fn wait_while<'a, F, T>(
+        self: Pin<&Self>,
+        mut guard: MutexGuard<'a, T>,
+        mut condition: F,
+    ) -> Result<MutexGuard<'a, T>, PreviousOwnerDied<MutexGuard<'a, T>>>
+    where
+        F: FnMut(&mut T) -> bool,
+        T: Unpin,
+    {
+        let inner = unsafe { Pin::new_unchecked(&self.inner) };
+        let mutex = unsafe { guard.mutex.map_unchecked(|x| &x.mutex) };
+
+        let mut ret = Ok(());
+
+        while condition(&mut *guard) {
+            match inner.wait(mutex) {
+                Locked::Ok(()) => {}
+                Locked::PreviousOwnerDied(()) => ret = Err(PreviousOwnerDied(())),
+            }
+        }
+
+        match ret {
+            Ok(()) => Ok(guard),
+            Err(PreviousOwnerDied(())) => Err(PreviousOwnerDied(guard)),
+        }
+    }
+
+    pub fn wait_timeout_while<'a, F, T>(
+        self: Pin<&Self>,
+        mut guard: MutexGuard<'a, T>,
+        mut condition: F,
+        dur: std::time::Duration,
+    ) -> Result<(MutexGuard<'a, T>, bool), PreviousOwnerDied<(MutexGuard<'a, T>, bool)>>
+    where
+        F: FnMut(&mut T) -> bool,
+        T: Unpin,
+    {
+        let inner = unsafe { Pin::new_unchecked(&self.inner) };
+        let mutex = unsafe { guard.mutex.map_unchecked(|x| &x.mutex) };
+
+        let mut prev_died = false;
+        let start = std::time::Instant::now();
+
+        let check_prev = |prev_died: bool, g: _, timeout: bool| match prev_died {
+            false => Ok((g, timeout)),
+            true => Err(PreviousOwnerDied((g, timeout))),
+        };
+
+        loop {
+            if condition(&mut *guard) {
+                return check_prev(prev_died, guard, false);
+            }
+
+            let timeout = match dur.checked_sub(start.elapsed()) {
+                Some(timeout) => timeout,
+                None => return check_prev(prev_died, guard, true),
+            };
+
+            match inner.wait_timeout(timeout, mutex) {
+                Locked::Ok(_timeout) => {}
+                Locked::PreviousOwnerDied(_timeout) => prev_died = true,
+            }
+        }
     }
 }
