@@ -165,6 +165,11 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
         cur.execute("INSERT INTO foo VALUES (0, 0, 'foo')")
         pageserver_http.timeline_gc(tenant_id, timeline_id, 10000 - i * 32)
         num_index_uploads = get_num_remote_ops("index", "upload")
+
+        # Also make sure that a no-op compaction doesn't upload the index
+        # file unnecessarily.
+        pageserver_http.timeline_compact(tenant_id, timeline_id)
+
         log.info(f"{num_index_uploads} index uploads after GC iteration {i}")
 
     after = num_index_uploads
