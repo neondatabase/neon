@@ -748,9 +748,14 @@ class NeonEnvBuilder:
     def cleanup_remote_storage(self):
         # here wee check for true remote storage, no the local one
         # local cleanup is not needed after test because in ci all env will be destroyed anyway
-        if not isinstance(self.remote_storage, S3Storage) or self.remote_storage_prefix is None:
+        if self.remote_storage_prefix is None:
             log.info("no remote storage was set up, skipping cleanup")
             return
+
+        # Making mypy happy with allowing only `S3Storage` further.
+        # `self.remote_storage_prefix` is coupled with `S3Storage` storage type,
+        # so this line effectively a no-op
+        assert isinstance(self.remote_storage, S3Storage)
 
         if self.keep_remote_storage_contents:
             log.info("keep_remote_storage_contents skipping remote storage cleanup")
