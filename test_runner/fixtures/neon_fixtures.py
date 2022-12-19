@@ -1742,6 +1742,12 @@ class NeonCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=check_return_code)
 
+    def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
+        return self.raw_cli(["start"], check_return_code=check_return_code)
+
+    def stop(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
+        return self.raw_cli(["stop"], check_return_code=check_return_code)
+
 
 class WalCraft(AbstractNeonCli):
     """
