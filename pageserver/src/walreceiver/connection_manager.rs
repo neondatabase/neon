@@ -95,7 +95,7 @@ pub fn spawn_connection_manager_task(
     );
 }
 
-const MAX_BROKER_IDLE_WAIT: Duration = Duration::from_secs(60);
+const MAX_BROKER_IDLE_WAIT: Duration = Duration::from_secs(90);
 
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
 /// Based on the updates, desides whether to start, keep or stop a WAL receiver task.
@@ -208,22 +208,22 @@ async fn connection_manager_loop_step(
                 }
             },
 
-            timed_out = async {
+            (idle_time, timed_out) = async {
                 match time_until_next_retry {
                     Some(time_until_next_retry) => {
                         tokio::time::sleep(time_until_next_retry).await;
-                        false
+                        (time_until_next_retry, false)
                     },
                     None => {
                         tokio::time::sleep(MAX_BROKER_IDLE_WAIT).await;
-                        true
+                        (MAX_BROKER_IDLE_WAIT, true)
                     }
                 }
             } => {
                 if timed_out {
-                    warn!("Got no broker or walreceiver events after waiting for {MAX_BROKER_IDLE_WAIT:?}")
+                    warn!("Got no broker or walreceiver events after waiting for {idle_time:?}")
                 } else {
-                    debug!("Waking up for the next retry after waiting for {time_until_next_retry:?}")
+                    debug!("Waking up for the next retry after waiting for {idle_time:?}")
                 }
             }
         }
