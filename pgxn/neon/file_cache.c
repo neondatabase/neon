@@ -250,6 +250,7 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 	FileCacheEntry* entry;
 	int chunk_offs = blkno & (CHUNK_SIZE-1);
 	bool found;
+	uint32 hash;
 
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
@@ -257,9 +258,10 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 	tag.rnode = rnode;
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(CHUNK_SIZE-1);
+	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
-	entry = hash_search(lfc_hash, &tag, HASH_FIND, NULL);
+	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
 	found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) != 0;
 	LWLockRelease(lfc_lock);
 	return found;
@@ -278,6 +280,8 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	FileCacheEntry* entry;
 	ssize_t rc;
 	int chunk_offs = blkno & (CHUNK_SIZE-1);
+	bool result = true;
+	uint32 hash;
 
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
@@ -285,9 +289,10 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	tag.rnode = rnode;
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(CHUNK_SIZE-1);
+	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-	entry = hash_search(lfc_hash, &tag, HASH_FIND, NULL);
+	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
 	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
 	{
 		/* Page is not cached */
@@ -306,16 +311,19 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (lfc_desc < 0) {
 			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
 			lfc_size_limit = 0; /* disable file cache */
-			return false;
+			result = false;
 		}
 	}
 
-	rc = pread(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*CHUNK_SIZE + chunk_offs)*BLCKSZ);
-	if (rc != BLCKSZ)
+	if (lfc_desc > 0)
 	{
-		elog(INFO, "Failed to read file cache: %m");
-		lfc_size_limit = 0; /* disable file cache */
-		return false;
+		rc = pread(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*CHUNK_SIZE + chunk_offs)*BLCKSZ);
+		if (rc != BLCKSZ)
+		{
+			elog(INFO, "Failed to read file cache: %m");
+			lfc_size_limit = 0; /* disable file cache */
+			result = false;
+		}
 	}
 
 	/* Place entry to the head of LRU list */
@@ -325,7 +333,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
 	LWLockRelease(lfc_lock);
 
-	return true;
+	return result;
 }
 
 /*
@@ -341,6 +349,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	ssize_t rc;
 	bool found;
 	int chunk_offs = blkno & (CHUNK_SIZE-1);
+	uint32 hash;
 
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return;
@@ -348,9 +357,10 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	tag.rnode = rnode;
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(CHUNK_SIZE-1);
+	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-	entry = hash_search(lfc_hash, &tag, HASH_ENTER, &found);
+	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
 
 	if (found)
 	{
@@ -363,7 +373,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		/*
 		 * We have two choices if all cache pages are pinned (i.e. used in IO operations):
 		 * 1. Wait until some of this operation is completed and pages is unpinned
-		 * 2. Allocate one more chunk, so that specified cache size is more than recommendation than hard limit.
+		 * 2. Allocate one more chunk, so that specified cache size is more recommendation than hard limit.
 		 * As far as probability of such event (that all pages are pinned) is considered to be very very small:
 		 * there are should be very large number of concurrent IO operations and them are limited by max_connections,
 		 * we prefer not to complicate code and use second approach.
@@ -382,8 +392,6 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		entry->access_count = 1;
 		memset(entry->bitmap, 0, sizeof entry->bitmap);
 	}
-	entry->bitmap[chunk_offs >> 5] |= (1 << (chunk_offs & 31));
-
 	LWLockRelease(lfc_lock);
 
 	/* Open cache file if not done yet */
@@ -393,23 +401,24 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (lfc_desc < 0) {
 			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
 			lfc_size_limit = 0; /* disable file cache */
-			return;
 		}
 	}
-
-	rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*CHUNK_SIZE + chunk_offs)*BLCKSZ);
-	if (rc != BLCKSZ)
+	if (lfc_desc > 0)
 	{
-		elog(INFO, "Failed to write file cache: %m");
-		lfc_size_limit = 0; /* disable file cache */
-		return;
+		rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*CHUNK_SIZE + chunk_offs)*BLCKSZ);
+		if (rc != BLCKSZ)
+		{
+			elog(INFO, "Failed to write file cache: %m");
+			lfc_size_limit = 0; /* disable file cache */
+		}
 	}
-
 	/* Place entry to the head of LRU list */
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 	Assert(entry->access_count > 0);
 	if (--entry->access_count == 0)
 		dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
+	if (lfc_size_limit != 0)
+		entry->bitmap[chunk_offs >> 5] |= (1 << (chunk_offs & 31));
 	LWLockRelease(lfc_lock);
 }
 
