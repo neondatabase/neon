@@ -11,6 +11,9 @@ ringbuf = "0.3.1"
 
 nix = { version = "0.26.1", features = ["mman", "fs"] }
 libc = { version = "0.2.138" }
+rand = "0.8.3"
+bytes = "1"
+sha2 = "0.10.6"
 
 [target.'cfg(miri)'.dependencies]
 parking_lot = "0.12.1"

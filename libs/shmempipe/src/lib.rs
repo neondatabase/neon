@@ -12,6 +12,9 @@ use nix::sys::mman::{MapFlags, ProtFlags};
 
 pub mod shared;
 
+const TO_WORKER_LEN: usize = 128 * 1024;
+const FROM_WORKER_LEN: usize = 16 * 1024;
+
 /// Input/output over a shared memory "pipe" which attempts to be faster than using standard input
 /// and output with inter-process communication.
 ///
@@ -26,9 +29,20 @@ pub struct RawSharedMemPipe {
     pub magic: AtomicU32,
 
     pub participants: [shared::PinnedMutex<Option<u32>>; 2],
+
+    pub to_worker_writer: shared::PinnedMutex<u32>,
+    pub to_worker_cond: shared::PinnedCondvar,
+
+    pub from_worker_writer: shared::PinnedMutex<()>,
+    pub from_worker_cond: shared::PinnedCondvar,
+
     // this wouldn't be too difficult to make a generic parameter, but let's hold off still.
-    // pub to_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; 128 * 1024]>,
-    // pub from_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; 8192 * 2]>,
+    //
+    // TODO: heikki wanted the response channel to be N * 8192 bytes, aligned to page so that they
+    // could possibly in future be mapped postgres shared buffers.
+    //
+    pub to_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; TO_WORKER_LEN]>,
+    pub from_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; FROM_WORKER_LEN]>,
 }
 
 // Ideas:
@@ -141,6 +155,82 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
             }
         }
     }
+
+    {
+        let to_worker = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker)
+                .cast::<MaybeUninit<ringbuf::StaticRb<u8, TO_WORKER_LEN>>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        to_worker.write(ringbuf::StaticRb::default());
+
+        unsafe {
+            to_worker.assume_init_mut();
+        }
+    }
+
+    {
+        let to_worker_writer = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_writer)
+                .cast::<MaybeUninit<shared::PinnedMutex<u32>>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        shared::PinnedMutex::initialize_at(to_worker_writer, 0).unwrap();
+    }
+
+    {
+        let to_worker_cond = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_cond)
+                .cast::<MaybeUninit<shared::PinnedCondvar>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        shared::PinnedCondvar::initialize_at(to_worker_cond).unwrap();
+    }
+
+    {
+        let from_worker = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker)
+                .cast::<MaybeUninit<ringbuf::StaticRb<u8, FROM_WORKER_LEN>>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        from_worker.write(ringbuf::StaticRb::default());
+
+        unsafe {
+            from_worker.assume_init_mut();
+        }
+    }
+
+    {
+        let from_worker_writer = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker_writer)
+                .cast::<MaybeUninit<shared::PinnedMutex<()>>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        shared::PinnedMutex::initialize_at(from_worker_writer, ()).unwrap();
+    }
+
+    {
+        let from_worker_cond = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker_cond)
+                .cast::<MaybeUninit<shared::PinnedCondvar>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        shared::PinnedCondvar::initialize_at(from_worker_cond).unwrap();
+    }
+
+    // FIXME: above, we need to do manual drop handling
 
     // Safety: it is now initialized
     let _ = unsafe { place.assume_init_mut() };
