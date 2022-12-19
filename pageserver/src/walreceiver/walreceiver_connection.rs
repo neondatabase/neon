@@ -184,7 +184,20 @@ pub async fn handle_walreceiver_connection(
             replication_message = physical_stream.next() => replication_message,
         }
     } {
-        let replication_message = replication_message?;
+        let replication_message = match replication_message {
+            Ok(message) => message,
+            Err(replication_error) => {
+                if replication_error.is_closed() {
+                    info!("Replication stream got closed");
+                    return Ok(());
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Replication stream error: {replication_error}"
+                    ));
+                }
+            }
+        };
+
         let now = Utc::now().naive_utc();
         let last_rec_lsn_before_msg = last_rec_lsn;
 
