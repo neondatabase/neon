@@ -1295,26 +1295,41 @@ impl Tenant {
         info!("waiting for timeline tasks to shutdown");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
 
-        // No timeout here, GC & Compaction should be responsive to the `TimelineState::Stopping` change.
-        info!("waiting for layer_removal_cs.lock()");
-        let layer_removal_guard = timeline.layer_removal_cs.lock().await;
-        info!("got layer_removal_cs.lock(), deleting layer files");
+        {
+            // Grab the layer_removal_cs lock, and actually perform the deletion.
+            //
+            // This lock prevents multiple concurrent delete_timeline calls from
+            // stepping on each other's toes, while deleting the files. It also
+            // prevents GC or compaction from running at the same time.
+            //
+            // Note that there are still other race conditions between
+            // GC, compaction and timeline deletion. GC task doesn't
+            // register itself properly with the timeline it's
+            // operating on. See
+            // https://github.com/neondatabase/neon/issues/2671
+            //
+            // No timeout here, GC & Compaction should be responsive to the
+            // `TimelineState::Stopping` change.
+            info!("waiting for layer_removal_cs.lock()");
+            let layer_removal_guard = timeline.layer_removal_cs.lock().await;
+            info!("got layer_removal_cs.lock(), deleting layer files");
 
-        // NB: storage_sync upload tasks that reference these layers have been cancelled
-        //     by the caller.
+            // NB: storage_sync upload tasks that reference these layers have been cancelled
+            //     by the caller.
 
-        let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
-        // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
-        // with some layers missing.
-        std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
-            format!(
-                "Failed to remove local timeline directory '{}'",
-                local_timeline_directory.display()
-            )
-        })?;
-        info!("finished deleting layer files, releasing layer_removal_cs.lock()");
+            let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+            // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
+            // with some layers missing.
+            std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
+                format!(
+                    "Failed to remove local timeline directory '{}'",
+                    local_timeline_directory.display()
+                )
+            })?;
 
-        drop(layer_removal_guard);
+            info!("finished deleting layer files, releasing layer_removal_cs.lock()");
+            drop(layer_removal_guard);
+        }
 
         // Remove the timeline from the map.
         let mut timelines = self.timelines.lock().unwrap();
