@@ -126,11 +126,20 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    logging::init(LogFormat::from_config(&args.log_format)?)?;
+    logging::init::<SafekeeperSlabConfig>(LogFormat::from_config(&args.log_format)?)?;
     info!("version: {GIT_VERSION}");
 
     // Change into the data directory.
     std::env::set_current_dir(&args.datadir)?;
+
+    for i in 1..4200 {
+        thread::spawn(move || loop {
+            let _enter2 = info_span!("baba", i=%i).entered();
+            // info!("hi number {} from the spawned thread!", i);
+            thread::sleep(Duration::from_millis(100000));
+        });
+    }
+    thread::sleep(Duration::from_millis(1000000));
 
     // Set or read our ID.
     let id = set_id(&args.datadir, args.id.map(NodeId))?;
@@ -331,6 +340,13 @@ fn parse_remote_storage(storage_conf: &str) -> anyhow::Result<RemoteStorageConfi
         // XXX: Don't print the original toml here, there might be some sensitive data
         parsed_config.context("Incorrectly parsed remote storage toml as no remote storage config")
     })
+}
+
+struct SafekeeperSlabConfig {}
+impl logging::SlabConfig for SafekeeperSlabConfig {
+    const INITIAL_PAGE_SIZE: usize = 32;
+    const MAX_THREADS: usize = 8192;
+    const MAX_PAGES: usize = logging::DefaultSlabConfig::MAX_PAGES;
 }
 
 #[test]

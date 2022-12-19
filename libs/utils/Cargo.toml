@@ -17,7 +17,9 @@ thiserror = "1.0"
 tokio = { version = "1.17", features = ["macros"]}
 tokio-rustls = "0.23"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { path = "/home/ars/rust/tracing/tracing-subscriber", features = ["env-filter", "json"] }
+# tracing-subscriber = { git = "/home/ars/rust/tracing/tracing-subscriber", features = ["env-filter", "json"] }
 nix = "0.25"
 signal-hook = "0.3.10"
 rand = "0.8.3"

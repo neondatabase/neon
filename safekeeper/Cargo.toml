@@ -31,7 +31,8 @@ thiserror = "1"
 tokio = { version = "1.17", features = ["macros", "fs"] }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 toml_edit = { version = "0.14", features = ["easy"] }
-tracing = "0.1.27"
+# tracing = "0.1.27"
+tracing = { path = "/home/ars/rust/tracing/tracing"}
 url = "2.2.2"
 
 metrics = { path = "../libs/metrics" }
