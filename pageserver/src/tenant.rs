@@ -2993,7 +2993,6 @@ mod tests {
                 .create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION)?
                 .initialize()?;
             make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
         }
 
         let tenant = harness.load().await;
@@ -3016,7 +3015,6 @@ mod tests {
                 .initialize()?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
 
             tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
 
@@ -3025,7 +3023,6 @@ mod tests {
                 .expect("Should have a local timeline");
 
             make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
         }
 
         // check that both of them are initially unloaded
