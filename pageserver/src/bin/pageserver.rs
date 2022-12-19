@@ -201,8 +201,12 @@ fn initialize_config(
 }
 
 fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
+    // Initialize logging
     logging::init(conf.log_format)?;
+
+    // Print version to the log, and expose it as a prometheus metric too.
     info!("version: {}", version());
+    set_build_info_metric(GIT_VERSION);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -218,38 +222,37 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         )
     }
 
+    // Create and lock PID file. This ensures that there cannot be more than one
+    // pageserver process running at the same time.
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
     let lock_file =
         utils::pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
     info!("Claimed pid file at {lock_file_path:?}");
 
-    // ensure that the lock file is held even if the main thread of the process is panics
-    // we need to release the lock file only when the current process is gone
+    // Ensure that the lock file is held even if the main thread of the process panics.
+    // We need to release the lock file only when the process exits.
     std::mem::forget(lock_file);
 
-    // TODO: Check that it looks like a valid repository before going further
+    // Bind the HTTP and libpq ports early, so that if they are in use by some other
+    // process, we error out early.
+    let http_addr = &conf.listen_http_addr;
+    info!("Starting pageserver http handler on {http_addr}");
+    let http_listener = tcp_listener::bind(http_addr)?;
 
-    // bind sockets before daemonizing so we report errors early and do not return until we are listening
-    info!(
-        "Starting pageserver http handler on {}",
-        conf.listen_http_addr
-    );
-    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone())?;
+    let pg_addr = &conf.listen_pg_addr;
+    info!("Starting pageserver pg protocol handler on {pg_addr}");
+    let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
-    info!(
-        "Starting pageserver pg protocol handler on {}",
-        conf.listen_pg_addr
-    );
-    let pageserver_listener = tcp_listener::bind(conf.listen_pg_addr.clone())?;
-
+    // Install signal handlers
     let signals = signals::install_shutdown_handlers()?;
 
-    // start profiler (if enabled)
+    // Start profiler (if enabled)
     let profiler_guard = profiling::init_profiler(conf);
 
+    // Launch broker client
     WALRECEIVER_RUNTIME.block_on(pageserver::walreceiver::init_broker_client(conf))?;
 
-    // initialize authentication for incoming connections
+    // Initialize authentication for incoming connections
     let auth = match &conf.auth_type {
         AuthType::Trust | AuthType::MD5 => None,
         AuthType::NeonJWT => {
@@ -277,6 +280,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         }
     };
 
+    // Set up remote storage client
     let remote_storage = conf
         .remote_storage_config
         .as_ref()
@@ -284,30 +288,18 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         .transpose()
         .context("Failed to init generic remote storage")?;
 
-    let (init_result_sender, init_result_receiver) =
-        std::sync::mpsc::channel::<anyhow::Result<()>>();
-    let storage_for_spawn = remote_storage.clone();
-    let _handler = BACKGROUND_RUNTIME.spawn(async move {
-        let result = tenant_mgr::init_tenant_mgr(conf, storage_for_spawn).await;
-        init_result_sender.send(result)
-    });
-    match init_result_receiver.recv() {
-        Ok(init_result) => init_result.context("Failed to init tenant_mgr")?,
-        Err(_sender_dropped_err) => {
-            anyhow::bail!("Failed to init tenant_mgr: no init status was returned");
-        }
-    }
+    // Scan the local 'tenants/' directory and start loading the tenants
+    BACKGROUND_RUNTIME.block_on(tenant_mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
 
-    // Spawn all HTTP related tasks in the MGMT_REQUEST_RUNTIME.
-    // bind before launching separate thread so the error reported before startup exits
-
-    // Create a Service from the router above to handle incoming requests.
+    // Start up the service to handle HTTP mgmt API request. We created the
+    // listener earlier already.
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, auth.clone(), remote_storage)?;
-        let service =
-            utils::http::RouterService::new(router.build().map_err(|err| anyhow!(err))?).unwrap();
+        let router = http::make_router(conf, auth.clone(), remote_storage)?
+            .build()
+            .map_err(|err| anyhow!(err))?;
+        let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown(task_mgr::shutdown_watcher());
@@ -327,7 +319,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     }
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
-    // for each connection.
+    // for each connection. We created the listener earlier already.
     task_mgr::spawn(
         COMPUTE_REQUEST_RUNTIME.handle(),
         TaskKind::LibpqEndpointListener,
@@ -339,8 +331,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
             page_service::libpq_listener_main(conf, auth, pageserver_listener, conf.auth_type).await
         },
     );
-
-    set_build_info_metric(GIT_VERSION);
 
     // All started up! Now just sit and wait for shutdown signal.
     signals.handle(|signal| match signal {
