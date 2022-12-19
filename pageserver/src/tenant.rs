@@ -1154,11 +1154,15 @@ impl Tenant {
     /// this function is periodically called by gc task.
     /// also it can be explicitly requested through page server api 'do_gc' command.
     ///
-    /// 'target_timeline_id' specifies the timeline to GC, or None for all.
-    /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
-    /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
-    /// to make tests more deterministic.
-    /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
+    /// `target_timeline_id` specifies the timeline to GC, or None for all.
+    ///
+    /// The `horizon` an `pitr` parameters determine how much WAL history needs to be retained.
+    /// Also known as the retention period, or the GC cutoff point. `horizon` specifies
+    /// the amount of history, as LSN difference from current latest LSN on each timeline.
+    /// `pitr` specifies the same as a time difference from the current time. The effective
+    /// GC cutoff point is determined conservatively by either `horizon` and `pitr`, whichever
+    /// requires more history to be retained.
+    //
     pub async fn gc_iteration(
         &self,
         target_timeline_id: Option<TimelineId>,
