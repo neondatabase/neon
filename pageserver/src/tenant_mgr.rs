@@ -262,27 +262,6 @@ pub async fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Resul
 }
 
 pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<()> {
-    // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
-    // It is important that we do not take locks here, and do not check whether the timeline exists
-    // because if we hold tenants_state::write_tenants() while awaiting for the tasks to join
-    // we cannot create new timelines and tenants, and that can take quite some time,
-    // it can even become stuck due to a bug making whole pageserver unavailable for some operations
-    // so this is the way how we deal with concurrent delete requests: shutdown everythig, wait for confirmation
-    // and then try to actually remove timeline from inmemory state and this is the point when concurrent requests
-    // will synchronize and either fail with the not found error or succeed
-
-    debug!("waiting for wal receiver to shutdown");
-    task_mgr::shutdown_tasks(
-        Some(TaskKind::WalReceiverManager),
-        Some(tenant_id),
-        Some(timeline_id),
-    )
-    .await;
-    debug!("wal receiver shutdown confirmed");
-
-    info!("waiting for timeline tasks to shutdown");
-    task_mgr::shutdown_tasks(None, Some(tenant_id), Some(timeline_id)).await;
-    info!("timeline task shutdown completed");
     match get_tenant(tenant_id, true).await {
         Ok(tenant) => {
             tenant.delete_timeline(timeline_id).await?;

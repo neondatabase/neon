@@ -1274,8 +1274,29 @@ impl Tenant {
             timeline
         };
 
-        info!("waiting for layer_removal_cs.lock()");
+        // Now that the Timeline is in Stopping state, request all the related tasks to
+        // shut down.
+        //
+        // NB: If you call delete_timeline multiple times concurrently, they will
+        // all go through the motions here. Make sure the code here is idempotent,
+        // and don't error out if some of the shutdown tasks have already been
+        // completed!
+
+        // Stop the walreceiver first.
+        debug!("waiting for wal receiver to shutdown");
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.tenant_id),
+            Some(timeline_id),
+        )
+        .await;
+        debug!("wal receiver shutdown confirmed");
+
+        info!("waiting for timeline tasks to shutdown");
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
+
         // No timeout here, GC & Compaction should be responsive to the `TimelineState::Stopping` change.
+        info!("waiting for layer_removal_cs.lock()");
         let layer_removal_guard = timeline.layer_removal_cs.lock().await;
         info!("got layer_removal_cs.lock(), deleting layer files");
 
