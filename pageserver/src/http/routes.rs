@@ -31,8 +31,6 @@ use utils::{
 // Imports only used for testing APIs
 #[cfg(feature = "testing")]
 use super::models::{ConfigureFailpointsRequest, TimelineGcRequest};
-#[cfg(feature = "testing")]
-use crate::CheckpointConfig;
 
 struct State {
     conf: &'static PageServerConf,
@@ -777,7 +775,11 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
     timeline
-        .checkpoint(CheckpointConfig::Forced)
+        .freeze_and_flush()
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    timeline
+        .compact()
         .await
         .map_err(ApiError::InternalServerError)?;
 

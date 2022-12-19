@@ -196,7 +196,7 @@ pub async fn shutdown_all_tenants() {
         let tenant_id = tenant.tenant_id();
         debug!("shutdown tenant {tenant_id}");
 
-        if let Err(err) = tenant.checkpoint().await {
+        if let Err(err) = tenant.freeze_and_flush().await {
             error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
         }
     }
