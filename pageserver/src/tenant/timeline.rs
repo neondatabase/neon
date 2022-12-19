@@ -589,6 +589,18 @@ impl Timeline {
                 let timer = self.metrics.compact_time_histo.start_timer();
                 self.compact_level0(target_file_size).await?;
                 timer.stop_and_record();
+
+                // If `create_image_layers' or `compact_level0` scheduled any
+                // uploads or deletions, but didn't update the index file yet,
+                // do it now.
+                //
+                // This isn't necessary for correctness, the remote state is
+                // consistent without the uploads and deletions, and we would
+                // update the index file on next flush iteration too. But it
+                // could take a while until that happens.
+                if let Some(remote_client) = &self.remote_client {
+                    remote_client.schedule_index_upload_for_file_changes()?;
+                }
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -1215,9 +1227,7 @@ impl Timeline {
             remote_client
                 .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
         }
-        if !local_only_layers.is_empty() {
-            remote_client.schedule_index_upload(up_to_date_metadata)?;
-        }
+        remote_client.schedule_index_upload_for_file_changes()?;
 
         info!("Done");
 
@@ -1923,13 +1933,9 @@ impl Timeline {
 
         if let Some(remote_client) = &self.remote_client {
             for (path, layer_metadata) in layer_paths_to_upload {
-                remote_client
-                    .schedule_layer_file_upload(&path, &layer_metadata)
-                    .context("schedule_layer_file_upload")?;
+                remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
             }
-            remote_client
-                .schedule_index_upload(&metadata)
-                .context("schedule_layer_file_upload")?;
+            remote_client.schedule_index_upload_for_metadata_update(&metadata)?;
         }
 
         Ok(())
@@ -2397,6 +2403,11 @@ impl Timeline {
             new_layers,
             deltas_to_compact,
         } = self.compact_level0_phase1(target_file_size).await?;
+
+        if new_layers.is_empty() && deltas_to_compact.is_empty() {
+            // nothing to do
+            return Ok(());
+        }
 
         // Before deleting any layers, we need to wait for their upload ops to finish.
         // See storage_sync module level comment on consistency.
