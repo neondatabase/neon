@@ -57,7 +57,6 @@ use crate::repository::{Key, Value};
 use crate::task_mgr::TaskKind;
 use crate::walreceiver::{is_broker_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
-use crate::CheckpointConfig;
 use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
@@ -499,22 +498,10 @@ impl Timeline {
     }
 
     /// Flush to disk all data that was written with the put_* functions
-    ///
-    /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
-    /// know anything about them here in the repository.
     #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
-    pub async fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
-        match cconf {
-            CheckpointConfig::Flush => {
-                self.freeze_inmem_layer(false);
-                self.flush_frozen_layers_and_wait().await
-            }
-            CheckpointConfig::Forced => {
-                self.freeze_inmem_layer(false);
-                self.flush_frozen_layers_and_wait().await?;
-                self.compact().await
-            }
-        }
+    pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+        self.freeze_inmem_layer(false);
+        self.flush_frozen_layers_and_wait().await
     }
 
     pub async fn compact(&self) -> anyhow::Result<()> {

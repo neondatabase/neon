@@ -51,7 +51,6 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::{Tenant, Timeline};
 use crate::tenant_mgr;
 use crate::trace::Tracer;
-use crate::CheckpointConfig;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
@@ -466,7 +465,7 @@ impl PageServerHandler {
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.checkpoint(CheckpointConfig::Flush).await?;
+        timeline.freeze_and_flush().await?;
 
         info!("done");
         Ok(())
