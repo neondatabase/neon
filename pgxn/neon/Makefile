@@ -4,13 +4,13 @@
 MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \
+	file_cache.o \
 	libpagestore.o \
 	libpqwalproposer.o \
+	neon.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
-	neon.o \
 	walproposer.o \
-	file_cache.o \
 	walproposer_utils.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)

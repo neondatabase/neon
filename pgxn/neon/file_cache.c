@@ -59,19 +59,17 @@
 
 typedef struct FileCacheEntry
 {
-	BufferTag key;
-	uint32    offset;
-	uint32    access_count;
-	uint32    bitmap[CHUNK_SIZE/32];
-	/* LRU list */
-	struct FileCacheEntry* next;
-	struct FileCacheEntry* prev;
+	BufferTag	key;
+	uint32		offset;
+	uint32		access_count;
+	uint32		bitmap[CHUNK_SIZE/32];
+	dlist_node	lru_node; /* LRU list node */
 } FileCacheEntry;
 
 typedef struct FileCacheControl
 {
 	uint32 size; /* size of cache file in chunks */
-	FileCacheEntry lru;
+	dlist_head lru; /* double linked list for LRU replacement algorithm */
 } FileCacheControl;
 
 static HTAB* lfc_hash;
@@ -85,46 +83,6 @@ static shmem_startup_hook_type prev_shmem_startup_hook;
 #if PG_VERSION_NUM>=150000
 static shmem_request_hook_type prev_shmem_request_hook;
 #endif
-
-/*
- * Prune L2 list
- */
-static void
-lfc_prune(FileCacheEntry* entry)
-{
-	entry->next = entry->prev = entry;
-}
-
-/*
- * Unlink from LRU list
- */
-static void
-lfc_unlink(FileCacheEntry* entry)
-{
-	entry->next->prev = entry->prev;
-	entry->prev->next = entry->next;
-}
-
-/*
- * Link to the head of LRU list
- */
-static void
-lfc_link(FileCacheEntry* after, FileCacheEntry* entry)
-{
-	entry->next = after->next;
-	entry->prev = after;
-	after->next->prev = entry;
-	after->next = entry;
-}
-
-/*
- * Check if list is empty
- */
-static bool
-lfc_is_empty(FileCacheEntry* entry)
-{
-	return entry->next == entry;
-}
 
 static void
 lfc_shmem_startup(void)
@@ -152,7 +110,7 @@ lfc_shmem_startup(void)
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
 		lfc_ctl->size = 0;
-		lfc_prune(&lfc_ctl->lru);
+		dlist_init(&lfc_ctl->lru);
 
 		/* Remove file cache on restart */
 		(void)unlink(lfc_path);
@@ -205,12 +163,11 @@ lfc_change_limit_hook(int newval, void *extra)
 		}
 	}
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-	while (new_size < lfc_ctl->size && !lfc_is_empty(&lfc_ctl->lru))
+	while (new_size < lfc_ctl->size && !dlist_is_empty(&lfc_ctl->lru))
 	{
 		/* Shrink cache by throwing away least recently accessed chunks and returning their space to file system */
-		FileCacheEntry* victim = lfc_ctl->lru.prev;
+		FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
 		Assert(victim->access_count == 0);
-		lfc_unlink(victim);
 #ifdef FALLOC_FL_PUNCH_HOLE
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)victim->offset*CHUNK_SIZE*BLCKSZ, CHUNK_SIZE*BLCKSZ) < 0)
 			elog(LOG, "Failed to punch hole in file: %m");
@@ -287,7 +244,7 @@ lfc_init(void)
  * Returns true if page is found in local cache.
  */
 bool
-lfc_cached(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
+lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 {
 	BufferTag tag;
 	FileCacheEntry* entry;
@@ -339,7 +296,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	}
 	/* Unlink entry from LRU list to pin it for the duration of IO operation */
 	if (entry->access_count++ == 0)
-		lfc_unlink(entry);
+		dlist_delete(&entry->lru_node);
 	LWLockRelease(lfc_lock);
 
 	/* Open cache file if not done yet */
@@ -365,7 +322,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 	Assert(entry->access_count > 0);
 	if (--entry->access_count == 0)
-		lfc_link(&lfc_ctl->lru, entry);
+		dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
 	LWLockRelease(lfc_lock);
 
 	return true;
@@ -399,7 +356,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	{
 		/* Unlink entry from LRU list to pin it for the duration of IO operation */
 		if (entry->access_count++ == 0)
-			lfc_unlink(entry);
+			dlist_delete(&entry->lru_node);
 	}
 	else
 	{
@@ -411,12 +368,11 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		 * there are should be very large number of concurrent IO operations and them are limited by max_connections,
 		 * we prefer not to complicate code and use second approach.
 		 */
-		if (lfc_ctl->size >= lfc_size_limit*MB/BLCKSZ/CHUNK_SIZE && !lfc_is_empty(&lfc_ctl->lru))
+		if (lfc_ctl->size >= lfc_size_limit*MB/BLCKSZ/CHUNK_SIZE && !dlist_is_empty(&lfc_ctl->lru))
 		{
 			/* Cache overflow: evict least recently used chunk */
-			FileCacheEntry* victim = lfc_ctl->lru.prev;
+			FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
 			Assert(victim->access_count == 0);
-			lfc_unlink(victim);
 			entry->offset = victim->offset; /* grab victim's chunk */
 			hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
 			elog(LOG, "Swap file cache page");
@@ -453,7 +409,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 	Assert(entry->access_count > 0);
 	if (--entry->access_count == 0)
-		lfc_link(&lfc_ctl->lru, entry);
+		dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
 	LWLockRelease(lfc_lock);
 }
 
