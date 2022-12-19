@@ -727,6 +727,12 @@ impl<T> PinnedMutex<T> {
 /// inconsistent.
 pub struct PreviousOwnerDied<T>(T);
 
+impl<T> std::fmt::Debug for PreviousOwnerDied<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreviousOwnerDied")
+    }
+}
+
 impl<T> PreviousOwnerDied<T> {
     pub fn into_inner(self) -> T {
         self.0

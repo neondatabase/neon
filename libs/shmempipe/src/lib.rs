@@ -9,11 +9,12 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::SeqCst;
 
 use nix::sys::mman::{MapFlags, ProtFlags};
+use shared::TryLockError;
 
 pub mod shared;
 
-const TO_WORKER_LEN: usize = 128 * 1024;
-const FROM_WORKER_LEN: usize = 16 * 1024;
+const TO_WORKER_LEN: usize = 32 * 4096;
+const FROM_WORKER_LEN: usize = 4 * 4096;
 
 /// Input/output over a shared memory "pipe" which attempts to be faster than using standard input
 /// and output with inter-process communication.
@@ -30,7 +31,7 @@ pub struct RawSharedMemPipe {
 
     pub participants: [shared::PinnedMutex<Option<u32>>; 2],
 
-    pub to_worker_writer: shared::PinnedMutex<u32>,
+    pub to_worker_writer: shared::PinnedMutex<()>,
     pub to_worker_cond: shared::PinnedCondvar,
 
     pub from_worker_writer: shared::PinnedMutex<()>,
@@ -41,15 +42,198 @@ pub struct RawSharedMemPipe {
     // TODO: heikki wanted the response channel to be N * 8192 bytes, aligned to page so that they
     // could possibly in future be mapped postgres shared buffers.
     //
+    // Note: this is repr(c), so the order matters.
     pub to_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; TO_WORKER_LEN]>,
     pub from_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; FROM_WORKER_LEN]>,
 }
 
-// Ideas:
-// should this be no_std? couldn't find any issues of using std through c.
-// struct ResponseSlot(shared::Mutex<[u8; 8192]>);
+impl SharedMemPipePtr<Created> {
+    /// Wrap this in a new hopefully unique `Arc<OwnedRequester>`.
+    pub fn try_acquire_requester(self) -> Option<std::sync::Arc<OwnedRequester>> {
+        let m = unsafe { std::pin::Pin::new_unchecked(&self.participants[0]) };
+        let mut guard = m.try_lock().map(Some).unwrap_or_else(|e| match e {
+            TryLockError::PreviousOwnerDied(g) => Some(g),
+            TryLockError::WouldBlock => None,
+        })?;
 
-pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
+        match *guard {
+            Some(x) if x == std::process::id() => {
+                // hopefully a re-acquiring
+            }
+            Some(_other) => return None,
+            None => {}
+        }
+
+        // well, we cannot really do much more than this. I was initially planning to keep the
+        // mutex locked, but that would have zero guarantees that the thread which created this
+        // side is the one to drop it.
+        *guard = Some(std::process::id());
+        drop(guard);
+
+        Some(std::sync::Arc::new(OwnedRequester {
+            producer: std::sync::Mutex::default(),
+            consumer: std::sync::Mutex::default(),
+            not_my_time: std::sync::Condvar::new(),
+            ptr: self,
+        }))
+    }
+}
+
+impl SharedMemPipePtr<Joined> {
+    pub fn try_acquire_responder(self) -> Option<OwnedResponder> {
+        let m = unsafe { std::pin::Pin::new_unchecked(&self.participants[1]) };
+        let guard = m.try_lock().map(Some).unwrap_or_else(|e| match e {
+            TryLockError::PreviousOwnerDied(g) => Some(g),
+            TryLockError::WouldBlock => None,
+        })?;
+        Some(OwnedResponder {
+            // Safety: the pointer cannot be moved
+            locked_mutex: unsafe { std::mem::transmute(guard) },
+            ptr: self,
+        })
+    }
+}
+
+pub struct OwnedRequester {
+    producer: std::sync::Mutex<u32>,
+    consumer: std::sync::Mutex<u32>,
+    not_my_time: std::sync::Condvar,
+    ptr: SharedMemPipePtr<Created>,
+}
+
+impl OwnedRequester {
+    pub fn request_response(&self, req: &[u8], resp: &mut [u8]) {
+        let id = {
+            let mut g = self.producer.lock().unwrap();
+
+            let id = *g;
+            *g = g.wrapping_add(1);
+
+            // Safety: we are only one creating producers for to_worker
+            let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
+            let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
+            let c = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+
+            let mut req = req;
+
+            while !req.is_empty() {
+                let n = p.push_slice(req);
+                req = &req[n..];
+
+                if n == 0 {
+                    // TODO: this mutex does not need to be robust
+                    let g = m.lock().expect("cannot have process deaths here");
+                    let _ = c.wait_while(g, |_| p.is_full());
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+
+            // println!("sent {id}");
+            id
+        };
+
+        let g = self.consumer.lock().unwrap();
+        // wait until it's our turn
+        let mut g = self
+            .not_my_time
+            .wait_while(g, |g| {
+                // println!("waiting for {id} turn to read, {} now", *g);
+                *g != id
+            })
+            .unwrap();
+
+        {
+            // Safety: we are the only one creating consumers for from_worker
+            let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
+            let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
+
+            let mut read = 0;
+            loop {
+                let n = c.pop_slice(&mut resp[read..]);
+
+                read += n;
+
+                if read == resp.len() {
+                    break;
+                } else {
+                    cond.notify_one();
+                    std::thread::yield_now();
+                }
+            }
+        }
+
+        *g = g.wrapping_add(1);
+        // there is a crate for better futex usage, which would allow to wake up only the one
+        // correct
+        self.not_my_time.notify_all();
+    }
+}
+
+pub struct OwnedResponder {
+    // self referential, has to be, also must be above ptr to get dropped first
+    locked_mutex: shared::MutexGuard<'static, Option<u32>>,
+    ptr: SharedMemPipePtr<Joined>,
+}
+
+impl OwnedResponder {
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::Read;
+        let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
+        let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+
+        let mut read = 0;
+
+        loop {
+            match c.read(&mut buf[read..]) {
+                Ok(n) => {
+                    read += n;
+
+                    if read == buf.len() {
+                        cond.notify_one();
+                        return Ok(n);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    cond.notify_one();
+                    std::thread::yield_now();
+                    continue;
+                }
+                Err(e) => {
+                    // unexpected, a new impl sends out these?
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    pub fn write_all(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
+        let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
+        let mutex = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
+        let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
+
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        // let mut busy = 0;
+
+        loop {
+            let wrote = p.push_slice(buf);
+            buf = &buf[wrote..];
+
+            if buf.is_empty() {
+                return Ok(0);
+            } else {
+                // busy += 1;
+                let g = mutex.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = cond.wait_while(g, |_| p.free_len() == 0);
+            }
+        }
+    }
+}
+
+pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
     use nix::fcntl::OFlag;
     use nix::sys::mman;
     use nix::sys::stat::Mode;
@@ -103,7 +287,12 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
     initialize_at(res)
 }
 
-fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPipePtr<Ready>> {
+/// Initialize the RawSharedMemPipe *in place*.
+///
+/// In place initialization is trickier than normal rust programs. This would be much simpler if we
+/// would have stable allocator trait, and many currently unstable MaybeUninit friendly
+/// conversions.
+fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPipePtr<Created>> {
     let inner = res.ptr();
     // Safety: lot of requirements, TODO
     let place = unsafe { inner.cast::<MaybeUninit<RawSharedMemPipe>>().as_mut() };
@@ -116,12 +305,10 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
                 .expect("valid non-null pointer")
         };
 
-        // Safety: atomics don't need to be init
-        let magic = unsafe { magic.assume_init_mut() };
+        magic.write(AtomicU32::new(0x0000_0000));
 
-        // we can now be raced by some other process due to shm_open, so write that we are
-        // initializing
-        magic.store(0, std::sync::atomic::Ordering::SeqCst);
+        // ceremonial
+        unsafe { magic.assume_init_mut() };
     }
 
     {
@@ -174,12 +361,12 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
     {
         let to_worker_writer = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_writer)
-                .cast::<MaybeUninit<shared::PinnedMutex<u32>>>()
+                .cast::<MaybeUninit<shared::PinnedMutex<()>>>()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
 
-        shared::PinnedMutex::initialize_at(to_worker_writer, 0).unwrap();
+        shared::PinnedMutex::initialize_at(to_worker_writer, ()).unwrap();
     }
 
     {
@@ -236,7 +423,7 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
     let _ = unsafe { place.assume_init_mut() };
     drop(place);
 
-    let res = res.post_initialization();
+    let res = res.post_initialization::<Created>();
 
     // FIXME: how exactly to do an Arc out of this? Maybe an Arc<Box<RawSharedMemPipe>>, since we
     // cannot access ArcInner ... which does have a repr(c) but the layout would be version
@@ -259,11 +446,11 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
 /// Without any test specific configuration, will call `munmap` afterwards.
 pub struct MMapped;
 
-/// Type state to fully cleanup on drop pointer.
-///
-/// In addition to `munmap` this will tombstone the shared memory segment, maybe run drop in
-/// future.
-pub struct Ready;
+/// Type state to fully cleanup on drop pointer, created with [`create`].
+pub struct Created;
+
+/// Type state to fully cleanup on drop pointer, created with [`open_existing`].
+pub struct Joined;
 
 pub struct SharedMemPipePtr<Stage> {
     ptr: Option<NonNull<RawSharedMemPipe>>,
@@ -273,6 +460,9 @@ pub struct SharedMemPipePtr<Stage> {
     munmap: bool,
     _marker: std::marker::PhantomData<Stage>,
 }
+
+unsafe impl Send for SharedMemPipePtr<Created> {}
+unsafe impl Sync for SharedMemPipePtr<Created> {}
 
 impl SharedMemPipePtr<MMapped> {
     fn post_mmap(ptr: NonNull<RawSharedMemPipe>, size: NonZeroUsize) -> Self {
@@ -301,7 +491,7 @@ impl SharedMemPipePtr<MMapped> {
         self.ptr.as_ref().unwrap().clone()
     }
 
-    fn post_initialization(mut self) -> SharedMemPipePtr<Ready> {
+    fn post_initialization<T>(mut self) -> SharedMemPipePtr<T> {
         let ptr = self.ptr.take();
         let size = self.size;
         let ret = SharedMemPipePtr {
@@ -319,7 +509,7 @@ impl SharedMemPipePtr<MMapped> {
 
 impl<Stage> Drop for SharedMemPipePtr<Stage> {
     fn drop(&mut self) {
-        use shared::{MutexGuard, PinnedMutex, TryLockError};
+        use shared::{MutexGuard, PinnedMutex};
         use std::pin::Pin;
 
         // Helper for locking all of the participants.
@@ -381,7 +571,7 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
     }
 }
 
-impl std::ops::Deref for SharedMemPipePtr<Ready> {
+impl std::ops::Deref for SharedMemPipePtr<Created> {
     type Target = RawSharedMemPipe;
 
     fn deref(&self) -> &Self::Target {
@@ -389,7 +579,15 @@ impl std::ops::Deref for SharedMemPipePtr<Ready> {
     }
 }
 
-pub fn open_existing(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
+impl std::ops::Deref for SharedMemPipePtr<Joined> {
+    type Target = RawSharedMemPipe;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.ptr.as_ref().unwrap().as_ref() }
+    }
+}
+
+pub fn open_existing(path: &Path) -> std::io::Result<SharedMemPipePtr<Joined>> {
     use nix::fcntl::OFlag;
     use nix::sys::mman;
     use nix::sys::stat::Mode;
@@ -441,7 +639,9 @@ pub fn open_existing(path: &Path) -> std::io::Result<SharedMemPipePtr<Ready>> {
     join_initialized_at(res)
 }
 
-fn join_initialized_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPipePtr<Ready>> {
+fn join_initialized_at(
+    res: SharedMemPipePtr<MMapped>,
+) -> std::io::Result<SharedMemPipePtr<Joined>> {
     let inner = res.ptr();
     let place = unsafe { inner.cast::<MaybeUninit<RawSharedMemPipe>>().as_mut() };
 
@@ -491,9 +691,10 @@ fn join_initialized_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<Shared
         }
     }
 
-    let res = res.post_initialization();
+    // It is now initialized, but it happened on a different process
+    unsafe { place.assume_init_mut() };
 
-    Ok(res)
+    Ok(res.post_initialization())
 }
 
 #[cfg(test)]
