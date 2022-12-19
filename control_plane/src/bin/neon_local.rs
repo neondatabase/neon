@@ -747,7 +747,7 @@ fn get_safekeeper(env: &local_env::LocalEnv, id: NodeId) -> Result<SafekeeperNod
     if let Some(node) = env.safekeepers.iter().find(|node| node.id == id) {
         Ok(SafekeeperNode::from_env(env, node))
     } else {
-        bail!("could not find safekeeper '{}'", id)
+        bail!("could not find safekeeper {id}")
     }
 }
 
@@ -806,22 +806,22 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
 }
 
 fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
-    broker::start_broker_process(env)?;
-    let pageserver = PageServerNode::from_env(env);
-
     // Postgres nodes are not started automatically
 
+    broker::start_broker_process(env)?;
+
+    let pageserver = PageServerNode::from_env(env);
     if let Err(e) = pageserver.start(&pageserver_config_overrides(sub_match)) {
-        eprintln!("pageserver start failed: {e}");
-        try_stop_storage_broker_process(env);
+        eprintln!("pageserver {} start failed: {:#}", env.pageserver.id, e);
+        try_stop_all(env, true);
         exit(1);
     }
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
         if let Err(e) = safekeeper.start() {
-            eprintln!("safekeeper '{}' start failed: {e}", safekeeper.id);
-            try_stop_storage_broker_process(env);
+            eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
+            try_stop_all(env, false);
             exit(1);
         }
     }
@@ -832,35 +832,41 @@ fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<
     let immediate =
         sub_match.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
 
+    try_stop_all(env, immediate);
+
+    Ok(())
+}
+
+fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     let pageserver = PageServerNode::from_env(env);
 
     // Stop all compute nodes
-    let cplane = ComputeControlPlane::load(env.clone())?;
-    for (_k, node) in cplane.nodes {
-        if let Err(e) = node.stop(false) {
-            eprintln!("postgres stop failed: {}", e);
+    match ComputeControlPlane::load(env.clone()) {
+        Ok(cplane) => {
+            for (_k, node) in cplane.nodes {
+                if let Err(e) = node.stop(false) {
+                    eprintln!("postgres stop failed: {e:#}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("postgres stop failed, could not restore control plane data from env: {e:#}")
         }
     }
 
     if let Err(e) = pageserver.stop(immediate) {
-        eprintln!("pageserver stop failed: {}", e);
+        eprintln!("pageserver {} stop failed: {:#}", env.pageserver.id, e);
     }
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
         if let Err(e) = safekeeper.stop(immediate) {
-            eprintln!("safekeeper '{}' stop failed: {}", safekeeper.id, e);
+            eprintln!("safekeeper {} stop failed: {:#}", safekeeper.id, e);
         }
     }
 
-    try_stop_storage_broker_process(env);
-
-    Ok(())
-}
-
-fn try_stop_storage_broker_process(env: &local_env::LocalEnv) {
     if let Err(e) = broker::stop_broker_process(env) {
-        eprintln!("neon broker stop failed: {e}");
+        eprintln!("neon broker stop failed: {e:#}");
     }
 }
 
