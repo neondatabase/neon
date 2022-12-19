@@ -203,29 +203,6 @@ pub struct TimelineInfo {
     pub pg_version: u32,
 
     pub state: TimelineState,
-
-    // Some of the above fields are duplicated in 'local' and 'remote', for backwards-
-    // compatility with older clients.
-    pub local: LocalTimelineInfo,
-    pub remote: RemoteTimelineInfo,
-}
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LocalTimelineInfo {
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub ancestor_timeline_id: Option<TimelineId>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub ancestor_lsn: Option<Lsn>,
-    pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
-    pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
-}
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RemoteTimelineInfo {
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub remote_consistent_lsn: Option<Lsn>,
 }
 
 pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;

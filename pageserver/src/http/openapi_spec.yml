@@ -795,37 +795,6 @@ components:
         latest_gc_cutoff_lsn:
           type: string
           format: hex
-
-        # These 'local' and 'remote' fields just duplicate some of the fields
-        # above. They are kept for backwards-compatibility. They can be removed,
-        # when the control plane has been updated to look at the above fields
-        # directly.
-        local:
-          $ref: "#/components/schemas/LocalTimelineInfo"
-        remote:
-          $ref: "#/components/schemas/RemoteTimelineInfo"
-
-    LocalTimelineInfo:
-      type: object
-      properties:
-        ancestor_timeline_id:
-          type: string
-          format: hex
-        ancestor_lsn:
-          type: string
-          format: hex
-        current_logical_size:
-          type: integer
-        current_physical_size:
-          type: integer
-    RemoteTimelineInfo:
-      type: object
-      required:
-        - remote_consistent_lsn
-      properties:
-        remote_consistent_lsn:
-          type: string
-          format: hex
     Error:
       type: object
       required:
