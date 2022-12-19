@@ -157,8 +157,9 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
     res.magic
         .store(0xcafebabe, std::sync::atomic::Ordering::SeqCst);
 
-    res.ref_count
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // FIXME: it is very ackward to *not* take the lock participants[0] here. We could have an
+    // additional wrapper data structure living in where-ever, which would record that a lock was
+    // taken and it needs to be unlocked before drop or better yet, have that happen automatically.
 
     Ok(res)
 }
@@ -275,6 +276,8 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
                 let do_unmap = self.munmap;
 
                 if do_unmap {
+                    // if any locks were still held by other processes, this should not be done
+                    // (link kernel robust futex doc here)
                     unsafe { nix::sys::mman::munmap(ptr.as_ptr().cast(), self.size.get()) }
                 } else {
                     Ok(())
@@ -363,32 +366,10 @@ fn join_initialized_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<Shared
         // Safety: atomics don't need to be init
         let magic = unsafe { magic.assume_init_ref() };
 
-        // Safety: this should be fine as well, but there might be an issue with *place.as_mut_ptr
-        // while there's another pointer to the value?
-        let ref_count = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).ref_count)
-                .cast::<MaybeUninit<AtomicU32>>()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
-        let ref_count = unsafe { ref_count.assume_init_ref() };
-
-        let count_was = ref_count.fetch_add(1, SeqCst);
-        let _g = RefCountDropGuard(ref_count);
-
-        if count_was == 0 {
-            // we've resurrected a shared memory area being destroyed, probably don't venture any
-            // further
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "shared memory area is being destroyed",
-            ));
-        }
-
         let mut ready = false;
 
         for _ in 0..1000 {
+            // FIXME: acqrel would be better?
             let read = magic.load(SeqCst);
 
             match read {
@@ -418,21 +399,11 @@ fn join_initialized_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<Shared
                 format!("shared memory area did not complete initialization before timeout"),
             ));
         }
-
-        std::mem::forget(_g);
     }
 
     let res = res.post_initialization();
 
     Ok(res)
-}
-
-struct RefCountDropGuard<'a>(&'a AtomicU32);
-
-impl Drop for RefCountDropGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
 }
 
 #[cfg(test)]
@@ -467,7 +438,6 @@ mod tests {
 
         {
             assert_eq!(0xcafebabe, ready.magic.load(SeqCst));
-            assert_eq!(1, ready.ref_count.load(SeqCst));
         }
 
         // first allowing for initialization then allowing joining already initialized shouldn't
@@ -480,14 +450,12 @@ mod tests {
 
         {
             assert_eq!(0xcafe_babe, joined.magic.load(SeqCst));
-            assert_eq!(2, joined.ref_count.load(SeqCst));
         }
 
         drop(joined);
 
         {
             assert_eq!(0xcafe_babe, ready.magic.load(SeqCst));
-            assert_eq!(1, ready.ref_count.load(SeqCst));
         }
 
         drop(ready);
@@ -497,7 +465,6 @@ mod tests {
             let target = ptr.cast::<RawSharedMemPipe>();
             let target = unsafe { target.as_ref() };
             assert_eq!(0xffff_ffff, target.magic.load(SeqCst));
-            assert_eq!(0, target.ref_count.load(SeqCst));
         }
     }
 
