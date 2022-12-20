@@ -655,7 +655,7 @@ struct PostgresRedoProcess {
     child: NoLeakChild,
     stdin: ChildStdin,
     stdout: ChildStdout,
-    stderr: ChildStderr,
+    // stderr: ChildStderr,
 }
 
 impl PostgresRedoProcess {
@@ -731,7 +731,7 @@ impl PostgresRedoProcess {
             .arg("--wal-redo")
             .arg("--disable-seccomp")
             .stdin(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::inherit())
             .stdout(Stdio::piped())
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
@@ -763,7 +763,7 @@ impl PostgresRedoProcess {
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
+        // let stderr = child.stderr.take().unwrap();
 
         macro_rules! set_nonblock_or_log_err {
             ($file:ident) => {{
@@ -776,7 +776,7 @@ impl PostgresRedoProcess {
         }
         set_nonblock_or_log_err!(stdin)?;
         set_nonblock_or_log_err!(stdout)?;
-        set_nonblock_or_log_err!(stderr)?;
+        // set_nonblock_or_log_err!(stderr)?;
 
         // all fallible operations post-spawn are complete, so get rid of the guard
         let child = scopeguard::ScopeGuard::into_inner(child);
@@ -786,7 +786,7 @@ impl PostgresRedoProcess {
             child,
             stdin,
             stdout,
-            stderr,
+            //stderr,
         })
     }
 
@@ -807,125 +807,133 @@ impl PostgresRedoProcess {
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
     ) -> Result<Bytes, std::io::Error> {
-        // Serialize all the messages to send the WAL redo process first.
-        //
-        // This could be problematic if there are millions of records to replay,
-        // but in practice the number of records is usually so small that it doesn't
-        // matter, and it's better to keep this code simple.
-        //
-        // Most requests start with a before-image with BLCKSZ bytes, followed by
-        // by some other WAL records. Start with a buffer that can hold that
-        // comfortably.
-        let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
-        build_begin_redo_for_block_msg(tag, &mut writebuf);
-        if let Some(img) = base_img {
-            build_push_page_msg(tag, &img, &mut writebuf);
-        }
-        for (lsn, rec) in records.iter() {
-            if let NeonWalRecord::Postgres {
-                will_init: _,
-                rec: postgres_rec,
-            } = rec
-            {
-                build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
-            } else {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "tried to pass neon wal record to postgres WAL redo",
-                ));
+        todo!("not enabled");
+        #[cfg(not_now)]
+        {
+            // Serialize all the messages to send the WAL redo process first.
+            //
+            // This could be problematic if there are millions of records to replay,
+            // but in practice the number of records is usually so small that it doesn't
+            // matter, and it's better to keep this code simple.
+            //
+            // Most requests start with a before-image with BLCKSZ bytes, followed by
+            // by some other WAL records. Start with a buffer that can hold that
+            // comfortably.
+            let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
+            build_begin_redo_for_block_msg(tag, &mut writebuf);
+            if let Some(img) = base_img {
+                build_push_page_msg(tag, &img, &mut writebuf);
             }
-        }
-        build_get_page_msg(tag, &mut writebuf);
-        WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
-
-        // The input is now in 'writebuf'. Do a blind write first, writing as much as
-        // we can, before calling poll(). That skips one call to poll() if the stdin is
-        // already available for writing, which it almost certainly is because the
-        // process is idle.
-        let mut nwrite = self.stdin.write(&writebuf)?;
-
-        // We expect the WAL redo process to respond with an 8k page image. We read it
-        // into this buffer.
-        let mut resultbuf = vec![0; BLCKSZ.into()];
-        let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
-
-        // Prepare for calling poll()
-        let mut pollfds = [
-            PollFd::new(self.stdout.as_raw_fd(), PollFlags::POLLIN),
-            PollFd::new(self.stderr.as_raw_fd(), PollFlags::POLLIN),
-            PollFd::new(self.stdin.as_raw_fd(), PollFlags::POLLOUT),
-        ];
-
-        // We do three things simultaneously: send the old base image and WAL records to
-        // the child process's stdin, read the result from child's stdout, and forward any logging
-        // information that the child writes to its stderr to the page server's log.
-        while nresult < BLCKSZ.into() {
-            // If we have more data to write, wake up if 'stdin' becomes writeable or
-            // we have data to read. Otherwise only wake up if there's data to read.
-            let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = loop {
-                match nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32) {
-                    Err(e) if e == nix::errno::Errno::EINTR => continue,
-                    res => break res,
+            for (lsn, rec) in records.iter() {
+                if let NeonWalRecord::Postgres {
+                    will_init: _,
+                    rec: postgres_rec,
+                } = rec
+                {
+                    build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
+                } else {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "tried to pass neon wal record to postgres WAL redo",
+                    ));
                 }
-            }?;
-
-            if n == 0 {
-                return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
             }
+            build_get_page_msg(tag, &mut writebuf);
+            WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
 
-            // If we have some messages in stderr, forward them to the log.
-            let err_revents = pollfds[1].revents().unwrap();
-            if err_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
-                let mut errbuf: [u8; 16384] = [0; 16384];
-                let n = self.stderr.read(&mut errbuf)?;
+            // The input is now in 'writebuf'. Do a blind write first, writing as much as
+            // we can, before calling poll(). That skips one call to poll() if the stdin is
+            // already available for writing, which it almost certainly is because the
+            // process is idle.
+            let mut nwrite = self.stdin.write(&writebuf)?;
 
-                // The message might not be split correctly into lines here. But this is
-                // good enough, the important thing is to get the message to the log.
-                if n > 0 {
-                    error!(
-                        "wal-redo-postgres: {}",
-                        String::from_utf8_lossy(&errbuf[0..n])
-                    );
+            // We expect the WAL redo process to respond with an 8k page image. We read it
+            // into this buffer.
+            let mut resultbuf = vec![0; BLCKSZ.into()];
+            let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
 
-                    // To make sure we capture all log from the process if it fails, keep
-                    // reading from the stderr, before checking the stdout.
-                    continue;
+            // Prepare for calling poll()
+            let mut pollfds = [
+                PollFd::new(self.stdout.as_raw_fd(), PollFlags::POLLIN),
+                PollFd::new(self.stderr.as_raw_fd(), PollFlags::POLLIN),
+                PollFd::new(self.stdin.as_raw_fd(), PollFlags::POLLOUT),
+            ];
+
+            // We do three things simultaneously: send the old base image and WAL records to
+            // the child process's stdin, read the result from child's stdout, and forward any logging
+            // information that the child writes to its stderr to the page server's log.
+            while nresult < BLCKSZ.into() {
+                // If we have more data to write, wake up if 'stdin' becomes writeable or
+                // we have data to read. Otherwise only wake up if there's data to read.
+                let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
+                let n = loop {
+                    match nix::poll::poll(
+                        &mut pollfds[0..nfds],
+                        wal_redo_timeout.as_millis() as i32,
+                    ) {
+                        Err(e) if e == nix::errno::Errno::EINTR => continue,
+                        res => break res,
+                    }
+                }?;
+
+                if n == 0 {
+                    return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
                 }
-            } else if err_revents.contains(PollFlags::POLLHUP) {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stderr unexpectedly",
-                ));
-            }
 
-            // If we have more data to write and 'stdin' is writeable, do write.
-            if nwrite < writebuf.len() {
-                let in_revents = pollfds[2].revents().unwrap();
-                if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
-                    nwrite += self.stdin.write(&writebuf[nwrite..])?;
-                } else if in_revents.contains(PollFlags::POLLHUP) {
-                    // We still have more data to write, but the process closed the pipe.
+                // If we have some messages in stderr, forward them to the log.
+                let err_revents = pollfds[1].revents().unwrap();
+                if err_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
+                    let mut errbuf: [u8; 16384] = [0; 16384];
+                    let n = self.stderr.read(&mut errbuf)?;
+
+                    // The message might not be split correctly into lines here. But this is
+                    // good enough, the important thing is to get the message to the log.
+                    if n > 0 {
+                        error!(
+                            "wal-redo-postgres: {}",
+                            String::from_utf8_lossy(&errbuf[0..n])
+                        );
+
+                        // To make sure we capture all log from the process if it fails, keep
+                        // reading from the stderr, before checking the stdout.
+                        continue;
+                    }
+                } else if err_revents.contains(PollFlags::POLLHUP) {
                     return Err(Error::new(
                         ErrorKind::BrokenPipe,
-                        "WAL redo process closed its stdin unexpectedly",
+                        "WAL redo process closed its stderr unexpectedly",
+                    ));
+                }
+
+                // If we have more data to write and 'stdin' is writeable, do write.
+                if nwrite < writebuf.len() {
+                    let in_revents = pollfds[2].revents().unwrap();
+                    if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty()
+                    {
+                        nwrite += self.stdin.write(&writebuf[nwrite..])?;
+                    } else if in_revents.contains(PollFlags::POLLHUP) {
+                        // We still have more data to write, but the process closed the pipe.
+                        return Err(Error::new(
+                            ErrorKind::BrokenPipe,
+                            "WAL redo process closed its stdin unexpectedly",
+                        ));
+                    }
+                }
+
+                // If we have some data in stdout, read it to the result buffer.
+                let out_revents = pollfds[0].revents().unwrap();
+                if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
+                    nresult += self.stdout.read(&mut resultbuf[nresult..])?;
+                } else if out_revents.contains(PollFlags::POLLHUP) {
+                    return Err(Error::new(
+                        ErrorKind::BrokenPipe,
+                        "WAL redo process closed its stdout unexpectedly",
                     ));
                 }
             }
 
-            // If we have some data in stdout, read it to the result buffer.
-            let out_revents = pollfds[0].revents().unwrap();
-            if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
-                nresult += self.stdout.read(&mut resultbuf[nresult..])?;
-            } else if out_revents.contains(PollFlags::POLLHUP) {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stdout unexpectedly",
-                ));
-            }
+            Ok(Bytes::from(resultbuf))
         }
-
-        Ok(Bytes::from(resultbuf))
     }
 }
 
