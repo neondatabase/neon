@@ -187,13 +187,13 @@ fn import_slru<Reader: Read>(
     path: &Path,
     mut reader: Reader,
     len: usize,
-) -> Result<()> {
-    trace!("importing slru file {}", path.display());
+) -> anyhow::Result<()> {
+    info!("importing slru file {path:?}");
 
     let mut buf: [u8; 8192] = [0u8; 8192];
     let filename = &path
         .file_name()
-        .expect("missing slru filename")
+        .with_context(|| format!("missing slru filename for path {path:?}"))?
         .to_string_lossy();
     let segno = u32::from_str_radix(filename, 16)?;
 
