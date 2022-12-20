@@ -103,8 +103,67 @@ pub struct OwnedRequester {
 
 #[derive(Default)]
 struct Wakeup {
-    waiting: std::collections::VecDeque<Option<std::thread::Thread>>,
+    waiting: UnparkInOrder,
     next: u32,
+}
+
+#[derive(Default)]
+struct UnparkInOrder(std::collections::VecDeque<Option<std::thread::Thread>>);
+
+impl UnparkInOrder {
+    fn store_current(&mut self, distance: usize) {
+        // it was thought originally that this would be *enough*, as in we'd unlikely have so many
+        // threads waiting that we'd have to have an alternative place for the overflow to go.
+        //
+        // let's check the popular thread count invariant :)
+        assert!(distance < 4096);
+        while self.0.len() <= distance {
+            self.0.push_back(None);
+        }
+        let slot = self.0.get_mut(distance).expect("just added the None in");
+        assert!(slot.is_none());
+        *slot = Some(std::thread::current());
+    }
+
+    fn current_is_front(&self) -> bool {
+        match self.0.front() {
+            Some(Some(first)) => {
+                let cur = std::thread::current();
+                cur.id() == first.id()
+            }
+            Some(None) | None => todo!(),
+        }
+    }
+
+    fn pop_current(&mut self) {
+        let cur = std::thread::current();
+        let next = self.0.front();
+        let next = next
+            .expect("should not be empty because we were just unparked")
+            .as_ref()
+            .expect("should had had the current thread in front because we were just unparked");
+        assert_eq!(cur.id(), next.id());
+
+        self.0.pop_front().expect("just verified");
+    }
+
+    fn unpark_front(&self) {
+        if let Some(x) = self.0.front().and_then(|x| x.as_ref()) {
+            x.unpark();
+        } else {
+            // Not an error, the thread we are hoping to wakeup just hasn't yet arrived to the
+            // parking lot.
+        }
+    }
+
+    /// Park the thread waiting to be unparked in order.
+    ///
+    /// Should create a profiling point.
+    #[no_mangle]
+    #[inline(never)]
+    fn park() {
+        std::thread::park();
+    }
 }
 
 impl OwnedRequester {
@@ -140,34 +199,19 @@ impl OwnedRequester {
         };
 
         let mut g = self.consumer.lock().unwrap();
+        let distance = id.wrapping_sub(g.next) as usize;
+        g.waiting.store_current(distance);
 
-        let distance = id.wrapping_sub(g.next);
-
-        while g.waiting.len() <= distance as usize {
-            g.waiting.push_back(None);
-        }
-        assert!(g.waiting[distance as usize].is_none());
-        g.waiting[distance as usize] = Some(std::thread::current());
-
-        // wait until it's our turn
-        /*let mut g = self
-        .not_my_time
-        .wait_while(g, |g| {
-            // println!("waiting for {id} turn to read, {} now", *g);
-            *g.next != id
-        })
-        .unwrap();*/
-
+        // TODO: UnparkInOrder::park_while(g, &self.consumer, |g| *g.next == id)
         let mut g = Some(g);
-
         while g.as_ref().unwrap().next != id {
-            g.take();
-            std::thread::park();
-
+            drop(g.take());
+            UnparkInOrder::park();
             g = Some(self.consumer.lock().unwrap());
         }
 
         let mut g = g.unwrap();
+        assert!(g.waiting.current_is_front());
 
         // eprintln!("this is {id} reading next");
         {
@@ -191,16 +235,8 @@ impl OwnedRequester {
         }
 
         g.next = g.next.wrapping_add(1);
-        // there is a crate for better futex usage, which would allow to wake up only the one
-        // correct
-        //self.not_my_time.notify_all();
-        g.waiting.pop_front();
-
-        if let Some(first) = g.waiting.front().and_then(|x| x.as_ref()) {
-            first.unpark();
-            // otherwise we don't need to unpark, because that thread has not yet arrived to the
-            // scene.
-        }
+        g.waiting.pop_current();
+        g.waiting.unpark_front();
     }
 }
 
