@@ -377,7 +377,7 @@ pub extern "C" fn shmempipe_open_via_env() -> *mut OwnedResponder {
 pub extern "C" fn shmempipe_read_exact(
     resp: *mut OwnedResponder,
     buffer: *mut u8,
-    len: usize,
+    len: u32,
 ) -> isize {
     if resp.is_null() || buffer.is_null() {
         return -1;
@@ -385,11 +385,8 @@ pub extern "C" fn shmempipe_read_exact(
     if len == 0 {
         return 0;
     }
-    if len > isize::MAX as usize {
-        return -2;
-    }
     let mut target = unsafe { Box::from_raw(resp) };
-    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len) };
+    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len as usize) };
     let ret = target.read_exact(buffer);
     std::mem::forget(target);
     ret as isize
@@ -399,7 +396,7 @@ pub extern "C" fn shmempipe_read_exact(
 pub extern "C" fn shmempipe_write_all(
     resp: *mut OwnedResponder,
     buffer: *mut u8,
-    len: usize,
+    len: u32,
 ) -> isize {
     if resp.is_null() || buffer.is_null() {
         return -1;
@@ -407,11 +404,8 @@ pub extern "C" fn shmempipe_write_all(
     if len == 0 {
         return 0;
     }
-    if len > isize::MAX as usize {
-        return -2;
-    }
     let mut target = unsafe { Box::from_raw(resp) };
-    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len) };
+    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len as usize) };
     let ret = target.write_all(buffer);
     std::mem::forget(target);
     ret as isize
