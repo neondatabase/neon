@@ -36,3 +36,5 @@ storage:
           console_region_id: aws-us-west-2
         zenith-1-sk-3:
           console_region_id: aws-us-west-2
+        zenith-1-sk-4:
+          console_region_id: aws-us-west-2
