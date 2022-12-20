@@ -14,7 +14,6 @@ demo = ["bytes", "rand", "sha2"]
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
-# memmap = "0.7.0"
 ringbuf = "0.3.1"
 
 nix = { version = "0.26.1", features = ["mman", "fs"] }

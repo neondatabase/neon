@@ -877,7 +877,7 @@ dependencies = [
  "clap 4.0.32",
  "comfy-table",
  "git-version",
- "nix",
+ "nix 0.25.1",
  "once_cell",
  "pageserver_api",
  "postgres",
@@ -2068,6 +2068,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46a58d1d356c6597d08cde02c2f09d785b09e28711837b1ed667dc652c08a694"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "libc",
+ "memoffset 0.7.1",
+ "pin-utils",
+ "static_assertions",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2241,7 +2255,7 @@ dependencies = [
  "hyper",
  "itertools",
  "metrics",
- "nix",
+ "nix 0.25.1",
  "num-traits",
  "once_cell",
  "pageserver_api",
@@ -2919,6 +2933,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ringbuf"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89e68dd9c1d8f7bb0c664e1556b1521809bc6fa62d92bb3b813adf8611caa0eb"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "routerify"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3084,7 +3107,7 @@ dependencies = [
  "humantime",
  "hyper",
  "metrics",
- "nix",
+ "nix 0.25.1",
  "once_cell",
  "parking_lot",
  "postgres",
@@ -3381,6 +3404,19 @@ name = "shlex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43b2853a4d09f215c24cc5489c992ce46052d359b5109343cbafbf26bc62f8a3"
+
+[[package]]
+name = "shmempipe"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "nix 0.26.1",
+ "parking_lot",
+ "rand",
+ "ringbuf",
+ "sha2",
+]
 
 [[package]]
 name = "signal-hook"
@@ -4218,7 +4254,7 @@ dependencies = [
  "hyper",
  "jsonwebtoken",
  "metrics",
- "nix",
+ "nix 0.25.1",
  "once_cell",
  "pq_proto",
  "rand",
