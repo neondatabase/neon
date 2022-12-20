@@ -215,7 +215,6 @@ pub struct DownloadRemoteLayersTaskInfo {
     pub task_id: String,
     pub state: DownloadRemoteLayersTaskState,
     pub total_layer_count: u64,         // stable once `completed`
-    pub successful_download_bytes: u64, // stable once `completed`
     pub successful_download_count: u64, // stable once `completed`
     pub failed_download_count: u64,     // stable once `completed`
 }

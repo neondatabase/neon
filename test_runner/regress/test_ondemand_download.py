@@ -1,7 +1,6 @@
 # It's possible to run any regular test with the local fs remote storage via
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
-import time
 from pathlib import Path
 
 import pytest
@@ -365,22 +364,17 @@ def test_download_remote_layers_api(
         sk.stop(immediate=True)
 
     ##### Second start, restore the data and ensure it's the same
-    env.pageserver.start()
-
-    wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
-
-    ###### Phase 1: exercise download error code path
-    # activate failpoint now, then get post_unlink_size so that it's stable
-    client.configure_failpoints(("remote-storage-download-pre-rename", "return"))
+    env.pageserver.start(extra_env_vars={"FAILPOINTS": "remote-storage-download-pre-rename=return"})
     env.pageserver.allowed_errors.extend(
         [
             f".*download_all_remote_layers.*{tenant_id}.*{timeline_id}.*layer download failed.*remote-storage-download-pre-rename failpoint",
             f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
         ]
     )
-    # wait for in-progress downloads to hit the failpoint
-    time.sleep(1)
 
+    wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
+
+    ###### Phase 1: exercise download error code path
     assert (
         filled_current_physical == get_api_current_physical_size()
     ), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
@@ -400,11 +394,14 @@ def test_download_remote_layers_api(
     log.info(f"info={info}")
     assert info["state"] == "Completed"
     assert info["total_layer_count"] > 0
-    assert info["successful_download_bytes"] == 0
     assert info["successful_download_count"] == 0
     assert (
         info["failed_download_count"] > 0
     )  # can't assert == total_layer_count because attach + tenant status downloads some layers
+    assert (
+        info["total_layer_count"]
+        == info["successful_download_count"] + info["failed_download_count"]
+    )
     assert get_api_current_physical_size() == filled_current_physical
     assert (
         get_resident_physical_size() == post_unlink_size
@@ -418,9 +415,12 @@ def test_download_remote_layers_api(
 
     assert info["state"] == "Completed"
     assert info["total_layer_count"] > 0
-    assert info["successful_download_bytes"] > 0
     assert info["successful_download_count"] > 0
     assert info["failed_download_count"] == 0
+    assert (
+        info["total_layer_count"]
+        == info["successful_download_count"] + info["failed_download_count"]
+    )
 
     refilled_size = get_resident_physical_size()
     log.info(refilled_size)

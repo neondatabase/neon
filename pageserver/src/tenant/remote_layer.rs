@@ -8,16 +8,10 @@ use crate::tenant::delta_layer::DeltaLayer;
 use crate::tenant::filename::{DeltaFileName, ImageFileName};
 use crate::tenant::image_layer::ImageLayer;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use crate::{
-    exponential_backoff_duration_seconds, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
-};
 use anyhow::{bail, Result};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
-use tokio::time::Instant;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -42,54 +36,7 @@ pub struct RemoteLayer {
 
     is_incremental: bool,
 
-    /// `download_watch` can be used to wait for download of the layer to finish.
-    /// If it is Some, you can subscribe on the watch to be notified when the
-    /// download finishes. If it's None, no download is in progress yet.
-    /// See Timeline::download_remote_layer(), that is the higher-level function
-    /// to coordinate layer download.
-    pub download_state: Mutex<DownloadState>,
-}
-
-#[derive(Debug)]
-pub enum DownloadState {
-    NotStarted,
-    Running(tokio::sync::watch::Sender<()>),
-    LayerMapUpdated { download_size: u64 },
-    Failed(DownloadRetryState),
-}
-
-#[derive(Debug)]
-pub struct DownloadRetryState {
-    pub last_err: anyhow::Error,
-    retry_count: u32,
-    pub backoff_until: tokio::time::Instant,
-}
-
-impl DownloadRetryState {
-    pub fn new(err: anyhow::Error) -> Self {
-        let mut st = DownloadRetryState {
-            last_err: err,
-            retry_count: 0,
-            backoff_until: Instant::now(), // doesn't matter
-        };
-        st.update_backoff();
-        st
-    }
-    pub fn record_failure(mut self, err: anyhow::Error) -> Self {
-        self.last_err = err;
-        self.update_backoff();
-        self
-    }
-
-    fn update_backoff(&mut self) {
-        self.backoff_until = Instant::now()
-            + Duration::from_secs_f64(exponential_backoff_duration_seconds(
-                self.retry_count,
-                DEFAULT_BASE_BACKOFF_SECONDS,
-                DEFAULT_MAX_BACKOFF_SECONDS,
-            ));
-        self.retry_count += 1;
-    }
+    pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
 }
 
 impl Layer for RemoteLayer {
@@ -203,11 +150,11 @@ impl RemoteLayer {
             timelineid,
             key_range: fname.key_range.clone(),
             lsn_range: fname.lsn..(fname.lsn + 1),
-            download_state: Mutex::new(DownloadState::NotStarted),
             is_delta: false,
             is_incremental: false,
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
+            ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -222,11 +169,11 @@ impl RemoteLayer {
             timelineid,
             key_range: fname.key_range.clone(),
             lsn_range: fname.lsn_range.clone(),
-            download_state: Mutex::new(DownloadState::NotStarted),
             is_delta: true,
             is_incremental: true,
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
+            ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
