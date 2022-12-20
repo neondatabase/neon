@@ -168,6 +168,11 @@ impl UnparkInOrder {
 
 impl OwnedRequester {
     pub fn request_response(&self, req: &[u8], resp: &mut [u8]) {
+        // Overview:
+        // - self.producer creates an order amongst competing request_response callers (id).
+        // - the same token (id) is used to find some order with `self.consumer` to read the
+        // response
+
         let id = {
             let mut g = self.producer.lock().unwrap();
 
