@@ -12,7 +12,7 @@ use super::models::{
     TimelineCreateRequest, TimelineInfo,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
-use crate::tenant::Timeline;
+use crate::tenant::{with_ondemand_download, Timeline};
 use crate::tenant_config::TenantConfOpt;
 use crate::{config::PageServerConf, tenant_mgr};
 use utils::{
@@ -298,12 +298,9 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
         .map_err(ApiError::NotFound)?;
-    let result = crate::tenant::retry_get_with_timeout(
-        || timeline.find_lsn_for_timestamp(timestamp_pg),
-        std::time::Duration::from_secs(60),
-    )
-    .await
-    .map_err(ApiError::InternalServerError)?;
+    let result = with_ondemand_download(|| timeline.find_lsn_for_timestamp(timestamp_pg))
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     let result = match result {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),

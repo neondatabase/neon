@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
 use fail::fail_point;
 use futures::stream::FuturesUnordered;
-use futures::{Future, StreamExt};
+use futures::StreamExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::{
@@ -430,7 +430,7 @@ impl Timeline {
 
     // Like get(), but if a remote layer file is needed, it is downloaded as part of this call.
     pub async fn get_download(&self, key: Key, lsn: Lsn) -> anyhow::Result<Bytes> {
-        retry_get(|| self.get(key, lsn)).await
+        with_ondemand_download(|| self.get(key, lsn)).await
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -1645,14 +1645,10 @@ impl Timeline {
                 //
                 if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
                     info!("need remote layer {}", layer.traversal_id());
-                    let tl = timeline.myself.upgrade().unwrap();
-
-                    let future = tl.download_remote_layer(Arc::clone(&remote_layer));
-
-                    let dynfuture: std::pin::Pin<
-                        Box<dyn Future<Output = anyhow::Result<u64>> + Send + Sync>,
-                    > = Box::pin(future);
-                    return Err(PageReconstructError::NeedDownload(dynfuture));
+                    return Err(PageReconstructError::NeedDownload(
+                        Weak::clone(&self.myself),
+                        Arc::downgrade(&remote_layer),
+                    ));
                 }
 
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
@@ -3207,12 +3203,11 @@ pub enum PageReconstructError {
     #[error(transparent)]
     WalRedo(#[from] crate::walredo::WalRedoError),
 
-    /// A layer file is missing locally. You can call the returned Future to
-    /// download the missing layer, and after that finishes, the operation will
-    /// probably succeed if you retry it. (It can return NeedDownload again, if
-    /// another layer needs to be downloaded.).
+    /// The given RemoteLayer needs to be downloaded and replaced in the timeline's layer map
+    /// for the operation to succeed. Use [`Timeline::download_remote_layer`] to do it, then
+    /// retry the operation that returned this error.
     #[error("layer file needs to be downloaded")]
-    NeedDownload(std::pin::Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + Sync>>),
+    NeedDownload(Weak<Timeline>, Weak<RemoteLayer>),
 }
 
 impl std::fmt::Debug for PageReconstructError {
@@ -3221,39 +3216,104 @@ impl std::fmt::Debug for PageReconstructError {
             PageReconstructError::Other(err) => err.fmt(f),
             PageReconstructError::WalRedo(err) => err.fmt(f),
             // TODO: print more info about the missing layer
-            PageReconstructError::NeedDownload(_) => write!(f, "need to download a layer"),
+            PageReconstructError::NeedDownload(_, _) => write!(f, "need to download a layer"),
         }
     }
 }
 
+/// Helper function to deal with [`PageReconstructError::NeedDownload`].
 ///
-/// Run a function that can return PageReconstructError, downloading the missing
-/// file and retrying if needed.
+/// Takes a sync closure that can fail with [`PageReconstructError`].
+/// If it is [`PageReconstructError::NeedDownload`],
+/// do the download and retry the function call.
 ///
-pub async fn retry_get_with_timeout<F, T>(f: F, timeout: Duration) -> Result<T, anyhow::Error>
-where
-    F: Send + Fn() -> Result<T, PageReconstructError>,
-    T: Send,
-{
-    match tokio::time::timeout(timeout, retry_get(f)).await {
-        Ok(r) => r,
-        Err(_) => bail!("timed out waiting for layer to be downloaded"),
-    }
-}
-
-pub async fn retry_get<F, T>(f: F) -> Result<T, anyhow::Error>
+/// ### Background
+///
+/// This is a crutch to make on-demand downloads efficient in
+/// our async-sync-async sandwich codebase. Some context:
+///
+/// - The code that does the downloads uses async Rust.
+/// - The code that initiates download is many levels of sync Rust.
+/// - The sync code must wait for the download to finish to
+///   make further progress.
+/// - The sync code is invoked directly from async functions upstack.
+///
+/// Example (there are also much worse ones where the sandwich is taller)
+///
+///   async handle_get_page_at_lsn_request        page_service.rs
+///     sync get_rel_page_at_lsn                  timeline.rs
+///       sync timeline.get                       timeline.rs
+///         sync get_reconstruct_data             timeline.rs
+///           async download_remote_layer         timeline.rs
+///
+/// It is not possible to Timeline::download_remote_layer().await within
+/// get_reconstruct_data, so instead, we return PageReconstructError::NeedDownload
+/// which contains references to the Timeline and RemoteLayer.
+/// We bubble that error upstack to the async code, which can then call
+/// Timeline::download_remote_layer().await.
+/// That is _efficient_ because tokio can use the same OS thread to do
+/// other work while we're waiting for the download.
+///
+/// The main drawback with this approach is that we need to be careful
+/// to actually _act_ on PageReconstructError::NeedDownload instead of
+/// just wrapping it into anyhow::Error or the like.
+/// At the time of writing, we are confident that we covered all code paths
+/// that need it right now, but it definitely is future maintenance cost.
+///
+/// Alternatives to consider in the future:
+///
+/// - Use the type to prevent wrapping PageReconstructError::NeedDownload
+///   into another error type.
+/// - Inside `get_reconstruct_data`, we can std::thread::spawn a thread
+///   and use it to block_on the download_remote_layer future.
+///   That is obviously inefficient as it creates one thread per download.
+/// - Convert everything to async. The problem here is that the sync
+///   functions are used by many other sync functions. So, the scope
+///   creep of such a conversion is tremendous.
+/// - Compromise between the two: implement async functions for each sync
+///   function. Switch over the hot code paths (GetPage()) to use the
+///   async path, so that the hot path doesn't  spawn threads. Other code
+///   paths would remain sync initially, and get converted to async over time.
+///
+pub async fn with_ondemand_download<F, T>(f: F) -> Result<T, anyhow::Error>
 where
     F: Send + Fn() -> Result<T, PageReconstructError>,
     T: Send,
 {
     loop {
-        let result = f();
-        let future = match result {
-            Err(PageReconstructError::NeedDownload(future)) => future,
-            _ => return Ok(result?),
-        };
-        future.await?;
+        let closure_result = f();
+        match closure_result {
+            Err(PageReconstructError::NeedDownload(weak_timeline, weak_remote_layer)) => {
+                // if the timeline is gone, it has likely been deleted / tenant detached
+                let tl = weak_timeline.upgrade().context("timeline is gone")?;
+                // if the remote layer got removed, retry the function, it might succeed now
+                let remote_layer = match weak_remote_layer.upgrade() {
+                    None => {
+                        info!("remote layer is gone, retrying closure");
+                        continue;
+                    }
+                    Some(l) => l,
+                };
+                // Does retries internally
+                tl.download_remote_layer(remote_layer).await?;
+                // Download successful, retry the closure
+                continue;
+            }
+            _ => return Ok(closure_result?),
+        }
     }
+}
+
+/// Like [`with_ondemand_download`], but for synchronous code.
+pub fn with_ondemand_download_sync<F, T>(
+    rt: &tokio::runtime::Runtime,
+    f: F,
+) -> Result<T, anyhow::Error>
+where
+    F: Send + Fn() -> Result<T, PageReconstructError>,
+    T: Send,
+{
+    rt.block_on(with_ondemand_download(f))
 }
 
 /// Helper function for get_reconstruct_data() to add the path of layers traversed
