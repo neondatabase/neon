@@ -286,7 +286,10 @@ impl RemoteStorage for S3Bucket {
 
     /// See the doc for `RemoteStorage::list_prefixes`
     /// Note: it wont include empty "directories"
-    async fn list_prefixes(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    async fn list_prefixes(
+        &self,
+        prefix: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
             .map(|p| self.relative_path_to_s3_object(p))
@@ -308,7 +311,8 @@ impl RemoteStorage for S3Bucket {
                 .concurrency_limiter
                 .acquire()
                 .await
-                .context("Concurrency limiter semaphore got closed during S3 list")?;
+                .context("Concurrency limiter semaphore got closed during S3 list")
+                .map_err(DownloadError::Other)?;
 
             metrics::inc_list_objects();
 
@@ -324,7 +328,9 @@ impl RemoteStorage for S3Bucket {
                 .map_err(|e| {
                     metrics::inc_list_objects_fail();
                     e
-                })?;
+                })
+                .context("Failed to list S3 prefixes")
+                .map_err(DownloadError::Other)?;
 
             document_keys.extend(
                 fetch_response

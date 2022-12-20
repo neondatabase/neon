@@ -227,6 +227,18 @@ use crate::{
 
 use utils::id::{TenantId, TimelineId};
 
+// Occasional network issues and such can cause remote operations to fail, and
+// that's expected. If a download fails, we log it at info-level, and retry.
+// But after FAILED_DOWNLOAD_WARN_THRESHOLD retries, we start to log it at WARN
+// level instead, as repeated failures can mean a more serious problem. If it
+// fails more than FAILED_DOWNLOAD_RETRIES times, we give up
+const FAILED_DOWNLOAD_WARN_THRESHOLD: u32 = 3;
+const FAILED_DOWNLOAD_RETRIES: u32 = 10;
+
+// Similarly log failed uploads and deletions at WARN level, after this many
+// retries. Uploads and deletions are retried forever, though.
+const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+
 /// A client for accessing a timeline's data in remote storage.
 ///
 /// This takes care of managing the number of connections, and balancing them
@@ -977,12 +989,14 @@ impl RemoteTimelineClient {
                 Err(e) => {
                     let retries = task.retries.fetch_add(1, Ordering::SeqCst);
 
-                    // uploads may fail due to rate limts (IAM, S3) or spurious network and external errors
-                    // such issues are relatively regular, so don't use WARN or ERROR to avoid alerting
-                    // people and tests until the retries are definitely causing delays.
-                    if retries < 3 {
+                    // Uploads can fail due to rate limits (IAM, S3), spurious network problems,
+                    // or other external reasons. Such issues are relatively regular, so log them
+                    // at info level at first, and only WARN if the operation fails repeatedly.
+                    //
+                    // (See similar logic for downloads in `download::download_retry`)
+                    if retries < FAILED_UPLOAD_WARN_THRESHOLD {
                         info!(
-                            "failed to perform remote task {}, will retry (attempt {}): {:?}",
+                            "failed to perform remote task {}, will retry (attempt {}): {:#}",
                             task.op, retries, e
                         );
                     } else {
@@ -1146,6 +1160,39 @@ pub fn create_remote_timeline_client(
         upload_queue: Mutex::new(UploadQueue::Uninitialized),
         metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
     })
+}
+
+///
+/// Create GenericRemoteStorage client from the pageserver config
+///
+pub fn create_remote_storage_client(
+    conf: &'static PageServerConf,
+) -> anyhow::Result<Option<GenericRemoteStorage>> {
+    let config = if let Some(config) = &conf.remote_storage_config {
+        config
+    } else {
+        // No remote storage configured.
+        return Ok(None);
+    };
+
+    // Create the client
+    let mut remote_storage = GenericRemoteStorage::from_config(config)?;
+
+    // If `test_remote_failures` is non-zero, wrap the client with a
+    // wrapper that simulates failures.
+    if conf.test_remote_failures > 0 {
+        if !cfg!(feature = "testing") {
+            anyhow::bail!("test_remote_failures option is not available because pageserver was compiled without the 'testing' feature");
+        }
+        info!(
+            "Simulating remote failures for first {} attempts of each op",
+            conf.test_remote_failures
+        );
+        remote_storage =
+            GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
+    }
+
+    Ok(Some(remote_storage))
 }
 
 #[cfg(test)]

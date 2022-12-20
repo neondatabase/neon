@@ -12,14 +12,13 @@ use tracing::*;
 use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, profiling, task_mgr,
+    http, page_cache, page_service, profiling, storage_sync2, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
     },
     tenant_mgr, virtual_file,
 };
-use remote_storage::GenericRemoteStorage;
 use utils::{
     auth::JwtAuth,
     logging,
@@ -281,12 +280,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     };
 
     // Set up remote storage client
-    let remote_storage = conf
-        .remote_storage_config
-        .as_ref()
-        .map(GenericRemoteStorage::from_config)
-        .transpose()
-        .context("Failed to init generic remote storage")?;
+    let remote_storage = storage_sync2::create_remote_storage_client(conf)?;
 
     // Scan the local 'tenants/' directory and start loading the tenants
     BACKGROUND_RUNTIME.block_on(tenant_mgr::init_tenant_mgr(conf, remote_storage.clone()))?;

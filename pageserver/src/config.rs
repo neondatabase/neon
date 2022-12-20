@@ -143,6 +143,8 @@ pub struct PageServerConf {
 
     /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
+
+    pub test_remote_failures: u64,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -221,6 +223,8 @@ struct PageServerConfigBuilder {
     log_format: BuilderValue<LogFormat>,
 
     concurrent_tenant_size_logical_size_queries: BuilderValue<ConfigurableSemaphore>,
+
+    test_remote_failures: BuilderValue<u64>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -256,6 +260,8 @@ impl Default for PageServerConfigBuilder {
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
             concurrent_tenant_size_logical_size_queries: Set(ConfigurableSemaphore::default()),
+
+            test_remote_failures: Set(0),
         }
     }
 }
@@ -336,6 +342,10 @@ impl PageServerConfigBuilder {
         self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
     }
 
+    pub fn test_remote_failures(&mut self, fail_first: u64) {
+        self.test_remote_failures = BuilderValue::Set(fail_first);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         Ok(PageServerConf {
             listen_pg_addr: self
@@ -384,6 +394,9 @@ impl PageServerConfigBuilder {
                 .ok_or(anyhow!(
                     "missing concurrent_tenant_size_logical_size_queries"
                 ))?,
+            test_remote_failures: self
+                .test_remote_failures
+                .ok_or(anyhow!("missing test_remote_failuers"))?,
         })
     }
 }
@@ -555,6 +568,7 @@ impl PageServerConf {
                     let permits = NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
                     ConfigurableSemaphore::new(permits)
                 }),
+                "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -676,6 +690,7 @@ impl PageServerConf {
             broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+            test_remote_failures: 0,
         }
     }
 }
@@ -849,6 +864,7 @@ log_format = 'json'
                 )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                test_remote_failures: 0,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -893,6 +909,7 @@ log_format = 'json'
                 broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                test_remote_failures: 0,
             },
             "Should be able to parse all basic config values correctly"
         );
