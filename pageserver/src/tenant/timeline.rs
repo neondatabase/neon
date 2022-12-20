@@ -67,7 +67,6 @@ use crate::{is_temporary, task_mgr};
 use crate::{page_cache, storage_sync::index::LayerFileMetadata};
 
 use super::filename::LayerFileName;
-use super::remote_layer::{DownloadRetryState, DownloadState};
 use super::storage_layer::Layer;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -2922,93 +2921,20 @@ impl Timeline {
     pub async fn download_remote_layer(
         self: Arc<Self>,
         remote_layer: Arc<RemoteLayer>,
-    ) -> anyhow::Result<u64> {
-        let s = Arc::clone(&self);
-
-        // Start download task. The loop 'returns' a receiver which we'll await later.
-        // If there is already a download task running, we'll clone its receiver.
-        // If there was a failed download attempt in the past, we do exponential back-off sleep before retrying.
-        // If there was a successful download in the past, we simply report success.
-        let mut receiver = loop {
-            let backoff_until = {
-                let mut download_state = remote_layer.download_state.lock().unwrap();
-                match &mut *download_state {
-                    DownloadState::Running(updates) => {
-                        info!("download of layer has already started, waiting",);
-                        break updates.subscribe();
-                    }
-                    DownloadState::LayerMapUpdated { download_size } => {
-                        // Download was initiated and completed by some other task between
-                        // the point in time when we observed the `RemoteLayer` in the layer map
-                        // and the time we got here.
-                        // Don't report a download size to avoid double-accounting.
-                        // This call didn't initiate the download task.
-                        return Ok(*download_size);
-                    }
-                    DownloadState::NotStarted => {
-                        let (sender, receiver) = tokio::sync::watch::channel(());
-                        *download_state = DownloadState::Running(sender);
-                        s.download_remote_layer_spawn_task(Arc::clone(&remote_layer), None);
-                        break receiver;
-                    }
-                    DownloadState::Failed(retry_state) => {
-                        let backoff_until = retry_state.backoff_until;
-                        if tokio::time::Instant::now() > backoff_until {
-                            let (sender, receiver) = tokio::sync::watch::channel(());
-                            let mut st = DownloadState::Running(sender);
-                            std::mem::swap(&mut *download_state, &mut st);
-                            let retry_state = match st {
-                                DownloadState::Failed(retry_state) => retry_state,
-                                _ => unreachable!("we just swapped it out"),
-                            };
-                            s.download_remote_layer_spawn_task(
-                                Arc::clone(&remote_layer),
-                                Some(retry_state),
-                            );
-                            break receiver;
-                        } else {
-                            backoff_until
-                        }
-                    }
-                }
-            };
-            info!("layer download failed earlier, backoff until {backoff_until:?}");
-            // XXX should be sensitive to task_mgr cancellation?
-            tokio::time::sleep_until(backoff_until).await;
+    ) -> anyhow::Result<()> {
+        let permit = match Arc::clone(&remote_layer.ongoing_download)
+            .acquire_owned()
+            .await
+        {
+            Ok(permit) => permit,
+            Err(_closed) => {
+                info!("download of layer has already finished");
+                return Ok(());
+            }
         };
 
-        // Wait for the state to change, i.e., sender getting dropped
-        let _ = receiver.changed().await;
-
-        // Was it successful?
-        //
-        // We cannot return the Result we received directly, because it does not
-        // implement Clone. We need to construct a new Error from it.
-        match &*remote_layer.download_state.lock().unwrap() {
-            DownloadState::NotStarted => unreachable!(),
-            DownloadState::Running(_) => unreachable!(),
-            DownloadState::LayerMapUpdated { download_size } => Ok(*download_size),
-            DownloadState::Failed(retry_state) => {
-                // This error lands in the PageReconstructError future and might be bubbled far up the call stack.
-                // Repeat fully identifying information here.
-                bail!(
-                    "could not download layer file tenant={} timeline={} layer={}: {:?}",
-                    self.tenant_id,
-                    self.timeline_id,
-                    remote_layer.short_id(),
-                    retry_state.last_err,
-                );
-            }
-        }
-    }
-
-    fn download_remote_layer_spawn_task(
-        self: Arc<Self>,
-        remote_layer: Arc<RemoteLayer>,
-        retry_state: Option<DownloadRetryState>,
-    ) {
-        // Need to spawn, because the future returned by download_layer_file is
-        // not Sync. Spawn it in the storage sync runtime
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // Spawn a task so that download does not outlive timeline when we detach tenant / delete timeline.
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::RemoteDownloadTask,
@@ -3018,6 +2944,9 @@ impl Timeline {
             false,
             async move {
                 let remote_client = self.remote_client.as_ref().unwrap();
+
+                // Does retries + exponential back-off internally.
+                // When this fails, don't layer further retry attempts here.
                 let result = remote_client
                     .download_layer_file(&remote_layer.file_name, &remote_layer.layer_metadata)
                     .await;
@@ -3037,28 +2966,31 @@ impl Timeline {
                     }
                     layers.insert_historic(new_layer);
                     drop(layers);
+
+                    // Now that we've inserted the download into the layer map,
+                    // close the semaphore. This will make other waiters for
+                    // this download return Ok(()).
+                    assert!(!remote_layer.ongoing_download.is_closed());
+                    remote_layer.ongoing_download.close();
+                } else {
+                    // Keep semaphore open. We'll drop the permit at the end of the function.
                 }
 
-                // Notify waiters that the download has finished.
-                let mut state = remote_layer.download_state.lock().unwrap();
-                match &*state {
-                    DownloadState::Running(_sender) => (),
-                    _ => unreachable!("something is wrong with the task management"),
-                }
-                let new_state = match result {
-                    Ok(download_size) => DownloadState::LayerMapUpdated { download_size },
-                    Err(err) => {
-                        let retry_state = match retry_state {
-                            Some(s) => s.record_failure(err),
-                            None => DownloadRetryState::new(err),
-                        };
-                        DownloadState::Failed(retry_state)
-                    }
-                };
-                *state = new_state; // this drops the `sender` Running(), thereby waking up receivers
+                // Don't treat it as an error if the task that triggered the download
+                // is no longer interested in the result.
+                sender.send(result.map(|_sz| ())).ok();
+
+                // In case we failed and there are other waiters, this will make one
+                // of them retry the download in a new task.
+                // XXX: This resets the exponential backoff because it's a new call to
+                // download_layer file.
+                drop(permit);
+
                 Ok(())
             },
         );
+
+        receiver.await.context("download task cancelled")?
     }
 
     pub async fn spawn_download_all_remote_layers(
@@ -3110,7 +3042,6 @@ impl Timeline {
             task_id: format!("{task_id}"),
             state: DownloadRemoteLayersTaskState::Running,
             total_layer_count: 0,
-            successful_download_bytes: 0,
             successful_download_count: 0,
             failed_download_count: 0,
         };
@@ -3159,12 +3090,10 @@ impl Timeline {
             tokio::select! {
                 dl = downloads.next() => {
                     lock_status!(st);
-                    st.total_layer_count += 1;
                     match dl {
                         None => break,
-                        Some(Ok(sz)) => {
+                        Some(Ok(())) => {
                             st.successful_download_count += 1;
-                            st.successful_download_bytes += sz;
                         },
                         Some(Err(e)) => {
                             error!(error = %e, "layer download failed");

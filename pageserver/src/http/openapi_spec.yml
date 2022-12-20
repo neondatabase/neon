@@ -847,8 +847,6 @@ components:
           description: State of the operation.
         total_layer_count:
           type: integer
-        successful_download_bytes:
-          type: integer
         successful_download_count:
           type: integer
         failed_download_count:
