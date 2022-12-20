@@ -250,7 +250,7 @@ pub async fn handle_walreceiver_connection(
 
                         walingest
                             .ingest_record(recdata, lsn, &mut modification, &mut decoded)
-                            .context("could not ingest record at {lsn}")?;
+                            .with_context(|| format!("could not ingest record at {lsn}"))?;
 
                         fail_point!("walreceiver-after-ingest");
 
