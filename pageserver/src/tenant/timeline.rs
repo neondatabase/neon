@@ -3304,18 +3304,6 @@ where
     }
 }
 
-/// Like [`with_ondemand_download`], but for synchronous code.
-pub fn with_ondemand_download_sync<F, T>(
-    rt: &tokio::runtime::Runtime,
-    f: F,
-) -> Result<T, anyhow::Error>
-where
-    F: Send + Fn() -> Result<T, PageReconstructError>,
-    T: Send,
-{
-    rt.block_on(with_ondemand_download(f))
-}
-
 /// Helper function for get_reconstruct_data() to add the path of layers traversed
 /// to an error, as anyhow context information.
 fn layer_traversal_error(

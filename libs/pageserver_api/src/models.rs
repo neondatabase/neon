@@ -210,7 +210,6 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 }
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DownloadRemoteLayersTaskInfo {
     pub task_id: String,
@@ -221,7 +220,6 @@ pub struct DownloadRemoteLayersTaskInfo {
     pub failed_download_count: u64,     // stable once `completed`
 }
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum DownloadRemoteLayersTaskState {
     Running,
