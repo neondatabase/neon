@@ -392,9 +392,11 @@ impl Timeline {
     /// the Repository implementation may incorrectly return a value from an ancestor
     /// branch, for example, or waste a lot of cycles chasing the non-existing key.
     ///
-    pub fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
+    pub fn get(&self, key: Key, lsn: Lsn) -> PageReconstructResult<Bytes> {
         if !lsn.is_valid() {
-            return Err(PageReconstructError::Other(anyhow!("Invalid LSN")));
+            return PageReconstructResult::from(PageReconstructError::Other(anyhow!(
+                "Invalid LSN"
+            )));
         }
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
@@ -1526,7 +1528,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<(), PageReconstructError> {
+    ) -> PageReconstructResult<()> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -1641,7 +1643,7 @@ impl Timeline {
                 // If it's a remote layer, the caller can do the download and retry.
                 if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
                     info!("need remote layer {}", layer.traversal_id());
-                    return Err(PageReconstructError::NeedDownload(
+                    return PageReconstructResult::from(PageReconstructError::NeedDownload(
                         Weak::clone(&timeline.myself),
                         Arc::downgrade(&remote_layer),
                     ));
@@ -2835,7 +2837,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         mut data: ValueReconstructState,
-    ) -> Result<Bytes, PageReconstructError> {
+    ) -> PageReconstructResult<Bytes> {
         // Perform WAL redo if needed
         data.records.reverse();
 
@@ -2849,10 +2851,8 @@ impl Timeline {
                 );
                 Ok(img.clone())
             } else {
-                Err(PageReconstructError::Other(anyhow!(
-                    "base image for {} at {} not found",
-                    key,
-                    request_lsn
+                PageReconstructResult::from(PageReconstructError::Other(anyhow!(
+                    "base image for {key} at {request_lsn} not found"
                 )))
             }
         } else {
@@ -2861,7 +2861,7 @@ impl Timeline {
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
             if data.img.is_none() && !data.records.first().unwrap().1.will_init() {
-                Err(PageReconstructError::Other(anyhow!(
+                PageReconstructResult::from(PageReconstructError::Other(anyhow!(
                     "Base image for {} at {} not found, but got {} WAL records",
                     key,
                     request_lsn,
@@ -3129,6 +3129,12 @@ impl Timeline {
     }
 }
 
+pub enum PageReconstructResult<T> {
+    Success(T),
+    NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
+    Error(PageReconstructError),
+}
+
 /// An error happened in a get() operation.
 #[derive(thiserror::Error)]
 pub enum PageReconstructError {
@@ -3153,6 +3159,12 @@ impl std::fmt::Debug for PageReconstructError {
             // TODO: print more info about the missing layer
             PageReconstructError::NeedDownload(_, _) => write!(f, "need to download a layer"),
         }
+    }
+}
+
+impl<T> From<PageReconstructError> for PageReconstructResult<T> {
+    fn from(e: PageReconstructError) -> Self {
+        Self::Error(e)
     }
 }
 
@@ -3212,7 +3224,7 @@ impl std::fmt::Debug for PageReconstructError {
 ///
 pub async fn with_ondemand_download<F, T>(f: F) -> Result<T, anyhow::Error>
 where
-    F: Send + Fn() -> Result<T, PageReconstructError>,
+    F: Send + Fn() -> PageReconstructResult<T>,
     T: Send,
 {
     loop {
@@ -3244,7 +3256,7 @@ where
 fn layer_traversal_error(
     msg: String,
     path: Vec<(ValueReconstructResult, Lsn, TraversalId)>,
-) -> Result<(), PageReconstructError> {
+) -> PageReconstructResult<()> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
     let mut msg_iter = path
@@ -3261,7 +3273,7 @@ fn layer_traversal_error(
 
     // Append all subsequent traversals, and the error message 'msg', as contexts.
     let msg = msg_iter.fold(err, |err, msg| err.context(msg));
-    Err(PageReconstructError::Other(msg))
+    PageReconstructResult::from(PageReconstructError::Other(msg))
 }
 
 /// Various functions to mutate the timeline.

@@ -6,10 +6,10 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use super::tenant::PageReconstructError;
+use super::tenant::PageReconstructResult;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
-use crate::tenant::Timeline;
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
@@ -39,8 +39,6 @@ pub enum LsnForTimestamp {
 pub enum CalculateLogicalSizeError {
     #[error("cancelled")]
     Cancelled,
-    #[error(transparent)]
-    PageReconstruct(#[from] PageReconstructError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -100,9 +98,9 @@ impl Timeline {
         blknum: BlockNumber,
         lsn: Lsn,
         latest: bool,
-    ) -> Result<Bytes, PageReconstructError> {
+    ) -> PageReconstructResult<Bytes> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::from(anyhow::anyhow!(
+            return PageReconstructResult::from(PageReconstructError::from(anyhow::anyhow!(
                 "invalid relnode"
             )));
         }
@@ -127,7 +125,7 @@ impl Timeline {
         dbnode: Oid,
         lsn: Lsn,
         latest: bool,
-    ) -> Result<usize, PageReconstructError> {
+    ) -> PageReconstructResult<usize> {
         let mut total_blocks = 0;
 
         let rels = self.list_rels(spcnode, dbnode, lsn)?;
@@ -145,7 +143,7 @@ impl Timeline {
         tag: RelTag,
         lsn: Lsn,
         latest: bool,
-    ) -> Result<BlockNumber, PageReconstructError> {
+    ) -> PageReconstructResult<BlockNumber> {
         if tag.relnode == 0 {
             return Err(anyhow::anyhow!("invalid relnode").into());
         }
@@ -187,7 +185,7 @@ impl Timeline {
         tag: RelTag,
         lsn: Lsn,
         _latest: bool,
-    ) -> Result<bool, PageReconstructError> {
+    ) -> PageReconstructResult<bool> {
         if tag.relnode == 0 {
             return Err(anyhow::anyhow!("invalid relnode").into());
         }
@@ -212,7 +210,7 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         lsn: Lsn,
-    ) -> Result<HashSet<RelTag>, PageReconstructError> {
+    ) -> PageReconstructResult<HashSet<RelTag>> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = self.get(key, lsn)?;
@@ -236,7 +234,7 @@ impl Timeline {
         segno: u32,
         blknum: BlockNumber,
         lsn: Lsn,
-    ) -> Result<Bytes, PageReconstructError> {
+    ) -> PageReconstructResult<Bytes> {
         let key = slru_block_to_key(kind, segno, blknum);
         self.get(key, lsn)
     }
@@ -247,7 +245,7 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         lsn: Lsn,
-    ) -> Result<BlockNumber, PageReconstructError> {
+    ) -> PageReconstructResult<BlockNumber> {
         let key = slru_segment_size_to_key(kind, segno);
         let mut buf = self.get(key, lsn)?;
         Ok(buf.get_u32_le())
@@ -259,7 +257,7 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         lsn: Lsn,
-    ) -> Result<bool, PageReconstructError> {
+    ) -> PageReconstructResult<bool> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
         let buf = self.get(key, lsn)?;
@@ -279,7 +277,7 @@ impl Timeline {
     pub fn find_lsn_for_timestamp(
         &self,
         search_timestamp: TimestampTz,
-    ) -> Result<LsnForTimestamp, PageReconstructError> {
+    ) -> PageReconstructResult<LsnForTimestamp> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         let min_lsn = *gc_cutoff_lsn_guard;
         let max_lsn = self.get_last_record_lsn();
@@ -348,7 +346,7 @@ impl Timeline {
         probe_lsn: Lsn,
         found_smaller: &mut bool,
         found_larger: &mut bool,
-    ) -> Result<bool, PageReconstructError> {
+    ) -> PageReconstructResult<bool> {
         for segno in self.list_slru_segments(SlruKind::Clog, probe_lsn)? {
             let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, probe_lsn)?;
             for blknum in (0..nblocks).rev() {
@@ -377,7 +375,7 @@ impl Timeline {
         &self,
         kind: SlruKind,
         lsn: Lsn,
-    ) -> Result<HashSet<u32>, PageReconstructError> {
+    ) -> PageReconstructResult<HashSet<u32>> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
@@ -392,7 +390,7 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         lsn: Lsn,
-    ) -> Result<Bytes, PageReconstructError> {
+    ) -> PageReconstructResult<Bytes> {
         let key = relmap_file_key(spcnode, dbnode);
 
         let buf = self.get(key, lsn)?;
@@ -407,20 +405,13 @@ impl Timeline {
         Ok(dir.dbdirs)
     }
 
-    pub fn get_twophase_file(
-        &self,
-        xid: TransactionId,
-        lsn: Lsn,
-    ) -> Result<Bytes, PageReconstructError> {
+    pub fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> PageReconstructResult<Bytes> {
         let key = twophase_file_key(xid);
         let buf = self.get(key, lsn)?;
         Ok(buf)
     }
 
-    pub fn list_twophase_files(
-        &self,
-        lsn: Lsn,
-    ) -> Result<HashSet<TransactionId>, PageReconstructError> {
+    pub fn list_twophase_files(&self, lsn: Lsn) -> PageReconstructResult<HashSet<TransactionId>> {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
         let dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
@@ -428,11 +419,11 @@ impl Timeline {
         Ok(dir.xids)
     }
 
-    pub fn get_control_file(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
+    pub fn get_control_file(&self, lsn: Lsn) -> PageReconstructResult<Bytes> {
         self.get(CONTROLFILE_KEY, lsn)
     }
 
-    pub fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
+    pub fn get_checkpoint(&self, lsn: Lsn) -> PageReconstructResult<Bytes> {
         self.get(CHECKPOINT_KEY, lsn)
     }
 
@@ -1059,7 +1050,7 @@ impl<'a> DatadirModification<'a> {
 
     // Internal helper functions to batch the modifications
 
-    fn get(&self, key: Key) -> Result<Bytes, PageReconstructError> {
+    fn get(&self, key: Key) -> PageReconstructResult<Bytes> {
         // Have we already updated the same key? Read the pending updated
         // version in that case.
         //
