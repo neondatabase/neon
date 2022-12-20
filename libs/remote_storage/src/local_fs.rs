@@ -92,13 +92,17 @@ impl RemoteStorage for LocalFs {
             .collect())
     }
 
-    async fn list_prefixes(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    async fn list_prefixes(
+        &self,
+        prefix: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
         let path = match prefix {
             Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
             None => Cow::Borrowed(&self.storage_root),
         };
         Ok(get_all_files(path.as_ref(), false)
-            .await?
+            .await
+            .map_err(DownloadError::Other)?
             .into_iter()
             .map(|path| {
                 path.strip_prefix(&self.storage_root)

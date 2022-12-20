@@ -56,6 +56,11 @@ def test_remote_storage_backup_and_restore(
         test_name="test_remote_storage_backup_and_restore",
     )
 
+    # Exercise retry code path by making all uploads and downloads fail for the
+    # first time. The retries print INFO-messages to the log; we will check
+    # that they are present after the test.
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+
     data_id = 1
     data_secret = "very secret secret"
 
@@ -76,6 +81,7 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.allowed_errors.append(
         ".*Cannot attach tenant .*?, local tenant directory already exists.*"
     )
+    env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
@@ -86,16 +92,6 @@ def test_remote_storage_backup_and_restore(
     timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     checkpoint_numbers = range(1, 3)
-
-    # On the first iteration, exercise retry code path by making the uploads
-    # fail for the first 3 times
-    action = "3*return->off"
-    pageserver_http.configure_failpoints(
-        [
-            ("before-upload-layer", action),
-            ("before-upload-index", action),
-        ]
-    )
 
     for checkpoint_number in checkpoint_numbers:
         with pg.cursor() as cur:
@@ -117,6 +113,14 @@ def test_remote_storage_backup_and_restore(
         log.info(f"waiting for checkpoint {checkpoint_number} upload")
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
+
+    # Check that we had to retry the uploads
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    )
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    )
 
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()

@@ -1904,6 +1904,28 @@ class NeonPageserver(PgProtocol):
 
         assert not errors
 
+    def log_contains(self, pattern: str) -> Optional[str]:
+        """Check that the pageserver log contains a line that matches the given regex"""
+        logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
+
+        contains_re = re.compile(pattern)
+
+        # XXX: Our rust logging machinery buffers the messages, so if you
+        # call this function immediately after it's been logged, there is
+        # no guarantee it is already present in the log file. This hasn't
+        # been a problem in practice, our python tests are not fast enough
+        # to hit that race condition.
+        while True:
+            line = logfile.readline()
+            if not line:
+                break
+
+            if contains_re.search(line):
+                # found it!
+                return line
+
+        return None
+
 
 def append_pageserver_param_overrides(
     params_to_update: List[str],

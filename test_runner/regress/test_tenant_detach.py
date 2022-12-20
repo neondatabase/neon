@@ -32,6 +32,58 @@ def do_gc_target(
         log.info("gc http thread returning")
 
 
+# Basic detach and re-attach test
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+def test_tenant_reattach(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_tenant_reattach",
+    )
+
+    # Exercise retry code path by making all uploads and downloads fail for the
+    # first time. The retries print INFO-messages to the log; we will check
+    # that they are present after the test.
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    # create new nenant
+    tenant_id, timeline_id = env.neon_cli.create_tenant()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    with pg.cursor() as cur:
+        cur.execute("CREATE TABLE t(key int primary key, value text)")
+        cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    # Wait for the all data to be processed by the pageserver and uploaded in remote storage
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    # Check that we had to retry the uploads
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    )
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    )
+
+    pageserver_http.tenant_detach(tenant_id)
+    pageserver_http.tenant_attach(tenant_id)
+
+    with pg.cursor() as cur:
+        assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
+
+    # Check that we had to retry the downloads
+    assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
+    assert env.pageserver.log_contains(".*download.*failed, will retry.*")
+
+
 def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()

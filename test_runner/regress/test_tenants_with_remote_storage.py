@@ -121,6 +121,11 @@ def test_tenants_attached_after_download(
     data_id = 1
     data_secret = "very secret secret"
 
+    # Exercise retry code path by making all uploads and downloads fail for the
+    # first time. The retries print INFO-messages to the log; we will check
+    # that they are present after the test.
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
@@ -158,6 +163,14 @@ def test_tenants_attached_after_download(
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
+
+    # Check that we had to retry the uploads
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    )
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    )
 
     ##### Stop the pageserver, erase its layer file to force it being downloaded from S3
     env.postgres.stop_all()
@@ -210,6 +223,9 @@ def test_tenants_attached_after_download(
         tenant_id, timeline_id, include_non_incremental_physical_size=True
     )
     assert detail_before["current_physical_size"] == detail_after["current_physical_size"]
+
+    # Check that we had to retry the downloads
+    assert env.pageserver.log_contains(".*download .* succeeded after 1 retries.*")
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
