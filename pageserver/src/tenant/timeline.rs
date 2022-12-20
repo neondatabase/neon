@@ -1645,7 +1645,7 @@ impl Timeline {
                 if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
                     info!("need remote layer {}", layer.traversal_id());
                     return Err(PageReconstructError::NeedDownload(
-                        Weak::clone(&self.myself),
+                        Weak::clone(&timeline.myself),
                         Arc::downgrade(&remote_layer),
                     ));
                 }
