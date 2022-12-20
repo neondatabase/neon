@@ -177,21 +177,31 @@ impl OwnedRequester {
             // Safety: we are only one creating producers for to_worker
             let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
             let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
-            let c = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+            let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
 
             let mut req = req;
 
-            while !req.is_empty() {
+            loop {
                 let n = p.push_slice(req);
                 req = &req[n..];
 
-                if n == 0 {
-                    // TODO: this mutex does not need to be robust
-                    let g = m.lock().expect("cannot have process deaths here");
-                    let _ = c.wait_while(g, |_| p.is_full());
-                } else {
-                    std::thread::yield_now();
+                if req.is_empty() {
+                    cond.notify_one();
+                    break;
+                } else if n == 0 {
+                    match m.try_lock() {
+                        Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => {
+                            let _ = cond
+                                .wait_while(g, |_| p.is_full())
+                                .unwrap_or_else(|e| e.into_inner());
+                            continue;
+                        }
+                        Err(TryLockError::WouldBlock) => {
+                            cond.notify_one();
+                        }
+                    }
                 }
+                std::thread::yield_now();
             }
 
             // println!("sent {id}");
@@ -213,10 +223,10 @@ impl OwnedRequester {
         let mut g = g.unwrap();
         assert!(g.waiting.current_is_front());
 
-        // eprintln!("this is {id} reading next");
         {
             // Safety: we are the only one creating consumers for from_worker
             let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
+            let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
             let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
             let mut read = 0;
@@ -226,11 +236,23 @@ impl OwnedRequester {
                 read += n;
 
                 if read == resp.len() {
-                    break;
-                } else {
                     cond.notify_one();
-                    std::thread::yield_now();
+                    break;
+                } else if n == 0 {
+                    match m.try_lock() {
+                        Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => {
+                            let _g = cond
+                                .wait_while(g, |_| c.is_empty())
+                                .unwrap_or_else(|e| e.into_inner());
+                            continue;
+                        }
+                        Err(TryLockError::WouldBlock) => {
+                            cond.notify_one();
+                        }
+                    }
                 }
+
+                std::thread::yield_now();
             }
         }
 
@@ -251,6 +273,7 @@ pub struct OwnedResponder {
 impl OwnedResponder {
     pub fn read_exact(&mut self, buf: &mut [u8]) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
+        let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
         let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
 
         let mut read = 0;
@@ -260,9 +283,21 @@ impl OwnedResponder {
 
             read += n;
 
-            cond.notify_one();
             if read == buf.len() {
-                return n;
+                cond.notify_one();
+                return read;
+            } else if n == 0 {
+                match m.try_lock() {
+                    Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => {
+                        let _g = cond
+                            .wait_while(g, |_| c.is_empty())
+                            .unwrap_or_else(|e| e.into_inner());
+                        continue;
+                    }
+                    Err(TryLockError::WouldBlock) => {
+                        cond.notify_one();
+                    }
+                };
             }
 
             std::thread::yield_now();
@@ -271,38 +306,39 @@ impl OwnedResponder {
 
     pub fn write_all(&mut self, mut buf: &[u8]) -> usize {
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
-        let mutex = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
+        // FIXME: delete this, because I already tried to repurpose it for requester
+        let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
         let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
+        // let signal = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_requester) };
 
         if buf.is_empty() {
             return 0;
         }
 
-        // let mut busy = 0;
-
-        let mut guard = None;
         let len = buf.len();
 
         loop {
-            let wrote = p.push_slice(buf);
-            buf = &buf[wrote..];
+            let n = p.push_slice(buf);
+            buf = &buf[n..];
 
             if buf.is_empty() {
+                cond.notify_one();
                 return len;
-            } else {
-                if guard.is_none() {
-                    guard = Some(mutex.lock().unwrap_or_else(|e| e.into_inner()));
+            } else if n == 0 {
+                match m.try_lock() {
+                    Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => {
+                        let _g = cond
+                            .wait_while(g, |_| p.is_full())
+                            .unwrap_or_else(|e| e.into_inner());
+                        continue;
+                    }
+                    Err(TryLockError::WouldBlock) => {
+                        cond.notify_one();
+                    }
                 }
-                let g = guard.unwrap();
-                // busy += 1;
-                let g = cond
-                    .wait_while(g, |_| {
-                        // eprintln!("looping while full");
-                        p.is_full()
-                    })
-                    .unwrap_or_else(|e| e.into_inner());
-                guard = Some(g);
             }
+
+            std::thread::yield_now();
         }
     }
 }
