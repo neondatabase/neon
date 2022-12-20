@@ -35,7 +35,7 @@ use pq_proto::ReplicationFeedback;
 use utils::lsn::Lsn;
 
 /// Status of the connection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct WalConnectionStatus {
     /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
     pub is_connected: bool,
@@ -83,7 +83,7 @@ pub async fn handle_walreceiver_connection(
         streaming_lsn: None,
         commit_lsn: None,
     };
-    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
         return Ok(());
     }
@@ -135,7 +135,7 @@ pub async fn handle_walreceiver_connection(
     connection_status.latest_connection_update = Utc::now().naive_utc();
     connection_status.latest_wal_update = Utc::now().naive_utc();
     connection_status.commit_lsn = Some(end_of_wal);
-    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
         return Ok(());
     }
@@ -184,7 +184,20 @@ pub async fn handle_walreceiver_connection(
             replication_message = physical_stream.next() => replication_message,
         }
     } {
-        let replication_message = replication_message?;
+        let replication_message = match replication_message {
+            Ok(message) => message,
+            Err(replication_error) => {
+                if replication_error.is_closed() {
+                    info!("Replication stream got closed");
+                    return Ok(());
+                } else {
+                    return Err(
+                        anyhow::Error::new(replication_error).context("replication stream error")
+                    );
+                }
+            }
+        };
+
         let now = Utc::now().naive_utc();
         let last_rec_lsn_before_msg = last_rec_lsn;
 
@@ -207,7 +220,7 @@ pub async fn handle_walreceiver_connection(
             }
             &_ => {}
         };
-        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
             warn!("Wal connection event listener dropped, aborting the connection: {e}");
             return Ok(());
         }
@@ -273,8 +286,7 @@ pub async fn handle_walreceiver_connection(
         if !connection_status.has_processed_wal && last_rec_lsn > last_rec_lsn_before_msg {
             // We have successfully processed at least one WAL record.
             connection_status.has_processed_wal = true;
-            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone()))
-            {
+            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
                 warn!("Wal connection event listener dropped, aborting the connection: {e}");
                 return Ok(());
             }
