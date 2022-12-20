@@ -96,9 +96,15 @@ impl SharedMemPipePtr<Joined> {
 
 pub struct OwnedRequester {
     producer: std::sync::Mutex<u32>,
-    consumer: std::sync::Mutex<u32>,
+    consumer: std::sync::Mutex<Wakeup>,
     not_my_time: std::sync::Condvar,
     ptr: SharedMemPipePtr<Created>,
+}
+
+#[derive(Default)]
+struct Wakeup {
+    waiting: std::collections::VecDeque<Option<std::thread::Thread>>,
+    next: u32,
 }
 
 impl OwnedRequester {
@@ -133,16 +139,37 @@ impl OwnedRequester {
             id
         };
 
-        let g = self.consumer.lock().unwrap();
-        // wait until it's our turn
-        let mut g = self
-            .not_my_time
-            .wait_while(g, |g| {
-                // println!("waiting for {id} turn to read, {} now", *g);
-                *g != id
-            })
-            .unwrap();
+        let mut g = self.consumer.lock().unwrap();
 
+        let distance = id.wrapping_sub(g.next);
+
+        while g.waiting.len() <= distance as usize {
+            g.waiting.push_back(None);
+        }
+        assert!(g.waiting[distance as usize].is_none());
+        g.waiting[distance as usize] = Some(std::thread::current());
+
+        // wait until it's our turn
+        /*let mut g = self
+        .not_my_time
+        .wait_while(g, |g| {
+            // println!("waiting for {id} turn to read, {} now", *g);
+            *g.next != id
+        })
+        .unwrap();*/
+
+        let mut g = Some(g);
+
+        while g.as_ref().unwrap().next != id {
+            g.take();
+            std::thread::park();
+
+            g = Some(self.consumer.lock().unwrap());
+        }
+
+        let mut g = g.unwrap();
+
+        // eprintln!("this is {id} reading next");
         {
             // Safety: we are the only one creating consumers for from_worker
             let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
@@ -163,10 +190,17 @@ impl OwnedRequester {
             }
         }
 
-        *g = g.wrapping_add(1);
+        g.next = g.next.wrapping_add(1);
         // there is a crate for better futex usage, which would allow to wake up only the one
         // correct
-        self.not_my_time.notify_all();
+        //self.not_my_time.notify_all();
+        g.waiting.pop_front();
+
+        if let Some(first) = g.waiting.front().and_then(|x| x.as_ref()) {
+            first.unpark();
+            // otherwise we don't need to unpark, because that thread has not yet arrived to the
+            // scene.
+        }
     }
 }
 
