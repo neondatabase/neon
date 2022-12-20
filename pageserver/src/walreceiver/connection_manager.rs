@@ -95,8 +95,6 @@ pub fn spawn_connection_manager_task(
     );
 }
 
-const MAX_BROKER_IDLE_WAIT: Duration = Duration::from_secs(90);
-
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
 /// Based on the updates, desides whether to start, keep or stop a WAL receiver task.
 /// If storage broker subscription is cancelled, exits.
@@ -208,24 +206,18 @@ async fn connection_manager_loop_step(
                 }
             },
 
-            (idle_time, timed_out) = async {
+            Some(()) = async {
                 match time_until_next_retry {
-                    Some(time_until_next_retry) => {
-                        tokio::time::sleep(time_until_next_retry).await;
-                        (time_until_next_retry, false)
+                    Some(sleep_time) => {
+                        tokio::time::sleep(sleep_time).await;
+                        Some(())
                     },
                     None => {
-                        tokio::time::sleep(MAX_BROKER_IDLE_WAIT).await;
-                        (MAX_BROKER_IDLE_WAIT, true)
+                        debug!("No candidates to retry, waiting indefinitely for the broker events");
+                        None
                     }
                 }
-            } => {
-                if timed_out {
-                    warn!("Got no broker or walreceiver events after waiting for {idle_time:?}")
-                } else {
-                    debug!("Waking up for the next retry after waiting for {idle_time:?}")
-                }
-            }
+            } => debug!("Waking up for the next retry after waiting for {time_until_next_retry:?}"),
         }
 
         if let Some(new_candidate) = walreceiver_state.next_connection_candidate() {
