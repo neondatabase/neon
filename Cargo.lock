@@ -2275,6 +2275,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "shmempipe",
  "signal-hook",
  "storage_broker",
  "svg_fmt",

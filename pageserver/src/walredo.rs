@@ -101,6 +101,7 @@ pub struct PostgresRedoManager {
     tenant_id: TenantId,
     conf: &'static PageServerConf,
 
+    pipe: Option<std::sync::Arc<shmempipe::OwnedRequester>>,
     process: Mutex<Option<PostgresRedoProcess>>,
 }
 
@@ -206,10 +207,15 @@ impl PostgresRedoManager {
     ///
     pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
+        let pipe = shmempipe::create(&std::path::Path::new(&format!("/walredo-{tenant_id}")))
+            .map(|x| x.try_acquire_requester())
+            .ok()
+            .and_then(|x| x);
         PostgresRedoManager {
             tenant_id,
             conf,
             process: Mutex::new(None),
+            pipe,
         }
     }
 
@@ -238,10 +244,13 @@ impl PostgresRedoManager {
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
+        // Relational WAL records are applied using wal-redo-postgres
+        let buf_tag = BufferTag { rel, blknum };
 
         let start_time = Instant::now();
 
         let mut process_guard = self.process.lock().unwrap();
+
         let lock_time = Instant::now();
 
         // launch the WAL redo process on first use
@@ -249,12 +258,55 @@ impl PostgresRedoManager {
             let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
             *process_guard = Some(p);
         }
+
+        if let Some(pipe) = self.pipe.as_ref() {
+            drop(process_guard);
+            let tag_len = 1 + 4 * 4;
+            let ch = 1;
+            let len = 4;
+
+            let mut buf = Vec::with_capacity(
+                (ch + len + tag_len)
+                    + base_img
+                        .as_ref()
+                        .map(|_| ch + len + tag_len + 8192)
+                        .unwrap_or(0)
+                    + records
+                        .iter()
+                        .map(|(_, rec)| match rec {
+                            NeonWalRecord::Postgres { rec, .. } => ch + len + 8 + rec.len(),
+                            _ => 0,
+                        })
+                        .sum::<usize>()
+                    + (ch + len + tag_len),
+            );
+
+            build_begin_redo_for_block_msg(buf_tag, &mut buf);
+
+            if let Some(page) = base_img {
+                build_push_page_msg(buf_tag, &page, &mut buf);
+            }
+
+            records.iter().for_each(|(endlsn, rec)| match rec {
+                NeonWalRecord::Postgres { rec, .. } => {
+                    build_apply_record_msg(*endlsn, rec, &mut buf)
+                }
+                _ => unreachable!(),
+            });
+
+            build_get_page_msg(buf_tag, &mut buf);
+
+            let mut b = [0u8; 8192];
+
+            pipe.request_response(&buf, &mut b);
+
+            return Ok(Bytes::copy_from_slice(&b));
+        }
+
         let process = process_guard.as_mut().unwrap();
 
         WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
 
-        // Relational WAL records are applied using wal-redo-postgres
-        let buf_tag = BufferTag { rel, blknum };
         let result = process
             .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
             .map_err(WalRedoError::IoError);
@@ -677,6 +729,7 @@ impl PostgresRedoProcess {
         // Start postgres itself
         let child = Command::new(pg_bin_dir_path.join("postgres"))
             .arg("--wal-redo")
+            .arg("--disable-seccomp")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
@@ -684,6 +737,7 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("PGDATA", &datadir)
+            .env("WALREDO_TENANT", tenant_id.to_string())
             // The redo process is not trusted, and runs in seccomp mode that
             // doesn't allow it to open any files. We have to also make sure it
             // doesn't inherit any file descriptors from the pageserver, that
