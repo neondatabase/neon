@@ -39,8 +39,13 @@ mod pthread {
 
     use super::Locked;
 
-    #[repr(transparent)]
-    pub struct Mutex(libc::pthread_mutex_t, std::marker::PhantomPinned);
+    // this was quite tricky to understand first, but in shared memory app these same mutexes
+    // appear in different addresses. in order to do the cond variable mutex check, we must instead
+    // compare identities.
+    static MUTEX_ID_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    #[repr(C)]
+    pub struct Mutex(libc::pthread_mutex_t, u32, std::marker::PhantomPinned);
 
     impl Mutex {
         // Using MaybeUninit::assume_init might move which is why there are the other variants
@@ -67,6 +72,12 @@ mod pthread {
 
             // Safety: ffi
             unsafe { cvt_nz(libc::pthread_mutex_init(mutex, attr.0.as_ptr())) }?;
+
+            let id = MUTEX_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            let id_slot = unsafe { std::ptr::addr_of_mut!((*place.as_mut_ptr()).1) };
+
+            unsafe { id_slot.write(id) };
 
             unsafe {
                 // Safety: it is now initialized, and we hope it doesn't move
@@ -222,10 +233,13 @@ mod pthread {
     }
 
     /// Following std implementation, but in-place.
+    // repr(c) as this is one of the structures used to communicate, we don't want fields to be
+    // reordered differently in two users.
+    #[repr(C)]
     pub struct Condvar {
-        inner: libc::pthread_cond_t,
         /// Used to check against "using different mutexes is UB".
-        mutex: std::sync::atomic::AtomicPtr<libc::pthread_mutex_t>,
+        mutex: std::sync::atomic::AtomicU32,
+        inner: libc::pthread_cond_t,
         _marker: std::marker::PhantomPinned,
     }
 
@@ -253,23 +267,27 @@ mod pthread {
             drop(attr);
 
             let mutex = unsafe { std::ptr::addr_of_mut!((*place.as_mut_ptr()).mutex) };
-            unsafe { mutex.write(std::sync::atomic::AtomicPtr::default()) };
+            unsafe { mutex.write(std::sync::atomic::AtomicU32::default()) };
 
             // Safety: all fields are initialized
             unsafe { Ok(Pin::new_unchecked(place.assume_init_mut())) }
         }
 
-        fn verify(self: Pin<&Self>, mutex: *mut libc::pthread_mutex_t) {
+        #[track_caller]
+        fn verify(self: Pin<&Self>, mutex: Pin<&Mutex>) {
             use std::sync::atomic::Ordering::Relaxed;
             // Relaxed is enough for this check which can be raced by other threads, no additional
             // effects are depended on
-            match self
-                .mutex
-                .compare_exchange(std::ptr::null_mut(), mutex, Relaxed, Relaxed)
-            {
+
+            let id = mutex.1;
+
+            match self.mutex.compare_exchange(0, id, Relaxed, Relaxed) {
                 Ok(_) => {}
-                Err(same) if same == mutex => {}
-                Err(_other) => panic!("misusing same condvar with different mutexes"),
+                Err(same) if same == id => {}
+                Err(_other) => panic!(
+                    "misusing same condvar with different mutexes, {:?} vs. {:?}",
+                    id, _other
+                ),
             }
         }
 
@@ -290,9 +308,10 @@ mod pthread {
             cvt_nz(res).expect("notify_all failed");
         }
 
+        #[track_caller]
         pub(super) fn wait(self: Pin<&Self>, mutex: Pin<&Mutex>) -> Locked<()> {
-            let mutex = mutex.inner();
             self.verify(mutex);
+            let mutex = mutex.inner();
             let inner = self.inner();
             let res = unsafe { libc::pthread_cond_wait(inner, mutex) };
             match res {
@@ -304,13 +323,14 @@ mod pthread {
             }
         }
 
+        #[track_caller]
         pub(super) fn wait_timeout(
             self: Pin<&Self>,
             dur: std::time::Duration,
             mutex: Pin<&Mutex>,
         ) -> Locked<bool> {
-            let mutex = mutex.inner();
             self.verify(mutex);
+            let mutex = mutex.inner();
 
             #[cfg(target_pointer_width = "32")]
             compile_error!("check all the abi complications with x64_32 or other 32-bit");
@@ -824,6 +844,7 @@ impl PinnedCondvar {
         inner.notify_all();
     }
 
+    #[track_caller]
     pub fn wait<'a, T>(
         self: Pin<&Self>,
         guard: MutexGuard<'a, T>,
@@ -837,6 +858,7 @@ impl PinnedCondvar {
         }
     }
 
+    #[track_caller]
     pub fn wait_timeout<'a, T>(
         self: Pin<&Self>,
         guard: MutexGuard<'a, T>,
@@ -851,6 +873,7 @@ impl PinnedCondvar {
         }
     }
 
+    #[track_caller]
     pub fn wait_while<'a, F, T>(
         self: Pin<&Self>,
         mut guard: MutexGuard<'a, T>,
@@ -878,6 +901,7 @@ impl PinnedCondvar {
         }
     }
 
+    #[track_caller]
     pub fn wait_timeout_while<'a, F, T>(
         self: Pin<&Self>,
         mut guard: MutexGuard<'a, T>,

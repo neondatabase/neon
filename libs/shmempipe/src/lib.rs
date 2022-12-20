@@ -837,6 +837,7 @@ fn join_initialized_at(
     let inner = res.ptr();
     let place = unsafe { inner.cast::<MaybeUninit<RawSharedMemPipe>>().as_mut() };
 
+    // NOTE: here cannot be any mutex initialization
     {
         let magic = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).magic)
