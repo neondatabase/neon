@@ -11,7 +11,7 @@ use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
 use crate::tenant::Timeline;
 use crate::walrecord::NeonWalRecord;
-use ::anyhow::{self, anyhow, bail, ensure, Context};
+use anyhow::Context;
 use bytes::{Buf, Bytes};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
@@ -102,7 +102,9 @@ impl Timeline {
         latest: bool,
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(anyhow!("invalid relnode").into());
+            return Err(PageReconstructError::from(anyhow::anyhow!(
+                "invalid relnode"
+            )));
         }
 
         let nblocks = self.get_rel_size(tag, lsn, latest)?;
@@ -145,7 +147,7 @@ impl Timeline {
         latest: bool,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(anyhow!("invalid relnode").into());
+            return Err(anyhow::anyhow!("invalid relnode").into());
         }
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
@@ -187,7 +189,7 @@ impl Timeline {
         _latest: bool,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(anyhow!("invalid relnode").into());
+            return Err(anyhow::anyhow!("invalid relnode").into());
         }
 
         // first try to lookup relation in cache
@@ -644,7 +646,7 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         rec: NeonWalRecord,
     ) -> anyhow::Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
         Ok(())
     }
@@ -671,7 +673,7 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> anyhow::Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
     }
@@ -721,7 +723,7 @@ impl<'a> DatadirModification<'a> {
         let buf = self.get(TWOPHASEDIR_KEY)?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
         if !dir.xids.insert(xid) {
-            bail!("twophase file for xid {} already exists", xid);
+            anyhow::bail!("twophase file for xid {} already exists", xid);
         }
         self.put(
             TWOPHASEDIR_KEY,
@@ -772,7 +774,7 @@ impl<'a> DatadirModification<'a> {
     ///
     /// 'nblocks' is the initial size.
     pub fn put_rel_creation(&mut self, rel: RelTag, nblocks: BlockNumber) -> anyhow::Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY)?)?;
@@ -792,7 +794,7 @@ impl<'a> DatadirModification<'a> {
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            bail!("rel {} already exists", rel);
+            anyhow::bail!("rel {rel} already exists");
         }
         self.put(
             rel_dir_key,
@@ -816,7 +818,7 @@ impl<'a> DatadirModification<'a> {
 
     /// Truncate relation
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> anyhow::Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         let last_lsn = self.tline.get_last_record_lsn();
         if self.tline.get_rel_exists(rel, last_lsn, true)? {
             let size_key = rel_size_to_key(rel);
@@ -842,7 +844,7 @@ impl<'a> DatadirModification<'a> {
     /// Extend relation
     /// If new size is smaller, do nothing.
     pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> anyhow::Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
 
         // Put size
         let size_key = rel_size_to_key(rel);
@@ -863,7 +865,7 @@ impl<'a> DatadirModification<'a> {
 
     /// Drop a relation.
     pub fn put_rel_drop(&mut self, rel: RelTag) -> anyhow::Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
 
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
@@ -902,7 +904,7 @@ impl<'a> DatadirModification<'a> {
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.insert(segno) {
-            bail!("slru segment {:?}/{} already exists", kind, segno);
+            anyhow::bail!("slru segment {kind:?}/{segno} already exists");
         }
         self.put(
             dir_key,
@@ -1072,7 +1074,7 @@ impl<'a> DatadirModification<'a> {
                 // work directly with Images, and we never need to read actual
                 // data pages. We could handle this if we had to, by calling
                 // the walredo manager, but let's keep it simple for now.
-                return Err(anyhow!("unexpected pending WAL record").into());
+                return Err(anyhow::anyhow!("unexpected pending WAL record").into());
             }
         } else {
             let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
@@ -1438,7 +1440,7 @@ pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
             },
             key.field6,
         ),
-        _ => bail!("unexpected value kind 0x{:02x}", key.field1),
+        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
     })
 }
 
@@ -1464,14 +1466,14 @@ pub fn key_to_slru_block(key: Key) -> anyhow::Result<(SlruKind, u32, BlockNumber
                 0x00 => SlruKind::Clog,
                 0x01 => SlruKind::MultiXactMembers,
                 0x02 => SlruKind::MultiXactOffsets,
-                _ => bail!("unrecognized slru kind 0x{:02x}", key.field2),
+                _ => anyhow::bail!("unrecognized slru kind 0x{:02x}", key.field2),
             };
             let segno = key.field4;
             let blknum = key.field6;
 
             (kind, segno, blknum)
         }
-        _ => bail!("unexpected value kind 0x{:02x}", key.field1),
+        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
     })
 }
 

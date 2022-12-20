@@ -91,9 +91,7 @@ mod timeline;
 
 pub mod size;
 
-pub use timeline::PageReconstructError;
-pub use timeline::Timeline;
-pub use timeline::{with_ondemand_download, with_ondemand_download_sync};
+pub use timeline::{with_ondemand_download, PageReconstructError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
