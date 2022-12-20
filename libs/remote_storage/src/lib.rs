@@ -164,18 +164,16 @@ impl Deref for GenericRemoteStorage {
 }
 
 impl GenericRemoteStorage {
-    pub fn from_config(
-        storage_config: &RemoteStorageConfig,
-    ) -> anyhow::Result<GenericRemoteStorage> {
+    pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => {
                 info!("Using fs root '{}' as a remote storage", root.display());
-                GenericRemoteStorage::LocalFs(LocalFs::new(root.clone())?)
+                Self::LocalFs(LocalFs::new(root.clone())?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
                 info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
-                GenericRemoteStorage::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
+                Self::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
             }
         })
     }
