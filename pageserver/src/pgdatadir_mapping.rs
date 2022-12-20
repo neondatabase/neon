@@ -450,7 +450,10 @@ impl Timeline {
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in crate::tenant::retry_get(|| self.list_rels(*spcnode, *dbnode, lsn)).await? {
+            for rel in
+                crate::tenant::with_ondemand_download(|| self.list_rels(*spcnode, *dbnode, lsn))
+                    .await?
+            {
                 if cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
