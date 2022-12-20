@@ -1487,7 +1487,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
         match self.local_path() {
             Some(local_path) => {
                 debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", self.get_timeline_id())),
-                    "need timeline ID to uniquely identify the layer when tranversal crosses ancestor boundary",
+                    "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
                 );
                 format!("{}", local_path.display())
             }
@@ -3022,7 +3022,7 @@ impl Timeline {
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
                  match &mut *status_guard {
                     None => {
-                        warn!("tasks tatus is supposed to be Some(), since we are running");
+                        warn!("tasks status is supposed to be Some(), since we are running");
                     }
                     Some(st) => {
                         let exp_task_id = format!("{}", task_mgr::current_task_id().unwrap());
