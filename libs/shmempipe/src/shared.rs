@@ -741,6 +741,41 @@ impl<T> PinnedMutex<T> {
     }
 }
 
+/// Helper trait to help working with especially `Result<_, TryLockError>`.
+pub trait IntoGuard {
+    type GuardType;
+    fn into_guard(self) -> Self::GuardType;
+
+    fn previous_owner_died(&self) -> bool;
+}
+
+impl<'a, T> IntoGuard for Result<MutexGuard<'a, T>, PreviousOwnerDied<MutexGuard<'a, T>>> {
+    type GuardType = MutexGuard<'a, T>;
+
+    fn into_guard(self) -> Self::GuardType {
+        self.unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn previous_owner_died(&self) -> bool {
+        matches!(self, Err(_))
+    }
+}
+
+impl<'a, T> IntoGuard for Result<MutexGuard<'a, T>, TryLockError<MutexGuard<'a, T>>> {
+    type GuardType = Option<MutexGuard<'a, T>>;
+
+    fn into_guard(self) -> Self::GuardType {
+        match self {
+            Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => Some(g),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    fn previous_owner_died(&self) -> bool {
+        matches!(self, Err(TryLockError::PreviousOwnerDied(_)))
+    }
+}
+
 /// Signals that previous owner of the lock had died, similar to [`std::sync::PoisonError`].
 ///
 /// Lock has now been repaired pthread-wise, but the protected data structure might be

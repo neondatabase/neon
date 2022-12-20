@@ -831,12 +831,6 @@ static size_t stdin_ptr = 0;	/* # of bytes already consumed */
 static ssize_t
 buffered_read(void *buf, size_t count)
 {
-#ifdef HAVE_SHMEMPIPE
-	if (shmempipe != NULL)
-	{
-		return shmempipe_read_exact(shmempipe, buf, count);
-	}
-#endif
 	char	   *dst = buf;
 
 	while (count > 0)
@@ -847,7 +841,14 @@ buffered_read(void *buf, size_t count)
 		{
 			ssize_t		ret;
 
-			ret = read(STDIN_FILENO, stdin_buf, sizeof(stdin_buf));
+#ifdef HAVE_SHMEMPIPE
+			if (shmempipe != NULL)
+			{
+				ret = shmempipe_read(shmempipe, stdin_buf, sizeof(stdin_buf));
+			}
+			else
+#endif
+				ret = read(STDIN_FILENO, stdin_buf, sizeof(stdin_buf));
 			if (ret < 0)
 			{
 				/* don't do anything here that could set 'errno' */

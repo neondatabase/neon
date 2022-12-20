@@ -6,10 +6,10 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
 
 use nix::sys::mman::{MapFlags, ProtFlags};
-use shared::TryLockError;
+use shared::{IntoGuard, TryLockError};
 
 pub mod shared;
 
@@ -29,8 +29,12 @@ pub struct RawSharedMemPipe {
     /// - 0xffff_ffff means tearing down
     pub magic: AtomicU32,
 
+    /// The processes participating in this.
+    ///
+    /// First is the pageserver process, second is the single threaded walredo process.
     pub participants: [shared::PinnedMutex<Option<u32>>; 2],
 
+    pub to_worker_waiters: AtomicU32,
     pub to_worker_writer: shared::PinnedMutex<()>,
     pub to_worker_cond: shared::PinnedCondvar,
 
@@ -73,7 +77,6 @@ impl SharedMemPipePtr<Created> {
         Some(std::sync::Arc::new(OwnedRequester {
             producer: std::sync::Mutex::default(),
             consumer: std::sync::Mutex::default(),
-            not_my_time: std::sync::Condvar::new(),
             ptr: self,
         }))
     }
@@ -97,7 +100,6 @@ impl SharedMemPipePtr<Joined> {
 pub struct OwnedRequester {
     producer: std::sync::Mutex<u32>,
     consumer: std::sync::Mutex<Wakeup>,
-    not_my_time: std::sync::Condvar,
     ptr: SharedMemPipePtr<Created>,
 }
 
@@ -169,49 +171,11 @@ impl UnparkInOrder {
 impl OwnedRequester {
     pub fn request_response(&self, req: &[u8], resp: &mut [u8]) {
         // Overview:
-        // - self.producer creates an order amongst competing request_response callers (id).
+        // - `self.producer` creates an order amongst competing request_response callers (id).
         // - the same token (id) is used to find some order with `self.consumer` to read the
         // response
 
-        let id = {
-            let mut g = self.producer.lock().unwrap();
-
-            let id = *g;
-            *g = g.wrapping_add(1);
-
-            // Safety: we are only one creating producers for to_worker
-            let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
-            let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
-            let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
-
-            let mut req = req;
-
-            loop {
-                let n = p.push_slice(req);
-                req = &req[n..];
-
-                if req.is_empty() {
-                    cond.notify_one();
-                    break;
-                } else if n == 0 {
-                    match m.try_lock() {
-                        Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => {
-                            let _ = cond
-                                .wait_while(g, |_| p.is_full())
-                                .unwrap_or_else(|e| e.into_inner());
-                            continue;
-                        }
-                        Err(TryLockError::WouldBlock) => {
-                            cond.notify_one();
-                        }
-                    }
-                }
-                std::thread::yield_now();
-            }
-
-            // println!("sent {id}");
-            id
-        };
+        let id = self.send_request(req);
 
         let mut g = self.consumer.lock().unwrap();
         let distance = id.wrapping_sub(g.next) as usize;
@@ -225,14 +189,77 @@ impl OwnedRequester {
             g = Some(self.consumer.lock().unwrap());
         }
 
-        let mut g = g.unwrap();
+        let g = g.unwrap();
         assert!(g.waiting.current_is_front());
+
+        let mut g = self.recv_response(id, g, resp);
+
+        g.next = g.next.wrapping_add(1);
+        g.waiting.pop_current();
+        g.waiting.unpark_front();
+    }
+
+    fn send_request(&self, req: &[u8]) -> u32 {
+        let mut g = self.producer.lock().unwrap();
+
+        let mut might_wait = self.ptr.to_worker_waiters.fetch_add(1, Release) == 0;
+
+        let id = *g;
+        *g = g.wrapping_add(1);
+
+        // Safety: we are only one creating producers for to_worker
+        let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
+        let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
+        let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+
+        {
+            let mut req = req;
+
+            loop {
+                let n = p.push_slice(req);
+                req = &req[n..];
+
+                if req.is_empty() {
+                    break;
+                } else if n == 0 {
+                    let g = if might_wait {
+                        Some(m.lock().into_guard())
+                    } else {
+                        m.try_lock().into_guard()
+                    };
+                    if g.is_some() {
+                        might_wait = false;
+                        cond.notify_one();
+                    }
+                }
+                std::thread::yield_now();
+            }
+        }
+
+        drop(g);
+
+        // always after the write make sure that the worker has progressed
+        if might_wait {
+            let _g = m.lock().into_guard();
+            cond.notify_one();
+        }
+
+        id
+    }
+
+    fn recv_response<'a>(
+        &self,
+        id: u32,
+        g: std::sync::MutexGuard<'a, Wakeup>,
+        resp: &mut [u8],
+    ) -> std::sync::MutexGuard<'a, Wakeup> {
+        assert_eq!(g.next, id);
 
         {
             // Safety: we are the only one creating consumers for from_worker
             let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
-            let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
-            let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
+            let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
+            let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
             let mut read = 0;
             loop {
@@ -241,29 +268,17 @@ impl OwnedRequester {
                 read += n;
 
                 if read == resp.len() {
-                    cond.notify_one();
                     break;
-                } else if n == 0 {
-                    match m.try_lock() {
-                        Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => {
-                            let _g = cond
-                                .wait_while(g, |_| c.is_empty())
-                                .unwrap_or_else(|e| e.into_inner());
-                            continue;
-                        }
-                        Err(TryLockError::WouldBlock) => {
-                            cond.notify_one();
-                        }
-                    }
                 }
 
                 std::thread::yield_now();
             }
+
+            // now the wait on the condition can start on `postgres --wal-redo` side
+            self.ptr.to_worker_waiters.fetch_sub(1, Release);
         }
 
-        g.next = g.next.wrapping_add(1);
-        g.waiting.pop_current();
-        g.waiting.unpark_front();
+        g
     }
 }
 
@@ -276,7 +291,7 @@ pub struct OwnedResponder {
 }
 
 impl OwnedResponder {
-    pub fn read_exact(&mut self, buf: &mut [u8]) -> usize {
+    pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
         let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
         let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
@@ -288,21 +303,15 @@ impl OwnedResponder {
 
             read += n;
 
-            if read == buf.len() {
-                cond.notify_one();
+            if read > 0 {
                 return read;
-            } else if n == 0 {
-                match m.try_lock() {
-                    Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => {
-                        let _g = cond
-                            .wait_while(g, |_| c.is_empty())
-                            .unwrap_or_else(|e| e.into_inner());
-                        continue;
-                    }
-                    Err(TryLockError::WouldBlock) => {
-                        cond.notify_one();
-                    }
-                };
+            } else if n == 0 && self.ptr.to_worker_waiters.load(Acquire) == 0 {
+                if let Some(g) = m.try_lock().into_guard() {
+                    let _g = cond
+                        .wait_while(g, |_| c.is_empty())
+                        .unwrap_or_else(|e| e.into_inner());
+                    continue;
+                }
             }
 
             std::thread::yield_now();
@@ -311,10 +320,8 @@ impl OwnedResponder {
 
     pub fn write_all(&mut self, mut buf: &[u8]) -> usize {
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
-        // FIXME: delete this, because I already tried to repurpose it for requester
-        let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
-        let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
-        // let signal = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_requester) };
+        let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
+        let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
         if buf.is_empty() {
             return 0;
@@ -327,20 +334,7 @@ impl OwnedResponder {
             buf = &buf[n..];
 
             if buf.is_empty() {
-                cond.notify_one();
                 return len;
-            } else if n == 0 {
-                match m.try_lock() {
-                    Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => {
-                        let _g = cond
-                            .wait_while(g, |_| p.is_full())
-                            .unwrap_or_else(|e| e.into_inner());
-                        continue;
-                    }
-                    Err(TryLockError::WouldBlock) => {
-                        cond.notify_one();
-                    }
-                }
             }
 
             std::thread::yield_now();
@@ -379,11 +373,7 @@ pub extern "C" fn shmempipe_open_via_env() -> *mut OwnedResponder {
 }
 
 #[no_mangle]
-pub extern "C" fn shmempipe_read_exact(
-    resp: *mut OwnedResponder,
-    buffer: *mut u8,
-    len: u32,
-) -> isize {
+pub extern "C" fn shmempipe_read(resp: *mut OwnedResponder, buffer: *mut u8, len: u32) -> isize {
     if resp.is_null() || buffer.is_null() {
         return -1;
     }
@@ -392,7 +382,7 @@ pub extern "C" fn shmempipe_read_exact(
     }
     let mut target = unsafe { Box::from_raw(resp) };
     let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len as usize) };
-    let ret = target.read_exact(buffer);
+    let ret = target.read(buffer);
     std::mem::forget(target);
     ret as isize
 }
@@ -531,6 +521,18 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
                 }
             }
         }
+    }
+
+    {
+        let to_worker_waiters = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_waiters)
+                .cast::<MaybeUninit<AtomicU32>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        to_worker_waiters.write(AtomicU32::default());
+        unsafe { to_worker_waiters.assume_init_mut() };
     }
 
     {
