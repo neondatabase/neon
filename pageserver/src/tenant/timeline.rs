@@ -1073,7 +1073,7 @@ impl Timeline {
             // Is the local layer's size different from the size stored in the
             // remote index file?
             // If so, rename_to_backup those files & replace their local layer with
-            // a RemoteLayer in the laye rmap so that we re-download them on-demand.
+            // a RemoteLayer in the layer map so that we re-download them on-demand.
             if let Some(local_layer) = local_layer {
                 let local_layer_path = local_layer
                     .local_path()
@@ -1638,10 +1638,7 @@ impl Timeline {
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
-                //
-                // Is this a remote layer? If so, create a Future that the caller can use to
-                // download the missing layer, and return it.
-                //
+                // If it's a remote layer, the caller can do the download and retry.
                 if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
                     info!("need remote layer {}", layer.traversal_id());
                     return Err(PageReconstructError::NeedDownload(
@@ -2909,14 +2906,23 @@ impl Timeline {
 
     /// Download a layer file from remote storage and insert it into the layer map.
     ///
-    /// It's safe to call this function for the same layer concurrently.
+    /// It's safe to call this function for the same layer concurrently. In that case:
+    /// - If the layer has already been downloaded, `OK(...)` is returned.
+    /// - If the layer is currently being downloaded, we wait until that download succeeded / failed.
+    ///     - If it succeeded, we return `Ok(...)`.
+    ///     - If it failed, we or another concurrent caller will initiate a new download attempt.
     ///
-    /// On success, returns the layer's size.
-    /// Don't use the success value for any acounting purposes, though, since
-    /// every concurrent caller gets that value (=> you would double-account).
+    /// Download errors are classified and retried if appropriate by the underlying RemoteTimelineClient function.
+    /// It has an internal limit for the maximum number of retries and prints appropriate log messages.
+    /// If we exceed the limit, it returns an error, and this function passes it through.
+    /// The caller _could_ retry further by themselves by calling this function again, but _should not_ do it.
+    /// The reason is that they cannot distinguish permanent errors from temporary ones, whereas
+    /// the underlying RemoteTimelineClient can.
     ///
-    /// If there is a download error, the function retries indefinitely, using an exponential back-off.
-    /// If you need a timeout, simply stop polling: we're cancellation-safe because the download happens in a spearate task_mgr task.
+    /// There is no internal timeout or slowness detection.
+    /// If the caller has a deadline or needs a timeout, they can simply stop polling:
+    /// we're **cancellation-safe** because the download happens in a separate task_mgr task.
+    /// So, the current download attempt will run to completion even if we stop polling.
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%remote_layer.short_id()))]
     pub async fn download_remote_layer(
         self: Arc<Self>,
