@@ -440,16 +440,22 @@ fn import_file<Reader: Read>(
     reader: Reader,
     len: usize,
 ) -> Result<Option<ControlFileData>> {
+    let file_name = match file_path.file_name() {
+        Some(name) => name.to_string_lossy(),
+        None => return Ok(None),
+    };
+
+    if file_name.starts_with('.') {
+        // tar archives on macOs, created without COPYFILE_DISABLE=1 env var
+        // will contain "fork files", skip them.
+        return Ok(None);
+    }
+
     if file_path.starts_with("global") {
         let spcnode = postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
-        match file_path
-            .file_name()
-            .expect("missing filename")
-            .to_string_lossy()
-            .as_ref()
-        {
+        match file_name.as_ref() {
             "pg_control" => {
                 let bytes = read_all_bytes(reader)?;
 
@@ -485,12 +491,7 @@ fn import_file<Reader: Read>(
             .to_string_lossy()
             .parse()?;
 
-        match file_path
-            .file_name()
-            .expect("missing base filename")
-            .to_string_lossy()
-            .as_ref()
-        {
+        match file_name.as_ref() {
             "pg_filenode.map" => {
                 let bytes = read_all_bytes(reader)?;
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
@@ -520,11 +521,7 @@ fn import_file<Reader: Read>(
         import_slru(modification, slru, file_path, reader, len)?;
         debug!("imported multixact members slru");
     } else if file_path.starts_with("pg_twophase") {
-        let file_name = &file_path
-            .file_name()
-            .expect("missing twophase filename")
-            .to_string_lossy();
-        let xid = u32::from_str_radix(file_name, 16)?;
+        let xid = u32::from_str_radix(file_name.as_ref(), 16)?;
 
         let bytes = read_all_bytes(reader)?;
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))?;
