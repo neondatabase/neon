@@ -210,16 +210,28 @@ impl OwnedResponder {
 
         // let mut busy = 0;
 
+        let mut guard = None;
+        let len = buf.len();
+
         loop {
             let wrote = p.push_slice(buf);
             buf = &buf[wrote..];
 
             if buf.is_empty() {
-                return 0;
+                return len;
             } else {
+                if guard.is_none() {
+                    guard = Some(mutex.lock().unwrap_or_else(|e| e.into_inner()));
+                }
+                let g = guard.unwrap();
                 // busy += 1;
-                let g = mutex.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = cond.wait_while(g, |_| p.free_len() == 0);
+                let g = cond
+                    .wait_while(g, |_| {
+                        // eprintln!("looping while full");
+                        p.is_full()
+                    })
+                    .unwrap_or_else(|e| e.into_inner());
+                guard = Some(g);
             }
         }
     }

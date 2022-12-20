@@ -24,7 +24,8 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
 	PG_CONFIGURE_OPTS += --with-libseccomp
-	WALREDO_EXTRA_CFLAGS = -DHAVE_SHMEMPIPE -I$(ROOT_PROJECT_DIR)/libs/shmempipe -L$(ROOT_PROJECT_DIR)/target/$(BUILD_TYPE) -lshmempipe
+	WALREDO_EXTRA_CFLAGS = -DHAVE_SHMEMPIPE -I$(ROOT_PROJECT_DIR)/libs/shmempipe/src
+	WALREDO_EXTRA_LDFLAGS = -L$(ROOT_PROJECT_DIR)/target/$(BUILD_TYPE) -lshmempipe
 else ifeq ($(UNAME_S),Darwin)
 	# macOS with brew-installed openssl requires explicit paths
 	# It can be configured with OPENSSL_PREFIX variable
@@ -34,6 +35,7 @@ else ifeq ($(UNAME_S),Darwin)
 	# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
 	EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:
 	WALREDO_EXTRA_CFLAGS =
+	WALREDO_EXTRA_LDFLAGS =
 endif
 
 # Use -C option so that when PostgreSQL "make install" installs the
@@ -118,11 +120,12 @@ postgres-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
 
-$(ROOT_PROJECT_DIR)/target/$(BUILD_TYPE)/libshmempipe.a:
+.PHONY: shmempipe
+shmempipe:
 	$(CARGO_CMD_PREFIX) cargo build -p shmempipe $(CARGO_BUILD_FLAGS)
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-%
+neon-pg-ext-%: postgres-% shmempipe
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
@@ -130,7 +133,7 @@ neon-pg-ext-%: postgres-%
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install
 	+@echo "Compiling neon_walredo $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT) $(WALREDO_EXTRA_CFLAGS)' \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT) $(WALREDO_EXTRA_CFLAGS)' LDFLAGS='$(LD_FLAGS) $(WALREDO_EXTRA_LDFLAGS)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile install
 	+@echo "Compiling neon_test_utils $*"

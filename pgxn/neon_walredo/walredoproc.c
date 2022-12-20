@@ -111,7 +111,7 @@ static BufferTag target_redo_tag;
 static XLogReaderState *reader_state;
 
 #ifdef HAVE_SHMEMPIPE
-static shmempipe_t* pipe;
+static void* shmempipe;
 #endif
 
 #define TRACE DEBUG5
@@ -178,8 +178,8 @@ WalRedoMain(int argc, char *argv[])
 #endif
 
 #ifdef HAVE_SHMEMPIPE
-	pipe = shmempipe_open_via_env();
-	if (pipe == NULL) {
+	shmempipe = shmempipe_open_via_env();
+	if (shmempipe == NULL) {
 		elog(WARNING, "No shmempipe configuration detected");
 	}
 #endif
@@ -787,8 +787,8 @@ GetPage(StringInfo input_message)
 		ssize_t		rc;
 
 #ifdef HAVE_SHMEMPIPE
-		if (pipe != NULL)
-			rc = shmempipe_write_all(&page[tot_written], BLCKSZ - tot_written);
+		if (shmempipe != NULL)
+			rc = shmempipe_write_all(shmempipe, &page[tot_written], BLCKSZ - tot_written);
 		else
 #endif
 			rc = write(STDOUT_FILENO, &page[tot_written], BLCKSZ - tot_written);
@@ -832,9 +832,9 @@ static ssize_t
 buffered_read(void *buf, size_t count)
 {
 #ifdef HAVE_SHMEMPIPE
-	if (pipe != NULL)
+	if (shmempipe != NULL)
 	{
-		return shmempipe_read_exact(pipe, buf, count);
+		return shmempipe_read_exact(shmempipe, buf, count);
 	}
 #endif
 	char	   *dst = buf;

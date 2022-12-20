@@ -10,7 +10,8 @@ default = []
 demo = ["bytes", "rand", "sha2"]
 
 [lib]
-crate-type = ["staticlib"]
+# this library is used from c and rust
+crate-type = ["staticlib", "lib"]
 
 [dependencies]
 # memmap = "0.7.0"
