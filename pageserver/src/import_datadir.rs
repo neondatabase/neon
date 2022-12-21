@@ -279,7 +279,9 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                    .no_ondemand_download()?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -405,7 +407,9 @@ pub fn import_wal_from_tar<Reader: Read>(
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                    .no_ondemand_download()?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);

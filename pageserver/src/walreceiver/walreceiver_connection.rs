@@ -20,7 +20,9 @@ use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
+use crate::{
+    metrics::LIVE_CONNECTIONS_COUNT, tenant::with_ondemand_download, walreceiver::TaskStateUpdate,
+};
 use crate::{
     task_mgr,
     task_mgr::TaskKind,
@@ -248,9 +250,16 @@ pub async fn handle_walreceiver_connection(
                         // at risk of hitting a deadlock.
                         ensure!(lsn.is_aligned());
 
-                        walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded)
-                            .with_context(|| format!("could not ingest record at {lsn}"))?;
+                        with_ondemand_download(|| {
+                            walingest.ingest_record(
+                                recdata.clone(),
+                                lsn,
+                                &mut modification,
+                                &mut decoded,
+                            )
+                        })
+                        .await
+                        .with_context(|| format!("could not ingest record at {lsn}"))?;
 
                         fail_point!("walreceiver-after-ingest");
 

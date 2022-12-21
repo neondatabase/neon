@@ -354,6 +354,17 @@ macro_rules! try_no_ondemand_download {
     }};
 }
 
+#[macro_export]
+macro_rules! try_page_reconstruct_result {
+    ($result:expr) => {{
+        let result = $result;
+        match result {
+            Ok(v) => v,
+            Err(e) => return PageReconstructResult::from(e),
+        }
+    }};
+}
+
 ///
 /// Information about how much history needs to be retained, needed by
 /// Garbage Collection.
@@ -3292,9 +3303,9 @@ impl Timeline {
 ///   async path, so that the hot path doesn't  spawn threads. Other code
 ///   paths would remain sync initially, and get converted to async over time.
 ///
-pub async fn with_ondemand_download<F, T>(f: F) -> Result<T, anyhow::Error>
+pub async fn with_ondemand_download<F, T>(mut f: F) -> Result<T, anyhow::Error>
 where
-    F: Send + Fn() -> PageReconstructResult<T>,
+    F: Send + FnMut() -> PageReconstructResult<T>,
     T: Send,
 {
     loop {
