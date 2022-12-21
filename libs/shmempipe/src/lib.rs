@@ -238,7 +238,7 @@ impl OwnedRequester {
 
         drop(g);
 
-        // always after the write make sure that the worker has progressed
+        // as part of the first write, make sure that the worker is woken up.
         if might_wait {
             let _g = m.lock().into_guard();
             cond.notify_one();
@@ -255,28 +255,35 @@ impl OwnedRequester {
     ) -> std::sync::MutexGuard<'a, Wakeup> {
         assert_eq!(g.next, id);
 
-        {
-            // Safety: we are the only one creating consumers for from_worker
-            let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
-            let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
-            let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
+        // Safety: we are the only one creating consumers for from_worker
+        let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
+        let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
+        let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
-            let mut read = 0;
-            loop {
-                let n = c.pop_slice(&mut resp[read..]);
+        let mut read = 0;
+        let mut consecutive_spins = 0;
+        loop {
+            let n = c.pop_slice(&mut resp[read..]);
 
-                read += n;
+            read += n;
 
-                if read == resp.len() {
-                    break;
-                }
-
-                std::thread::yield_now();
+            if read == resp.len() {
+                break;
             }
 
-            // now the wait on the condition can start on `postgres --wal-redo` side
-            self.ptr.to_worker_waiters.fetch_sub(1, Release);
+            if n != 0 {
+                consecutive_spins = 0;
+            } else if consecutive_spins < 100 {
+                consecutive_spins += 1;
+                std::hint::spin_loop();
+                continue;
+            } else {
+                std::thread::yield_now();
+            }
         }
+
+        // now the wait on the condition can start on `postgres --wal-redo` side
+        self.ptr.to_worker_waiters.fetch_sub(1, Release);
 
         g
     }
@@ -337,6 +344,7 @@ impl OwnedResponder {
                 return len;
             }
 
+            // std::hint::spin_loop();
             std::thread::yield_now();
         }
     }
