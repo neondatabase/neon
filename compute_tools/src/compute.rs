@@ -23,7 +23,7 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use log::info;
+use log::{info, warn};
 use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
 
@@ -328,6 +328,9 @@ impl ComputeNode {
             .wait()
             .expect("failed to start waiting on Postgres process");
 
+        self.check_for_core_dumps()
+            .expect("failed to check for core dumps");
+
         Ok(ecode)
     }
 
@@ -342,5 +345,69 @@ impl ComputeNode {
 
         self.prepare_pgdata()?;
         self.run()
+    }
+
+    // Look for core dumps and collect backtraces.
+    //
+    // EKS worker nodes have following core dump settings:
+    //   /proc/sys/kernel/core_pattern -> core
+    //   /proc/sys/kernel/core_uses_pid -> 1
+    //   ulimint -c -> unlimited
+    // which results in core dumps being written to postgres data directory as core.<pid>.
+    //
+    // Use that as a default location and pattern, except macos where core dumps are written
+    // to /cores/ directory by default.
+    fn check_for_core_dumps(&self) -> Result<()> {
+        let core_dump_dir = match std::env::consts::OS {
+            "macos" => Path::new("/cores/"),
+            _ => Path::new(&self.pgdata),
+        };
+
+        // Collect core dump paths if any
+        info!("checking for core dumps in {}", core_dump_dir.display());
+        let files = fs::read_dir(core_dump_dir)?;
+        let cores = files.filter_map(|entry| {
+            let entry = entry.ok()?;
+            let _ = entry.file_name().to_str()?.strip_prefix("core.")?;
+            Some(entry.path())
+        });
+
+        // Print backtrace for each core dump
+        for core_path in cores {
+            warn!(
+                "core dump found: {}, collecting backtrace",
+                core_path.display()
+            );
+
+            // Try first with gdb
+            let backtrace = Command::new("gdb")
+                .args(["--batch", "-q", "-ex", "bt", &self.pgbin])
+                .arg(&core_path)
+                .output();
+
+            // Try lldb if no gdb is found -- that is handy for local testing on macOS
+            let backtrace = match backtrace {
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    warn!("cannot find gdb, trying lldb");
+                    Command::new("lldb")
+                        .arg("-c")
+                        .arg(&core_path)
+                        .args(["--batch", "-o", "bt all", "-o", "quit"])
+                        .output()
+                }
+                _ => backtrace,
+            }?;
+
+            warn!(
+                "core dump backtrace: {}",
+                String::from_utf8_lossy(&backtrace.stdout)
+            );
+            warn!(
+                "debugger stderr: {}",
+                String::from_utf8_lossy(&backtrace.stderr)
+            );
+        }
+
+        Ok(())
     }
 }
