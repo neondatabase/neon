@@ -31,6 +31,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
+use crate::reconstruct;
 use crate::tenant::Timeline;
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
@@ -52,10 +53,10 @@ pub struct WalIngest<'a> {
 }
 
 impl<'a> WalIngest<'a> {
-    pub fn new(timeline: &Timeline, startpoint: Lsn) -> Result<WalIngest> {
+    pub fn new(timeline: &Timeline, startpoint: Lsn) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let checkpoint_bytes = timeline.get_checkpoint(startpoint)?;
+        let checkpoint_bytes = reconstruct!(timeline.get_checkpoint(startpoint));
         let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
@@ -505,7 +506,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         modification: &mut DatadirModification,
         rec: &XlCreateDatabase,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         let db_id = rec.db_id;
         let tablespace_id = rec.tablespace_id;
         let src_db_id = rec.src_db_id;
@@ -518,16 +519,18 @@ impl<'a> WalIngest<'a> {
         // get calls instead.
         let req_lsn = modification.tline.get_last_record_lsn();
 
-        let rels = modification
-            .tline
-            .list_rels(src_tablespace_id, src_db_id, req_lsn)?;
+        let rels =
+            reconstruct!(modification
+                .tline
+                .list_rels(src_tablespace_id, src_db_id, req_lsn));
 
         debug!("ingest_xlog_dbase_create: {} rels", rels.len());
 
         // Copy relfilemap
-        let filemap = modification
-            .tline
-            .get_relmap_file(src_tablespace_id, src_db_id, req_lsn)?;
+        let filemap =
+            reconstruct!(modification
+                .tline
+                .get_relmap_file(src_tablespace_id, src_db_id, req_lsn));
         modification.put_relmap_file(tablespace_id, db_id, filemap)?;
 
         let mut num_rels_copied = 0;
@@ -536,7 +539,7 @@ impl<'a> WalIngest<'a> {
             assert_eq!(src_rel.spcnode, src_tablespace_id);
             assert_eq!(src_rel.dbnode, src_db_id);
 
-            let nblocks = modification.tline.get_rel_size(src_rel, req_lsn, true)?;
+            let nblocks = reconstruct!(modification.tline.get_rel_size(src_rel, req_lsn, true));
             let dst_rel = RelTag {
                 spcnode: tablespace_id,
                 dbnode: db_id,
@@ -551,10 +554,10 @@ impl<'a> WalIngest<'a> {
             for blknum in 0..nblocks {
                 debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
 
-                let content = modification
+                let content = reconstruct!(modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true)?;
-                modification.put_rel_page_image(dst_rel, blknum, content)?;
+                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true));
+                reconstruct!(modification.put_rel_page_image(dst_rel, blknum, content))?;
                 num_blocks_copied += 1;
             }
 
@@ -713,7 +716,7 @@ impl<'a> WalIngest<'a> {
                     relnode: xnode.relnode,
                 };
                 let last_lsn = self.timeline.get_last_record_lsn();
-                if modification.tline.get_rel_exists(rel, last_lsn, true)? {
+                if reconstruct!(modification.tline.get_rel_exists(rel, last_lsn, true)) {
                     self.put_rel_drop(modification, rel)?;
                 }
             }
@@ -765,9 +768,9 @@ impl<'a> WalIngest<'a> {
         // it. So we use the previous record's LSN in the get calls
         // instead.
         let req_lsn = modification.tline.get_last_record_lsn();
-        for segno in modification
+        for segno in reconstruct!(modification
             .tline
-            .list_slru_segments(SlruKind::Clog, req_lsn)?
+            .list_slru_segments(SlruKind::Clog, req_lsn))
         {
             let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
             if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
@@ -946,7 +949,7 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification,
         rel: RelTag,
         nblocks: BlockNumber,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         modification.put_rel_truncation(rel, nblocks)?;
         Ok(())
     }
@@ -956,11 +959,11 @@ impl<'a> WalIngest<'a> {
         Ok(())
     }
 
-    fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> Result<BlockNumber> {
-        let nblocks = if !self.timeline.get_rel_exists(rel, lsn, true)? {
+    fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> anyhow::Result<BlockNumber> {
+        let nblocks = if !reconstruct!(self.timeline.get_rel_exists(rel, lsn, true)) {
             0
         } else {
-            self.timeline.get_rel_size(rel, lsn, true)?
+            reconstruct!(self.timeline.get_rel_size(rel, lsn, true))
         };
         Ok(nblocks)
     }
@@ -970,18 +973,18 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification,
         rel: RelTag,
         blknum: BlockNumber,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         let new_nblocks = blknum + 1;
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let old_nblocks = if !self.timeline.get_rel_exists(rel, last_lsn, true)? {
+        let old_nblocks = if !reconstruct!(self.timeline.get_rel_exists(rel, last_lsn, true)) {
             // create it with 0 size initially, the logic below will extend it
             modification.put_rel_creation(rel, 0)?;
             0
         } else {
-            self.timeline.get_rel_size(rel, last_lsn, true)?
+            reconstruct!(self.timeline.get_rel_size(rel, last_lsn, true))
         };
 
         if new_nblocks > old_nblocks {
@@ -1015,7 +1018,7 @@ impl<'a> WalIngest<'a> {
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // we don't use a cache for this like we do for relations. SLRUS are explcitly
         // extended with ZEROPAGE records, not with commit records, so it happens
         // a lot less frequently.
@@ -1025,16 +1028,14 @@ impl<'a> WalIngest<'a> {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = self.timeline.get_last_record_lsn();
-        let old_nblocks = if !self
-            .timeline
-            .get_slru_segment_exists(kind, segno, last_lsn)?
-        {
-            // create it with 0 size initially, the logic below will extend it
-            modification.put_slru_segment_creation(kind, segno, 0)?;
-            0
-        } else {
-            self.timeline.get_slru_segment_size(kind, segno, last_lsn)?
-        };
+        let old_nblocks =
+            if !reconstruct!(self.timeline.get_slru_segment_exists(kind, segno, last_lsn)) {
+                // create it with 0 size initially, the logic below will extend it
+                modification.put_slru_segment_creation(kind, segno, 0)?;
+                0
+            } else {
+                reconstruct!(self.timeline.get_slru_segment_size(kind, segno, last_lsn))
+            };
 
         if new_nblocks > old_nblocks {
             trace!(

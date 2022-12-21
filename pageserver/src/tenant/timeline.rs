@@ -336,6 +336,20 @@ pub struct WalReceiverInfo {
     pub last_received_msg_ts: u128,
 }
 
+#[macro_export]
+macro_rules! reconstruct {
+    ($result:expr) => {{
+        let result = $result;
+        match result {
+            PageReconstructResult::Success(value) => value,
+            PageReconstructResult::NeedsDownload(timeline, layer) => {
+                return PageReconstructResult::NeedsDownload(timeline, layer);
+            }
+            PageReconstructResult::Error(e) => return PageReconstructResult::Error(e),
+        }
+    }};
+}
+
 ///
 /// Information about how much history needs to be retained, needed by
 /// Garbage Collection.
@@ -394,9 +408,7 @@ impl Timeline {
     ///
     pub fn get(&self, key: Key, lsn: Lsn) -> PageReconstructResult<Bytes> {
         if !lsn.is_valid() {
-            return PageReconstructResult::from(PageReconstructError::Other(anyhow!(
-                "Invalid LSN"
-            )));
+            return PageReconstructResult::from(anyhow!("Invalid LSN"));
         }
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
@@ -407,7 +419,7 @@ impl Timeline {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
+                    Ordering::Equal => return PageReconstructResult::Success(cached_img), // exact LSN match, return the image
                     Ordering::Greater => {
                         unreachable!("the returned lsn should never be after the requested lsn")
                     }
@@ -422,7 +434,7 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
+        reconstruct!(self.get_reconstruct_data(key, lsn, &mut reconstruct_state));
 
         self.metrics
             .reconstruct_time_histo
@@ -1555,12 +1567,12 @@ impl Timeline {
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
-                ValueReconstructResult::Complete => return Ok(()),
+                ValueReconstructResult::Complete => return PageReconstructResult::Success(()),
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
                         self.metrics.materialized_page_cache_hit_counter.inc_by(1);
-                        return Ok(());
+                        return PageReconstructResult::Success(());
                     }
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
@@ -1593,7 +1605,10 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                let ancestor = timeline.get_ancestor_timeline()?;
+                let ancestor = match timeline.get_ancestor_timeline() {
+                    Ok(timeline) => timeline,
+                    Err(e) => return PageReconstructResult::from(e),
+                };
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
@@ -1611,11 +1626,14 @@ impl Timeline {
                     // Get all the data needed to reconstruct the page version from this layer.
                     // But if we have an older cached page image, no need to go past that.
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
-                    result = open_layer.get_value_reconstruct_data(
+                    result = match open_layer.get_value_reconstruct_data(
                         key,
                         lsn_floor..cont_lsn,
                         reconstruct_state,
-                    )?;
+                    ) {
+                        Ok(result) => result,
+                        Err(e) => return PageReconstructResult::from(e),
+                    };
                     cont_lsn = lsn_floor;
                     traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
                     continue;
@@ -1626,35 +1644,46 @@ impl Timeline {
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
-                    result = frozen_layer.get_value_reconstruct_data(
+                    result = match frozen_layer.get_value_reconstruct_data(
                         key,
                         lsn_floor..cont_lsn,
                         reconstruct_state,
-                    )?;
+                    ) {
+                        Ok(result) => result,
+                        Err(e) => return PageReconstructResult::from(e),
+                    };
                     cont_lsn = lsn_floor;
                     traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
                     continue 'outer;
                 }
             }
 
-            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
+            let search_result = match layers.search(key, cont_lsn) {
+                Ok(result) => result,
+                Err(e) => return PageReconstructResult::from(e),
+            };
+
+            if let Some(SearchResult { lsn_floor, layer }) = search_result {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
                 // If it's a remote layer, the caller can do the download and retry.
                 if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
                     info!("need remote layer {}", layer.traversal_id());
-                    return PageReconstructResult::from(PageReconstructError::NeedDownload(
+                    return PageReconstructResult::NeedsDownload(
                         Weak::clone(&timeline.myself),
                         Arc::downgrade(&remote_layer),
-                    ));
+                    );
                 }
 
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                result = layer.get_value_reconstruct_data(
+                result = match layer.get_value_reconstruct_data(
                     key,
                     lsn_floor..cont_lsn,
                     reconstruct_state,
-                )?;
+                ) {
+                    Ok(result) => result,
+                    Err(e) => return PageReconstructResult::from(e),
+                };
                 cont_lsn = lsn_floor;
                 traversal_path.push((result, cont_lsn, layer.traversal_id()));
             } else if timeline.ancestor_timeline.is_some() {
@@ -2585,7 +2614,7 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match self.find_lsn_for_timestamp(pitr_timestamp)? {
+                match reconstruct!(self.find_lsn_for_timestamp(pitr_timestamp)) {
                     LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
                     LsnForTimestamp::Future(lsn) => {
                         debug!("future({})", lsn);
@@ -2849,11 +2878,11 @@ impl Timeline {
                     key,
                     img_lsn
                 );
-                Ok(img.clone())
+                PageReconstructResult::Success(img.clone())
             } else {
-                PageReconstructResult::from(PageReconstructError::Other(anyhow!(
+                PageReconstructResult::from(anyhow!(
                     "base image for {key} at {request_lsn} not found"
-                )))
+                ))
             }
         } else {
             // We need to do WAL redo.
@@ -2861,12 +2890,12 @@ impl Timeline {
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
             if data.img.is_none() && !data.records.first().unwrap().1.will_init() {
-                PageReconstructResult::from(PageReconstructError::Other(anyhow!(
+                PageReconstructResult::from(anyhow!(
                     "Base image for {} at {} not found, but got {} WAL records",
                     key,
                     request_lsn,
                     data.records.len()
-                )))
+                ))
             } else {
                 if data.img.is_some() {
                     trace!(
@@ -2881,14 +2910,18 @@ impl Timeline {
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
-                let img = self
+                let img = match self
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
-                    .context("Failed to reconstruct a page image:")?;
+                    .context("Failed to reconstruct a page image:")
+                {
+                    Ok(img) => img,
+                    Err(e) => return PageReconstructResult::from(e),
+                };
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();
-                    cache
+                    if let Err(e) = cache
                         .memorize_materialized_page(
                             self.tenant_id,
                             self.timeline_id,
@@ -2896,10 +2929,13 @@ impl Timeline {
                             last_rec_lsn,
                             &img,
                         )
-                        .context("Materialized page memoization failed")?;
+                        .context("Materialized page memoization failed")
+                    {
+                        return PageReconstructResult::from(e);
+                    }
                 }
 
-                Ok(img)
+                PageReconstructResult::Success(img)
             }
         }
     }
@@ -3131,6 +3167,9 @@ impl Timeline {
 
 pub enum PageReconstructResult<T> {
     Success(T),
+    /// The given RemoteLayer needs to be downloaded and replaced in the timeline's layer map
+    /// for the operation to succeed. Use [`Timeline::download_remote_layer`] to do it, then
+    /// retry the operation that returned this error.
     NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
     Error(PageReconstructError),
 }
@@ -3143,31 +3182,27 @@ pub enum PageReconstructError {
 
     #[error(transparent)]
     WalRedo(#[from] crate::walredo::WalRedoError),
-
-    /// The given RemoteLayer needs to be downloaded and replaced in the timeline's layer map
-    /// for the operation to succeed. Use [`Timeline::download_remote_layer`] to do it, then
-    /// retry the operation that returned this error.
-    #[error("layer file needs to be downloaded")]
-    NeedDownload(Weak<Timeline>, Weak<RemoteLayer>),
 }
 
 impl std::fmt::Debug for PageReconstructError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
-            PageReconstructError::Other(err) => err.fmt(f),
-            PageReconstructError::WalRedo(err) => err.fmt(f),
-            // TODO: print more info about the missing layer
-            PageReconstructError::NeedDownload(_, _) => write!(f, "need to download a layer"),
+            Self::Other(err) => err.fmt(f),
+            Self::WalRedo(err) => err.fmt(f),
         }
     }
 }
 
-impl<T> From<PageReconstructError> for PageReconstructResult<T> {
-    fn from(e: PageReconstructError) -> Self {
-        Self::Error(e)
+impl<E, T> From<E> for PageReconstructResult<T>
+where
+    E: Into<PageReconstructError>,
+{
+    fn from(e: E) -> Self {
+        Self::Error(e.into())
     }
 }
 
+// TODO kb adjust docs
 /// Helper function to deal with [`PageReconstructError::NeedDownload`].
 ///
 /// Takes a sync closure that can fail with [`PageReconstructError`].
@@ -3230,7 +3265,7 @@ where
     loop {
         let closure_result = f();
         match closure_result {
-            Err(PageReconstructError::NeedDownload(weak_timeline, weak_remote_layer)) => {
+            PageReconstructResult::NeedsDownload(weak_timeline, weak_remote_layer) => {
                 // if the timeline is gone, it has likely been deleted / tenant detached
                 let tl = weak_timeline.upgrade().context("timeline is gone")?;
                 // if the remote layer got removed, retry the function, it might succeed now
@@ -3246,7 +3281,10 @@ where
                 // Download successful, retry the closure
                 continue;
             }
-            _ => return Ok(closure_result?),
+            PageReconstructResult::Success(closure_value) => return Ok(closure_value),
+            PageReconstructResult::Error(e) => {
+                return Err(anyhow::Error::new(e).context("Failed to reconstruct the page"))
+            }
         }
     }
 }
@@ -3273,7 +3311,7 @@ fn layer_traversal_error(
 
     // Append all subsequent traversals, and the error message 'msg', as contexts.
     let msg = msg_iter.fold(err, |err, msg| err.context(msg));
-    PageReconstructResult::from(PageReconstructError::Other(msg))
+    PageReconstructResult::from(msg)
 }
 
 /// Various functions to mutate the timeline.

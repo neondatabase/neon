@@ -22,8 +22,8 @@ use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 use tracing::*;
 
-use crate::task_mgr;
 use crate::tenant::{with_ondemand_download, PageReconstructResult, Timeline};
+use crate::{reconstruct, task_mgr};
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
@@ -214,9 +214,9 @@ where
         for (seg, blocks) in chunks.into_iter().enumerate() {
             let mut segment_data: Vec<u8> = vec![];
             for blknum in blocks {
-                let img = self
+                let img = reconstruct!(self
                     .timeline
-                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)?;
+                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false));
                 segment_data.extend_from_slice(&img[..]);
             }
 
@@ -306,10 +306,7 @@ where
             // XLOG_TBLSPC_DROP records. But we probably should just
             // throw an error on CREATE TABLESPACE in the first place.
             if !has_relmap_file
-                && self
-                    .timeline
-                    .list_rels(spcnode, dbnode, self.lsn)?
-                    .is_empty()
+                && reconstruct!(self.timeline.list_rels(spcnode, dbnode, self.lsn)).is_empty()
             {
                 return Ok(());
             }
