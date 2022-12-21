@@ -126,7 +126,7 @@ fn initialize_config(
             );
         }
         // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path).with_context(|| {
+        let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
             format!(
                 "Failed to read pageserver config at '{}'",
                 cfg_file_path.display()
@@ -180,7 +180,7 @@ fn initialize_config(
     if update_config {
         info!("Writing pageserver config to '{}'", cfg_file_path.display());
 
-        std::fs::write(&cfg_file_path, toml.to_string()).with_context(|| {
+        std::fs::write(cfg_file_path, toml.to_string()).with_context(|| {
             format!(
                 "Failed to write pageserver config to '{}'",
                 cfg_file_path.display()

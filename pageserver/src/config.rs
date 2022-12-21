@@ -722,7 +722,7 @@ impl PageServerConf {
             auth_validation_public_key_path: None,
             remote_storage_config: None,
             profiling: ProfilingConfig::Disabled,
-            default_tenant_conf: TenantConf::dummy_conf(),
+            default_tenant_conf: TenantConf::default(),
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
             broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
