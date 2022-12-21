@@ -354,6 +354,14 @@ macro_rules! try_no_ondemand_download {
     }};
 }
 
+/// Replacement for `?` in functions that return [`PageReconstructResult`].
+///
+/// Given an `expr: Result<T, E>`, use `try_page_reconstruct_result!(expr)`
+/// instead of `(expr)?`.
+/// If `expr` is `Ok(v)`, the macro evaluates to `v`.
+/// If `expr` is `Err(e)`, the macro returns `PageReconstructResult::Error(e.into())`.
+///
+/// Once `std::ops::Try` is stabilized, we should use it instead of this macro.
 #[macro_export]
 macro_rules! try_page_reconstruct_result {
     ($result:expr) => {{
