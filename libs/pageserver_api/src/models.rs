@@ -323,7 +323,7 @@ impl PagestreamFeMessage {
         match self {
             Self::Exists(req) => {
                 bytes.put_u8(0);
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
@@ -333,7 +333,7 @@ impl PagestreamFeMessage {
 
             Self::Nblocks(req) => {
                 bytes.put_u8(1);
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
@@ -343,7 +343,7 @@ impl PagestreamFeMessage {
 
             Self::GetPage(req) => {
                 bytes.put_u8(2);
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
@@ -354,7 +354,7 @@ impl PagestreamFeMessage {
 
             Self::DbSize(req) => {
                 bytes.put_u8(3);
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.dbnode);
             }

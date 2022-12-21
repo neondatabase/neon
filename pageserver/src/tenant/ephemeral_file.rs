@@ -91,7 +91,7 @@ impl EphemeralFile {
                 break;
             }
 
-            off += n as usize;
+            off += n;
         }
         Ok(())
     }

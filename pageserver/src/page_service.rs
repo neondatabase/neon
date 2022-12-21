@@ -444,9 +444,7 @@ impl PageServerHandler {
         pgb.flush().await?;
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
         let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-        tokio::task::block_in_place(|| {
-            import_wal_from_tar(&*timeline, reader, start_lsn, end_lsn)
-        })?;
+        tokio::task::block_in_place(|| import_wal_from_tar(&timeline, reader, start_lsn, end_lsn))?;
         info!("wal import complete");
 
         // Drain the rest of the Copy data
@@ -658,7 +656,7 @@ impl PageServerHandler {
         tokio::task::block_in_place(|| {
             let basebackup =
                 basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
-            tracing::Span::current().record("lsn", &basebackup.lsn.to_string().as_str());
+            tracing::Span::current().record("lsn", basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()
         })?;
         pgb.write_message(&BeMessage::CopyDone)?;

@@ -519,9 +519,9 @@ impl RemoteTimelineClient {
         let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
             current_remote_index_part
                 .layer_metadata
-                .iter()
+                .values()
                 // If we don't have the file size for the layer, don't account for it in the metric.
-                .map(|(_, ilmd)| ilmd.file_size.unwrap_or(0))
+                .map(|ilmd| ilmd.file_size.unwrap_or(0))
                 .sum()
         } else {
             0

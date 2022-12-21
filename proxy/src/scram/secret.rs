@@ -48,7 +48,7 @@ impl ServerSecret {
 
         Self {
             iterations: 4096,
-            salt_base64: base64::encode(&mocked_salt),
+            salt_base64: base64::encode(mocked_salt),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
             doomed: true,
@@ -68,7 +68,7 @@ impl ServerSecret {
 
         Some(Self {
             iterations,
-            salt_base64: base64::encode(&salt),
+            salt_base64: base64::encode(salt),
             stored_key: password.client_key().sha256(),
             server_key: password.server_key(),
             doomed: false,

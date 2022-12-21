@@ -409,7 +409,7 @@ impl PostgresRedoManager {
                     key
                 );
                 for &xid in xids {
-                    let pageno = xid as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                    let pageno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
                     let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
 
@@ -459,7 +459,7 @@ impl PostgresRedoManager {
                     key
                 );
                 for &xid in xids {
-                    let pageno = xid as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+                    let pageno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
                     let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
 
@@ -647,7 +647,7 @@ impl PostgresRedoProcess {
 
         info!("running initdb in {}", datadir.display());
         let initdb = Command::new(pg_bin_dir_path.join("initdb"))
-            .args(&["-D", &datadir.to_string_lossy()])
+            .args(["-D", &datadir.to_string_lossy()])
             .arg("-N")
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)

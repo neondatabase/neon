@@ -241,7 +241,7 @@ impl PageServerNode {
         let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
         args.push(Cow::Borrowed("--init"));
 
-        let init_output = Command::new(&self.env.pageserver_bin())
+        let init_output = Command::new(self.env.pageserver_bin())
             .args(args.iter().map(Cow::as_ref))
             .envs(self.pageserver_env_variables()?)
             .output()

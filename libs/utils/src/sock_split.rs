@@ -50,7 +50,7 @@ impl BufStream {
 
     /// Returns a reference to the underlying TcpStream.
     fn get_ref(&self) -> &TcpStream {
-        &*self.0.get_ref().0
+        &self.0.get_ref().0
     }
 }
 

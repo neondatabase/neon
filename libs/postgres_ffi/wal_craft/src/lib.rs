@@ -81,7 +81,7 @@ impl Conf {
             .new_pg_command("initdb")?
             .arg("-D")
             .arg(self.datadir.as_os_str())
-            .args(&["-U", "postgres", "--no-instructions", "--no-sync"])
+            .args(["-U", "postgres", "--no-instructions", "--no-sync"])
             .output()?;
         debug!("initdb output: {:?}", output);
         ensure!(
@@ -105,12 +105,12 @@ impl Conf {
         let unix_socket_dir_path = unix_socket_dir.path().to_owned();
         let server_process = self
             .new_pg_command("postgres")?
-            .args(&["-c", "listen_addresses="])
+            .args(["-c", "listen_addresses="])
             .arg("-k")
             .arg(unix_socket_dir_path.as_os_str())
             .arg("-D")
             .arg(self.datadir.as_os_str())
-            .args(&["-c", "logging_collector=on"]) // stderr will mess up with tests output
+            .args(["-c", "logging_collector=on"]) // stderr will mess up with tests output
             .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
             .stderr(Stdio::from(log_file))
             .spawn()?;
@@ -142,7 +142,7 @@ impl Conf {
         );
         let output = self
             .new_pg_command("pg_waldump")?
-            .args(&[
+            .args([
                 &first_segment_file.as_os_str(),
                 &last_segment_file.as_os_str(),
             ])
