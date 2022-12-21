@@ -42,11 +42,17 @@ where
 
     loop {
         buffer.resize(4, 0);
-        responder.read_exact(&mut buffer);
+        let mut read = 0;
+        while read < 4 {
+            read += responder.read(&mut buffer);
+        }
         let len = buffer.get_u32();
 
         buffer.resize(len as usize, 0);
-        responder.read_exact(&mut buffer);
+        let mut read = 0;
+        while read < len as usize {
+            read += responder.read(&mut buffer[read..]);
+        }
 
         let sha = <[u8; 32]>::from(sha2::Sha256::digest(&buffer[..]));
         response.clear();

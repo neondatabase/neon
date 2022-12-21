@@ -16,7 +16,7 @@ crate-type = ["staticlib", "lib"]
 [dependencies]
 ringbuf = "0.3.1"
 
-nix = { version = "0.26.1", features = ["mman", "fs"] }
+nix = { version = "0.26.1", features = ["mman", "fs", "event"] }
 libc = { version = "0.2.138" }
 
 bytes = { version = "1", optional = true }

@@ -18,7 +18,7 @@
 //! There is an in-place initialization support which returns a `&mut T` as a symbolic gesture that
 //! `MaybeUninit::assume_init_mut` has been invoked.
 
-use std::{cell::UnsafeCell, mem::MaybeUninit, pin::Pin};
+use std::{cell::UnsafeCell, mem::MaybeUninit, os::unix::prelude::FromRawFd, pin::Pin};
 
 /// Return value for the robust pthread_mutex [`Mutex::lock`] and [`Mutex::try_lock`].
 #[cfg_attr(test, derive(Debug))]
@@ -973,5 +973,27 @@ impl PinnedCondvar {
                 Locked::PreviousOwnerDied(_timeout) => prev_died = true,
             }
         }
+    }
+}
+
+pub struct EventfdSemaphore(std::os::unix::prelude::RawFd);
+
+impl EventfdSemaphore {
+    pub fn wait(&self) {
+        let mut out = [0u8; 8];
+        nix::unistd::read(self.0, &mut out).expect("reading from eventfd semaphore failed");
+    }
+
+    pub fn post(&self) {
+        let one = 1u64.to_ne_bytes();
+        nix::unistd::write(self.0, &one).expect("writing to eventfd semaphore failed");
+    }
+}
+
+// FIXME: no drop impl for EventfdSemaphore, though we should have close when the drop actually happens.
+
+impl FromRawFd for EventfdSemaphore {
+    unsafe fn from_raw_fd(fd: std::os::unix::prelude::RawFd) -> Self {
+        EventfdSemaphore(fd)
     }
 }

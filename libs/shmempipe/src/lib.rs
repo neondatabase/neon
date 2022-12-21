@@ -3,6 +3,7 @@ use std::alloc::Layout;
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::prelude::FromRawFd;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicU32;
@@ -29,9 +30,14 @@ pub struct RawSharedMemPipe {
     /// - 0xffff_ffff means tearing down
     pub magic: AtomicU32,
 
+    /// Eventfd used in semaphore mode, used
+    pub sync_fd: i32,
+
     /// The processes participating in this.
     ///
     /// First is the pageserver process, second is the single threaded walredo process.
+    ///
+    /// FIXME: these are unsafe in security barriers.
     pub participants: [shared::PinnedMutex<Option<u32>>; 2],
 
     pub to_worker_waiters: AtomicU32,
@@ -169,6 +175,11 @@ impl UnparkInOrder {
 }
 
 impl OwnedRequester {
+    /// Returns the file descriptors that need to be kept open for child process.
+    pub fn shared_fds(&self) -> [i32; 1] {
+        [self.ptr.sync_fd]
+    }
+
     pub fn request_response(&self, req: &[u8], resp: &mut [u8]) {
         // Overview:
         // - `self.producer` creates an order amongst competing request_response callers (id).
@@ -209,8 +220,10 @@ impl OwnedRequester {
 
         // Safety: we are only one creating producers for to_worker
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
-        let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
-        let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+        let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
+        let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+
+        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.sync_fd) };
 
         {
             let mut req = req;
@@ -222,15 +235,18 @@ impl OwnedRequester {
                 if req.is_empty() {
                     break;
                 } else if n == 0 {
-                    let g = if might_wait {
-                        Some(m.lock().into_guard())
-                    } else {
-                        m.try_lock().into_guard()
-                    };
-                    if g.is_some() {
-                        might_wait = false;
-                        cond.notify_one();
-                    }
+                    sem.post();
+                    might_wait = false;
+
+                    // let g = if might_wait {
+                    //     Some(m.lock().into_guard())
+                    // } else {
+                    //     m.try_lock().into_guard()
+                    // };
+                    // if g.is_some() {
+                    //     might_wait = false;
+                    //     cond.notify_one();
+                    // }
                 }
                 std::thread::yield_now();
             }
@@ -240,8 +256,9 @@ impl OwnedRequester {
 
         // as part of the first write, make sure that the worker is woken up.
         if might_wait {
-            let _g = m.lock().into_guard();
-            cond.notify_one();
+            sem.post();
+            // let _g = m.lock().into_guard();
+            // cond.notify_one();
         }
 
         id
@@ -300,8 +317,10 @@ pub struct OwnedResponder {
 impl OwnedResponder {
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
-        let m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
-        let cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+        let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
+        let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+
+        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.sync_fd) };
 
         let mut read = 0;
 
@@ -312,11 +331,14 @@ impl OwnedResponder {
 
             if read > 0 {
                 return read;
-            } else if n == 0 && self.ptr.to_worker_waiters.load(Acquire) == 0 {
-                if let Some(g) = m.try_lock().into_guard() {
-                    let _g = cond
-                        .wait_while(g, |_| c.is_empty())
-                        .unwrap_or_else(|e| e.into_inner());
+            } else if n == 0 {
+                let mut waited = false;
+                while self.ptr.to_worker_waiters.load(Acquire) == 0 {
+                    sem.wait();
+                    waited = true;
+                }
+
+                if waited {
                     continue;
                 }
             }
@@ -370,8 +392,8 @@ pub extern "C" fn shmempipe_open_via_env() -> *mut OwnedResponder {
         .copied()
         .chain(id.as_bytes().into_iter().copied())
         .chain(std::iter::once(0))
-        .enumerate()
-        .for_each(|(i, b)| buf[i] = b);
+        .zip(buf.iter_mut())
+        .for_each(|(i, o)| *o = i);
 
     let path = match std::ffi::CStr::from_bytes_with_nul(&buf) {
         Ok(path) => path,
@@ -427,12 +449,16 @@ pub extern "C" fn shmempipe_destroy(resp: *mut OwnedResponder) {
 
 pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
     use nix::fcntl::OFlag;
+    use nix::sys::eventfd::{eventfd, EfdFlags};
     use nix::sys::mman;
     use nix::sys::stat::Mode;
-    use std::os::unix::io::FromRawFd;
 
     assert!(path.is_absolute());
     assert!(path.as_os_str().len() < 255);
+
+    // synchronization between the creator and the
+    // FIXME: OwnedFd
+    let sync_fd = unsafe { std::fs::File::from_raw_fd(eventfd(0, EfdFlags::EFD_SEMAPHORE)?) };
 
     // O_CLOEXEC, maybe?
     let flags = OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_TRUNC | OFlag::O_CLOEXEC;
@@ -476,7 +502,7 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
     // fd's, unless the mmap's hold an "fd" to the shared
     drop(handle);
 
-    initialize_at(res)
+    initialize_at(res, sync_fd)
 }
 
 /// Initialize the RawSharedMemPipe *in place*.
@@ -484,7 +510,10 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
 /// In place initialization is trickier than normal rust programs. This would be much simpler if we
 /// would have stable allocator trait, and many currently unstable MaybeUninit friendly
 /// conversions.
-fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPipePtr<Created>> {
+fn initialize_at(
+    res: SharedMemPipePtr<MMapped>,
+    sync_fd: std::fs::File,
+) -> std::io::Result<SharedMemPipePtr<Created>> {
     let inner = res.ptr();
     // Safety: lot of requirements, TODO
     let place = unsafe { inner.cast::<MaybeUninit<RawSharedMemPipe>>().as_mut() };
@@ -501,6 +530,21 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
 
         // ceremonial
         unsafe { magic.assume_init_mut() };
+    }
+
+    {
+        let sync = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).sync_fd)
+                .cast::<MaybeUninit<i32>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        sync.write(sync_fd.as_raw_fd());
+
+        unsafe { sync.assume_init_mut() };
+
+        // the file is dropped if the init completes
     }
 
     {
@@ -625,6 +669,7 @@ fn initialize_at(res: SharedMemPipePtr<MMapped>) -> std::io::Result<SharedMemPip
 
     // Safety: it is now initialized
     let _ = unsafe { place.assume_init_mut() };
+    std::mem::forget(sync_fd);
     drop(place);
 
     let res = res.post_initialization::<Created>();
@@ -737,9 +782,11 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
 
         let _res = {
             if let Some(ptr) = self.ptr.take() {
-                if self.attempt_drop {
+                // use another eventfd for this, something the creator takes during...?
+                if false && self.attempt_drop {
                     let shared = unsafe { ptr.as_ref() };
 
+                    // TODO: remove all this
                     let locked = lock_all(&shared.participants);
 
                     if locked.iter().all(|x| x.is_some()) {
@@ -754,12 +801,14 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
                     }
                 }
 
+                // FIXME: drop the eventfd somehow, is it dup'd or what?
+
                 #[allow(unused)]
                 let do_unmap = true;
                 #[cfg(test)]
                 let do_unmap = self.munmap;
 
-                if do_unmap {
+                if false && do_unmap {
                     // if any locks were still held by other processes, this should not be done
                     // (link kernel robust futex doc here)
                     unsafe { nix::sys::mman::munmap(ptr.as_ptr().cast(), self.size.get()) }
@@ -797,7 +846,6 @@ pub fn open_existing<P: nix::NixPath + ?Sized>(
     use nix::fcntl::OFlag;
     use nix::sys::mman;
     use nix::sys::stat::Mode;
-    use std::os::unix::io::FromRawFd;
 
     // assert!(path.is_absolute());
     // assert!(path.as_os_str().len() < 255);
