@@ -138,19 +138,23 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.allowed_errors.append(
         ".*error attaching tenant: storage-sync-list-remote-timelines",
     )
-    # Since we can't list remote timelines, tenant will go into Broken state immediately
+    # Attach it. This HTTP request will succeed and launch a
+    # background task to load the tenant. In that background task,
+    # listing the remote timelines will fail because of the failpoint,
+    # and the tenant will be marked as Broken.
     client.tenant_attach(tenant_id)
     wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+
     # Ensure that even though the tenant is broken, we can't attach it again.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
         client.tenant_attach(tenant_id)
-    tenant_status = client.tenant_status(tenant_id)
-    log.info("Tenant status with active failpoint: %s", tenant_status)
 
     # Restart again, this implicitly clears the failpoint.
     # test_remote_failures=1 remains active, though, as it's in the pageserver config.
     # This means that any of the remote client operations after restart will exercise the
     # retry code path.
+    #
+    # The initiated attach operation should survive the restart, and continue from where it was.
     env.pageserver.stop()
     layer_download_failed_regex = (
         r"download.*[0-9A-F]+-[0-9A-F]+.*open a download stream for layer.*simulated failure"
@@ -160,8 +164,8 @@ def test_remote_storage_backup_and_restore(
     ), "we shouldn't have tried any layer downloads yet since list remote timelines has a failpoint"
     env.pageserver.start()
 
-    # The pageserver remembers that the tenant was attaching.
-    # Ensure that we still fail by trying to attach.
+    # Ensure that the pageserver remembers that the tenant was attaching, by
+    # trying to attach it again. It should fail.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
         client.tenant_attach(tenant_id)
     log.info("waiting for tenant to become active. this should be quick with on-demand download")
@@ -169,7 +173,6 @@ def test_remote_storage_backup_and_restore(
     def tenant_active():
         all_states = client.tenant_list()
         [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["has_in_progress_downloads"] is False
         assert tenant["state"] == "Active"
 
     wait_until(
@@ -355,7 +358,6 @@ def test_remote_storage_upload_queue_retries(
     def tenant_active():
         all_states = client.tenant_list()
         [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["has_in_progress_downloads"] is False
         assert tenant["state"] == "Active"
 
     wait_until(30, 1, tenant_active)
