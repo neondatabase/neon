@@ -597,6 +597,28 @@ jobs:
       - name: Kaniko build compute node with extensions v15
         run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v15 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}}
 
+  vm-compute-node-image-v15:
+    runs-on: [ self-hosted, dev, x64 ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    needs: [ tag, compute-node-image-v15 ]
+    defaults:
+      run:
+        shell: sh -eu {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Build
+        run: |
+          curl https://github.com/neondatabase/neonvm/releases/latest/download/vm-builder -o vm-builder
+          chmod +x vm-builder
+          ./vm-builder -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} \
+             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
+
   test-images:
     needs: [ tag, neon-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
     runs-on: [ self-hosted, dev, x64 ]
