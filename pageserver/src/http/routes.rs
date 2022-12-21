@@ -791,7 +791,7 @@ async fn timeline_download_remote_layers_handler_post(
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
     match timeline.spawn_download_all_remote_layers().await {
-        Ok(st) => json_response(StatusCode::CREATED, st),
+        Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
     }
 }
