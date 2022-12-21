@@ -883,9 +883,12 @@ class SafekeeperEnv:
             raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}")
 
     def get_safekeeper_connstrs(self):
+        assert self.safekeepers is not None, "safekeepers are not initialized"
         return ",".join([sk_proc.args[2] for sk_proc in self.safekeepers])
 
     def create_postgres(self):
+        assert self.tenant_id is not None, "tenant_id is not initialized"
+        assert self.timeline_id is not None, "tenant_id is not initialized"
         pgdata_dir = os.path.join(self.repo_dir, "proposer_pgdata")
         pg = ProposerPostgres(
             pgdata_dir,
