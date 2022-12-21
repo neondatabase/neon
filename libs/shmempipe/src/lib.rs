@@ -31,7 +31,9 @@ pub struct RawSharedMemPipe {
     pub magic: AtomicU32,
 
     /// Eventfd used in semaphore mode, used
-    pub sync_fd: i32,
+    pub notify_request_written: i32,
+
+    pub notify_response_written: i32,
 
     /// The processes participating in this.
     ///
@@ -176,8 +178,11 @@ impl UnparkInOrder {
 
 impl OwnedRequester {
     /// Returns the file descriptors that need to be kept open for child process.
-    pub fn shared_fds(&self) -> [i32; 1] {
-        [self.ptr.sync_fd]
+    pub fn shared_fds(&self) -> [i32; 2] {
+        [
+            self.ptr.notify_request_written,
+            self.ptr.notify_response_written,
+        ]
     }
 
     pub fn request_response(&self, req: &[u8], resp: &mut [u8]) {
@@ -190,6 +195,7 @@ impl OwnedRequester {
 
         let mut g = self.consumer.lock().unwrap();
         let distance = id.wrapping_sub(g.next) as usize;
+        // FIXME: current impl stores the thread even in `id == g.next`
         g.waiting.store_current(distance);
 
         // TODO: UnparkInOrder::park_while(g, &self.consumer, |g| *g.next == id)
@@ -223,7 +229,7 @@ impl OwnedRequester {
         let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
         let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
 
-        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.sync_fd) };
+        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
         {
             let mut req = req;
@@ -277,6 +283,11 @@ impl OwnedRequester {
         let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
         let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
+        let sem =
+            unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
+
+        let mut waited = false;
+
         let mut read = 0;
         let mut consecutive_spins = 0;
         loop {
@@ -288,7 +299,10 @@ impl OwnedRequester {
                 break;
             }
 
-            if n != 0 {
+            if !waited && n == 0 {
+                waited = true;
+                sem.wait();
+            } else if n != 0 {
                 consecutive_spins = 0;
             } else if consecutive_spins < 100 {
                 consecutive_spins += 1;
@@ -320,7 +334,7 @@ impl OwnedResponder {
         let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
         let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
 
-        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.sync_fd) };
+        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
         let mut read = 0;
 
@@ -352,18 +366,31 @@ impl OwnedResponder {
         let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
         let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
+        let sem =
+            unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
+
         if buf.is_empty() {
             return 0;
         }
 
         let len = buf.len();
 
+        let mut woken = false;
+
         loop {
             let n = p.push_slice(buf);
             buf = &buf[n..];
 
             if buf.is_empty() {
+                if !woken {
+                    sem.post();
+                }
                 return len;
+            }
+
+            if !woken && n == 0 {
+                woken = true;
+                sem.post();
             }
 
             // std::hint::spin_loop();
@@ -458,7 +485,10 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
 
     // synchronization between the creator and the
     // FIXME: OwnedFd
-    let sync_fd = unsafe { std::fs::File::from_raw_fd(eventfd(0, EfdFlags::EFD_SEMAPHORE)?) };
+    let notify_request_written =
+        unsafe { std::fs::File::from_raw_fd(eventfd(0, EfdFlags::EFD_SEMAPHORE)?) };
+    let notify_response_written =
+        unsafe { std::fs::File::from_raw_fd(eventfd(0, EfdFlags::EFD_SEMAPHORE)?) };
 
     // O_CLOEXEC, maybe?
     let flags = OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_TRUNC | OFlag::O_CLOEXEC;
@@ -502,7 +532,7 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
     // fd's, unless the mmap's hold an "fd" to the shared
     drop(handle);
 
-    initialize_at(res, sync_fd)
+    initialize_at(res, notify_request_written, notify_response_written)
 }
 
 /// Initialize the RawSharedMemPipe *in place*.
@@ -512,7 +542,8 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
 /// conversions.
 fn initialize_at(
     res: SharedMemPipePtr<MMapped>,
-    sync_fd: std::fs::File,
+    notify_request_written: std::fs::File,
+    notify_response_written: std::fs::File,
 ) -> std::io::Result<SharedMemPipePtr<Created>> {
     let inner = res.ptr();
     // Safety: lot of requirements, TODO
@@ -533,16 +564,31 @@ fn initialize_at(
     }
 
     {
-        let sync = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).sync_fd)
+        let fd = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).notify_request_written)
                 .cast::<MaybeUninit<i32>>()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
 
-        sync.write(sync_fd.as_raw_fd());
+        fd.write(notify_request_written.as_raw_fd());
 
-        unsafe { sync.assume_init_mut() };
+        unsafe { fd.assume_init_mut() };
+
+        // the file is dropped if the init completes
+    }
+
+    {
+        let fd = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).notify_response_written)
+                .cast::<MaybeUninit<i32>>()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+
+        fd.write(notify_response_written.as_raw_fd());
+
+        unsafe { fd.assume_init_mut() };
 
         // the file is dropped if the init completes
     }
@@ -669,7 +715,8 @@ fn initialize_at(
 
     // Safety: it is now initialized
     let _ = unsafe { place.assume_init_mut() };
-    std::mem::forget(sync_fd);
+    std::mem::forget(notify_request_written);
+    std::mem::forget(notify_response_written);
     drop(place);
 
     let res = res.post_initialization::<Created>();
