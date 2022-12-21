@@ -405,6 +405,7 @@ impl WalreceiverState {
                     connect_timeout,
                 )
                 .await
+                .context("walreceiver connection handling failure")
             }
             .instrument(info_span!("walreceiver_connection", id = %id, node_id = %new_sk_id))
         });
