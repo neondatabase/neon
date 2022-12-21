@@ -5,6 +5,7 @@ use std::num::NonZeroUsize;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::FromRawFd;
 use std::path::Path;
+use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
@@ -62,7 +63,7 @@ pub struct RawSharedMemPipe {
 impl SharedMemPipePtr<Created> {
     /// Wrap this in a new hopefully unique `Arc<OwnedRequester>`.
     pub fn try_acquire_requester(self) -> Option<std::sync::Arc<OwnedRequester>> {
-        let m = unsafe { std::pin::Pin::new_unchecked(&self.participants[0]) };
+        let m = unsafe { Pin::new_unchecked(&self.participants[0]) };
         let mut guard = m.try_lock().map(Some).unwrap_or_else(|e| match e {
             TryLockError::PreviousOwnerDied(g) => Some(g),
             TryLockError::WouldBlock => None,
@@ -92,7 +93,7 @@ impl SharedMemPipePtr<Created> {
 
 impl SharedMemPipePtr<Joined> {
     pub fn try_acquire_responder(self) -> Option<OwnedResponder> {
-        let m = unsafe { std::pin::Pin::new_unchecked(&self.participants[1]) };
+        let m = unsafe { Pin::new_unchecked(&self.participants[1]) };
         let guard = m.try_lock().map(Some).unwrap_or_else(|e| match e {
             TryLockError::PreviousOwnerDied(g) => Some(g),
             TryLockError::WouldBlock => None,
@@ -141,7 +142,7 @@ impl UnparkInOrder {
                 let cur = std::thread::current();
                 cur.id() == first.id()
             }
-            Some(None) | None => todo!(),
+            Some(None) | None => false,
         }
     }
 
@@ -226,8 +227,8 @@ impl OwnedRequester {
 
         // Safety: we are only one creating producers for to_worker
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
-        let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
-        let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+        let _m = unsafe { Pin::new_unchecked(&self.ptr.to_worker_writer) };
+        let _cond = unsafe { Pin::new_unchecked(&self.ptr.to_worker_cond) };
 
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
@@ -280,8 +281,8 @@ impl OwnedRequester {
 
         // Safety: we are the only one creating consumers for from_worker
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
-        let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
-        let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
+        let _m = unsafe { Pin::new_unchecked(&self.ptr.from_worker_writer) };
+        let _cond = unsafe { Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
         let sem =
             unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
@@ -331,8 +332,8 @@ pub struct OwnedResponder {
 impl OwnedResponder {
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
-        let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_writer) };
-        let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.to_worker_cond) };
+        let _m = unsafe { Pin::new_unchecked(&self.ptr.to_worker_writer) };
+        let _cond = unsafe { Pin::new_unchecked(&self.ptr.to_worker_cond) };
 
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
@@ -363,8 +364,8 @@ impl OwnedResponder {
 
     pub fn write_all(&mut self, mut buf: &[u8]) -> usize {
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
-        let _m = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_writer) };
-        let _cond = unsafe { std::pin::Pin::new_unchecked(&self.ptr.from_worker_cond) };
+        let _m = unsafe { Pin::new_unchecked(&self.ptr.from_worker_writer) };
+        let _cond = unsafe { Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
         let sem =
             unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
@@ -806,7 +807,6 @@ impl SharedMemPipePtr<MMapped> {
 impl<Stage> Drop for SharedMemPipePtr<Stage> {
     fn drop(&mut self) {
         use shared::{MutexGuard, PinnedMutex};
-        use std::pin::Pin;
 
         // Helper for locking all of the participants.
         fn lock_all<const N: usize>(
