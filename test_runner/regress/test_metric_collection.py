@@ -22,6 +22,7 @@ def httpserver_listen_address(port_distributor: PortDistributor):
 
 num_metrics_received = 0
 remote_uploaded = 0
+first_request = True
 
 
 #
@@ -46,7 +47,12 @@ def metrics_handler(request: Request) -> Response:
     for event in events:
         assert checks.pop(event["metric"])(event["value"]), f"{event['metric']} isn't valid"
 
-    assert not checks, f"{' '.join(checks.keys())} wasn't/weren't received"
+    global first_request
+    # check that all checks were sent
+    # but only on the first request, because we don't send non-changed metrics
+    if first_request:
+        assert not checks, f"{' '.join(checks.keys())} wasn't/weren't received"
+        first_request = False
 
     global num_metrics_received
     num_metrics_received += 1
