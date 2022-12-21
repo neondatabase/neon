@@ -220,13 +220,8 @@ impl PostgresRedoManager {
     }
 
     /// Launch process pre-emptively. Should not be needed except for benchmarking.
-    pub fn launch_process(&mut self, pg_version: u32) -> anyhow::Result<()> {
-        let inner = self.process.get_mut().unwrap();
-        if inner.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
-            *inner = Some(p);
-        }
-        Ok(())
+    pub fn launch_process(&mut self, _pg_version: u32) -> anyhow::Result<()> {
+        todo!("this should be removed")
     }
 
     ///
@@ -255,7 +250,12 @@ impl PostgresRedoManager {
 
         // launch the WAL redo process on first use
         if process_guard.is_none() {
-            let p = PostgresRedoProcess::launch(self.conf, self.tenant_id, pg_version)?;
+            let p = PostgresRedoProcess::launch(
+                self.conf,
+                self.tenant_id,
+                pg_version,
+                self.pipe.as_ref().map(|p| p.shared_fds()),
+            )?;
             *process_guard = Some(p);
         }
 
@@ -617,10 +617,13 @@ impl PostgresRedoManager {
 /// Command with ability not to give all file descriptors to child process
 ///
 trait CloseFileDescriptors: CommandExt {
+    /// Close file descriptors (other than stdin, stdout, stderr) in child process.
     ///
-    /// Close file descriptors (other than stdin, stdout, stderr) in child process
-    ///
+    /// Normally rust file descriptors are opened with CLOEXEC however to make sure, we close all
+    /// except wanted. This furthers the goal of keeping process separation a security barrier.
     fn close_fds(&mut self) -> &mut Command;
+
+    fn close_fds_except<const N: usize>(&mut self, leave_open: [i32; N]) -> &mut Command;
 }
 
 impl<C: CommandExt> CloseFileDescriptors for C {
@@ -645,6 +648,16 @@ impl<C: CommandExt> CloseFileDescriptors for C {
             })
         }
     }
+
+    fn close_fds_except<const N: usize>(&mut self, mut leave_open: [i32; N]) -> &mut Command {
+        leave_open.sort_unstable();
+        unsafe {
+            self.pre_exec(move || {
+                close_fds::set_fds_cloexec_threadsafe(3, &leave_open);
+                Ok(())
+            })
+        }
+    }
 }
 
 ///
@@ -663,10 +676,11 @@ impl PostgresRedoProcess {
     // Start postgres binary in special WAL redo mode.
     //
     #[instrument(skip_all,fields(tenant_id=%tenant_id, pg_version=pg_version))]
-    fn launch(
+    fn launch<const N: usize>(
         conf: &PageServerConf,
         tenant_id: TenantId,
         pg_version: u32,
+        shared_fds: Option<[i32; N]>,
     ) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
@@ -727,7 +741,9 @@ impl PostgresRedoProcess {
         }
 
         // Start postgres itself
-        let child = Command::new(pg_bin_dir_path.join("postgres"))
+        let mut builder = Command::new(pg_bin_dir_path.join("postgres"));
+
+        builder
             .arg("--wal-redo")
             .arg("--disable-seccomp")
             .stdin(Stdio::piped())
@@ -737,24 +753,29 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("PGDATA", &datadir)
-            .env("WALREDO_TENANT", tenant_id.to_string())
-            // The redo process is not trusted, and runs in seccomp mode that
-            // doesn't allow it to open any files. We have to also make sure it
-            // doesn't inherit any file descriptors from the pageserver, that
-            // would allow an attacker to read any files that happen to be open
-            // in the pageserver.
-            //
-            // The Rust standard library makes sure to mark any file descriptors with
-            // as close-on-exec by default, but that's not enough, since we use
-            // libraries that directly call libc open without setting that flag.
-            .close_fds()
-            .spawn_no_leak_child()
-            .map_err(|e| {
-                Error::new(
-                    e.kind(),
-                    format!("postgres --wal-redo command failed to start: {}", e),
-                )
-            })?;
+            .env("WALREDO_TENANT", tenant_id.to_string());
+
+        // The redo process is not trusted, and runs in seccomp mode that
+        // doesn't allow it to open any files. We have to also make sure it
+        // doesn't inherit any file descriptors from the pageserver, that
+        // would allow an attacker to read any files that happen to be open
+        // in the pageserver.
+        //
+        // The Rust standard library makes sure to mark any file descriptors with
+        // as close-on-exec by default, but that's not enough, since we use
+        // libraries that directly call libc open without setting that flag.
+        if let Some(fds) = shared_fds {
+            builder.close_fds_except(fds)
+        } else {
+            builder.close_fds()
+        };
+
+        let child = builder.spawn_no_leak_child().map_err(|e| {
+            Error::new(
+                e.kind(),
+                format!("postgres --wal-redo command failed to start: {}", e),
+            )
+        })?;
 
         let mut child = scopeguard::guard(child, |child| {
             error!("killing wal-redo-postgres process due to a problem during launch");
