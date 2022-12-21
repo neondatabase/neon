@@ -64,10 +64,7 @@ impl SharedMemPipePtr<Created> {
     /// Wrap this in a new hopefully unique `Arc<OwnedRequester>`.
     pub fn try_acquire_requester(self) -> Option<std::sync::Arc<OwnedRequester>> {
         let m = unsafe { Pin::new_unchecked(&self.participants[0]) };
-        let mut guard = m.try_lock().map(Some).unwrap_or_else(|e| match e {
-            TryLockError::PreviousOwnerDied(g) => Some(g),
-            TryLockError::WouldBlock => None,
-        })?;
+        let mut guard = m.try_lock().into_guard()?;
 
         match *guard {
             Some(x) if x == std::process::id() => {
@@ -80,6 +77,8 @@ impl SharedMemPipePtr<Created> {
         // well, we cannot really do much more than this. I was initially planning to keep the
         // mutex locked, but that would have zero guarantees that the thread which created this
         // side is the one to drop it.
+        //
+        // could hold a semaphore instead?
         *guard = Some(std::process::id());
         drop(guard);
 
@@ -94,12 +93,9 @@ impl SharedMemPipePtr<Created> {
 impl SharedMemPipePtr<Joined> {
     pub fn try_acquire_responder(self) -> Option<OwnedResponder> {
         let m = unsafe { Pin::new_unchecked(&self.participants[1]) };
-        let guard = m.try_lock().map(Some).unwrap_or_else(|e| match e {
-            TryLockError::PreviousOwnerDied(g) => Some(g),
-            TryLockError::WouldBlock => None,
-        })?;
+        let guard = m.try_lock().into_guard()?;
         Some(OwnedResponder {
-            // Safety: the pointer cannot be moved
+            // Safety: the pointer `ptr` will not be remapped
             locked_mutex: unsafe { std::mem::transmute(guard) },
             ptr: self,
         })
@@ -244,16 +240,6 @@ impl OwnedRequester {
                 } else if n == 0 {
                     sem.post();
                     might_wait = false;
-
-                    // let g = if might_wait {
-                    //     Some(m.lock().into_guard())
-                    // } else {
-                    //     m.try_lock().into_guard()
-                    // };
-                    // if g.is_some() {
-                    //     might_wait = false;
-                    //     cond.notify_one();
-                    // }
                 }
                 std::thread::yield_now();
             }
@@ -264,8 +250,6 @@ impl OwnedRequester {
         // as part of the first write, make sure that the worker is woken up.
         if might_wait {
             sem.post();
-            // let _g = m.lock().into_guard();
-            // cond.notify_one();
         }
 
         id
@@ -576,7 +560,7 @@ fn initialize_at(
 
         unsafe { fd.assume_init_mut() };
 
-        // the file is dropped if the init completes
+        // the file is forgotten if the init completes
     }
 
     {
@@ -591,7 +575,7 @@ fn initialize_at(
 
         unsafe { fd.assume_init_mut() };
 
-        // the file is dropped if the init completes
+        // the file is forgotten if the init completes
     }
 
     {
