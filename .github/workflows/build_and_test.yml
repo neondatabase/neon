@@ -582,7 +582,6 @@ jobs:
 
   vm-compute-node-image:
     runs-on: [ self-hosted, dev, x64 ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     needs: [ tag, compute-node-image ]
     strategy:
       fail-fast: false
@@ -593,18 +592,21 @@ jobs:
         shell: sh -eu {0}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Build vm image
+      - name: Downloading latest vm-builder
         run: |
           curl -L https://github.com/neondatabase/neonvm/releases/latest/download/vm-builder -o vm-builder
           chmod +x vm-builder
+
+      - name: Pulling compute-node image
+        run: |
           docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+      - name: Build vm image
+        run: |
           ./vm-builder -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+      - name: Pushing vm-compute-node image
+        run: |
           docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
   test-images:
