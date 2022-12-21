@@ -55,9 +55,7 @@ impl<'a> WalIngest<'a> {
     pub fn new(timeline: &Timeline, startpoint: Lsn) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let checkpoint_bytes = timeline
-            .get_checkpoint(startpoint)
-            .require_reconstructed()?;
+        let checkpoint_bytes = timeline.get_checkpoint(startpoint).no_ondemand_download()?;
         let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
@@ -523,7 +521,7 @@ impl<'a> WalIngest<'a> {
         let rels = modification
             .tline
             .list_rels(src_tablespace_id, src_db_id, req_lsn)
-            .require_reconstructed()?;
+            .no_ondemand_download()?;
 
         debug!("ingest_xlog_dbase_create: {} rels", rels.len());
 
@@ -531,7 +529,7 @@ impl<'a> WalIngest<'a> {
         let filemap = modification
             .tline
             .get_relmap_file(src_tablespace_id, src_db_id, req_lsn)
-            .require_reconstructed()?;
+            .no_ondemand_download()?;
         modification.put_relmap_file(tablespace_id, db_id, filemap)?;
 
         let mut num_rels_copied = 0;
@@ -543,7 +541,7 @@ impl<'a> WalIngest<'a> {
             let nblocks = modification
                 .tline
                 .get_rel_size(src_rel, req_lsn, true)
-                .require_reconstructed()?;
+                .no_ondemand_download()?;
             let dst_rel = RelTag {
                 spcnode: tablespace_id,
                 dbnode: db_id,
@@ -561,7 +559,7 @@ impl<'a> WalIngest<'a> {
                 let content = modification
                     .tline
                     .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true)
-                    .require_reconstructed()?;
+                    .no_ondemand_download()?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
             }
@@ -724,7 +722,7 @@ impl<'a> WalIngest<'a> {
                 if modification
                     .tline
                     .get_rel_exists(rel, last_lsn, true)
-                    .require_reconstructed()?
+                    .no_ondemand_download()?
                 {
                     self.put_rel_drop(modification, rel)?;
                 }
@@ -780,7 +778,7 @@ impl<'a> WalIngest<'a> {
         for segno in modification
             .tline
             .list_slru_segments(SlruKind::Clog, req_lsn)
-            .require_reconstructed()?
+            .no_ondemand_download()?
         {
             let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
             if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
@@ -973,13 +971,13 @@ impl<'a> WalIngest<'a> {
         let nblocks = if !self
             .timeline
             .get_rel_exists(rel, lsn, true)
-            .require_reconstructed()?
+            .no_ondemand_download()?
         {
             0
         } else {
             self.timeline
                 .get_rel_size(rel, lsn, true)
-                .require_reconstructed()?
+                .no_ondemand_download()?
         };
         Ok(nblocks)
     }
@@ -998,7 +996,7 @@ impl<'a> WalIngest<'a> {
         let old_nblocks = if !self
             .timeline
             .get_rel_exists(rel, last_lsn, true)
-            .require_reconstructed()?
+            .no_ondemand_download()?
         {
             // create it with 0 size initially, the logic below will extend it
             modification.put_rel_creation(rel, 0)?;
@@ -1006,7 +1004,7 @@ impl<'a> WalIngest<'a> {
         } else {
             self.timeline
                 .get_rel_size(rel, last_lsn, true)
-                .require_reconstructed()?
+                .no_ondemand_download()?
         };
 
         if new_nblocks > old_nblocks {
@@ -1053,7 +1051,7 @@ impl<'a> WalIngest<'a> {
         let old_nblocks = if !self
             .timeline
             .get_slru_segment_exists(kind, segno, last_lsn)
-            .require_reconstructed()?
+            .no_ondemand_download()?
         {
             // create it with 0 size initially, the logic below will extend it
             modification.put_slru_segment_creation(kind, segno, 0)?;
@@ -1061,7 +1059,7 @@ impl<'a> WalIngest<'a> {
         } else {
             self.timeline
                 .get_slru_segment_size(kind, segno, last_lsn)
-                .require_reconstructed()?
+                .no_ondemand_download()?
         };
 
         if new_nblocks > old_nblocks {
@@ -1145,30 +1143,30 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Lsn(0x10), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             false
         );
         assert!(tline
             .get_rel_size(TESTREL_A, Lsn(0x10), false)
-            .require_reconstructed()
+            .no_ondemand_download()
             .is_err());
 
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Lsn(0x20), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             true
         );
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x20), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             1
         );
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x50), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             3
         );
 
@@ -1176,46 +1174,46 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 2")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 3")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1 at 4")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1229,19 +1227,19 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x60), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             2
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1 at 4")
         );
 
@@ -1249,13 +1247,13 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x50), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             3
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1266,7 +1264,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x68), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             0
         );
 
@@ -1277,19 +1275,19 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x70), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             2
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1")
         );
 
@@ -1300,21 +1298,21 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x80), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             1501
         );
         for blk in 2..1500 {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false)
-                    .require_reconstructed()?,
+                    .no_ondemand_download()?,
                 ZERO_PAGE
             );
         }
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             TEST_IMG("foo blk 1500")
         );
 
@@ -1337,13 +1335,13 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Lsn(0x20), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             true
         );
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x20), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             1
         );
 
@@ -1356,7 +1354,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Lsn(0x30), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             false
         );
 
@@ -1372,13 +1370,13 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Lsn(0x40), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             true
         );
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x40), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             1
         );
 
@@ -1407,24 +1405,24 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Lsn(0x10), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             false
         );
         assert!(tline
             .get_rel_size(TESTREL_A, Lsn(0x10), false)
-            .require_reconstructed()
+            .no_ondemand_download()
             .is_err());
 
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Lsn(0x20), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             true
         );
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x20), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             relsize
         );
 
@@ -1435,7 +1433,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false)
-                    .require_reconstructed()?,
+                    .no_ondemand_download()?,
                 TEST_IMG(&data)
             );
         }
@@ -1450,7 +1448,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x60), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             1
         );
 
@@ -1460,7 +1458,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false)
-                    .require_reconstructed()?,
+                    .no_ondemand_download()?,
                 TEST_IMG(&data)
             );
         }
@@ -1469,7 +1467,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x50), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             relsize
         );
         for blkno in 0..relsize {
@@ -1478,7 +1476,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false)
-                    .require_reconstructed()?,
+                    .no_ondemand_download()?,
                 TEST_IMG(&data)
             );
         }
@@ -1496,13 +1494,13 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_exists(TESTREL_A, Lsn(0x80), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             true
         );
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x80), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             relsize
         );
         // Check relation content
@@ -1512,7 +1510,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false)
-                    .require_reconstructed()?,
+                    .no_ondemand_download()?,
                 TEST_IMG(&data)
             );
         }
@@ -1542,7 +1540,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(lsn), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             RELSEG_SIZE + 1
         );
 
@@ -1554,7 +1552,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(lsn), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             RELSEG_SIZE
         );
         assert_current_logical_size(&*tline, Lsn(lsn));
@@ -1567,7 +1565,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(lsn), false)
-                .require_reconstructed()?,
+                .no_ondemand_download()?,
             RELSEG_SIZE - 1
         );
         assert_current_logical_size(&*tline, Lsn(lsn));
@@ -1583,7 +1581,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_size(TESTREL_A, Lsn(lsn), false)
-                    .require_reconstructed()?,
+                    .no_ondemand_download()?,
                 size as BlockNumber
             );
 

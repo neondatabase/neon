@@ -217,7 +217,7 @@ where
                 let img = self
                     .timeline
                     .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
-                    .require_reconstructed()?;
+                    .no_ondemand_download()?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
@@ -310,7 +310,7 @@ where
                 && self
                     .timeline
                     .list_rels(spcnode, dbnode, self.lsn)
-                    .require_reconstructed()?
+                    .no_ondemand_download()?
                     .is_empty()
             {
                 return Ok(());

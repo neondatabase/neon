@@ -336,8 +336,12 @@ pub struct WalReceiverInfo {
     pub last_received_msg_ts: u128,
 }
 
+/// Like `?`, but for [`PageReconstructResult`].
+/// Use it to bubble up the `NeedsDownload` and `Error` to the caller.
+///
+/// Once `std::ops::Try` is stabilized, we should use it instead of this macro.
 #[macro_export]
-macro_rules! reconstruct {
+macro_rules! try_no_ondemand_download {
     ($result:expr) => {{
         let result = $result;
         match result {
@@ -407,6 +411,11 @@ impl std::fmt::Debug for PageReconstructError {
     }
 }
 
+/// This impl makes it so you can substitute return type
+/// `Result<T, E>` with `PageReconstructError<T>` in functions
+/// and existing `?` will generally continue to work.
+/// The reason why  thanks to
+/// anyhow::Error that `(some error type)ensures that exis
 impl<E, T> From<E> for PageReconstructResult<T>
 where
     E: Into<PageReconstructError>,
@@ -417,7 +426,23 @@ where
 }
 
 impl<T> PageReconstructResult<T> {
-    pub fn require_reconstructed(self) -> anyhow::Result<T> {
+    /// Treat the need for on-demand download as an error.
+    ///
+    /// **Avoid this function in new code** if you can help it,
+    /// as on-demand download will become the norm in the future,
+    /// especially once we implement layer file eviction.
+    ///
+    /// If you are in an async function, use [`with_ondemand_download`]
+    /// to do the download right here.
+    ///
+    /// If you are in a sync function, change its return type from
+    /// `Result<T, E>` to `PageReconstructResult<T>` and bubble up
+    /// the non-success cases of `PageReconstructResult<T>` to the caller.
+    /// This gives them a chance to do the download and retry.
+    /// Consider using [`try_no_ondemand_download`] for convenience.
+    ///
+    /// For more background, read the comment on [`with_ondemand_download`].
+    pub fn no_ondemand_download(self) -> anyhow::Result<T> {
         match self {
             PageReconstructResult::Success(value) => Ok(value),
             // TODO print more info about the timeline
@@ -484,7 +509,7 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        reconstruct!(self.get_reconstruct_data(key, lsn, &mut reconstruct_state));
+        try_no_ondemand_download!(self.get_reconstruct_data(key, lsn, &mut reconstruct_state));
 
         self.metrics
             .reconstruct_time_histo
@@ -2666,7 +2691,7 @@ impl Timeline {
 
                 match self
                     .find_lsn_for_timestamp(pitr_timestamp)
-                    .require_reconstructed()?
+                    .no_ondemand_download()?
                 {
                     LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
                     LsnForTimestamp::Future(lsn) => {
@@ -3218,12 +3243,11 @@ impl Timeline {
     }
 }
 
-// TODO kb adjust docs
-/// Helper function to deal with [`PageReconstructError::NeedDownload`].
+/// Helper function to deal with [`PageReconstructResult`].
 ///
-/// Takes a sync closure that can fail with [`PageReconstructError`].
-/// If it is [`PageReconstructError::NeedDownload`],
-/// do the download and retry the function call.
+/// Takes a sync closure that returns a [`PageReconstructResult`].
+/// If it is [`PageReconstructResult::NeedsDownload`],
+/// do the download and retry the closure.
 ///
 /// ### Background
 ///
@@ -3245,23 +3269,23 @@ impl Timeline {
 ///           async download_remote_layer         timeline.rs
 ///
 /// It is not possible to Timeline::download_remote_layer().await within
-/// get_reconstruct_data, so instead, we return PageReconstructError::NeedDownload
-/// which contains references to the Timeline and RemoteLayer.
+/// get_reconstruct_data, so instead, we return [`PageReconstructResult::NeedsDownload`]
+/// which contains references to the [`Timeline`] and [`RemoteLayer`].
 /// We bubble that error upstack to the async code, which can then call
-/// Timeline::download_remote_layer().await.
+/// `Timeline::download_remote_layer().await`.
 /// That is _efficient_ because tokio can use the same OS thread to do
 /// other work while we're waiting for the download.
 ///
-/// The main drawback with this approach is that we need to be careful
-/// to actually _act_ on PageReconstructError::NeedDownload instead of
-/// just wrapping it into anyhow::Error or the like.
-/// At the time of writing, we are confident that we covered all code paths
-/// that need it right now, but it definitely is future maintenance cost.
+/// It is a deliberate decision to use a new result type to communicate
+/// the need for download instead of adding another variant to [`PageReconstructError`].
+/// The reason is that with the latter approach, any place that does
+/// `?` on a `Result<T, PageReconstructError>` will implicitly ignore the
+/// need for download. We want that to be explicit, so that
+/// - the code base becomes greppable for places that don't do a download
+/// - future code changes will need to explicilty address for on-demand download
 ///
 /// Alternatives to consider in the future:
 ///
-/// - Use the type to prevent wrapping PageReconstructError::NeedDownload
-///   into another error type.
 /// - Inside `get_reconstruct_data`, we can std::thread::spawn a thread
 ///   and use it to block_on the download_remote_layer future.
 ///   That is obviously inefficient as it creates one thread per download.
