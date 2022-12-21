@@ -23,7 +23,7 @@ use tar::{Builder, EntryType, Header};
 use tracing::*;
 
 use crate::task_mgr;
-use crate::tenant::{with_ondemand_download, PageReconstructError, Timeline};
+use crate::tenant::{with_ondemand_download, PageReconstructResult, Timeline};
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
@@ -216,7 +216,8 @@ where
             for blknum in blocks {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)?;
+                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
+                    .no_ondemand_download()?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
@@ -308,7 +309,8 @@ where
             if !has_relmap_file
                 && self
                     .timeline
-                    .list_rels(spcnode, dbnode, self.lsn)?
+                    .list_rels(spcnode, dbnode, self.lsn)
+                    .no_ondemand_download()?
                     .is_empty()
             {
                 return Ok(());
@@ -504,7 +506,7 @@ where
 
 fn with_ondemand_download_sync<F, T>(f: F) -> anyhow::Result<T>
 where
-    F: Send + Fn() -> Result<T, PageReconstructError>,
+    F: Send + Fn() -> PageReconstructResult<T>,
     T: Send,
 {
     task_mgr::COMPUTE_REQUEST_RUNTIME.block_on(with_ondemand_download(f))

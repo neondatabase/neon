@@ -6,11 +6,11 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use super::tenant::PageReconstructError;
+use super::tenant::PageReconstructResult;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::repository::*;
 use crate::tenant::Timeline;
 use crate::walrecord::NeonWalRecord;
+use crate::{repository::*, try_no_ondemand_download};
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -39,8 +39,6 @@ pub enum LsnForTimestamp {
 pub enum CalculateLogicalSizeError {
     #[error("cancelled")]
     Cancelled,
-    #[error(transparent)]
-    PageReconstruct(#[from] PageReconstructError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -100,20 +98,18 @@ impl Timeline {
         blknum: BlockNumber,
         lsn: Lsn,
         latest: bool,
-    ) -> Result<Bytes, PageReconstructError> {
+    ) -> PageReconstructResult<Bytes> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::from(anyhow::anyhow!(
-                "invalid relnode"
-            )));
+            return PageReconstructResult::from(anyhow::anyhow!("invalid relnode"));
         }
 
-        let nblocks = self.get_rel_size(tag, lsn, latest)?;
+        let nblocks = try_no_ondemand_download!(self.get_rel_size(tag, lsn, latest));
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
                 tag, blknum, lsn, nblocks
             );
-            return Ok(ZERO_PAGE.clone());
+            return PageReconstructResult::Success(ZERO_PAGE.clone());
         }
 
         let key = rel_block_to_key(tag, blknum);
@@ -127,16 +123,16 @@ impl Timeline {
         dbnode: Oid,
         lsn: Lsn,
         latest: bool,
-    ) -> Result<usize, PageReconstructError> {
+    ) -> PageReconstructResult<usize> {
         let mut total_blocks = 0;
 
-        let rels = self.list_rels(spcnode, dbnode, lsn)?;
+        let rels = try_no_ondemand_download!(self.list_rels(spcnode, dbnode, lsn));
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, lsn, latest)?;
+            let n_blocks = try_no_ondemand_download!(self.get_rel_size(rel, lsn, latest));
             total_blocks += n_blocks as usize;
         }
-        Ok(total_blocks)
+        PageReconstructResult::Success(total_blocks)
     }
 
     /// Get size of a relation file
@@ -145,27 +141,27 @@ impl Timeline {
         tag: RelTag,
         lsn: Lsn,
         latest: bool,
-    ) -> Result<BlockNumber, PageReconstructError> {
+    ) -> PageReconstructResult<BlockNumber> {
         if tag.relnode == 0 {
-            return Err(anyhow::anyhow!("invalid relnode").into());
+            return PageReconstructResult::from(anyhow::anyhow!("invalid relnode"));
         }
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
-            return Ok(nblocks);
+            return PageReconstructResult::Success(nblocks);
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, lsn, latest)?
+            && !try_no_ondemand_download!(self.get_rel_exists(tag, lsn, latest))
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
             // without extending it.  Tolerate that by claiming that
             // any non-existent FSM fork has size 0.
-            return Ok(0);
+            return PageReconstructResult::Success(0);
         }
 
         let key = rel_size_to_key(tag);
-        let mut buf = self.get(key, lsn)?;
+        let mut buf = try_no_ondemand_download!(self.get(key, lsn));
         let nblocks = buf.get_u32_le();
 
         if latest {
@@ -178,7 +174,7 @@ impl Timeline {
             // associated with most recent value of LSN.
             self.update_cached_rel_size(tag, lsn, nblocks);
         }
-        Ok(nblocks)
+        PageReconstructResult::Success(nblocks)
     }
 
     /// Does relation exist?
@@ -187,23 +183,26 @@ impl Timeline {
         tag: RelTag,
         lsn: Lsn,
         _latest: bool,
-    ) -> Result<bool, PageReconstructError> {
+    ) -> PageReconstructResult<bool> {
         if tag.relnode == 0 {
-            return Err(anyhow::anyhow!("invalid relnode").into());
+            return PageReconstructResult::from(anyhow::anyhow!("invalid relnode"));
         }
 
         // first try to lookup relation in cache
         if let Some(_nblocks) = self.get_cached_rel_size(&tag, lsn) {
-            return Ok(true);
+            return PageReconstructResult::Success(true);
         }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
-        let buf = self.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf).context("deserialization failure")?;
+        let buf = try_no_ondemand_download!(self.get(key, lsn));
 
-        let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
-
-        Ok(exists)
+        match RelDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => {
+                let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
+                PageReconstructResult::Success(exists)
+            }
+            Err(e) => PageReconstructResult::from(e),
+        }
     }
 
     /// Get a list of all existing relations in given tablespace and database.
@@ -212,21 +211,25 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         lsn: Lsn,
-    ) -> Result<HashSet<RelTag>, PageReconstructError> {
+    ) -> PageReconstructResult<HashSet<RelTag>> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
-        let buf = self.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf).context("deserialization failure")?;
+        let buf = try_no_ondemand_download!(self.get(key, lsn));
 
-        let rels: HashSet<RelTag> =
-            HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
-                spcnode,
-                dbnode,
-                relnode: *relnode,
-                forknum: *forknum,
-            }));
+        match RelDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => {
+                let rels: HashSet<RelTag> =
+                    HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
+                        spcnode,
+                        dbnode,
+                        relnode: *relnode,
+                        forknum: *forknum,
+                    }));
 
-        Ok(rels)
+                PageReconstructResult::Success(rels)
+            }
+            Err(e) => PageReconstructResult::from(e),
+        }
     }
 
     /// Look up given SLRU page version.
@@ -236,7 +239,7 @@ impl Timeline {
         segno: u32,
         blknum: BlockNumber,
         lsn: Lsn,
-    ) -> Result<Bytes, PageReconstructError> {
+    ) -> PageReconstructResult<Bytes> {
         let key = slru_block_to_key(kind, segno, blknum);
         self.get(key, lsn)
     }
@@ -247,10 +250,10 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         lsn: Lsn,
-    ) -> Result<BlockNumber, PageReconstructError> {
+    ) -> PageReconstructResult<BlockNumber> {
         let key = slru_segment_size_to_key(kind, segno);
-        let mut buf = self.get(key, lsn)?;
-        Ok(buf.get_u32_le())
+        let mut buf = try_no_ondemand_download!(self.get(key, lsn));
+        PageReconstructResult::Success(buf.get_u32_le())
     }
 
     /// Get size of an SLRU segment
@@ -259,14 +262,18 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         lsn: Lsn,
-    ) -> Result<bool, PageReconstructError> {
+    ) -> PageReconstructResult<bool> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
-        let buf = self.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
+        let buf = try_no_ondemand_download!(self.get(key, lsn));
 
-        let exists = dir.segments.get(&segno).is_some();
-        Ok(exists)
+        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => {
+                let exists = dir.segments.get(&segno).is_some();
+                PageReconstructResult::Success(exists)
+            }
+            Err(e) => PageReconstructResult::from(e),
+        }
     }
 
     /// Locate LSN, such that all transactions that committed before
@@ -279,7 +286,7 @@ impl Timeline {
     pub fn find_lsn_for_timestamp(
         &self,
         search_timestamp: TimestampTz,
-    ) -> Result<LsnForTimestamp, PageReconstructError> {
+    ) -> PageReconstructResult<LsnForTimestamp> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         let min_lsn = *gc_cutoff_lsn_guard;
         let max_lsn = self.get_last_record_lsn();
@@ -295,12 +302,12 @@ impl Timeline {
             // cannot overflow, high and low are both smaller than u64::MAX / 2
             let mid = (high + low) / 2;
 
-            let cmp = self.is_latest_commit_timestamp_ge_than(
+            let cmp = try_no_ondemand_download!(self.is_latest_commit_timestamp_ge_than(
                 search_timestamp,
                 Lsn(mid * 8),
                 &mut found_smaller,
                 &mut found_larger,
-            )?;
+            ));
 
             if cmp {
                 high = mid;
@@ -312,15 +319,15 @@ impl Timeline {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
                 // just after importing a cluster.
-                Ok(LsnForTimestamp::NoData(max_lsn))
+                PageReconstructResult::Success(LsnForTimestamp::NoData(max_lsn))
             }
             (true, false) => {
                 // Didn't find any commit timestamps larger than the request
-                Ok(LsnForTimestamp::Future(max_lsn))
+                PageReconstructResult::Success(LsnForTimestamp::Future(max_lsn))
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
-                Ok(LsnForTimestamp::Past(max_lsn))
+                PageReconstructResult::Success(LsnForTimestamp::Past(max_lsn))
             }
             (true, true) => {
                 // low is the LSN of the first commit record *after* the search_timestamp,
@@ -330,7 +337,7 @@ impl Timeline {
                 // Otherwise, if you restore to the returned LSN, the database will
                 // include physical changes from later commits that will be marked
                 // as aborted, and will need to be vacuumed away.
-                Ok(LsnForTimestamp::Present(Lsn((low - 1) * 8)))
+                PageReconstructResult::Success(LsnForTimestamp::Present(Lsn((low - 1) * 8)))
             }
         }
     }
@@ -348,12 +355,20 @@ impl Timeline {
         probe_lsn: Lsn,
         found_smaller: &mut bool,
         found_larger: &mut bool,
-    ) -> Result<bool, PageReconstructError> {
-        for segno in self.list_slru_segments(SlruKind::Clog, probe_lsn)? {
-            let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, probe_lsn)?;
+    ) -> PageReconstructResult<bool> {
+        for segno in try_no_ondemand_download!(self.list_slru_segments(SlruKind::Clog, probe_lsn)) {
+            let nblocks = try_no_ondemand_download!(self.get_slru_segment_size(
+                SlruKind::Clog,
+                segno,
+                probe_lsn
+            ));
             for blknum in (0..nblocks).rev() {
-                let clog_page =
-                    self.get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn)?;
+                let clog_page = try_no_ondemand_download!(self.get_slru_page_at_lsn(
+                    SlruKind::Clog,
+                    segno,
+                    blknum,
+                    probe_lsn
+                ));
 
                 if clog_page.len() == BLCKSZ as usize + 8 {
                     let mut timestamp_bytes = [0u8; 8];
@@ -362,14 +377,14 @@ impl Timeline {
 
                     if timestamp >= search_timestamp {
                         *found_larger = true;
-                        return Ok(true);
+                        return PageReconstructResult::Success(true);
                     } else {
                         *found_smaller = true;
                     }
                 }
             }
         }
-        Ok(false)
+        PageReconstructResult::Success(false)
     }
 
     /// Get a list of SLRU segments
@@ -377,14 +392,15 @@ impl Timeline {
         &self,
         kind: SlruKind,
         lsn: Lsn,
-    ) -> Result<HashSet<u32>, PageReconstructError> {
+    ) -> PageReconstructResult<HashSet<u32>> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
-        let buf = self.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
-
-        Ok(dir.segments)
+        let buf = try_no_ondemand_download!(self.get(key, lsn));
+        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => PageReconstructResult::Success(dir.segments),
+            Err(e) => PageReconstructResult::from(e),
+        }
     }
 
     pub fn get_relmap_file(
@@ -392,47 +408,44 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         lsn: Lsn,
-    ) -> Result<Bytes, PageReconstructError> {
+    ) -> PageReconstructResult<Bytes> {
         let key = relmap_file_key(spcnode, dbnode);
 
-        let buf = self.get(key, lsn)?;
-        Ok(buf)
+        let buf = try_no_ondemand_download!(self.get(key, lsn));
+        PageReconstructResult::Success(buf)
     }
 
-    pub fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>, PageReconstructError> {
+    pub fn list_dbdirs(&self, lsn: Lsn) -> PageReconstructResult<HashMap<(Oid, Oid), bool>> {
         // fetch directory entry
-        let buf = self.get(DBDIR_KEY, lsn)?;
-        let dir = DbDirectory::des(&buf).context("deserialization failure")?;
+        let buf = try_no_ondemand_download!(self.get(DBDIR_KEY, lsn));
 
-        Ok(dir.dbdirs)
+        match DbDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => PageReconstructResult::Success(dir.dbdirs),
+            Err(e) => PageReconstructResult::from(e),
+        }
     }
 
-    pub fn get_twophase_file(
-        &self,
-        xid: TransactionId,
-        lsn: Lsn,
-    ) -> Result<Bytes, PageReconstructError> {
+    pub fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> PageReconstructResult<Bytes> {
         let key = twophase_file_key(xid);
-        let buf = self.get(key, lsn)?;
-        Ok(buf)
+        let buf = try_no_ondemand_download!(self.get(key, lsn));
+        PageReconstructResult::Success(buf)
     }
 
-    pub fn list_twophase_files(
-        &self,
-        lsn: Lsn,
-    ) -> Result<HashSet<TransactionId>, PageReconstructError> {
+    pub fn list_twophase_files(&self, lsn: Lsn) -> PageReconstructResult<HashSet<TransactionId>> {
         // fetch directory entry
-        let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
-        let dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
+        let buf = try_no_ondemand_download!(self.get(TWOPHASEDIR_KEY, lsn));
 
-        Ok(dir.xids)
+        match TwoPhaseDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => PageReconstructResult::Success(dir.xids),
+            Err(e) => PageReconstructResult::from(e),
+        }
     }
 
-    pub fn get_control_file(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
+    pub fn get_control_file(&self, lsn: Lsn) -> PageReconstructResult<Bytes> {
         self.get(CONTROLFILE_KEY, lsn)
     }
 
-    pub fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
+    pub fn get_checkpoint(&self, lsn: Lsn) -> PageReconstructResult<Bytes> {
         self.get(CHECKPOINT_KEY, lsn)
     }
 
@@ -491,7 +504,8 @@ impl Timeline {
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
-                .list_rels(spcnode, dbnode, lsn)?
+                .list_rels(spcnode, dbnode, lsn)
+                .no_ondemand_download()?
                 .iter()
                 .cloned()
                 .collect();
@@ -692,7 +706,7 @@ impl<'a> DatadirModification<'a> {
     /// Store a relmapper file (pg_filenode.map) in the repository
     pub fn put_relmap_file(&mut self, spcnode: Oid, dbnode: Oid, img: Bytes) -> anyhow::Result<()> {
         // Add it to the directory (if it doesn't exist already)
-        let buf = self.get(DBDIR_KEY)?;
+        let buf = self.get(DBDIR_KEY).no_ondemand_download()?;
         let mut dbdir = DbDirectory::des(&buf)?;
 
         let r = dbdir.dbdirs.insert((spcnode, dbnode), true);
@@ -720,7 +734,7 @@ impl<'a> DatadirModification<'a> {
 
     pub fn put_twophase_file(&mut self, xid: TransactionId, img: Bytes) -> anyhow::Result<()> {
         // Add it to the directory entry
-        let buf = self.get(TWOPHASEDIR_KEY)?;
+        let buf = self.get(TWOPHASEDIR_KEY).no_ondemand_download()?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
         if !dir.xids.insert(xid) {
             anyhow::bail!("twophase file for xid {} already exists", xid);
@@ -747,10 +761,13 @@ impl<'a> DatadirModification<'a> {
     pub fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> anyhow::Result<()> {
         let req_lsn = self.tline.get_last_record_lsn();
 
-        let total_blocks = self.tline.get_db_size(spcnode, dbnode, req_lsn, true)?;
+        let total_blocks = self
+            .tline
+            .get_db_size(spcnode, dbnode, req_lsn, true)
+            .no_ondemand_download()?;
 
         // Remove entry from dbdir
-        let buf = self.get(DBDIR_KEY)?;
+        let buf = self.get(DBDIR_KEY).no_ondemand_download()?;
         let mut dir = DbDirectory::des(&buf)?;
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
@@ -777,7 +794,7 @@ impl<'a> DatadirModification<'a> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY)?)?;
+        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY).no_ondemand_download()?)?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
             // Didn't exist. Update dbdir
@@ -789,7 +806,7 @@ impl<'a> DatadirModification<'a> {
             RelDirectory::default()
         } else {
             // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key)?)?
+            RelDirectory::des(&self.get(rel_dir_key).no_ondemand_download()?)?
         };
 
         // Add the new relation to the rel directory entry, and write it back
@@ -820,10 +837,14 @@ impl<'a> DatadirModification<'a> {
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         let last_lsn = self.tline.get_last_record_lsn();
-        if self.tline.get_rel_exists(rel, last_lsn, true)? {
+        if self
+            .tline
+            .get_rel_exists(rel, last_lsn, true)
+            .no_ondemand_download()?
+        {
             let size_key = rel_size_to_key(rel);
             // Fetch the old size first
-            let old_size = self.get(size_key)?.get_u32_le();
+            let old_size = self.get(size_key).no_ondemand_download()?.get_u32_le();
 
             // Update the entry with the new size.
             let buf = nblocks.to_le_bytes();
@@ -848,7 +869,7 @@ impl<'a> DatadirModification<'a> {
 
         // Put size
         let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key)?.get_u32_le();
+        let old_size = self.get(size_key).no_ondemand_download()?.get_u32_le();
 
         // only extend relation here. never decrease the size
         if nblocks > old_size {
@@ -869,7 +890,7 @@ impl<'a> DatadirModification<'a> {
 
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let buf = self.get(dir_key)?;
+        let buf = self.get(dir_key).no_ondemand_download()?;
         let mut dir = RelDirectory::des(&buf)?;
 
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
@@ -880,7 +901,7 @@ impl<'a> DatadirModification<'a> {
 
         // update logical size
         let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key)?.get_u32_le();
+        let old_size = self.get(size_key).no_ondemand_download()?.get_u32_le();
         self.pending_nblocks -= old_size as i64;
 
         // Remove enty from relation size cache
@@ -900,7 +921,7 @@ impl<'a> DatadirModification<'a> {
     ) -> anyhow::Result<()> {
         // Add it to the directory entry
         let dir_key = slru_dir_to_key(kind);
-        let buf = self.get(dir_key)?;
+        let buf = self.get(dir_key).no_ondemand_download()?;
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.insert(segno) {
@@ -939,7 +960,7 @@ impl<'a> DatadirModification<'a> {
     pub fn drop_slru_segment(&mut self, kind: SlruKind, segno: u32) -> anyhow::Result<()> {
         // Remove it from the directory entry
         let dir_key = slru_dir_to_key(kind);
-        let buf = self.get(dir_key)?;
+        let buf = self.get(dir_key).no_ondemand_download()?;
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.remove(&segno) {
@@ -965,7 +986,7 @@ impl<'a> DatadirModification<'a> {
     /// This method is used for marking truncated SLRU files
     pub fn drop_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
         // Remove it from the directory entry
-        let buf = self.get(TWOPHASEDIR_KEY)?;
+        let buf = self.get(TWOPHASEDIR_KEY).no_ondemand_download()?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
 
         if !dir.xids.remove(&xid) {
@@ -1059,7 +1080,7 @@ impl<'a> DatadirModification<'a> {
 
     // Internal helper functions to batch the modifications
 
-    fn get(&self, key: Key) -> Result<Bytes, PageReconstructError> {
+    fn get(&self, key: Key) -> PageReconstructResult<Bytes> {
         // Have we already updated the same key? Read the pending updated
         // version in that case.
         //
@@ -1067,14 +1088,16 @@ impl<'a> DatadirModification<'a> {
         // value that has been removed, deletion only avoids leaking storage.
         if let Some(value) = self.pending_updates.get(&key) {
             if let Value::Image(img) = value {
-                Ok(img.clone())
+                PageReconstructResult::Success(img.clone())
             } else {
                 // Currently, we never need to read back a WAL record that we
                 // inserted in the same "transaction". All the metadata updates
                 // work directly with Images, and we never need to read actual
                 // data pages. We could handle this if we had to, by calling
                 // the walredo manager, but let's keep it simple for now.
-                return Err(anyhow::anyhow!("unexpected pending WAL record").into());
+                return PageReconstructResult::from(anyhow::anyhow!(
+                    "unexpected pending WAL record"
+                ));
             }
         } else {
             let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
