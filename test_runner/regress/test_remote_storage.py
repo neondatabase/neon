@@ -132,39 +132,36 @@ def test_remote_storage_backup_and_restore(
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    # Introduce failpoint in download
+    # Introduce failpoint in list remote timelines code path to make tenant_attach fail.
+    # This is before the failures injected by test_remote_failures, so it's a permanent error.
     pageserver_http.configure_failpoints(("storage-sync-list-remote-timelines", "return"))
     env.pageserver.allowed_errors.append(
         ".*error attaching tenant: storage-sync-list-remote-timelines",
     )
-
-    # Attach doesn't download anything, so, this should succeed
+    # Since we can't list remote timelines, tenant will go into Broken state immediately
     client.tenant_attach(tenant_id)
-
-    detail = client.tenant_status(tenant_id)
-    log.info("Tenant status with active failpoint: %s", detail)
-
-    # is there a better way to assert that failpoint triggered?
     wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
-
-    # assert cannot attach timeline that is scheduled for download
-    # FIXME: we used to keep retrying the initial download on failure.
-    # (We need to download some layers to calculate the logical size.)
-    # Now we mark the timeline as broken, instead.
-    # with pytest.raises(Exception, match="attach is already in progress"):
+    # Ensure that even though the tenant is broken, we can't attach it again.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
         client.tenant_attach(tenant_id)
-
     tenant_status = client.tenant_status(tenant_id)
     log.info("Tenant status with active failpoint: %s", tenant_status)
-    # FIXME see above
-    # assert tenant_status["has_in_progress_downloads"] is True
 
-    # trigger temporary download files removal
+    # Restart again, this implicitly clears the failpoint.
+    # test_remote_failures=1 remains active, though, as it's in the pageserver config.
+    # This means that any of the remote client operations after restart will exercise the
+    # retry code path.
     env.pageserver.stop()
+    layer_download_failed_regex = (
+        r"download.*[0-9A-F]+-[0-9A-F]+.*open a download stream for layer.*simulated failure"
+    )
+    assert not env.pageserver.log_contains(
+        layer_download_failed_regex
+    ), "we shouldn't have tried any layer downloads yet since list remote timelines has a failpoint"
     env.pageserver.start()
 
-    # ensure that an initiated attach operation survives pageserver restart
+    # The pageserver remembers that the tenant was attaching.
+    # Ensure that we still fail by trying to attach.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
         client.tenant_attach(tenant_id)
     log.info("waiting for tenant to become active. this should be quick with on-demand download")
@@ -188,7 +185,6 @@ def test_remote_storage_backup_and_restore(
     ), "current db Lsn should should not be less than the one stored on remote storage"
 
     log.info("select some data, this will cause layers to be downloaded")
-    # FIXME exercise code path where download fails
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
@@ -196,6 +192,9 @@ def test_remote_storage_backup_and_restore(
                 query_scalar(cur, f"SELECT data FROM t{checkpoint_number} WHERE id = {data_id};")
                 == f"{data}|{checkpoint_number}"
             )
+
+    log.info("ensure that we neede to retry downloads due to test_remote_failures=1")
+    assert env.pageserver.log_contains(layer_download_failed_regex)
 
 
 # Exercises the upload queue retry code paths.
