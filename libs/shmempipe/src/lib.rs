@@ -350,6 +350,10 @@ impl OwnedResponder {
     }
 }
 
+/// Main entrypoint for the pgxn/neon_walredo/walredoproc.c.
+///
+/// Reads the "WALREDO_TENANT" environment variable which is expected to have the hex form of
+/// tenant id in it, uses that as the suffix of the shm_open path.
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern "C" fn shmempipe_open_via_env() -> *mut OwnedResponder {
