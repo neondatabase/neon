@@ -31,7 +31,6 @@ use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
-use crate::reconstruct;
 use crate::tenant::Timeline;
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
@@ -56,7 +55,9 @@ impl<'a> WalIngest<'a> {
     pub fn new(timeline: &Timeline, startpoint: Lsn) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let checkpoint_bytes = reconstruct!(timeline.get_checkpoint(startpoint));
+        let checkpoint_bytes = timeline
+            .get_checkpoint(startpoint)
+            .require_reconstructed()?;
         let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
@@ -519,18 +520,18 @@ impl<'a> WalIngest<'a> {
         // get calls instead.
         let req_lsn = modification.tline.get_last_record_lsn();
 
-        let rels =
-            reconstruct!(modification
-                .tline
-                .list_rels(src_tablespace_id, src_db_id, req_lsn));
+        let rels = modification
+            .tline
+            .list_rels(src_tablespace_id, src_db_id, req_lsn)
+            .require_reconstructed()?;
 
         debug!("ingest_xlog_dbase_create: {} rels", rels.len());
 
         // Copy relfilemap
-        let filemap =
-            reconstruct!(modification
-                .tline
-                .get_relmap_file(src_tablespace_id, src_db_id, req_lsn));
+        let filemap = modification
+            .tline
+            .get_relmap_file(src_tablespace_id, src_db_id, req_lsn)
+            .require_reconstructed()?;
         modification.put_relmap_file(tablespace_id, db_id, filemap)?;
 
         let mut num_rels_copied = 0;
@@ -539,7 +540,10 @@ impl<'a> WalIngest<'a> {
             assert_eq!(src_rel.spcnode, src_tablespace_id);
             assert_eq!(src_rel.dbnode, src_db_id);
 
-            let nblocks = reconstruct!(modification.tline.get_rel_size(src_rel, req_lsn, true));
+            let nblocks = modification
+                .tline
+                .get_rel_size(src_rel, req_lsn, true)
+                .require_reconstructed()?;
             let dst_rel = RelTag {
                 spcnode: tablespace_id,
                 dbnode: db_id,
@@ -554,10 +558,11 @@ impl<'a> WalIngest<'a> {
             for blknum in 0..nblocks {
                 debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
 
-                let content = reconstruct!(modification
+                let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true));
-                reconstruct!(modification.put_rel_page_image(dst_rel, blknum, content))?;
+                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true)
+                    .require_reconstructed()?;
+                modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
             }
 
@@ -660,7 +665,7 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification,
         parsed: &XlXactParsedRecord,
         is_commit: bool,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // Record update of CLOG pages
         let mut pageno = parsed.xid / pg_constants::CLOG_XACTS_PER_PAGE;
         let mut segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -716,7 +721,11 @@ impl<'a> WalIngest<'a> {
                     relnode: xnode.relnode,
                 };
                 let last_lsn = self.timeline.get_last_record_lsn();
-                if reconstruct!(modification.tline.get_rel_exists(rel, last_lsn, true)) {
+                if modification
+                    .tline
+                    .get_rel_exists(rel, last_lsn, true)
+                    .require_reconstructed()?
+                {
                     self.put_rel_drop(modification, rel)?;
                 }
             }
@@ -728,7 +737,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         modification: &mut DatadirModification,
         xlrec: &XlClogTruncate,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         info!(
             "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {}",
             xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db
@@ -768,9 +777,10 @@ impl<'a> WalIngest<'a> {
         // it. So we use the previous record's LSN in the get calls
         // instead.
         let req_lsn = modification.tline.get_last_record_lsn();
-        for segno in reconstruct!(modification
+        for segno in modification
             .tline
-            .list_slru_segments(SlruKind::Clog, req_lsn))
+            .list_slru_segments(SlruKind::Clog, req_lsn)
+            .require_reconstructed()?
         {
             let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
             if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
@@ -960,10 +970,16 @@ impl<'a> WalIngest<'a> {
     }
 
     fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> anyhow::Result<BlockNumber> {
-        let nblocks = if !reconstruct!(self.timeline.get_rel_exists(rel, lsn, true)) {
+        let nblocks = if !self
+            .timeline
+            .get_rel_exists(rel, lsn, true)
+            .require_reconstructed()?
+        {
             0
         } else {
-            reconstruct!(self.timeline.get_rel_size(rel, lsn, true))
+            self.timeline
+                .get_rel_size(rel, lsn, true)
+                .require_reconstructed()?
         };
         Ok(nblocks)
     }
@@ -979,12 +995,18 @@ impl<'a> WalIngest<'a> {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let old_nblocks = if !reconstruct!(self.timeline.get_rel_exists(rel, last_lsn, true)) {
+        let old_nblocks = if !self
+            .timeline
+            .get_rel_exists(rel, last_lsn, true)
+            .require_reconstructed()?
+        {
             // create it with 0 size initially, the logic below will extend it
             modification.put_rel_creation(rel, 0)?;
             0
         } else {
-            reconstruct!(self.timeline.get_rel_size(rel, last_lsn, true))
+            self.timeline
+                .get_rel_size(rel, last_lsn, true)
+                .require_reconstructed()?
         };
 
         if new_nblocks > old_nblocks {
@@ -1028,14 +1050,19 @@ impl<'a> WalIngest<'a> {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = self.timeline.get_last_record_lsn();
-        let old_nblocks =
-            if !reconstruct!(self.timeline.get_slru_segment_exists(kind, segno, last_lsn)) {
-                // create it with 0 size initially, the logic below will extend it
-                modification.put_slru_segment_creation(kind, segno, 0)?;
-                0
-            } else {
-                reconstruct!(self.timeline.get_slru_segment_size(kind, segno, last_lsn))
-            };
+        let old_nblocks = if !self
+            .timeline
+            .get_slru_segment_exists(kind, segno, last_lsn)
+            .require_reconstructed()?
+        {
+            // create it with 0 size initially, the logic below will extend it
+            modification.put_slru_segment_creation(kind, segno, 0)?;
+            0
+        } else {
+            self.timeline
+                .get_slru_segment_size(kind, segno, last_lsn)
+                .require_reconstructed()?
+        };
 
         if new_nblocks > old_nblocks {
             trace!(
@@ -1115,43 +1142,80 @@ mod tests {
         assert_current_logical_size(&*tline, Lsn(0x50));
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10), false)?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10), false).is_err());
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x10), false)
+                .require_reconstructed()?,
+            false
+        );
+        assert!(tline
+            .get_rel_size(TESTREL_A, Lsn(0x10), false)
+            .require_reconstructed()
+            .is_err());
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, 1);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, 3);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false)
+                .require_reconstructed()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x20), false)
+                .require_reconstructed()?,
+            1
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x50), false)
+                .require_reconstructed()?,
+            3
+        );
 
         // Check page contents at each LSN
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 0 at 2")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 0 at 3")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 1 at 4")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1162,20 +1226,36 @@ mod tests {
         assert_current_logical_size(&*tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60), false)?, 2);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x60), false)
+                .require_reconstructed()?,
+            2
+        );
+        assert_eq!(
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         // should still see the truncated block with older LSN
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, 3);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x50), false)
+                .require_reconstructed()?,
+            3
+        );
+        assert_eq!(
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1183,19 +1263,33 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x68));
         walingest.put_rel_truncation(&mut m, TESTREL_A, 0)?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x68), false)?, 0);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x68), false)
+                .require_reconstructed()?,
+            0
+        );
 
         // Extend from 0 to 2 blocks, leaving a gap
         let mut m = tline.begin_modification(Lsn(0x70));
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"))?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70), false)?, 2);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x70), false)
+                .require_reconstructed()?,
+            2
+        );
+        assert_eq!(
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false)
+                .require_reconstructed()?,
             ZERO_PAGE
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 1")
         );
 
@@ -1203,15 +1297,24 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x80));
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"))?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80), false)?, 1501);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x80), false)
+                .require_reconstructed()?,
+            1501
+        );
         for blk in 2..1500 {
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false)
+                    .require_reconstructed()?,
                 ZERO_PAGE
             );
         }
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false)?,
+            tline
+                .get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false)
+                .require_reconstructed()?,
             TEST_IMG("foo blk 1500")
         );
 
@@ -1231,8 +1334,18 @@ mod tests {
         m.commit()?;
 
         // Check that rel exists and size is correct
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, 1);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false)
+                .require_reconstructed()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x20), false)
+                .require_reconstructed()?,
+            1
+        );
 
         // Drop rel
         let mut m = tline.begin_modification(Lsn(0x30));
@@ -1240,7 +1353,12 @@ mod tests {
         m.commit()?;
 
         // Check that rel is not visible anymore
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30), false)?, false);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x30), false)
+                .require_reconstructed()?,
+            false
+        );
 
         // FIXME: should fail
         //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x30), false)?.is_none());
@@ -1251,8 +1369,18 @@ mod tests {
         m.commit()?;
 
         // Check that rel exists and size is correct
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x40), false)?, 1);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x40), false)
+                .require_reconstructed()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x40), false)
+                .require_reconstructed()?,
+            1
+        );
 
         Ok(())
     }
@@ -1276,18 +1404,38 @@ mod tests {
         m.commit()?;
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10), false)?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10), false).is_err());
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x10), false)
+                .require_reconstructed()?,
+            false
+        );
+        assert!(tline
+            .get_rel_size(TESTREL_A, Lsn(0x10), false)
+            .require_reconstructed()
+            .is_err());
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, relsize);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false)
+                .require_reconstructed()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x20), false)
+                .require_reconstructed()?,
+            relsize
+        );
 
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false)
+                    .require_reconstructed()?,
                 TEST_IMG(&data)
             );
         }
@@ -1299,24 +1447,38 @@ mod tests {
         m.commit()?;
 
         // Check reported size and contents after truncation
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60), false)?, 1);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x60), false)
+                .require_reconstructed()?,
+            1
+        );
 
         for blkno in 0..1 {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false)
+                    .require_reconstructed()?,
                 TEST_IMG(&data)
             );
         }
 
         // should still see all blocks with older LSN
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50), false)?, relsize);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x50), false)
+                .require_reconstructed()?,
+            relsize
+        );
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false)
+                    .require_reconstructed()?,
                 TEST_IMG(&data)
             );
         }
@@ -1331,14 +1493,26 @@ mod tests {
         }
         m.commit()?;
 
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80), false)?, true);
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80), false)?, relsize);
+        assert_eq!(
+            tline
+                .get_rel_exists(TESTREL_A, Lsn(0x80), false)
+                .require_reconstructed()?,
+            true
+        );
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(0x80), false)
+                .require_reconstructed()?,
+            relsize
+        );
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x80);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false)?,
+                tline
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false)
+                    .require_reconstructed()?,
                 TEST_IMG(&data)
             );
         }
@@ -1366,7 +1540,9 @@ mod tests {
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(lsn), false)
+                .require_reconstructed()?,
             RELSEG_SIZE + 1
         );
 
@@ -1375,7 +1551,12 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(lsn));
         walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE)?;
         m.commit()?;
-        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?, RELSEG_SIZE);
+        assert_eq!(
+            tline
+                .get_rel_size(TESTREL_A, Lsn(lsn), false)
+                .require_reconstructed()?,
+            RELSEG_SIZE
+        );
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate another block
@@ -1384,7 +1565,9 @@ mod tests {
         walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1)?;
         m.commit()?;
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
+            tline
+                .get_rel_size(TESTREL_A, Lsn(lsn), false)
+                .require_reconstructed()?,
             RELSEG_SIZE - 1
         );
         assert_current_logical_size(&*tline, Lsn(lsn));
@@ -1398,7 +1581,9 @@ mod tests {
             walingest.put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber)?;
             m.commit()?;
             assert_eq!(
-                tline.get_rel_size(TESTREL_A, Lsn(lsn), false)?,
+                tline
+                    .get_rel_size(TESTREL_A, Lsn(lsn), false)
+                    .require_reconstructed()?,
                 size as BlockNumber
             );
 

@@ -379,6 +379,56 @@ pub struct GcInfo {
     pub pitr_cutoff: Lsn,
 }
 
+pub enum PageReconstructResult<T> {
+    Success(T),
+    /// The given RemoteLayer needs to be downloaded and replaced in the timeline's layer map
+    /// for the operation to succeed. Use [`Timeline::download_remote_layer`] to do it, then
+    /// retry the operation that returned this error.
+    NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
+    Error(PageReconstructError),
+}
+
+/// An error happened in a get() operation.
+#[derive(thiserror::Error)]
+pub enum PageReconstructError {
+    #[error(transparent)]
+    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
+
+    #[error(transparent)]
+    WalRedo(#[from] crate::walredo::WalRedoError),
+}
+
+impl std::fmt::Debug for PageReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            Self::Other(err) => err.fmt(f),
+            Self::WalRedo(err) => err.fmt(f),
+        }
+    }
+}
+
+impl<E, T> From<E> for PageReconstructResult<T>
+where
+    E: Into<PageReconstructError>,
+{
+    fn from(e: E) -> Self {
+        Self::Error(e.into())
+    }
+}
+
+impl<T> PageReconstructResult<T> {
+    pub fn require_reconstructed(self) -> anyhow::Result<T> {
+        match self {
+            PageReconstructResult::Success(value) => Ok(value),
+            // TODO print more info about the timeline
+            PageReconstructResult::NeedsDownload(_, _) => anyhow::bail!("Layer needs downloading"),
+            PageReconstructResult::Error(e) => {
+                Err(anyhow::Error::new(e).context("Failed to reconstruct the page"))
+            }
+        }
+    }
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -2614,7 +2664,10 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match reconstruct!(self.find_lsn_for_timestamp(pitr_timestamp)) {
+                match self
+                    .find_lsn_for_timestamp(pitr_timestamp)
+                    .require_reconstructed()?
+                {
                     LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
                     LsnForTimestamp::Future(lsn) => {
                         debug!("future({})", lsn);
@@ -3162,43 +3215,6 @@ impl Timeline {
             .read()
             .unwrap()
             .clone()
-    }
-}
-
-pub enum PageReconstructResult<T> {
-    Success(T),
-    /// The given RemoteLayer needs to be downloaded and replaced in the timeline's layer map
-    /// for the operation to succeed. Use [`Timeline::download_remote_layer`] to do it, then
-    /// retry the operation that returned this error.
-    NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
-    Error(PageReconstructError),
-}
-
-/// An error happened in a get() operation.
-#[derive(thiserror::Error)]
-pub enum PageReconstructError {
-    #[error(transparent)]
-    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
-
-    #[error(transparent)]
-    WalRedo(#[from] crate::walredo::WalRedoError),
-}
-
-impl std::fmt::Debug for PageReconstructError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            Self::Other(err) => err.fmt(f),
-            Self::WalRedo(err) => err.fmt(f),
-        }
-    }
-}
-
-impl<E, T> From<E> for PageReconstructResult<T>
-where
-    E: Into<PageReconstructError>,
-{
-    fn from(e: E) -> Self {
-        Self::Error(e.into())
     }
 }
 

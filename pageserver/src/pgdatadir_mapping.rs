@@ -500,7 +500,9 @@ impl Timeline {
             result.add_key(relmap_file_key(spcnode, dbnode));
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
-            let mut rels: Vec<RelTag> = reconstruct!(self.list_rels(spcnode, dbnode, lsn))
+            let mut rels: Vec<RelTag> = self
+                .list_rels(spcnode, dbnode, lsn)
+                .require_reconstructed()?
                 .iter()
                 .cloned()
                 .collect();
@@ -701,7 +703,7 @@ impl<'a> DatadirModification<'a> {
     /// Store a relmapper file (pg_filenode.map) in the repository
     pub fn put_relmap_file(&mut self, spcnode: Oid, dbnode: Oid, img: Bytes) -> anyhow::Result<()> {
         // Add it to the directory (if it doesn't exist already)
-        let buf = reconstruct!(self.get(DBDIR_KEY));
+        let buf = self.get(DBDIR_KEY).require_reconstructed()?;
         let mut dbdir = DbDirectory::des(&buf)?;
 
         let r = dbdir.dbdirs.insert((spcnode, dbnode), true);
@@ -729,7 +731,7 @@ impl<'a> DatadirModification<'a> {
 
     pub fn put_twophase_file(&mut self, xid: TransactionId, img: Bytes) -> anyhow::Result<()> {
         // Add it to the directory entry
-        let buf = reconstruct!(self.get(TWOPHASEDIR_KEY));
+        let buf = self.get(TWOPHASEDIR_KEY).require_reconstructed()?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
         if !dir.xids.insert(xid) {
             anyhow::bail!("twophase file for xid {} already exists", xid);
@@ -756,10 +758,13 @@ impl<'a> DatadirModification<'a> {
     pub fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> anyhow::Result<()> {
         let req_lsn = self.tline.get_last_record_lsn();
 
-        let total_blocks = reconstruct!(self.tline.get_db_size(spcnode, dbnode, req_lsn, true));
+        let total_blocks = self
+            .tline
+            .get_db_size(spcnode, dbnode, req_lsn, true)
+            .require_reconstructed()?;
 
         // Remove entry from dbdir
-        let buf = reconstruct!(self.get(DBDIR_KEY));
+        let buf = self.get(DBDIR_KEY).require_reconstructed()?;
         let mut dir = DbDirectory::des(&buf)?;
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
@@ -786,7 +791,7 @@ impl<'a> DatadirModification<'a> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(&reconstruct!(self.get(DBDIR_KEY)))?;
+        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY).require_reconstructed()?)?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
             // Didn't exist. Update dbdir
@@ -798,7 +803,7 @@ impl<'a> DatadirModification<'a> {
             RelDirectory::default()
         } else {
             // reldir already exists, fetch it
-            RelDirectory::des(&reconstruct!(self.get(rel_dir_key)))?
+            RelDirectory::des(&self.get(rel_dir_key).require_reconstructed()?)?
         };
 
         // Add the new relation to the rel directory entry, and write it back
@@ -829,10 +834,14 @@ impl<'a> DatadirModification<'a> {
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         let last_lsn = self.tline.get_last_record_lsn();
-        if reconstruct!(self.tline.get_rel_exists(rel, last_lsn, true)) {
+        if self
+            .tline
+            .get_rel_exists(rel, last_lsn, true)
+            .require_reconstructed()?
+        {
             let size_key = rel_size_to_key(rel);
             // Fetch the old size first
-            let old_size = reconstruct!(self.get(size_key)).get_u32_le();
+            let old_size = self.get(size_key).require_reconstructed()?.get_u32_le();
 
             // Update the entry with the new size.
             let buf = nblocks.to_le_bytes();
@@ -857,7 +866,7 @@ impl<'a> DatadirModification<'a> {
 
         // Put size
         let size_key = rel_size_to_key(rel);
-        let old_size = reconstruct!(self.get(size_key)).get_u32_le();
+        let old_size = self.get(size_key).require_reconstructed()?.get_u32_le();
 
         // only extend relation here. never decrease the size
         if nblocks > old_size {
@@ -878,7 +887,7 @@ impl<'a> DatadirModification<'a> {
 
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let buf = reconstruct!(self.get(dir_key));
+        let buf = self.get(dir_key).require_reconstructed()?;
         let mut dir = RelDirectory::des(&buf)?;
 
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
@@ -889,7 +898,7 @@ impl<'a> DatadirModification<'a> {
 
         // update logical size
         let size_key = rel_size_to_key(rel);
-        let old_size = reconstruct!(self.get(size_key)).get_u32_le();
+        let old_size = self.get(size_key).require_reconstructed()?.get_u32_le();
         self.pending_nblocks -= old_size as i64;
 
         // Remove enty from relation size cache
@@ -909,7 +918,7 @@ impl<'a> DatadirModification<'a> {
     ) -> anyhow::Result<()> {
         // Add it to the directory entry
         let dir_key = slru_dir_to_key(kind);
-        let buf = reconstruct!(self.get(dir_key));
+        let buf = self.get(dir_key).require_reconstructed()?;
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.insert(segno) {
@@ -948,7 +957,7 @@ impl<'a> DatadirModification<'a> {
     pub fn drop_slru_segment(&mut self, kind: SlruKind, segno: u32) -> anyhow::Result<()> {
         // Remove it from the directory entry
         let dir_key = slru_dir_to_key(kind);
-        let buf = reconstruct!(self.get(dir_key));
+        let buf = self.get(dir_key).require_reconstructed()?;
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.remove(&segno) {
@@ -974,7 +983,7 @@ impl<'a> DatadirModification<'a> {
     /// This method is used for marking truncated SLRU files
     pub fn drop_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
         // Remove it from the directory entry
-        let buf = reconstruct!(self.get(TWOPHASEDIR_KEY));
+        let buf = self.get(TWOPHASEDIR_KEY).require_reconstructed()?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
 
         if !dir.xids.remove(&xid) {
