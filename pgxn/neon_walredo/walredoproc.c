@@ -42,6 +42,7 @@
  */
 
 #include "postgres.h"
+#include <assert.h>
 
 #ifdef HAVE_SHMEMPIPE
 #include "shmempipe.h"
@@ -105,6 +106,7 @@ static void apply_error_callback(void *arg);
 static bool redo_block_filter(XLogReaderState *record, uint8 block_id);
 static void GetPage(StringInfo input_message);
 static ssize_t buffered_read(void *buf, size_t count);
+static void process_message(StringInfo input_message, int firstchar, bool enable_seccomp);
 
 static BufferTag target_redo_tag;
 
@@ -171,7 +173,6 @@ enter_seccomp_mode(void)
 void
 WalRedoMain(int argc, char *argv[])
 {
-	int			firstchar;
 	StringInfoData input_message;
 #ifdef HAVE_LIBSECCOMP
 	bool		enable_seccomp;
@@ -304,6 +305,79 @@ WalRedoMain(int argc, char *argv[])
 	MemoryContextSwitchTo(MessageContext);
 	initStringInfo(&input_message);
 
+	if (shmempipe != NULL)
+	{
+		// with shmempipe we can take a different approach, which is to buffer
+		// the whole message, and then just bump the pointer through, before
+		// reading the next message.
+
+		uint32_t next_frame = 0;
+
+		for (;;) {
+			resetStringInfo(&input_message);
+
+			assert(shmempipe_read_frame_len(shmempipe, &next_frame) == 0);
+
+			if (next_frame > MaxAllocSize)
+			{
+				// let's not buffer this
+				// buffered_redo(&input_message);
+				// TODO, needs to be a loop of course, but also need to break out after G message.
+				assert(0);
+			}
+			else
+			{
+				// because of resetStringInfo, len == 0, so we can safely use
+				// next_frame as the target size, because it is not calculated
+				// against the capacity, but the used length.
+				enlargeStringInfo(&input_message, next_frame);
+
+				// we use these pointers as &mut [u8] over at rust, which is not allowed with uninit memory
+				memset(input_message.data, 0, input_message.maxlen);
+
+				assert(input_message.maxlen >= next_frame);
+				ssize_t read = shmempipe_read_exact(shmempipe, input_message.data, next_frame);
+				assert(read == next_frame);
+				input_message.len = next_frame;
+
+				for (;;)
+				{
+					int backup = input_message.len;
+
+					// reproduce non-buffering ReadRedoCommand
+					int firstchar = input_message.data[input_message.cursor++];
+
+					int32 message_len = 0;
+					memcpy(&message_len, &input_message.data[input_message.cursor], sizeof(int32));
+					message_len = pg_ntoh32(message_len);
+
+					if (message_len < 4)
+						ereport(ERROR,
+								(errcode(ERRCODE_PROTOCOL_VIOLATION),
+								 errmsg("invalid message length")));
+
+					message_len -= 4;
+					input_message.cursor += sizeof(int32);
+					input_message.len = message_len + input_message.cursor;
+
+					process_message(&input_message, firstchar, enable_seccomp);
+
+					// was it the final sub-message?
+					if (firstchar == 'G')
+					{
+						assert(input_message.cursor == next_frame);
+						break;
+					}
+					else
+					{
+						// restore view into the end of frame
+						input_message.len = backup;
+					}
+				}
+			}
+		}
+	}
+
 	for (;;)
 	{
 		/* Release memory left over from prior query cycle. */
@@ -311,60 +385,10 @@ WalRedoMain(int argc, char *argv[])
 
 		set_ps_display("idle");
 
-		/*
-		 * (3) read a command (loop blocks here)
-		 */
+		int			firstchar;
 		firstchar = ReadRedoCommand(&input_message);
-		switch (firstchar)
-		{
-			case 'B':			/* BeginRedoForBlock */
-				BeginRedoForBlock(&input_message);
-				break;
 
-			case 'P':			/* PushPage */
-				PushPage(&input_message);
-				break;
-
-			case 'A':			/* ApplyRecord */
-				ApplyRecord(&input_message);
-				break;
-
-			case 'G':			/* GetPage */
-				GetPage(&input_message);
-				break;
-
-				/*
-				 * EOF means we're done. Perform normal shutdown.
-				 */
-			case EOF:
-				ereport(LOG,
-						(errmsg("received EOF on stdin, shutting down")));
-
-#ifdef HAVE_LIBSECCOMP
-				/*
-				 * Skip the shutdown sequence, leaving some garbage behind.
-				 * Hopefully, postgres will clean it up in the next run.
-				 * This way we don't have to enable extra syscalls, which is nice.
-				 * See enter_seccomp_mode() above.
-				 */
-				if (enable_seccomp)
-					_exit(0);
-#endif /* HAVE_LIBSECCOMP */
-				/*
-				 * NOTE: if you are tempted to add more code here, DON'T!
-				 * Whatever you had in mind to do should be set up as an
-				 * on_proc_exit or on_shmem_exit callback, instead. Otherwise
-				 * it will fail to be called during other backend-shutdown
-				 * scenarios.
-				 */
-				proc_exit(0);
-
-			default:
-				ereport(FATAL,
-						(errcode(ERRCODE_PROTOCOL_VIOLATION),
-						 errmsg("invalid frontend message type %d",
-								firstchar)));
-		}
+		process_message(&input_message, firstchar, enable_seccomp);
 	}							/* end of input-reading loop */
 }
 
@@ -383,6 +407,63 @@ NeonRedoReadBuffer(RelFileNode rnode,
 	return ReadBufferWithoutRelcache(rnode, forkNum, blockNum, mode,
 									 NULL); /* no strategy */
 #endif
+}
+
+static void process_message(StringInfo input_message, int firstchar, bool enable_seccomp)
+{
+	/*
+	 * (3) read a command (loop blocks here)
+	 */
+	switch (firstchar)
+	{
+		case 'B':			/* BeginRedoForBlock */
+			BeginRedoForBlock(input_message);
+			break;
+
+		case 'P':			/* PushPage */
+			PushPage(input_message);
+			break;
+
+		case 'A':			/* ApplyRecord */
+			ApplyRecord(input_message);
+			break;
+
+		case 'G':			/* GetPage */
+			GetPage(input_message);
+			break;
+
+			/*
+			 * EOF means we're done. Perform normal shutdown.
+			 */
+		case EOF:
+			ereport(LOG,
+					(errmsg("received EOF on stdin, shutting down")));
+
+#ifdef HAVE_LIBSECCOMP
+			/*
+			 * Skip the shutdown sequence, leaving some garbage behind.
+			 * Hopefully, postgres will clean it up in the next run.
+			 * This way we don't have to enable extra syscalls, which is nice.
+			 * See enter_seccomp_mode() above.
+			 */
+			if (enable_seccomp)
+				_exit(0);
+#endif /* HAVE_LIBSECCOMP */
+			/*
+			 * NOTE: if you are tempted to add more code here, DON'T!
+			 * Whatever you had in mind to do should be set up as an
+			 * on_proc_exit or on_shmem_exit callback, instead. Otherwise
+			 * it will fail to be called during other backend-shutdown
+			 * scenarios.
+			 */
+			proc_exit(0);
+
+		default:
+			ereport(FATAL,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("invalid frontend message type %d",
+							firstchar)));
+	}
 }
 
 
@@ -588,12 +669,15 @@ ApplyRecord(StringInfo input_message)
 	smgrinit();					/* reset inmem smgr state */
 
 	/* note: the input must be aligned here */
+	// FIXME: how will this be aligned???
 	record = (XLogRecord *) pq_getmsgbytes(input_message, sizeof(XLogRecord));
 
 	nleft = input_message->len - input_message->cursor;
 	if (record->xl_tot_len != sizeof(XLogRecord) + nleft)
 		elog(ERROR, "mismatch between record (%d) and message size (%d)",
 			 record->xl_tot_len, (int) sizeof(XLogRecord) + nleft);
+
+	input_message->cursor += record->xl_tot_len - sizeof(XLogRecord);
 
 	/* Setup error traceback support for ereport() */
 	errcallback.callback = apply_error_callback;
@@ -812,7 +896,7 @@ GetPage(StringInfo input_message)
 
 
 /* Buffer used by buffered_read() */
-static char stdin_buf[16 * 1024];
+static char stdin_buf[16 * 1024] = { 0 };
 static size_t stdin_len = 0;	/* # of bytes in buffer */
 static size_t stdin_ptr = 0;	/* # of bytes already consumed */
 

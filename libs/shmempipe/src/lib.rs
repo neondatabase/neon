@@ -98,6 +98,7 @@ impl SharedMemPipePtr<Joined> {
             // Safety: the pointer `ptr` will not be remapped
             locked_mutex: unsafe { std::mem::transmute(guard) },
             ptr: self,
+            remaining: None,
         })
     }
 }
@@ -177,6 +178,8 @@ impl OwnedRequester {
     /// Returns the file descriptors that need to be kept open for child process.
     pub fn shared_fds(&self) -> [i32; 2] {
         [
+            // FIXME: one should be enough for waiting for the worker, or the worker waiting for
+            // new input
             self.ptr.notify_request_written,
             self.ptr.notify_response_written,
         ]
@@ -223,27 +226,40 @@ impl OwnedRequester {
 
         // Safety: we are only one creating producers for to_worker
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
-        let _m = unsafe { Pin::new_unchecked(&self.ptr.to_worker_writer) };
-        let _cond = unsafe { Pin::new_unchecked(&self.ptr.to_worker_cond) };
 
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
-        {
-            let mut req = req;
-
+        let mut send = |mut req| {
+            let mut consecutive_spins = 0;
             loop {
                 let n = p.push_slice(req);
                 req = &req[n..];
 
                 if req.is_empty() {
                     break;
-                } else if n == 0 {
+                } else if n == 0 && might_wait {
                     sem.post();
                     might_wait = false;
+                } else if n != 0 {
+                    consecutive_spins = 0;
+                    std::hint::spin_loop();
+                } else if consecutive_spins < 1024 {
+                    consecutive_spins += 1;
+                    std::hint::spin_loop();
+                } else {
+                    std::thread::yield_now();
                 }
-                std::thread::yield_now();
             }
-        }
+        };
+
+        // framing doesn't require us to manage state, as we always send both
+        // TODO: try with postponed producer, this syncs twice, might might be a good or bad thing.
+        let frame_len = u32::try_from(req.len())
+            .expect("message cannot be more than 4GB")
+            .to_ne_bytes();
+
+        send(&frame_len);
+        send(req);
 
         drop(g);
 
@@ -265,16 +281,15 @@ impl OwnedRequester {
 
         // Safety: we are the only one creating consumers for from_worker
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
-        let _m = unsafe { Pin::new_unchecked(&self.ptr.from_worker_writer) };
-        let _cond = unsafe { Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
         let sem =
             unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
 
-        let mut waited = false;
+        sem.wait();
 
         let mut read = 0;
         let mut consecutive_spins = 0;
+
         loop {
             let n = c.pop_slice(&mut resp[read..]);
 
@@ -284,15 +299,12 @@ impl OwnedRequester {
                 break;
             }
 
-            if !waited && n == 0 {
-                waited = true;
-                sem.wait();
-            } else if n != 0 {
+            if n != 0 {
                 consecutive_spins = 0;
-            } else if consecutive_spins < 100 {
+                std::hint::spin_loop();
+            } else if consecutive_spins < 1024 {
                 consecutive_spins += 1;
                 std::hint::spin_loop();
-                continue;
             } else {
                 std::thread::yield_now();
             }
@@ -310,28 +322,103 @@ impl OwnedRequester {
 pub struct OwnedResponder {
     // self referential, has to be, also must be above ptr to get dropped first
     locked_mutex: shared::MutexGuard<'static, Option<u32>>,
+    /// How long currently received message is, and how much is remaining.
+    remaining: Option<(u32, u32)>,
     ptr: SharedMemPipePtr<Joined>,
 }
 
 impl OwnedResponder {
-    pub fn read(&mut self, buf: &mut [u8]) -> usize {
-        let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
-        let _m = unsafe { Pin::new_unchecked(&self.ptr.to_worker_writer) };
-        let _cond = unsafe { Pin::new_unchecked(&self.ptr.to_worker_cond) };
+    pub fn read_next_frame_len(&mut self) -> Result<u32, u32> {
+        match self.remaining.as_mut() {
+            Some((_, remaining)) => Err(*remaining),
+            None => {
+                // well, reading to empty does seem wrong
+                assert_eq!(self.read(&mut [][..]), 0);
+                let (len, remaining) = self.remaining.as_ref().unwrap();
+                assert_eq!(len, remaining);
+                return Ok(*remaining);
+            }
+        }
+    }
 
+    pub fn read(&mut self, buf: &mut [u8]) -> usize {
+        if self.remaining.is_none() {
+            // read the new frame length
+            let mut len = [0u8; 4];
+            assert_eq!(self.recv(&mut len, 3), 4);
+            let len = u32::from_ne_bytes(len);
+            // store it as frame size, remaining size
+            self.remaining = Some((len, len));
+        }
+
+        if buf.is_empty() {
+            return 0;
+        }
+
+        let (_, mut remaining) = self.remaining.unwrap();
+
+        // recv only up to the next frame length
+        let allowed = buf.len();
+        let buf = &mut buf[..std::cmp::min(allowed, remaining as usize)];
+
+        let read = self.recv(buf, 0);
+
+        remaining = remaining
+            .checked_sub(
+                u32::try_from(read)
+                    .expect("should had read at most remaining, not overflowing u32"),
+            )
+            .expect("should not have read more than remaining");
+
+        if remaining == 0 {
+            self.remaining = None;
+        } else {
+            let (_, rem) = self.remaining.as_mut().unwrap();
+            *rem = remaining;
+        }
+
+        read
+    }
+
+    // TODO: call this read_frame or something other
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> usize {
+        // TODO: panics should not be leaked to ffi, it is UB right now but might become abort in
+        // future. it is easy to take all common pointer handling out and make that wrapper also
+        // catch_unwind, then abort.
+        // eprintln!("read_exact({})", buf.len());
+        let remaining = match self.remaining.as_ref() {
+            Some((_, remaining)) => *remaining,
+            None => unreachable!("cannot panic here but the frame length should be known"),
+        };
+
+        assert!(remaining as usize <= buf.len());
+
+        // can remaining be 1? probably by bug.
+        assert!(remaining > 1);
+
+        let read = self.recv(&mut buf[..remaining as usize], remaining as usize - 1);
+
+        assert_eq!(read, remaining as usize);
+        self.remaining = None;
+
+        // eprintln!("read_exact({}) -> {}", buf.len(), read);
+        read
+    }
+
+    fn recv(&mut self, buf: &mut [u8], read_more_than: usize) -> usize {
+        let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
         let mut read = 0;
-
+        let mut waited = false;
         loop {
             let n = c.pop_slice(&mut buf[read..]);
 
             read += n;
 
-            if read > 0 {
+            if read > read_more_than {
                 return read;
-            } else if n == 0 {
-                let mut waited = false;
+            } else if n == 0 && !waited {
                 while self.ptr.to_worker_waiters.load(Acquire) == 0 {
                     sem.wait();
                     waited = true;
@@ -340,16 +427,19 @@ impl OwnedResponder {
                 if waited {
                     continue;
                 }
-            }
 
-            std::thread::yield_now();
+                std::hint::spin_loop();
+            } else {
+                // std::thread::yield_now();
+                std::hint::spin_loop();
+            }
         }
     }
 
     pub fn write_all(&mut self, mut buf: &[u8]) -> usize {
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
-        let _m = unsafe { Pin::new_unchecked(&self.ptr.from_worker_writer) };
-        let _cond = unsafe { Pin::new_unchecked(&self.ptr.from_worker_cond) };
+        // let _m = unsafe { Pin::new_unchecked(&self.ptr.from_worker_writer) };
+        // let _cond = unsafe { Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
         let sem =
             unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
@@ -358,31 +448,40 @@ impl OwnedResponder {
             return 0;
         }
 
+        sem.post();
+
         let len = buf.len();
 
         let mut woken = false;
+        let mut consecutive_spins = 0;
 
         loop {
             let n = p.push_slice(buf);
             buf = &buf[n..];
 
-            if buf.is_empty() {
-                if !woken {
-                    sem.post();
-                }
-                return len;
-            }
-
-            if !woken && n == 0 {
+            if !woken {
                 woken = true;
                 sem.post();
             }
 
-            // std::hint::spin_loop();
-            std::thread::yield_now();
+            if buf.is_empty() {
+                return len;
+            }
+
+            if n != 0 {
+                consecutive_spins = 0;
+                std::hint::spin_loop();
+            } else if consecutive_spins < 1024 {
+                consecutive_spins += 1;
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
         }
     }
 }
+
+// TODO: cbindgen could probably just output the header file for these functions
 
 /// Main entrypoint for the pgxn/neon_walredo/walredoproc.c.
 ///
@@ -419,6 +518,27 @@ pub extern "C" fn shmempipe_open_via_env() -> *mut OwnedResponder {
 }
 
 #[no_mangle]
+pub extern "C" fn shmempipe_read_frame_len(
+    resp: *mut OwnedResponder,
+    len: *mut u32,
+) -> libc::c_int {
+    if resp.is_null() || len.is_null() {
+        return -1;
+    }
+
+    let mut target = unsafe { Box::from_raw(resp) };
+    let res = target.read_next_frame_len();
+    std::mem::forget(target);
+    match res {
+        Ok(frame_len) => {
+            unsafe { len.write(frame_len) };
+            0
+        }
+        Err(_) => return -2,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn shmempipe_read(resp: *mut OwnedResponder, buffer: *mut u8, len: u32) -> isize {
     if resp.is_null() || buffer.is_null() {
         return -1;
@@ -431,6 +551,25 @@ pub extern "C" fn shmempipe_read(resp: *mut OwnedResponder, buffer: *mut u8, len
     let ret = target.read(buffer);
     std::mem::forget(target);
     ret as isize
+}
+
+#[no_mangle]
+pub extern "C" fn shmempipe_read_exact(
+    resp: *mut OwnedResponder,
+    buffer: *mut u8,
+    len: u32,
+) -> isize {
+    if resp.is_null() || buffer.is_null() {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+    let mut target = unsafe { Box::from_raw(resp) };
+    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len as usize) };
+    target.read_exact(buffer);
+    std::mem::forget(target);
+    len as isize
 }
 
 #[no_mangle]
