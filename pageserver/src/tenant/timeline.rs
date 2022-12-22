@@ -23,9 +23,8 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::storage_sync::index::IndexPart;
-use crate::storage_sync::RemoteTimelineClient;
 use crate::tenant::remote_layer::RemoteLayer;
+use crate::tenant::storage_sync::{self, index::LayerFileMetadata};
 use crate::tenant::{
     delta_layer::{DeltaLayer, DeltaLayerWriter},
     ephemeral_file::is_ephemeral_file,
@@ -56,6 +55,7 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
+use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr::TaskKind;
@@ -64,10 +64,11 @@ use crate::walredo::WalRedoManager;
 use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
-use crate::{page_cache, storage_sync::index::LayerFileMetadata};
 
 use super::filename::LayerFileName;
 use super::storage_layer::Layer;
+use super::storage_sync::index::IndexPart;
+use super::storage_sync::RemoteTimelineClient;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -97,7 +98,7 @@ pub struct Timeline {
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
 
     /// Remote storage client.
-    /// See [`storage_sync2`] module comment for details.
+    /// See [`storage_sync`] module comment for details.
     pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     // What page versions do we hold in the repository? If we get a
@@ -1123,7 +1124,7 @@ impl Timeline {
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
-            } else if crate::storage_sync::is_temp_download_file(&direntry_path) {
+            } else if storage_sync::is_temp_download_file(&direntry_path) {
                 info!(
                     "skipping temp download file, reconcile_with_remote will resume / clean up: {}",
                     fname
@@ -1293,7 +1294,7 @@ impl Timeline {
     /// 3. Schedule upload of local-only layer files (which will then also update the remote
     ///    IndexPart to include the new layer files).
     ///
-    /// Refer to the `storage_sync2` module comment for more context.
+    /// Refer to the `storage_sync` module comment for more context.
     ///
     /// # TODO
     /// May be a bit cleaner to do things based on populated remote client,

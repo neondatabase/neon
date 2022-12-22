@@ -3,7 +3,6 @@
 //!
 use crate::config::PageServerConf;
 use crate::repository::Key;
-use crate::storage_sync::index::LayerFileMetadata;
 use crate::tenant::delta_layer::DeltaLayer;
 use crate::tenant::filename::{DeltaFileName, ImageFileName};
 use crate::tenant::image_layer::ImageLayer;
@@ -20,6 +19,7 @@ use utils::{
 
 use super::filename::LayerFileName;
 use super::storage_layer::{LayerIter, LayerKeyIter, PersistentLayer};
+use super::storage_sync::index::LayerFileMetadata;
 
 #[derive(Debug)]
 pub struct RemoteLayer {

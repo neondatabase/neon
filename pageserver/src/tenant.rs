@@ -45,15 +45,14 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
+use self::storage_sync::create_remote_timeline_client;
+use self::storage_sync::index::IndexPart;
+use self::storage_sync::RemoteTimelineClient;
 use crate::config::PageServerConf;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
-use crate::storage_sync::create_remote_timeline_client;
-use crate::storage_sync::index::IndexPart;
-use crate::storage_sync::list_remote_timelines;
-use crate::storage_sync::RemoteTimelineClient;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::metadata::load_metadata;
@@ -86,6 +85,7 @@ mod remote_layer;
 pub mod metadata;
 mod par_fsync;
 pub mod storage_layer;
+mod storage_sync;
 
 mod timeline;
 
@@ -647,7 +647,7 @@ impl Tenant {
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
         let remote_timelines =
-            list_remote_timelines(remote_storage, self.conf, self.tenant_id).await?;
+            storage_sync::list_remote_timelines(remote_storage, self.conf, self.tenant_id).await?;
 
         info!("found {} timelines", remote_timelines.len());
 
