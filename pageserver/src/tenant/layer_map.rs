@@ -119,7 +119,7 @@ where
                 .next_back()
                 .map(|p| Arc::clone(p.1));
         }
-        for (_key, layers) in self.l1_layers.range(int_key..) {
+        if let Some((_key, layers)) = self.l1_layers.range(int_key..).next() {
             let mut lsn_iter = layers.iter();
             while let Some((_lsn, layer)) = lsn_iter.next_back() {
                 if image_only && layer.is_incremental() {
@@ -147,7 +147,6 @@ where
                     break;
                 }
             }
-            break;
         }
         if candidate.is_none() {
             tracing::info!("Failed to locate key {} end_lsn={}", key, end_lsn);
@@ -184,13 +183,12 @@ where
     // When inserting new point, copy from successor point all layers which contain this point
     fn copy_layers(&self, end_key: i128) -> BTreeMap<Lsn, Arc<L>> {
         let mut new_layers = BTreeMap::new();
-        for (_key, layers) in self.l1_layers.range(end_key..) {
+        if let Some((_key, layers)) = self.l1_layers.range(end_key..).next() {
             for (lsn, layer) in layers {
                 if layer.get_key_range().start.to_i128() < end_key {
                     new_layers.insert(*lsn, Arc::clone(layer));
                 }
             }
-            break;
         }
         new_layers
     }
@@ -267,7 +265,7 @@ where
                 break;
             }
         }
-        return Ok(false);
+        Ok(false)
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
@@ -355,7 +353,7 @@ where
             }
         }
         let mut result = all_layers.len();
-        for (_key, layer) in &self.l0_delta_layers {
+        for layer in self.l0_delta_layers.values() {
             if range_overlaps(lsn_range, &layer.get_lsn_range()) {
                 result += 1;
             }
