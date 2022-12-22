@@ -27,7 +27,7 @@ use log::{info, warn};
 use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
 
-use crate::checker::create_writablity_check_data;
+use crate::checker::create_writability_check_data;
 use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -91,29 +91,12 @@ pub enum ComputeStatus {
     Failed,
 }
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 pub struct ComputeMetrics {
     pub sync_safekeepers_ms: AtomicU64,
     pub basebackup_ms: AtomicU64,
     pub config_ms: AtomicU64,
     pub total_startup_ms: AtomicU64,
-}
-
-impl ComputeMetrics {
-    pub fn new() -> Self {
-        Self {
-            sync_safekeepers_ms: AtomicU64::new(0),
-            basebackup_ms: AtomicU64::new(0),
-            config_ms: AtomicU64::new(0),
-            total_startup_ms: AtomicU64::new(0),
-        }
-    }
-}
-
-impl Default for ComputeMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ComputeNode {
@@ -292,7 +275,7 @@ impl ComputeNode {
         handle_databases(&self.spec, &mut client)?;
         handle_role_deletions(self, &mut client)?;
         handle_grants(self, &mut client)?;
-        create_writablity_check_data(&mut client)?;
+        create_writability_check_data(&mut client)?;
 
         // 'Close' connection
         drop(client);
