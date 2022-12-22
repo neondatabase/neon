@@ -274,9 +274,10 @@ impl PostgresRedoManager {
                     + records
                         .iter()
                         .map(|(_, rec)| match rec {
-                            NeonWalRecord::Postgres { rec, .. } => ch + len + 8 + rec.len(),
-                            _ => 0,
+                            NeonWalRecord::Postgres { rec, .. } => rec.len(),
+                            _ => unreachable!(),
                         })
+                        .map(|rec_len| ch + len + 8 + rec_len)
                         .sum::<usize>()
                     + (ch + len + tag_len),
             );
