@@ -2133,7 +2133,7 @@ HandleSafekeeperResponse(void)
 	{
 		/* Get ReplicationFeedback fields from the most advanced safekeeper */
 		GetLatestNeonFeedback(&quorumFeedback.rf);
-		SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
+		SetNeonCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
 	}
 
 	if (minQuorumLsn > quorumFeedback.flushLsn || diskConsistentLsn != quorumFeedback.rf.ps_flushlsn)

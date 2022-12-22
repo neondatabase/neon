@@ -33,6 +33,7 @@ _PG_init(void)
 {
 	pg_init_libpagestore();
 	pg_init_walproposer();
+	pg_init_lwlc();
 
 	EmitWarningsOnPlaceholders("neon");
 }
@@ -46,7 +47,7 @@ pg_cluster_size(PG_FUNCTION_ARGS)
 {
 	int64		size;
 
-	size = GetZenithCurrentClusterSize();
+	size = GetNeonCurrentClusterSize();
 
 	if (size == 0)
 		PG_RETURN_NULL();
