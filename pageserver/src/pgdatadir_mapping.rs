@@ -8,7 +8,7 @@
 //!
 use super::tenant::PageReconstructResult;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::tenant::Timeline;
+use crate::tenant::{with_ondemand_download, Timeline};
 use crate::walrecord::NeonWalRecord;
 use crate::{repository::*, try_no_ondemand_download};
 use anyhow::Context;
@@ -503,12 +503,11 @@ impl Timeline {
             result.add_key(relmap_file_key(spcnode, dbnode));
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
-            let mut rels: Vec<RelTag> = self
-                .list_rels(spcnode, dbnode, lsn)
-                .no_ondemand_download()?
-                .iter()
-                .cloned()
-                .collect();
+            let mut rels: Vec<RelTag> =
+                with_ondemand_download(|| self.list_rels(spcnode, dbnode, lsn))
+                    .await?
+                    .into_iter()
+                    .collect();
             rels.sort_unstable();
             for rel in rels {
                 let relsize_key = rel_size_to_key(rel);
