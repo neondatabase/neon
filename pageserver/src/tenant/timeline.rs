@@ -23,14 +23,13 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::tenant::remote_layer::RemoteLayer;
+use crate::tenant::storage_layer::{
+    DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer, LayerFileName,
+    RemoteLayer,
+};
 use crate::tenant::storage_sync::{self, index::LayerFileMetadata};
 use crate::tenant::{
-    delta_layer::{DeltaLayer, DeltaLayerWriter},
     ephemeral_file::is_ephemeral_file,
-    filename::{DeltaFileName, ImageFileName},
-    image_layer::{ImageLayer, ImageLayerWriter},
-    inmemory_layer::InMemoryLayer,
     layer_map::{LayerMap, SearchResult},
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
@@ -65,8 +64,7 @@ use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 
-use super::filename::LayerFileName;
-use super::storage_layer::Layer;
+use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
 use super::storage_sync::index::IndexPart;
 use super::storage_sync::RemoteTimelineClient;
 

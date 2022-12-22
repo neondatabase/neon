@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::config::PageServerConf;
-use crate::tenant::filename::LayerFileName;
+use crate::tenant::storage_layer::LayerFileName;
 use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;

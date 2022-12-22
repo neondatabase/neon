@@ -224,7 +224,6 @@ use utils::lsn::Lsn;
 use crate::metrics::RemoteOpFileKind;
 use crate::metrics::RemoteOpKind;
 use crate::metrics::{MeasureRemoteOp, RemoteTimelineClientMetrics};
-use crate::tenant::filename::LayerFileName;
 use crate::tenant::storage_sync::index::LayerFileMetadata;
 use crate::{
     config::PageServerConf,
@@ -238,6 +237,8 @@ use crate::{
 use utils::id::{TenantId, TimelineId};
 
 use self::index::IndexPart;
+
+use super::storage_layer::LayerFileName;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.

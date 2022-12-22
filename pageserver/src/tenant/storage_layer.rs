@@ -1,6 +1,10 @@
-//!
 //! Common traits and structs for layers
-//!
+
+mod delta_layer;
+mod filename;
+mod image_layer;
+mod inmemory_layer;
+mod remote_layer;
 
 use crate::repository::{Key, Value};
 use crate::walrecord::NeonWalRecord;
@@ -15,8 +19,11 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::LayerFileName;
-use super::remote_layer::RemoteLayer;
+pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
+pub use filename::{DeltaFileName, ImageFileName, LayerFileName, PathOrConf};
+pub use image_layer::{ImageLayer, ImageLayerWriter};
+pub use inmemory_layer::InMemoryLayer;
+pub use remote_layer::RemoteLayer;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where

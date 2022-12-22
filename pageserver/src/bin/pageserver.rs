@@ -370,9 +370,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     })
 }
 
-///
-/// Create GenericRemoteStorage client from the pageserver config
-///
 fn create_remote_storage_client(
     conf: &'static PageServerConf,
 ) -> anyhow::Result<Option<GenericRemoteStorage>> {

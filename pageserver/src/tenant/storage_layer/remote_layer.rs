@@ -3,10 +3,8 @@
 //!
 use crate::config::PageServerConf;
 use crate::repository::Key;
-use crate::tenant::delta_layer::DeltaLayer;
-use crate::tenant::filename::{DeltaFileName, ImageFileName};
-use crate::tenant::image_layer::ImageLayer;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_sync::index::LayerFileMetadata;
 use anyhow::{bail, Result};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -17,9 +15,9 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::LayerFileName;
-use super::storage_layer::{LayerIter, LayerKeyIter, PersistentLayer};
-use super::storage_sync::index::LayerFileMetadata;
+use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
+use super::image_layer::ImageLayer;
+use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
