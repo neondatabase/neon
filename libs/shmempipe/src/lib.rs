@@ -1134,6 +1134,7 @@ mod tests {
     /// This is a test for miri to detect any UB, or valgrind memcheck.
     ///
     /// With miri, `parking_lot` simpler mutexes are used.
+    #[cfg(miri)]
     #[test]
     fn initialize_at_on_boxed() {
         let mem = Box::new(MaybeUninit::<RawSharedMemPipe>::uninit());
