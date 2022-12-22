@@ -56,7 +56,7 @@ pub mod defaults {
     pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize =
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
-    pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "60 s";
+    pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     ///
     /// Default built-in configuration file.

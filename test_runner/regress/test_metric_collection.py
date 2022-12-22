@@ -69,7 +69,8 @@ def test_metric_collection(
     # to trigger remote storage operations in a controlled way
     neon_env_builder.pageserver_config_override = (
         f"""
-    metric_collection_endpoint="{metric_collection_endpoint}"
+        metric_collection_interval="60s"
+        metric_collection_endpoint="{metric_collection_endpoint}"
     """
         + "tenant_config={pitr_interval = '0 sec'}"
     )
