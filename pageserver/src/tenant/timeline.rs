@@ -413,20 +413,143 @@ pub enum PageReconstructResult<T> {
 /// An error happened in a get() operation.
 #[derive(thiserror::Error)]
 pub enum PageReconstructError {
-    #[error(transparent)]
     Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
 
-    #[error(transparent)]
+    LayerTraversal {
+        msg: String,
+        traversal_path: Vec<(ValueReconstructResult, Lsn, TraversalId)>,
+    },
+
     WalRedo(#[from] crate::walredo::WalRedoError),
 }
 
-impl std::fmt::Debug for PageReconstructError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+type TraversalId = String;
+
+trait TraversalLayerExt {
+    fn traversal_id(&self) -> TraversalId;
+}
+
+impl TraversalLayerExt for Arc<dyn PersistentLayer> {
+    fn traversal_id(&self) -> TraversalId {
+        match self.local_path() {
+            Some(local_path) => {
+                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", self.get_timeline_id())),
+                    "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
+                );
+                format!("{}", local_path.display())
+            }
+            None => {
+                format!(
+                    "remote {}/{}",
+                    self.get_timeline_id(),
+                    self.filename().file_name()
+                )
+            }
+        }
+    }
+}
+
+impl TraversalLayerExt for Arc<InMemoryLayer> {
+    fn traversal_id(&self) -> TraversalId {
+        format!(
+            "timeline {} in-memory {}",
+            self.get_timeline_id(),
+            self.short_id()
+        )
+    }
+}
+
+impl std::fmt::Display for PageReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Other(err) => err.fmt(f),
             Self::WalRedo(err) => err.fmt(f),
+            Self::LayerTraversal {
+                msg,
+                traversal_path,
+            } => write_traversal_path_error(f, msg, traversal_path, Some(10)),
         }
     }
+}
+
+impl std::fmt::Debug for PageReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Other(err) => err.fmt(f),
+            Self::WalRedo(err) => err.fmt(f),
+            Self::LayerTraversal {
+                msg,
+                traversal_path,
+            } => write_traversal_path_error(f, msg, traversal_path, Some(20)),
+        }
+    }
+}
+
+fn write_traversal_path_error(
+    f: &mut std::fmt::Formatter<'_>,
+    error_message: &str,
+    traversal_path: &[(ValueReconstructResult, Lsn, TraversalId)],
+    max_elements_to_write: Option<usize>,
+) -> std::fmt::Result {
+    write!(f, "Message: {error_message}, traversal path: ")?;
+
+    match traversal_path.len() {
+        0 => write!(f, "Empty"),
+        _not_empty => {
+            write!(f, "[")?;
+
+            let mut max_threshold = max_elements_to_write.unwrap_or(usize::MAX);
+            let mut path_element_index = 0;
+
+            while max_threshold > 1 {
+                match traversal_path.get(path_element_index) {
+                    Some(path_element) => {
+                        if path_element_index > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write_path_element(f, path_element)?
+                    }
+                    None => break,
+                }
+
+                max_threshold -= 1;
+                path_element_index += 1;
+            }
+
+            if max_threshold == 1 {
+                if path_element_index == 0 {
+                    let first_element = traversal_path
+                        .first()
+                        .expect("Traversal path is checked to be non-empty");
+                    write!(f, ", ")?;
+                    write_path_element(f, first_element)?;
+                    write!(f, ", ...")?;
+                } else {
+                    if path_element_index < traversal_path.len() - 1 {
+                        write!(f, ", ... , ")?;
+                    }
+
+                    let last_element = traversal_path
+                        .last()
+                        .expect("Traversal path is checked to be non-empty");
+                    write_path_element(f, last_element)?;
+                }
+            }
+
+            write!(f, "]")
+        }
+    }
+}
+
+fn write_path_element(
+    f: &mut std::fmt::Formatter<'_>,
+    (traversal_result, cont_lsn, traversal_id): &(ValueReconstructResult, Lsn, TraversalId),
+) -> std::fmt::Result {
+    f.debug_struct("LayerTraversal")
+        .field("result", traversal_result)
+        .field("cont_lsn", cont_lsn)
+        .field("id", traversal_id)
+        .finish()
 }
 
 /// This impl makes it so you can substitute return type
@@ -1581,42 +1704,6 @@ impl Timeline {
     }
 }
 
-type TraversalId = String;
-
-trait TraversalLayerExt {
-    fn traversal_id(&self) -> TraversalId;
-}
-
-impl TraversalLayerExt for Arc<dyn PersistentLayer> {
-    fn traversal_id(&self) -> String {
-        match self.local_path() {
-            Some(local_path) => {
-                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", self.get_timeline_id())),
-                    "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
-                );
-                format!("{}", local_path.display())
-            }
-            None => {
-                format!(
-                    "remote {}/{}",
-                    self.get_timeline_id(),
-                    self.filename().file_name()
-                )
-            }
-        }
-    }
-}
-
-impl TraversalLayerExt for Arc<InMemoryLayer> {
-    fn traversal_id(&self) -> String {
-        format!(
-            "timeline {} in-memory {}",
-            self.get_timeline_id(),
-            self.short_id()
-        )
-    }
-}
-
 impl Timeline {
     ///
     /// Get a handle to a Layer for reading.
@@ -1667,25 +1754,22 @@ impl Timeline {
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
-                        return layer_traversal_error(format!(
-                            "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
-                            key,
-                            Lsn(cont_lsn.0 - 1),
-                            request_lsn,
-                            timeline.ancestor_lsn
-                        ), traversal_path);
+                        return PageReconstructResult::Error(PageReconstructError::LayerTraversal {
+                            msg: format!("could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
+                                key,
+                                Lsn(cont_lsn.0 - 1),
+                                request_lsn,
+                                timeline.ancestor_lsn
+                            ),
+                            traversal_path,
+                        })
                     }
                     prev_lsn = cont_lsn;
                 }
-                ValueReconstructResult::Missing => {
-                    return layer_traversal_error(
-                        format!(
-                            "could not find data for key {} at LSN {}, for request at LSN {}",
-                            key, cont_lsn, request_lsn
-                        ),
-                        traversal_path,
-                    );
-                }
+                ValueReconstructResult::Missing => return PageReconstructResult::Error(PageReconstructError::LayerTraversal {
+                    msg: format!("could not find data for key {key} at LSN {cont_lsn}, for request at LSN {request_lsn}"),
+                    traversal_path,
+                }),
             }
 
             // Recurse into ancestor if needed
@@ -3314,35 +3398,10 @@ where
             }
             PageReconstructResult::Success(closure_value) => return Ok(closure_value),
             PageReconstructResult::Error(e) => {
-                return Err(anyhow::Error::new(e).context("Failed to reconstruct the page"))
+                return Err(anyhow::Error::new(e).context("Failed to reconstruct the page"));
             }
         }
     }
-}
-
-/// Helper function for get_reconstruct_data() to add the path of layers traversed
-/// to an error, as anyhow context information.
-fn layer_traversal_error(
-    msg: String,
-    path: Vec<(ValueReconstructResult, Lsn, TraversalId)>,
-) -> PageReconstructResult<()> {
-    // We want the original 'msg' to be the outermost context. The outermost context
-    // is the most high-level information, which also gets propagated to the client.
-    let mut msg_iter = path
-        .iter()
-        .map(|(r, c, l)| {
-            format!(
-                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r, c, l,
-            )
-        })
-        .chain(std::iter::once(msg));
-    // Construct initial message from the first traversed layer
-    let err = anyhow!(msg_iter.next().unwrap());
-
-    // Append all subsequent traversals, and the error message 'msg', as contexts.
-    let msg = msg_iter.fold(err, |err, msg| err.context(msg));
-    PageReconstructResult::from(msg)
 }
 
 /// Various functions to mutate the timeline.
