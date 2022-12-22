@@ -160,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for _i in 0..args.num_pubs {
         let c = None;
-        tokio::spawn(publish(c, args.num_subs as u64));
+        tokio::spawn(publish(c, args.num_subs));
     }
 
     h.await?;

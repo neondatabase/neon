@@ -805,7 +805,7 @@ fn wal_stream_connection_config(
     auth_token: Option<&str>,
 ) -> anyhow::Result<PgConnectionConfig> {
     let (host, port) =
-        parse_host_port(&listen_pg_addr_str).context("Unable to parse listen_pg_addr_str")?;
+        parse_host_port(listen_pg_addr_str).context("Unable to parse listen_pg_addr_str")?;
     let port = port.unwrap_or(5432);
     Ok(PgConnectionConfig::new_host_port(host, port)
         .extend_options([

@@ -317,7 +317,7 @@ impl<'a> WalIngest<'a> {
             spcnode: blk.rnode_spcnode,
             dbnode: blk.rnode_dbnode,
             relnode: blk.rnode_relnode,
-            forknum: blk.forknum as u8,
+            forknum: blk.forknum,
         };
 
         //
@@ -1131,7 +1131,7 @@ mod tests {
     async fn test_relsize() -> Result<()> {
         let tenant = TenantHarness::create("test_relsize")?.load().await;
         let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
-        let mut walingest = init_walingest_test(&*tline)?;
+        let mut walingest = init_walingest_test(&tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest.put_rel_creation(&mut m, TESTREL_A)?;
@@ -1155,7 +1155,7 @@ mod tests {
             .no_ondemand_download()?;
         m.commit()?;
 
-        assert_current_logical_size(&*tline, Lsn(0x50));
+        assert_current_logical_size(&tline, Lsn(0x50));
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(
@@ -1239,7 +1239,7 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x60));
         walingest.put_rel_truncation(&mut m, TESTREL_A, 2)?;
         m.commit()?;
-        assert_current_logical_size(&*tline, Lsn(0x60));
+        assert_current_logical_size(&tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
         assert_eq!(
@@ -1347,7 +1347,7 @@ mod tests {
     async fn test_drop_extend() -> Result<()> {
         let tenant = TenantHarness::create("test_drop_extend")?.load().await;
         let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
-        let mut walingest = init_walingest_test(&*tline)?;
+        let mut walingest = init_walingest_test(&tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest
@@ -1416,7 +1416,7 @@ mod tests {
     async fn test_truncate_extend() -> Result<()> {
         let tenant = TenantHarness::create("test_truncate_extend")?.load().await;
         let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
-        let mut walingest = init_walingest_test(&*tline)?;
+        let mut walingest = init_walingest_test(&tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
         let relsize = 20 * 1024 * 1024 / 8192;
@@ -1554,7 +1554,7 @@ mod tests {
     async fn test_large_rel() -> Result<()> {
         let tenant = TenantHarness::create("test_large_rel")?.load().await;
         let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
-        let mut walingest = init_walingest_test(&*tline)?;
+        let mut walingest = init_walingest_test(&tline)?;
 
         let mut lsn = 0x10;
         for blknum in 0..RELSEG_SIZE + 1 {
@@ -1567,7 +1567,7 @@ mod tests {
             m.commit()?;
         }
 
-        assert_current_logical_size(&*tline, Lsn(lsn));
+        assert_current_logical_size(&tline, Lsn(lsn));
 
         assert_eq!(
             tline
@@ -1587,7 +1587,7 @@ mod tests {
                 .no_ondemand_download()?,
             RELSEG_SIZE
         );
-        assert_current_logical_size(&*tline, Lsn(lsn));
+        assert_current_logical_size(&tline, Lsn(lsn));
 
         // Truncate another block
         lsn += 0x10;
@@ -1600,7 +1600,7 @@ mod tests {
                 .no_ondemand_download()?,
             RELSEG_SIZE - 1
         );
-        assert_current_logical_size(&*tline, Lsn(lsn));
+        assert_current_logical_size(&tline, Lsn(lsn));
 
         // Truncate to 1500, and then truncate all the way down to 0, one block at a time
         // This tests the behavior at segment boundaries
@@ -1619,7 +1619,7 @@ mod tests {
 
             size -= 1;
         }
-        assert_current_logical_size(&*tline, Lsn(lsn));
+        assert_current_logical_size(&tline, Lsn(lsn));
 
         Ok(())
     }

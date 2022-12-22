@@ -1327,10 +1327,8 @@ impl Timeline {
                     index_part.timeline_layers.len()
                 );
                 remote_client.init_upload_queue(index_part)?;
-                let local_only_filenames = self
-                    .create_remote_layers(index_part, local_layers, disk_consistent_lsn)
-                    .await?;
-                local_only_filenames
+                self.create_remote_layers(index_part, local_layers, disk_consistent_lsn)
+                    .await?
             }
             None => {
                 info!("initializing upload queue as empty");
@@ -3425,9 +3423,9 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     let mut new_path = path.to_owned();
 
     for i in 0u32.. {
-        new_path.set_file_name(format!("{}.{}.old", filename, i));
+        new_path.set_file_name(format!("{filename}.{i}.old"));
         if !new_path.exists() {
-            std::fs::rename(&path, &new_path)?;
+            std::fs::rename(path, &new_path)?;
             return Ok(());
         }
     }

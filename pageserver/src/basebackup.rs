@@ -131,7 +131,7 @@ where
 
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
-            let header = new_tar_header_dir(*dir)?;
+            let header = new_tar_header_dir(dir)?;
             self.ar.append(&header, &mut io::empty())?;
         }
 

@@ -239,7 +239,7 @@ mod test {
         conf: &SafeKeeperConf,
         ttid: &TenantTimelineId,
     ) -> Result<(FileStorage, SafeKeeperState)> {
-        fs::create_dir_all(&conf.timeline_dir(ttid)).expect("failed to create timeline dir");
+        fs::create_dir_all(conf.timeline_dir(ttid)).expect("failed to create timeline dir");
         Ok((
             FileStorage::restore_new(ttid, conf)?,
             FileStorage::load_control_file_conf(conf, ttid)?,
@@ -250,7 +250,7 @@ mod test {
         conf: &SafeKeeperConf,
         ttid: &TenantTimelineId,
     ) -> Result<(FileStorage, SafeKeeperState)> {
-        fs::create_dir_all(&conf.timeline_dir(ttid)).expect("failed to create timeline dir");
+        fs::create_dir_all(conf.timeline_dir(ttid)).expect("failed to create timeline dir");
         let state = SafeKeeperState::empty();
         let storage = FileStorage::create_new(ttid, conf, state.clone())?;
         Ok((storage, state))

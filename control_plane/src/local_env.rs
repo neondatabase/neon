@@ -404,7 +404,7 @@ impl LocalEnv {
             }
         }
 
-        fs::create_dir(&base_path)?;
+        fs::create_dir(base_path)?;
 
         // generate keys for jwt
         // openssl genrsa -out private_key.pem 2048
@@ -413,7 +413,7 @@ impl LocalEnv {
             private_key_path = base_path.join("auth_private_key.pem");
             let keygen_output = Command::new("openssl")
                 .arg("genrsa")
-                .args(&["-out", private_key_path.to_str().unwrap()])
+                .args(["-out", private_key_path.to_str().unwrap()])
                 .arg("2048")
                 .stdout(Stdio::null())
                 .output()
@@ -430,10 +430,10 @@ impl LocalEnv {
             // openssl rsa -in private_key.pem -pubout -outform PEM -out public_key.pem
             let keygen_output = Command::new("openssl")
                 .arg("rsa")
-                .args(&["-in", private_key_path.to_str().unwrap()])
+                .args(["-in", private_key_path.to_str().unwrap()])
                 .arg("-pubout")
-                .args(&["-outform", "PEM"])
-                .args(&["-out", public_key_path.to_str().unwrap()])
+                .args(["-outform", "PEM"])
+                .args(["-out", public_key_path.to_str().unwrap()])
                 .stdout(Stdio::null())
                 .output()
                 .context("failed to generate auth private key")?;

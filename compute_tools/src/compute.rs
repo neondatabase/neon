@@ -175,7 +175,7 @@ impl ComputeNode {
         let start_time = Utc::now();
 
         let sync_handle = Command::new(&self.pgbin)
-            .args(&["--sync-safekeepers"])
+            .args(["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
             .stdout(Stdio::piped())
             .spawn()
@@ -253,7 +253,7 @@ impl ComputeNode {
 
         // Run postgres as a child process.
         let mut pg = Command::new(&self.pgbin)
-            .args(&["-D", &self.pgdata])
+            .args(["-D", &self.pgdata])
             .spawn()
             .expect("cannot start postgres process");
 

@@ -569,7 +569,7 @@ impl ImageLayerWriterInner {
                 lsn: self.lsn,
             },
         );
-        std::fs::rename(self.path, &final_path)?;
+        std::fs::rename(self.path, final_path)?;
 
         trace!("created image layer {}", layer.path().display());
 

@@ -549,7 +549,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
             table.load_preset(comfy_table::presets::NOTHING);
 
-            table.set_header(&[
+            table.set_header([
                 "NODE",
                 "ADDRESS",
                 "TIMELINE",
@@ -584,7 +584,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     .map(|name| name.as_str())
                     .unwrap_or("?");
 
-                table.add_row(&[
+                table.add_row([
                     node_name.as_str(),
                     &node.address.to_string(),
                     &node.timeline_id.to_string(),

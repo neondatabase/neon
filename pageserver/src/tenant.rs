@@ -337,7 +337,7 @@ impl TimelineUninitMark {
         let uninit_mark_parent = uninit_mark_file
             .parent()
             .with_context(|| format!("Uninit mark file {uninit_mark_file:?} has no parent"))?;
-        ignore_absent_files(|| fs::remove_file(&uninit_mark_file)).with_context(|| {
+        ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
             format!("Failed to remove uninit mark file at path {uninit_mark_file:?}")
         })?;
         crashsafe::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
@@ -2321,12 +2321,12 @@ impl Tenant {
         // See more for on the issue #2748 condenced out of the initial PR review.
         let mut shared_cache = self.cached_logical_sizes.lock().await;
 
-        size::gather_inputs(self, logical_sizes_at_once, &mut *shared_cache).await
+        size::gather_inputs(self, logical_sizes_at_once, &mut shared_cache).await
     }
 }
 
 fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
-    fs::remove_dir_all(&timeline_dir)
+    fs::remove_dir_all(timeline_dir)
         .or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 // we can leave the uninit mark without a timeline dir,
@@ -2342,7 +2342,7 @@ fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> a
                 timeline_dir.display()
             )
         })?;
-    fs::remove_file(&uninit_mark).with_context(|| {
+    fs::remove_file(uninit_mark).with_context(|| {
         format!(
             "Failed to remove timeline uninit mark file {}",
             uninit_mark.display()
@@ -2442,7 +2442,7 @@ fn try_create_target_tenant_dir(
         anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
     });
 
-    fs::rename(&temporary_tenant_dir, target_tenant_directory).with_context(|| {
+    fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
             "failed to move tenant {} temporary directory {} into the permanent one {}",
             tenant_id,
@@ -2496,9 +2496,9 @@ fn run_initdb(
     );
 
     let initdb_output = Command::new(&initdb_bin_path)
-        .args(&["-D", &initdb_target_dir.to_string_lossy()])
-        .args(&["-U", &conf.superuser])
-        .args(&["-E", "utf8"])
+        .args(["-D", &initdb_target_dir.to_string_lossy()])
+        .args(["-U", &conf.superuser])
+        .args(["-E", "utf8"])
         .arg("--no-instructions")
         // This is only used for a temporary installation that is deleted shortly after,
         // so no need to fsync it
@@ -2660,9 +2660,11 @@ pub mod harness {
 
             // Disable automatic GC and compaction to make the unit tests more deterministic.
             // The tests perform them manually if needed.
-            let mut tenant_conf = TenantConf::dummy_conf();
-            tenant_conf.gc_period = Duration::ZERO;
-            tenant_conf.compaction_period = Duration::ZERO;
+            let tenant_conf = TenantConf {
+                gc_period: Duration::ZERO,
+                compaction_period: Duration::ZERO,
+                ..TenantConf::default()
+            };
 
             let tenant_id = TenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;

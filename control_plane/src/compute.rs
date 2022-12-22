@@ -44,7 +44,7 @@ impl ComputeControlPlane {
         let mut nodes = BTreeMap::default();
         let pgdatadirspath = &env.pg_data_dirs_path();
 
-        for tenant_dir in fs::read_dir(&pgdatadirspath)
+        for tenant_dir in fs::read_dir(pgdatadirspath)
             .with_context(|| format!("failed to list {}", pgdatadirspath.display()))?
         {
             let tenant_dir = tenant_dir?;
@@ -67,8 +67,8 @@ impl ComputeControlPlane {
     fn get_port(&mut self) -> u16 {
         1 + self
             .nodes
-            .iter()
-            .map(|(_name, node)| node.address.port())
+            .values()
+            .map(|node| node.address.port())
             .max()
             .unwrap_or(self.base_port)
     }
@@ -183,7 +183,7 @@ impl PostgresNode {
 
     fn sync_safekeepers(&self, auth_token: &Option<String>, pg_version: u32) -> Result<Lsn> {
         let pg_path = self.env.pg_bin_dir(pg_version)?.join("postgres");
-        let mut cmd = Command::new(&pg_path);
+        let mut cmd = Command::new(pg_path);
 
         cmd.arg("--sync-safekeepers")
             .env_clear()
@@ -261,7 +261,7 @@ impl PostgresNode {
     }
 
     fn create_pgdata(&self) -> Result<()> {
-        fs::create_dir_all(&self.pgdata()).with_context(|| {
+        fs::create_dir_all(self.pgdata()).with_context(|| {
             format!(
                 "could not create data directory {}",
                 self.pgdata().display()
@@ -478,7 +478,7 @@ impl PostgresNode {
                 postgresql_conf_path.to_str().unwrap()
             )
         })?;
-        fs::remove_dir_all(&self.pgdata())?;
+        fs::remove_dir_all(self.pgdata())?;
         self.create_pgdata()?;
 
         // 2. Bring back config files
@@ -514,7 +514,7 @@ impl PostgresNode {
                 "Destroying postgres data directory '{}'",
                 self.pgdata().to_str().unwrap()
             );
-            fs::remove_dir_all(&self.pgdata())?;
+            fs::remove_dir_all(self.pgdata())?;
         } else {
             self.pg_ctl(&["stop"], &None)?;
         }

@@ -267,7 +267,7 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
         }
 
         let nread = file.read_to_end(&mut buf)?;
-        if nread != WAL_SEGMENT_SIZE - offset as usize {
+        if nread != WAL_SEGMENT_SIZE - offset {
             // Maybe allow this for .partial files?
             error!("read only {} bytes from WAL file", nread);
         }

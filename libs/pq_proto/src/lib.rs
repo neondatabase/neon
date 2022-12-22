@@ -881,7 +881,7 @@ impl<'a> BeMessage<'a> {
                     buf.put_u8(b'k');
                     buf.put_u64(req.sent_ptr);
                     buf.put_i64(req.timestamp);
-                    buf.put_u8(if req.request_reply { 1 } else { 0 });
+                    buf.put_u8(u8::from(req.request_reply));
                 });
             }
         }

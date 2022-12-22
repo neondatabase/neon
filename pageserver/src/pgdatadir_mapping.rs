@@ -710,14 +710,14 @@ impl<'a> DatadirModification<'a> {
         let mut dbdir = DbDirectory::des(&buf)?;
 
         let r = dbdir.dbdirs.insert((spcnode, dbnode), true);
-        if r == None || r == Some(false) {
+        if r.is_none() || r == Some(false) {
             // The dbdir entry didn't exist, or it contained a
             // 'false'. The 'insert' call already updated it with
             // 'true', now write the updated 'dbdirs' map back.
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         }
-        if r == None {
+        if r.is_none() {
             // Create RelDirectory
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
@@ -1095,9 +1095,7 @@ impl<'a> DatadirModification<'a> {
                 // work directly with Images, and we never need to read actual
                 // data pages. We could handle this if we had to, by calling
                 // the walredo manager, but let's keep it simple for now.
-                return PageReconstructResult::from(anyhow::anyhow!(
-                    "unexpected pending WAL record"
-                ));
+                PageReconstructResult::from(anyhow::anyhow!("unexpected pending WAL record"))
             }
         } else {
             let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
@@ -1425,7 +1423,7 @@ fn twophase_key_range(xid: TransactionId) -> Range<Key> {
         field2: 0,
         field3: 0,
         field4: 0,
-        field5: if overflowed { 1 } else { 0 },
+        field5: u8::from(overflowed),
         field6: next_xid,
     }
 }
