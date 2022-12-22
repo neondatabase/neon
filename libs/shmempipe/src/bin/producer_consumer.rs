@@ -26,7 +26,9 @@ fn as_inner<I>(mut args: I)
 where
     I: Iterator<Item = OsString>,
 {
+    #[allow(unused)]
     use bytes::Buf;
+    #[allow(unused)]
     use sha2::Digest;
 
     let path = args.next().expect("need path name used for shm_open");
@@ -36,28 +38,30 @@ where
 
     let mut responder = shm.try_acquire_responder().unwrap();
 
-    let mut response = Vec::with_capacity(8192);
+    let response = vec![0; 8192];
 
     let mut buffer = bytes::BytesMut::with_capacity(16 * 1024);
 
     loop {
-        buffer.resize(4, 0);
-        let mut read = 0;
-        while read < 4 {
-            read += responder.read(&mut buffer);
-        }
-        let len = buffer.get_u32();
-
+        let len = responder
+            .read_next_frame_len()
+            .expect("should be in the beginning of frame");
         buffer.resize(len as usize, 0);
-        let mut read = 0;
-        while read < len as usize {
-            read += responder.read(&mut buffer[read..]);
-        }
+        responder.read_exact(&mut buffer);
 
+        /*
+        let started_at = std::time::Instant::now();
         let sha = <[u8; 32]>::from(sha2::Sha256::digest(&buffer[..]));
         response.clear();
         response.extend(sha);
         response.resize(8192, 0);
+
+        let elapsed = started_at.elapsed();
+        println!("processing time: {:?}", elapsed);*/
+
+        // response.clear();
+        // response.extend(buffer.iter().copied().cycle().take(8192));
+
         responder.write_all(&response);
     }
 }
@@ -137,30 +141,32 @@ fn as_outer() {
         // otherwise start producing random values for 1..64kB, expecting to get back the hash of
         // the random values repeated for 8192 bytes.
 
-        // let distr = rand::distributions::Uniform::<u32>::new_inclusive(230, 64 * 1024);
+        #[allow(unused)]
+        let distr = rand::distributions::Uniform::<u32>::new_inclusive(230, 64 * 1024);
 
         let owned = shm.try_acquire_requester().expect("I am the only one");
 
         let reqs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        let _jhs = (0..4)
+        let _jhs = (0..1)
             .map(|_| (owned.clone(), reqs.clone()))
             .map(|(owned, reqs)| {
                 std::thread::spawn(move || {
+                    #[allow(unused)]
                     use bytes::BufMut;
                     #[allow(unused)]
                     use rand::{Rng, RngCore};
+                    #[allow(unused)]
                     use sha2::Digest;
                     let mut req = Vec::with_capacity(128 * 1024);
                     let mut resp = Vec::with_capacity(8192);
                     let mut rng = rand::thread_rng();
                     loop {
                         req.clear();
-                        let len = 1132 - 4; // rng.sample(&distr);
-                        req.put_u32(len);
-                        req.resize(4 + len as usize, 0);
-
-                        rng.fill_bytes(&mut req[4..][..len as usize]);
+                        // let len = rng.sample(&distr);
+                        let len = 1132;
+                        req.resize(len as usize, 0);
+                        rng.fill_bytes(&mut req[..len as usize]);
 
                         resp.clear();
                         resp.resize(8192, 1);
@@ -172,11 +178,10 @@ fn as_outer() {
                         // let elapsed = started.elapsed();
                         reqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                        let expected =
-                            <[u8; 32]>::from(sha2::Sha256::digest(&req[4..][..len as usize]));
+                        /*let expected = <[u8; 32]>::from(sha2::Sha256::digest(&req[..len as usize]));
                         assert_eq!(resp.len(), 8192);
                         assert_eq!(expected.as_slice(), &resp[..32]);
-                        assert!(resp[32..].iter().all(|&x| x == 0));
+                        assert!(resp[32..].iter().all(|&x| x == 0));*/
                     }
                 })
             })
