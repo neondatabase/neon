@@ -767,6 +767,7 @@ jobs:
       - id: set-matrix
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "include=[]" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "storage_broker_ns": "neon-storage-broker", "storage_broker_config": "production.neon-storage-broker", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
             echo "include=[$PRODUCTION]" >> $GITHUB_OUTPUT
