@@ -673,10 +673,46 @@ fn initialize_at(
     // Safety: lot of requirements, TODO
     let place = unsafe { inner.cast::<MaybeUninit<RawSharedMemPipe>>().as_mut() };
 
+    trait AsPointerToUninit {
+        type Target;
+        fn cast_uninit(self) -> Self::Target;
+    }
+
+    trait AsPointerToUninitArray {
+        type Target;
+        fn cast_uninit_array(self) -> Self::Target;
+    }
+
+    impl<T> AsPointerToUninit for *mut T {
+        type Target = *mut MaybeUninit<T>;
+
+        // this is just a convinience to type less, also, any cast is valid, so this is easy to
+        // mistype
+        fn cast_uninit(self) -> Self::Target {
+            self.cast::<MaybeUninit<T>>()
+        }
+    }
+
+    impl<T, const N: usize> AsPointerToUninitArray for *mut [T; N] {
+        type Target = *mut [MaybeUninit<T>; N];
+
+        fn cast_uninit_array(self) -> Self::Target {
+            self.cast::<[MaybeUninit<T>; N]>()
+        }
+    }
+
+    /*
+    macro_rules! init {
+        (field:$ident,how:$expr) => {{
+            let field = unsafe { std::ptr::addr_of_mut!((*place.as_mut_ptr()).$field).cast::<MaybeUninit<_>>
+        }}
+    }
+    */
+
     {
         let magic = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).magic)
-                .cast::<MaybeUninit<AtomicU32>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -688,9 +724,19 @@ fn initialize_at(
     }
 
     {
+        let send_request_loops = unsafe {
+            std::ptr::addr_of_mut!((*place.as_mut_ptr()).send_request_loops)
+                .cast_uninit()
+                .as_mut()
+                .expect("valid non-null pointer")
+        };
+        send_request_loops.write(AtomicUsize::new(0));
+    }
+
+    {
         let fd = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).notify_request_written)
-                .cast::<MaybeUninit<i32>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -705,7 +751,7 @@ fn initialize_at(
     {
         let fd = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).notify_response_written)
-                .cast::<MaybeUninit<i32>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -720,10 +766,8 @@ fn initialize_at(
     {
         let participants = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).participants)
-                // these casts are easy to get wrong, for example u32 vs. Option<u32> at the
-                // deepest level -- maybe this could be done in phases with a helper method to
-                // switch only the topmost as maybeuninit
-                .cast::<MaybeUninit<[MaybeUninit<shared::PinnedMutex<Option<u32>>>; 2]>>()
+                .cast_uninit_array()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -752,7 +796,7 @@ fn initialize_at(
     {
         let to_worker_waiters = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_waiters)
-                .cast::<MaybeUninit<AtomicU32>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -764,7 +808,7 @@ fn initialize_at(
     {
         let to_worker = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker)
-                .cast::<MaybeUninit<ringbuf::StaticRb<u8, TO_WORKER_LEN>>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -779,7 +823,7 @@ fn initialize_at(
     {
         let to_worker_writer = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_writer)
-                .cast::<MaybeUninit<shared::PinnedMutex<()>>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -790,7 +834,7 @@ fn initialize_at(
     {
         let to_worker_cond = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_cond)
-                .cast::<MaybeUninit<shared::PinnedCondvar>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -801,7 +845,7 @@ fn initialize_at(
     {
         let from_worker = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker)
-                .cast::<MaybeUninit<ringbuf::StaticRb<u8, FROM_WORKER_LEN>>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -816,7 +860,7 @@ fn initialize_at(
     {
         let from_worker_writer = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker_writer)
-                .cast::<MaybeUninit<shared::PinnedMutex<()>>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
@@ -827,7 +871,7 @@ fn initialize_at(
     {
         let from_worker_cond = unsafe {
             std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker_cond)
-                .cast::<MaybeUninit<shared::PinnedCondvar>>()
+                .cast_uninit()
                 .as_mut()
                 .expect("valid non-null pointer")
         };
