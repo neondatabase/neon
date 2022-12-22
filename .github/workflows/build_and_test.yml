@@ -759,20 +759,18 @@ jobs:
   calculate-deploy-targets:
     runs-on: [ self-hosted, dev, x64 ]
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
     outputs:
       matrix-include: ${{ steps.set-matrix.outputs.include }}
     steps:
       - id: set-matrix
         run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "include=[]" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+          if [[ "$GITHUB_REF_NAME" == "release" ]]; then
             PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "storage_broker_ns": "neon-storage-broker", "storage_broker_config": "production.neon-storage-broker", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
             echo "include=[$PRODUCTION]" >> $GITHUB_OUTPUT
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to 'release'"
             exit 1
           fi
 
@@ -783,7 +781,7 @@ jobs:
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
     defaults:
       run:
@@ -827,7 +825,7 @@ jobs:
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: |
       (github.ref_name == 'main') &&
       github.event_name != 'workflow_dispatch'
@@ -939,7 +937,7 @@ jobs:
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
     defaults:
       run:
@@ -982,7 +980,7 @@ jobs:
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
     defaults:
       run:
