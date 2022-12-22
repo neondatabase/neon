@@ -701,22 +701,19 @@ fn initialize_at(
         }
     }
 
-    /*
-    macro_rules! init {
-        (field:$ident,how:$expr) => {{
-            let field = unsafe { std::ptr::addr_of_mut!((*place.as_mut_ptr()).$field).cast::<MaybeUninit<_>>
-        }}
+    macro_rules! uninit_field {
+        ($field:ident) => {{
+            unsafe {
+                std::ptr::addr_of_mut!((*place.as_mut_ptr()).$field)
+                    .cast_uninit()
+                    .as_mut()
+                    .expect("valid non-null ptr")
+            }
+        }};
     }
-    */
 
     {
-        let magic = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).magic)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let magic = uninit_field!(magic);
         magic.write(AtomicU32::new(0x0000_0000));
 
         // ceremonial
@@ -724,40 +721,16 @@ fn initialize_at(
     }
 
     {
-        let send_request_loops = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).send_request_loops)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-        send_request_loops.write(AtomicUsize::new(0));
-    }
-
-    {
-        let fd = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).notify_request_written)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let fd = uninit_field!(notify_request_written);
         fd.write(notify_request_written.as_raw_fd());
-
         unsafe { fd.assume_init_mut() };
 
         // the file is forgotten if the init completes
     }
 
     {
-        let fd = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).notify_response_written)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let fd = uninit_field!(notify_response_written);
         fd.write(notify_response_written.as_raw_fd());
-
         unsafe { fd.assume_init_mut() };
 
         // the file is forgotten if the init completes
@@ -794,88 +767,40 @@ fn initialize_at(
     }
 
     {
-        let to_worker_waiters = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_waiters)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let to_worker_waiters = uninit_field!(to_worker_waiters);
         to_worker_waiters.write(AtomicU32::default());
         unsafe { to_worker_waiters.assume_init_mut() };
     }
 
     {
-        let to_worker = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let to_worker = uninit_field!(to_worker);
         to_worker.write(ringbuf::StaticRb::default());
-
-        unsafe {
-            to_worker.assume_init_mut();
-        }
+        unsafe { to_worker.assume_init_mut() };
     }
 
     {
-        let to_worker_writer = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_writer)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let to_worker_writer = uninit_field!(to_worker_writer);
         shared::PinnedMutex::initialize_at(to_worker_writer, ()).unwrap();
     }
 
     {
-        let to_worker_cond = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).to_worker_cond)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let to_worker_cond = uninit_field!(to_worker_cond);
         shared::PinnedCondvar::initialize_at(to_worker_cond).unwrap();
     }
 
     {
-        let from_worker = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let from_worker = uninit_field!(from_worker);
         from_worker.write(ringbuf::StaticRb::default());
-
-        unsafe {
-            from_worker.assume_init_mut();
-        }
+        unsafe { from_worker.assume_init_mut() };
     }
 
     {
-        let from_worker_writer = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker_writer)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let from_worker_writer = uninit_field!(from_worker_writer);
         shared::PinnedMutex::initialize_at(from_worker_writer, ()).unwrap();
     }
 
     {
-        let from_worker_cond = unsafe {
-            std::ptr::addr_of_mut!((*place.as_mut_ptr()).from_worker_cond)
-                .cast_uninit()
-                .as_mut()
-                .expect("valid non-null pointer")
-        };
-
+        let from_worker_cond = uninit_field!(from_worker_cond);
         shared::PinnedCondvar::initialize_at(from_worker_cond).unwrap();
     }
 
