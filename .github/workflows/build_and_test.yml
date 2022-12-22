@@ -733,13 +733,13 @@ jobs:
         run: crane push compute-node-v14 neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
 
       - name: Push vm compute node v14 image to Docker Hub
-        run: crane push compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
+        run: crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
 
       - name: Push compute node v15 image to Docker Hub
         run: crane push compute-node-v15 neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}}
 
       - name: Push vm compute node v15 image to Docker Hub
-        run: crane push compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
+        run: crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
 
       - name: Push rust image to Docker Hub
         run: crane push rust neondatabase/rust:pinned
