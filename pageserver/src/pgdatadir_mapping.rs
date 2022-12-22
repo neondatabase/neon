@@ -10,7 +10,7 @@ use super::tenant::PageReconstructResult;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::tenant::{with_ondemand_download, Timeline};
 use crate::walrecord::NeonWalRecord;
-use crate::{repository::*, try_no_ondemand_download};
+use crate::{repository::*, try_no_ondemand_download, try_page_reconstruct_result};
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -196,13 +196,11 @@ impl Timeline {
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = try_no_ondemand_download!(self.get(key, lsn));
 
-        match RelDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
-                PageReconstructResult::Success(exists)
-            }
-            Err(e) => PageReconstructResult::from(e),
-        }
+        let dir = try_page_reconstruct_result!(
+            RelDirectory::des(&buf).context("deserialization failure")
+        );
+        let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
+        PageReconstructResult::Success(exists)
     }
 
     /// Get a list of all existing relations in given tablespace and database.
@@ -216,20 +214,19 @@ impl Timeline {
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = try_no_ondemand_download!(self.get(key, lsn));
 
-        match RelDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let rels: HashSet<RelTag> =
-                    HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
-                        spcnode,
-                        dbnode,
-                        relnode: *relnode,
-                        forknum: *forknum,
-                    }));
+        let dir = try_page_reconstruct_result!(
+            RelDirectory::des(&buf).context("deserialization failure")
+        );
 
-                PageReconstructResult::Success(rels)
-            }
-            Err(e) => PageReconstructResult::from(e),
-        }
+        let rels: HashSet<RelTag> =
+            HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
+                spcnode,
+                dbnode,
+                relnode: *relnode,
+                forknum: *forknum,
+            }));
+
+        PageReconstructResult::Success(rels)
     }
 
     /// Look up given SLRU page version.
@@ -267,13 +264,12 @@ impl Timeline {
         let key = slru_dir_to_key(kind);
         let buf = try_no_ondemand_download!(self.get(key, lsn));
 
-        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let exists = dir.segments.get(&segno).is_some();
-                PageReconstructResult::Success(exists)
-            }
-            Err(e) => PageReconstructResult::from(e),
-        }
+        let dir = try_page_reconstruct_result!(
+            SlruSegmentDirectory::des(&buf).context("deserialization failure")
+        );
+
+        let exists = dir.segments.get(&segno).is_some();
+        PageReconstructResult::Success(exists)
     }
 
     /// Locate LSN, such that all transactions that committed before
@@ -397,10 +393,10 @@ impl Timeline {
         let key = slru_dir_to_key(kind);
 
         let buf = try_no_ondemand_download!(self.get(key, lsn));
-        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => PageReconstructResult::Success(dir.segments),
-            Err(e) => PageReconstructResult::from(e),
-        }
+        let dir = try_page_reconstruct_result!(
+            SlruSegmentDirectory::des(&buf).context("deserialization failure")
+        );
+        PageReconstructResult::Success(dir.segments)
     }
 
     pub fn get_relmap_file(
@@ -418,11 +414,10 @@ impl Timeline {
     pub fn list_dbdirs(&self, lsn: Lsn) -> PageReconstructResult<HashMap<(Oid, Oid), bool>> {
         // fetch directory entry
         let buf = try_no_ondemand_download!(self.get(DBDIR_KEY, lsn));
+        let dir =
+            try_page_reconstruct_result!(DbDirectory::des(&buf).context("deserialization failure"));
 
-        match DbDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => PageReconstructResult::Success(dir.dbdirs),
-            Err(e) => PageReconstructResult::from(e),
-        }
+        PageReconstructResult::Success(dir.dbdirs)
     }
 
     pub fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> PageReconstructResult<Bytes> {
@@ -435,10 +430,10 @@ impl Timeline {
         // fetch directory entry
         let buf = try_no_ondemand_download!(self.get(TWOPHASEDIR_KEY, lsn));
 
-        match TwoPhaseDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => PageReconstructResult::Success(dir.xids),
-            Err(e) => PageReconstructResult::from(e),
-        }
+        let dir = try_page_reconstruct_result!(
+            TwoPhaseDirectory::des(&buf).context("deserialization failure")
+        );
+        PageReconstructResult::Success(dir.xids)
     }
 
     pub fn get_control_file(&self, lsn: Lsn) -> PageReconstructResult<Bytes> {

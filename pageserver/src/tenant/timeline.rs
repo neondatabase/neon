@@ -1656,7 +1656,6 @@ impl Timeline {
 
         'outer: loop {
             // The function should have updated 'state'
-            //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
                 ValueReconstructResult::Complete => return PageReconstructResult::Success(()),
                 ValueReconstructResult::Continue => {
@@ -1696,10 +1695,7 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                let ancestor = match timeline.get_ancestor_timeline() {
-                    Ok(timeline) => timeline,
-                    Err(e) => return PageReconstructResult::from(e),
-                };
+                let ancestor = try_page_reconstruct_result!(timeline.get_ancestor_timeline());
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
@@ -1717,14 +1713,11 @@ impl Timeline {
                     // Get all the data needed to reconstruct the page version from this layer.
                     // But if we have an older cached page image, no need to go past that.
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
-                    result = match open_layer.get_value_reconstruct_data(
+                    result = try_page_reconstruct_result!(open_layer.get_value_reconstruct_data(
                         key,
                         lsn_floor..cont_lsn,
                         reconstruct_state,
-                    ) {
-                        Ok(result) => result,
-                        Err(e) => return PageReconstructResult::from(e),
-                    };
+                    ));
                     cont_lsn = lsn_floor;
                     traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
                     continue;
@@ -1735,14 +1728,11 @@ impl Timeline {
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
-                    result = match frozen_layer.get_value_reconstruct_data(
+                    result = try_page_reconstruct_result!(frozen_layer.get_value_reconstruct_data(
                         key,
                         lsn_floor..cont_lsn,
                         reconstruct_state,
-                    ) {
-                        Ok(result) => result,
-                        Err(e) => return PageReconstructResult::from(e),
-                    };
+                    ));
                     cont_lsn = lsn_floor;
                     traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
                     continue 'outer;
@@ -1762,14 +1752,11 @@ impl Timeline {
                 }
 
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                result = match layer.get_value_reconstruct_data(
+                result = try_page_reconstruct_result!(layer.get_value_reconstruct_data(
                     key,
                     lsn_floor..cont_lsn,
                     reconstruct_state,
-                ) {
-                    Ok(result) => result,
-                    Err(e) => return PageReconstructResult::from(e),
-                };
+                ));
                 cont_lsn = lsn_floor;
                 traversal_path.push((result, cont_lsn, layer.traversal_id()));
             } else if timeline.ancestor_timeline.is_some() {
@@ -2999,18 +2986,14 @@ impl Timeline {
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
-                let img = match self
+                let img = try_page_reconstruct_result!(self
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
-                    .context("Failed to reconstruct a page image:")
-                {
-                    Ok(img) => img,
-                    Err(e) => return PageReconstructResult::from(e),
-                };
+                    .context("Failed to reconstruct a page image:"));
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();
-                    if let Err(e) = cache
+                    try_page_reconstruct_result!(cache
                         .memorize_materialized_page(
                             self.tenant_id,
                             self.timeline_id,
@@ -3018,10 +3001,7 @@ impl Timeline {
                             last_rec_lsn,
                             &img,
                         )
-                        .context("Materialized page memoization failed")
-                    {
-                        return PageReconstructResult::from(e);
-                    }
+                        .context("Materialized page memoization failed"));
                 }
 
                 PageReconstructResult::Success(img)
