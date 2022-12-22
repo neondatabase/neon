@@ -6,6 +6,8 @@ storage:
     broker_endpoint: http://storage-broker-lb.zeta.eu-west-1.internal.aws.neon.build:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
+      metric_collection_endpoint: http://console-staging.local/billing/api/v1/usage_events
+      metric_collection_interval: 10min
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
