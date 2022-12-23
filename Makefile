@@ -20,6 +20,8 @@ else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
 
+LIBSHMEMPIPE=$(ROOT_PROJECT_DIR)/target/$(BUILD_TYPE)/libshmempipe.a
+
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
@@ -120,12 +122,14 @@ postgres-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
 
-.PHONY: shmempipe
-shmempipe:
+# in addition to rebuilding the shmempipe, we must always clean out the dynamic library shmempipe is linked to (statically)
+# there doesn't seem to be a pgxs way to have the MODULE_big depend on external object files.
+$(LIBSHMEMPIPE): $(ROOT_PROJECT_DIR)/Cargo.lock $(ROOT_PROJECT_DIR)/libs/shmempipe/Cargo.toml $(wildcard $(ROOT_PROJECT_DIR)/libs/shmempipe/src/*.rs)
+	rm -f $(POSTGRES_INSTALL_DIR)/build/neon-walredo-*/neon_walredo.so
 	$(CARGO_CMD_PREFIX) cargo build -p shmempipe $(CARGO_BUILD_FLAGS)
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-% shmempipe
+neon-pg-ext-%: postgres-% $(LIBSHMEMPIPE)
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
