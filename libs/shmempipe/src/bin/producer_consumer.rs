@@ -46,7 +46,9 @@ where
         let len = responder
             .read_next_frame_len()
             .expect("should be in the beginning of frame");
+        // println!("read frame len = {len} bytes");
         buffer.resize(len as usize, 0);
+        // println!("reading request");
         responder.read_exact(&mut buffer);
 
         /*
@@ -62,6 +64,8 @@ where
         // response.clear();
         // response.extend(buffer.iter().copied().cycle().take(8192));
 
+        // println!("write_all?");
+        std::thread::sleep(std::time::Duration::from_micros(4));
         responder.write_all(&response);
     }
 }
@@ -86,11 +90,11 @@ fn as_outer() {
         if let Some(child_mut) = child.as_mut() {
             match child_mut.try_wait() {
                 Ok(Some(es)) => {
-                    println!("child had exited: {es:?}");
+                    // println!("child had exited: {es:?}");
                     child.take();
                 }
                 Ok(None) => { /* not yet exited */ }
-                Err(e) => println!("child probably hasn't exited yet: {e:?}"),
+                Err(e) => {} // println!("child probably hasn't exited yet: {e:?}"),
             }
         }
 
@@ -115,19 +119,19 @@ fn as_outer() {
                     if previously_died_slots.contains(&i) {
                         // we cannot detect ABA but just stay silent, assuming no change
                     } else {
-                        println!("slot#{i} is free, last: {:?}", *g);
+                        // println!("slot#{i} is free, last: {:?}", *g);
                     }
                 }
                 Err(TryLockError::PreviousOwnerDied(g)) => {
-                    println!("slot#{i} had previously died: {:?}", *g);
+                    // println!("slot#{i} had previously died: {:?}", *g);
                     previously_died_slots.insert(i);
                     previous_locked_slot.remove(&i);
                 }
                 Err(TryLockError::WouldBlock) => {
                     if previously_died_slots.remove(&i) {
-                        println!("previously died slot#{i} has been reused");
+                        // println!("previously died slot#{i} has been reused");
                     } else if previous_locked_slot.insert(i) {
-                        println!("slot#{i} is locked");
+                        // println!("slot#{i} is locked");
                     }
                 }
             }
@@ -148,7 +152,7 @@ fn as_outer() {
 
         let reqs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        let _jhs = (0..1)
+        let _jhs = (0..2)
             .map(|_| (owned.clone(), reqs.clone()))
             .map(|(owned, reqs)| {
                 std::thread::spawn(move || {
@@ -161,6 +165,7 @@ fn as_outer() {
                     let mut req = Vec::with_capacity(128 * 1024);
                     let mut resp = Vec::with_capacity(8192);
                     let mut rng = rand::thread_rng();
+                    std::thread::sleep_ms(1000);
                     loop {
                         req.clear();
                         // let len = rng.sample(&distr);
@@ -173,6 +178,7 @@ fn as_outer() {
 
                         // let started = std::time::Instant::now();
 
+                        // println!("outer: sending request");
                         owned.request_response(&req, &mut resp);
 
                         // let elapsed = started.elapsed();
@@ -186,6 +192,10 @@ fn as_outer() {
                 })
             })
             .collect::<Vec<_>>();
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
 
         loop {
             let started = std::time::Instant::now();

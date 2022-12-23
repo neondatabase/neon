@@ -7,8 +7,8 @@ use std::os::unix::prelude::FromRawFd;
 use std::path::Path;
 use std::pin::Pin;
 use std::ptr::NonNull;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
+use std::sync::atomic::{AtomicU32, AtomicUsize};
 
 use nix::sys::mman::{MapFlags, ProtFlags};
 use shared::{IntoGuard, TryLockError};
@@ -31,10 +31,17 @@ pub struct RawSharedMemPipe {
     /// - 0xffff_ffff means tearing down
     pub magic: AtomicU32,
 
-    /// Eventfd used in semaphore mode, used
+    /// Eventfd used in semaphore mode, used to wakeup the request reader (walredoproc.c)
     pub notify_request_written: i32,
 
+    /// Eventfd used in semaphore mode, used to wakeup the response reader
     pub notify_response_written: i32,
+
+    pub requests: AtomicUsize,
+    pub send_request_loops: AtomicUsize,
+    pub receive_request_loops: AtomicUsize,
+    pub recv_loops: AtomicUsize,
+    pub write_loops: AtomicUsize,
 
     /// The processes participating in this.
     ///
@@ -109,6 +116,12 @@ pub struct OwnedRequester {
     ptr: SharedMemPipePtr<Created>,
 }
 
+impl Drop for OwnedRequester {
+    fn drop(&mut self) {
+        self.dump_loops(true);
+    }
+}
+
 #[derive(Default)]
 struct Wakeup {
     waiting: UnparkInOrder,
@@ -128,9 +141,15 @@ impl UnparkInOrder {
         while self.0.len() <= distance {
             self.0.push_back(None);
         }
+        let me = Some(std::thread::current());
         let slot = self.0.get_mut(distance).expect("just added the None in");
-        assert!(slot.is_none());
-        *slot = Some(std::thread::current());
+        assert!(
+            slot.is_none(),
+            "was expecting None, but found {:?} in place of {:?}",
+            slot.as_ref().map(|x| x.id()),
+            me.as_ref().map(|x| x.id())
+        );
+        *slot = me;
     }
 
     fn current_is_front(&self) -> bool {
@@ -195,31 +214,36 @@ impl OwnedRequester {
 
         let mut g = self.consumer.lock().unwrap();
         let distance = id.wrapping_sub(g.next) as usize;
+
         // FIXME: current impl stores the thread even in `id == g.next`
         g.waiting.store_current(distance);
 
         // TODO: UnparkInOrder::park_while(g, &self.consumer, |g| *g.next == id)
-        let mut g = Some(g);
-        while g.as_ref().unwrap().next != id {
-            drop(g.take());
+        // maybe easier with heap?
+        let mut g = g;
+        while g.next != id {
+            drop(g);
             UnparkInOrder::park();
-            g = Some(self.consumer.lock().unwrap());
+            g = self.consumer.lock().unwrap();
         }
 
-        let g = g.unwrap();
         assert!(g.waiting.current_is_front());
+        g.waiting.pop_current();
 
         let mut g = self.recv_response(id, g, resp);
 
         g.next = g.next.wrapping_add(1);
-        g.waiting.pop_current();
         g.waiting.unpark_front();
+        drop(g);
+
+        self.ptr.requests.fetch_add(1, Relaxed);
     }
 
     fn send_request(&self, req: &[u8]) -> u32 {
         let mut g = self.producer.lock().unwrap();
 
-        let mut might_wait = self.ptr.to_worker_waiters.fetch_add(1, Release) == 0;
+        let mut might_wait = false && self.ptr.to_worker_waiters.fetch_add(1, Release) == 0;
+        // println!("send_request: {:?}", might_wait);
 
         let id = *g;
         *g = g.wrapping_add(1);
@@ -229,17 +253,27 @@ impl OwnedRequester {
 
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
+        let mut loops = 0;
+
+        let mut p = p.into_postponed();
+
         let mut send = |mut req| {
             let mut consecutive_spins = 0;
             loop {
+                loops += 1;
                 let n = p.push_slice(req);
                 req = &req[n..];
 
                 if req.is_empty() {
                     break;
-                } else if n == 0 && might_wait {
-                    sem.post();
-                    might_wait = false;
+                } else if n == 0 {
+                    p.sync();
+
+                    if might_wait {
+                        // println!("woking it up");
+                        sem.post();
+                        might_wait = false;
+                    }
                 } else if n != 0 {
                     consecutive_spins = 0;
                     std::hint::spin_loop();
@@ -259,12 +293,19 @@ impl OwnedRequester {
             .to_ne_bytes();
 
         send(&frame_len);
+        // println!("sent frame length: {}", req.len());
         send(req);
+        // println!("sent req: {}", req.len());
+
+        p.sync();
 
         drop(g);
 
+        self.ptr.send_request_loops.fetch_add(loops, Relaxed);
+
         // as part of the first write, make sure that the worker is woken up.
         if might_wait {
+            // println!("waking up after");
             sem.post();
         }
 
@@ -282,15 +323,22 @@ impl OwnedRequester {
         // Safety: we are the only one creating consumers for from_worker
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
 
-        let sem =
+        let _sem =
             unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
 
-        sem.wait();
+        if false && c.is_empty() {
+            _sem.wait();
+            // println!("recv_response woken up");
+        }
 
         let mut read = 0;
         let mut consecutive_spins = 0;
+        let mut loops = 0;
+
+        // println!("recv_response: beginning with {} bytes in buffer", c.len());
 
         loop {
+            loops += 1;
             let n = c.pop_slice(&mut resp[read..]);
 
             read += n;
@@ -310,10 +358,41 @@ impl OwnedRequester {
             }
         }
 
-        // now the wait on the condition can start on `postgres --wal-redo` side
-        self.ptr.to_worker_waiters.fetch_sub(1, Release);
+        self.ptr.receive_request_loops.fetch_add(loops, Relaxed);
 
         g
+    }
+
+    pub fn dump_loops(&self, print: bool) {
+        {
+            let mut it = [
+                &self.ptr.send_request_loops,
+                &self.ptr.receive_request_loops,
+                &self.ptr.recv_loops,
+                &self.ptr.write_loops,
+                &self.ptr.requests,
+            ]
+            .into_iter()
+            .map(|x| {
+                let mut current = x.load(Relaxed);
+                loop {
+                    match x.compare_exchange(current, 0, Relaxed, Relaxed) {
+                        Ok(zeroed) => return zeroed,
+                        Err(loaded) => current = loaded,
+                    }
+                }
+            });
+
+            let sr = it.next().unwrap();
+            let rr = it.next().unwrap();
+            let rx = it.next().unwrap();
+            let tx = it.next().unwrap();
+            let reqs = it.next().unwrap();
+
+            if print {
+                eprintln!("loops: {sr}/{rr} -- {rx}/{tx} -- {reqs}");
+            }
+        }
     }
 }
 
@@ -329,6 +408,7 @@ pub struct OwnedResponder {
 
 impl OwnedResponder {
     pub fn read_next_frame_len(&mut self) -> Result<u32, u32> {
+        // println!("reading next frame len");
         match self.remaining.as_mut() {
             Some((_, remaining)) => Err(*remaining),
             None => {
@@ -345,7 +425,7 @@ impl OwnedResponder {
         if self.remaining.is_none() {
             // read the new frame length
             let mut len = [0u8; 4];
-            assert_eq!(self.recv(&mut len, 3), 4);
+            assert_eq!(self.recv(&mut len, 3, true), 4);
             let len = u32::from_ne_bytes(len);
             // store it as frame size, remaining size
             self.remaining = Some((len, len));
@@ -361,7 +441,7 @@ impl OwnedResponder {
         let allowed = buf.len();
         let buf = &mut buf[..std::cmp::min(allowed, remaining as usize)];
 
-        let read = self.recv(buf, 0);
+        let read = self.recv(buf, 0, false);
 
         remaining = remaining
             .checked_sub(
@@ -396,7 +476,11 @@ impl OwnedResponder {
         // can remaining be 1? probably by bug.
         assert!(remaining > 1);
 
-        let read = self.recv(&mut buf[..remaining as usize], remaining as usize - 1);
+        let read = self.recv(
+            &mut buf[..remaining as usize],
+            remaining as usize - 1,
+            false,
+        );
 
         assert_eq!(read, remaining as usize);
         self.remaining = None;
@@ -405,66 +489,85 @@ impl OwnedResponder {
         read
     }
 
-    fn recv(&mut self, buf: &mut [u8], read_more_than: usize) -> usize {
+    fn recv(&mut self, buf: &mut [u8], read_more_than: usize, can_wait: bool) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
         let mut read = 0;
-        let mut waited = false;
+        let mut waited = true;
+        let mut loops = 0;
+        let mut consecutive_spins = 0;
+
         loop {
+            loops += 1;
             let n = c.pop_slice(&mut buf[read..]);
 
             read += n;
 
             if read > read_more_than {
+                // interestingly this sleeps the most, probably while the response is being read.
+                self.ptr.recv_loops.fetch_add(loops, Relaxed);
                 return read;
-            } else if n == 0 && !waited {
-                while self.ptr.to_worker_waiters.load(Acquire) == 0 {
-                    sem.wait();
-                    waited = true;
+            } else if n != 0 {
+                consecutive_spins = 0;
+                std::hint::spin_loop();
+            } else if n == 0 && (!waited || consecutive_spins < 1024) {
+                if !waited {
+                    while can_wait && self.ptr.to_worker_waiters.load(Acquire) == 0 {
+                        // eprintln!("recv: entering asleep");
+                        sem.wait();
+                        // eprintln!(
+                        //     "recv: woke up from sleep with {}/{} bytes in buffer",
+                        //     c.len(),
+                        //     buf.len()
+                        // );
+                        waited = true;
+                    }
                 }
 
                 if waited {
                     continue;
                 }
 
+                consecutive_spins += 1;
                 std::hint::spin_loop();
             } else {
-                // std::thread::yield_now();
-                std::hint::spin_loop();
+                std::thread::yield_now();
             }
         }
     }
 
     pub fn write_all(&mut self, mut buf: &[u8]) -> usize {
+        // eprintln!("entered write_all");
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
-        // let _m = unsafe { Pin::new_unchecked(&self.ptr.from_worker_writer) };
-        // let _cond = unsafe { Pin::new_unchecked(&self.ptr.from_worker_cond) };
 
-        let sem =
+        let _sem =
             unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
 
         if buf.is_empty() {
             return 0;
         }
 
-        sem.post();
-
         let len = buf.len();
 
-        let mut woken = false;
+        let mut woken = true;
         let mut consecutive_spins = 0;
+        let mut loops = 0;
 
         loop {
+            loops += 1;
             let n = p.push_slice(buf);
             buf = &buf[n..];
 
-            if !woken {
+            if !woken && n > 0 {
                 woken = true;
-                sem.post();
+                _sem.post();
             }
 
             if buf.is_empty() {
+                // eprintln!("wrote {len} bytes");
+                self.ptr.write_loops.fetch_add(loops, Relaxed);
+                self.ptr.to_worker_waiters.fetch_sub(1, Release);
                 return len;
             }
 
@@ -718,6 +821,36 @@ fn initialize_at(
 
         // ceremonial
         unsafe { magic.assume_init_mut() };
+    }
+
+    {
+        let field = uninit_field!(requests);
+        field.write(AtomicUsize::new(0));
+        unsafe { field.assume_init_mut() };
+    }
+
+    {
+        let field = uninit_field!(send_request_loops);
+        field.write(AtomicUsize::new(0));
+        unsafe { field.assume_init_mut() };
+    }
+
+    {
+        let field = uninit_field!(receive_request_loops);
+        field.write(AtomicUsize::new(0));
+        unsafe { field.assume_init_mut() };
+    }
+
+    {
+        let field = uninit_field!(recv_loops);
+        field.write(AtomicUsize::new(0));
+        unsafe { field.assume_init_mut() };
+    }
+
+    {
+        let field = uninit_field!(write_loops);
+        field.write(AtomicUsize::new(0));
+        unsafe { field.assume_init_mut() };
     }
 
     {
