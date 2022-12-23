@@ -161,7 +161,7 @@ pub struct Timeline {
 
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
-    pub gc_info: std::sync::RwLock<GcInfo>,
+    pub gc_info: tokio::sync::RwLock<GcInfo>,
 
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
@@ -932,7 +932,7 @@ impl Timeline {
                 write_lock: Mutex::new(()),
                 layer_removal_cs: Default::default(),
 
-                gc_info: std::sync::RwLock::new(GcInfo {
+                gc_info: tokio::sync::RwLock::new(GcInfo {
                     retain_lsns: Vec::new(),
                     horizon_cutoff: Lsn(0),
                     pitr_cutoff: Lsn(0),
@@ -2680,10 +2680,7 @@ impl Timeline {
         cutoff_horizon: Lsn,
         pitr: Duration,
     ) -> anyhow::Result<()> {
-        let mut gc_info = self.gc_info.write().unwrap();
-
-        gc_info.horizon_cutoff = cutoff_horizon;
-        gc_info.retain_lsns = retain_lsns;
+        let mut gc_info = self.gc_info.write().await;
 
         // Calculate pitr cutoff point.
         // If we cannot determine a cutoff LSN, be conservative and don't GC anything.
@@ -2701,23 +2698,37 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match self
-                    .find_lsn_for_timestamp(pitr_timestamp)
-                    .no_ondemand_download()?
-                {
-                    LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
-                    LsnForTimestamp::Future(lsn) => {
-                        debug!("future({})", lsn);
-                        pitr_cutoff_lsn = gc_info.horizon_cutoff;
+                match self.find_lsn_for_timestamp(pitr_timestamp) {
+                    PageReconstructResult::Success(_) => {}
+                    first_result @ PageReconstructResult::NeedsDownload(_, _) => {
+                        drop(gc_info);
+
+                        let mut first_result = Some(first_result);
+                        match with_ondemand_download(|| match first_result.take() {
+                            Some(download_result) => download_result,
+                            None => self.find_lsn_for_timestamp(pitr_timestamp),
+                        })
+                        .await?
+                        {
+                            LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
+                            LsnForTimestamp::Future(lsn) => {
+                                debug!("future({lsn})");
+                                pitr_cutoff_lsn = cutoff_horizon;
+                            }
+                            LsnForTimestamp::Past(lsn) => {
+                                debug!("past({lsn})");
+                            }
+                            LsnForTimestamp::NoData(lsn) => {
+                                debug!("nodata({lsn})");
+                            }
+                        }
+
+                        gc_info = self.gc_info.write().await;
                     }
-                    LsnForTimestamp::Past(lsn) => {
-                        debug!("past({})", lsn);
-                    }
-                    LsnForTimestamp::NoData(lsn) => {
-                        debug!("nodata({})", lsn);
-                    }
+                    PageReconstructResult::Error(_) => todo!(),
                 }
-                debug!("pitr_cutoff_lsn = {:?}", pitr_cutoff_lsn)
+
+                debug!("pitr_cutoff_lsn = {pitr_cutoff_lsn:?}")
             }
         } else {
             // No time-based retention. (Some unit tests depend on garbage-collection
@@ -2725,7 +2736,24 @@ impl Timeline {
             // above doesn't work.)
             pitr_cutoff_lsn = gc_info.horizon_cutoff;
         }
-        gc_info.pitr_cutoff = pitr_cutoff_lsn;
+
+        if gc_info.horizon_cutoff <= cutoff_horizon && gc_info.retain_lsns <= retain_lsns {
+            gc_info.horizon_cutoff = cutoff_horizon;
+            gc_info.pitr_cutoff = pitr_cutoff_lsn;
+            gc_info.retain_lsns = retain_lsns;
+        } else {
+            // if we released the lock for layer downloads, other GC could've raced and used downloaded layers to update the GC info.
+            info!(
+                "Newer GC info was found, not updating. Current info: {{cutoff_horizon: {}, pitr_cutoff_lsn: {}}}, GC info: {{cutoff_horizon: {}, pitr_cutoff_lsn: {}}}",
+                cutoff_horizon, pitr_cutoff_lsn, gc_info.horizon_cutoff, gc_info.pitr_cutoff
+            );
+            if gc_info.retain_lsns != retain_lsns {
+                warn!(
+                    "Retain LSNs are different: current: {:?}, gc: {:?}",
+                    retain_lsns, gc_info.retain_lsns
+                );
+            }
+        }
 
         Ok(())
     }
@@ -2748,7 +2776,7 @@ impl Timeline {
         }
 
         let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
-            let gc_info = self.gc_info.read().unwrap();
+            let gc_info = self.gc_info.read().await;
 
             let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
             let pitr_cutoff = gc_info.pitr_cutoff;

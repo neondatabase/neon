@@ -2023,7 +2023,7 @@ impl Tenant {
                 *latest_gc_cutoff_lsn,
             ))?;
         {
-            let gc_info = src_timeline.gc_info.read().unwrap();
+            let gc_info = src_timeline.gc_info.read().await;
             let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
             if start_lsn < cutoff {
                 bail!(format!(

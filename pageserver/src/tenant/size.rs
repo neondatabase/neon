@@ -103,7 +103,7 @@ pub(super) async fn gather_inputs(
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
             // there's a race between the update (holding tenant.gc_lock) and this read but it
             // might not be an issue, because it's not for Timeline::gc
-            let gc_info = timeline.gc_info.read().unwrap();
+            let gc_info = timeline.gc_info.read().await;
 
             // similar to gc, but Timeline::get_latest_gc_cutoff_lsn() will not be updated before a
             // new gc run, which we have no control over. however differently from `Timeline::gc`
