@@ -139,9 +139,19 @@ where
                         lsn_floor: lsn_range.start,
                     });
                 }
-                candidate = Some(Arc::clone(layer));
                 if !layer.is_incremental() {
                     image_lsn = Some(lsn_range.end);
+                }
+                // We are traversing layers in end_lsn decreasing order.
+                // It means that we can stop at first matched candidate.
+                // But we also need to calulculate cont_lsn, which is max(image_lsn+1, start_lsn).
+                // So we can stop if we located image or if this layer preceed latest layer (candidate.start_lsn >= layer.end_lsn)
+                if let Some(latest_layer) = &candidate {
+                    if latest_layer.get_lsn_range().start >= lsn_range.end {
+                        break;
+                    }
+                } else {
+                    candidate = Some(layer.clone());
                 }
                 if image_lsn.is_some() {
                     break;
