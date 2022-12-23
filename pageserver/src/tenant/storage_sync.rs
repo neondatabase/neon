@@ -221,15 +221,12 @@ use tracing::{info_span, Instrument};
 
 use utils::lsn::Lsn;
 
-use self::index::IndexPart;
-
 use crate::metrics::RemoteOpFileKind;
 use crate::metrics::RemoteOpKind;
 use crate::metrics::{MeasureRemoteOp, RemoteTimelineClientMetrics};
-use crate::tenant::filename::LayerFileName;
+use crate::tenant::storage_sync::index::LayerFileMetadata;
 use crate::{
     config::PageServerConf,
-    storage_sync::index::LayerFileMetadata,
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
@@ -238,6 +235,10 @@ use crate::{
 };
 
 use utils::id::{TenantId, TimelineId};
+
+use self::index::IndexPart;
+
+use super::storage_layer::LayerFileName;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -1176,39 +1177,6 @@ pub fn create_remote_timeline_client(
         upload_queue: Mutex::new(UploadQueue::Uninitialized),
         metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
     })
-}
-
-///
-/// Create GenericRemoteStorage client from the pageserver config
-///
-pub fn create_remote_storage_client(
-    conf: &'static PageServerConf,
-) -> anyhow::Result<Option<GenericRemoteStorage>> {
-    let config = if let Some(config) = &conf.remote_storage_config {
-        config
-    } else {
-        // No remote storage configured.
-        return Ok(None);
-    };
-
-    // Create the client
-    let mut remote_storage = GenericRemoteStorage::from_config(config)?;
-
-    // If `test_remote_failures` is non-zero, wrap the client with a
-    // wrapper that simulates failures.
-    if conf.test_remote_failures > 0 {
-        if !cfg!(feature = "testing") {
-            anyhow::bail!("test_remote_failures option is not available because pageserver was compiled without the 'testing' feature");
-        }
-        info!(
-            "Simulating remote failures for first {} attempts of each op",
-            conf.test_remote_failures
-        );
-        remote_storage =
-            GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
-    }
-
-    Ok(Some(remote_storage))
 }
 
 #[cfg(test)]

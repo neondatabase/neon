@@ -11,8 +11,6 @@ pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod profiling;
 pub mod repository;
-pub mod storage_sync2;
-pub use storage_sync2 as storage_sync;
 pub mod task_mgr;
 pub mod tenant;
 pub mod tenant_config;

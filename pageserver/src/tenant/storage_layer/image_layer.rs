@@ -25,7 +25,6 @@ use crate::repository::{Key, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::tenant::filename::{ImageFileName, PathOrConf};
 use crate::tenant::storage_layer::{
     PersistentLayer, ValueReconstructResult, ValueReconstructState,
 };
@@ -51,8 +50,8 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::LayerFileName;
-use super::storage_layer::{Layer, LayerIter};
+use super::filename::{ImageFileName, LayerFileName, PathOrConf};
+use super::{Layer, LayerIter};
 
 ///
 /// Header stored in the beginning of the file

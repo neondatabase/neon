@@ -45,18 +45,19 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
+use self::storage_sync::create_remote_timeline_client;
+use self::storage_sync::index::IndexPart;
+use self::storage_sync::RemoteTimelineClient;
 use crate::config::PageServerConf;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
-use crate::storage_sync::create_remote_timeline_client;
-use crate::storage_sync::index::IndexPart;
-use crate::storage_sync::list_remote_timelines;
-use crate::storage_sync::RemoteTimelineClient;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::metadata::load_metadata;
+use crate::tenant::storage_layer::DeltaLayer;
+use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
 use crate::tenant_config::TenantConfOpt;
 use crate::virtual_file::VirtualFile;
@@ -74,18 +75,14 @@ use utils::{
 
 mod blob_io;
 pub mod block_io;
-mod delta_layer;
 mod disk_btree;
 pub(crate) mod ephemeral_file;
-pub mod filename;
-mod image_layer;
-mod inmemory_layer;
 pub mod layer_map;
-mod remote_layer;
 
 pub mod metadata;
 mod par_fsync;
 pub mod storage_layer;
+mod storage_sync;
 
 mod timeline;
 
@@ -647,7 +644,7 @@ impl Tenant {
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
         let remote_timelines =
-            list_remote_timelines(remote_storage, self.conf, self.tenant_id).await?;
+            storage_sync::list_remote_timelines(remote_storage, self.conf, self.tenant_id).await?;
 
         info!("found {} timelines", remote_timelines.len());
 
@@ -2541,12 +2538,8 @@ pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> anyhow::Result<()
     file.read_exact_at(&mut header_buf, 0)?;
 
     match u16::from_be_bytes(header_buf) {
-        crate::IMAGE_FILE_MAGIC => {
-            image_layer::ImageLayer::new_for_path(path, file)?.dump(verbose)?
-        }
-        crate::DELTA_FILE_MAGIC => {
-            delta_layer::DeltaLayer::new_for_path(path, file)?.dump(verbose)?
-        }
+        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose)?,
+        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose)?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 

@@ -7,12 +7,13 @@ use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
+use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
 use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, profiling, storage_sync2, task_mgr,
+    http, page_cache, page_service, profiling, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
@@ -280,7 +281,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     };
 
     // Set up remote storage client
-    let remote_storage = storage_sync2::create_remote_storage_client(conf)?;
+    let remote_storage = create_remote_storage_client(conf)?;
 
     // Scan the local 'tenants/' directory and start loading the tenants
     BACKGROUND_RUNTIME.block_on(tenant_mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
@@ -367,6 +368,36 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
             unreachable!()
         }
     })
+}
+
+fn create_remote_storage_client(
+    conf: &'static PageServerConf,
+) -> anyhow::Result<Option<GenericRemoteStorage>> {
+    let config = if let Some(config) = &conf.remote_storage_config {
+        config
+    } else {
+        // No remote storage configured.
+        return Ok(None);
+    };
+
+    // Create the client
+    let mut remote_storage = GenericRemoteStorage::from_config(config)?;
+
+    // If `test_remote_failures` is non-zero, wrap the client with a
+    // wrapper that simulates failures.
+    if conf.test_remote_failures > 0 {
+        if !cfg!(feature = "testing") {
+            anyhow::bail!("test_remote_failures option is not available because pageserver was compiled without the 'testing' feature");
+        }
+        info!(
+            "Simulating remote failures for first {} attempts of each op",
+            conf.test_remote_failures
+        );
+        remote_storage =
+            GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
+    }
+
+    Ok(Some(remote_storage))
 }
 
 fn cli() -> Command {

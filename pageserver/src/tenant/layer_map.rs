@@ -12,7 +12,6 @@
 
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
-use crate::tenant::inmemory_layer::InMemoryLayer;
 use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use amplify_num::i256;
 use anyhow::Result;
@@ -27,7 +26,7 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use super::storage_layer::Layer;
+use super::storage_layer::{InMemoryLayer, Layer};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.

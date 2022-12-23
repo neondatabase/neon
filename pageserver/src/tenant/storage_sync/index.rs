@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tracing::warn;
 
-use crate::tenant::{filename::LayerFileName, metadata::TimelineMetadata};
+use crate::tenant::{metadata::TimelineMetadata, storage_layer::LayerFileName};
 
 use utils::lsn::Lsn;
 

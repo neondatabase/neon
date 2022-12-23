@@ -14,14 +14,13 @@ use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::config::PageServerConf;
-use crate::storage_sync::index::LayerFileMetadata;
-use crate::tenant::filename::LayerFileName;
+use crate::tenant::storage_layer::LayerFileName;
 use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
-use super::index::{IndexPart, IndexPartUnclean};
+use super::index::{IndexPart, IndexPartUnclean, LayerFileMetadata};
 use super::{FAILED_DOWNLOAD_RETRIES, FAILED_DOWNLOAD_WARN_THRESHOLD};
 
 async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
