@@ -9,29 +9,11 @@ use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use log::{error, info};
 use serde_json;
 
-use crate::compute::{ComputeNode, ComputeStatus};
+use crate::compute::ComputeNode;
 
 // Service function to handle all available routes.
 async fn routes(req: Request<Body>, compute: Arc<ComputeNode>) -> Response<Body> {
     match (req.method(), req.uri().path()) {
-        // Timestamp of the last Postgres activity in the plain text.
-        // DEPRECATED in favour of /status
-        (&Method::GET, "/last_activity") => {
-            info!("serving /last_active GET request");
-            let state = compute.state.read().unwrap();
-
-            // Use RFC3339 format for consistency.
-            Response::new(Body::from(state.last_active.to_rfc3339()))
-        }
-
-        // Has compute setup process finished? -> true/false.
-        // DEPRECATED in favour of /status
-        (&Method::GET, "/ready") => {
-            info!("serving /ready GET request");
-            let status = compute.get_status();
-            Response::new(Body::from(format!("{}", status == ComputeStatus::Running)))
-        }
-
         // Serialized compute state.
         (&Method::GET, "/status") => {
             info!("serving /status GET request");
@@ -44,16 +26,6 @@ async fn routes(req: Request<Body>, compute: Arc<ComputeNode>) -> Response<Body>
         (&Method::GET, "/metrics.json") => {
             info!("serving /metrics.json GET request");
             Response::new(Body::from(serde_json::to_string(&compute.metrics).unwrap()))
-        }
-
-        // DEPRECATED, use POST instead
-        (&Method::GET, "/check_writability") => {
-            info!("serving /check_writability GET request");
-            let res = crate::checker::check_writability(&compute).await;
-            match res {
-                Ok(_) => Response::new(Body::from("true")),
-                Err(e) => Response::new(Body::from(e.to_string())),
-            }
         }
 
         (&Method::POST, "/check_writability") => {
