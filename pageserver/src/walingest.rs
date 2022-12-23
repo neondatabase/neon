@@ -33,10 +33,10 @@ use tracing::*;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::PageReconstructResult;
 use crate::tenant::Timeline;
-use crate::try_no_ondemand_download;
 use crate::try_page_reconstruct_result as try_prr;
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
+use crate::{try_no_ondemand_download, try_page_reconstruct_result};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
@@ -55,14 +55,16 @@ pub struct WalIngest<'a> {
 }
 
 impl<'a> WalIngest<'a> {
-    pub fn new(timeline: &Timeline, startpoint: Lsn) -> anyhow::Result<WalIngest> {
+    pub fn new(timeline: &Timeline, startpoint: Lsn) -> PageReconstructResult<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let checkpoint_bytes = timeline.get_checkpoint(startpoint).no_ondemand_download()?;
-        let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
+        let checkpoint_bytes = try_no_ondemand_download!(timeline.get_checkpoint(startpoint));
+        let checkpoint = try_page_reconstruct_result!(
+            CheckPoint::decode(&checkpoint_bytes).context("Failed to decode checkpoint bytes")
+        );
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
-        Ok(WalIngest {
+        PageReconstructResult::Success(WalIngest {
             timeline,
             checkpoint,
             checkpoint_modified: false,
@@ -1122,7 +1124,7 @@ mod tests {
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""))?; // dummy relmapper file
         m.commit()?;
-        let walingest = WalIngest::new(tline, Lsn(0x10))?;
+        let walingest = WalIngest::new(tline, Lsn(0x10)).no_ondemand_download()?;
 
         Ok(walingest)
     }

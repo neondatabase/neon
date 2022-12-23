@@ -175,7 +175,8 @@ pub async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint)?;
+    let mut walingest =
+        with_ondemand_download(|| WalIngest::new(timeline.as_ref(), startpoint)).await?;
 
     while let Some(replication_message) = {
         select! {

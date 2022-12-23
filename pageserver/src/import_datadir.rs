@@ -237,14 +237,19 @@ fn import_slru<Reader: Read>(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) -> Result<()> {
+fn import_wal(
+    walpath: &Path,
+    tline: &Timeline,
+    startpoint: Lsn,
+    endpoint: Lsn,
+) -> anyhow::Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint, tline.pg_version);
 
     let mut segno = startpoint.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(tline, startpoint)?;
+    let mut walingest = WalIngest::new(tline, startpoint).no_ondemand_download()?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
@@ -362,7 +367,7 @@ pub fn import_wal_from_tar<Reader: Read>(
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
-    let mut walingest = WalIngest::new(tline, start_lsn)?;
+    let mut walingest = WalIngest::new(tline, start_lsn).no_ondemand_download()?;
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
