@@ -18,6 +18,10 @@ pub mod shared;
 const TO_WORKER_LEN: usize = 32 * 4096;
 const FROM_WORKER_LEN: usize = 4 * 4096;
 
+/// Whether or not to put the `request_response` function to sleep while waiting for the response
+/// written by `write_all`.
+const USE_EVENTFD_ON_RESPONSE: bool = true;
+
 /// Input/output over a shared memory "pipe" which attempts to be faster than using standard input
 /// and output with inter-process communication.
 ///
@@ -102,7 +106,8 @@ impl SharedMemPipePtr<Joined> {
         let m = unsafe { Pin::new_unchecked(&self.participants[1]) };
         let guard = m.try_lock().into_guard()?;
         Some(OwnedResponder {
-            // Safety: the pointer `ptr` will not be remapped
+            // Safety: the pointer `ptr` will not be remapped, and it will get dropped earlier than
+            // ptr
             locked_mutex: unsafe { std::mem::transmute(guard) },
             ptr: self,
             remaining: None,
@@ -183,13 +188,20 @@ impl UnparkInOrder {
         }
     }
 
-    /// Park the thread waiting to be unparked in order.
-    ///
-    /// Should create a profiling point.
-    #[no_mangle]
-    #[inline(never)]
-    fn park() {
-        std::thread::park();
+    pub(crate) fn park_while<'a, T, F>(
+        mut guard: std::sync::MutexGuard<'a, T>,
+        consumer: &'a std::sync::Mutex<T>,
+        mut cond: F,
+    ) -> std::sync::MutexGuard<'a, T>
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        while !cond(&mut *guard) {
+            drop(guard);
+            std::thread::park();
+            guard = consumer.lock().unwrap();
+        }
+        guard
     }
 }
 
@@ -198,7 +210,8 @@ impl OwnedRequester {
     pub fn shared_fds(&self) -> [i32; 2] {
         [
             // FIXME: one should be enough for waiting for the worker, or the worker waiting for
-            // new input
+            // new input -- nope, it's not, because there's an affinity to read it yourself when
+            // immediatedly reading it after posting.
             self.ptr.notify_request_written,
             self.ptr.notify_response_written,
         ]
@@ -218,14 +231,7 @@ impl OwnedRequester {
         // FIXME: current impl stores the thread even in `id == g.next`
         g.waiting.store_current(distance);
 
-        // TODO: UnparkInOrder::park_while(g, &self.consumer, |g| *g.next == id)
-        // maybe easier with heap?
-        let mut g = g;
-        while g.next != id {
-            drop(g);
-            UnparkInOrder::park();
-            g = self.consumer.lock().unwrap();
-        }
+        g = UnparkInOrder::park_while(g, &self.consumer, |g| g.next == id);
 
         assert!(g.waiting.current_is_front());
         g.waiting.pop_current();
@@ -242,14 +248,13 @@ impl OwnedRequester {
     fn send_request(&self, req: &[u8]) -> u32 {
         let mut g = self.producer.lock().unwrap();
 
-        let mut might_wait = false && self.ptr.to_worker_waiters.fetch_add(1, Release) == 0;
-        // println!("send_request: {:?}", might_wait);
+        let mut might_wait = self.ptr.to_worker_waiters.fetch_add(1, Release) == 0;
 
         let id = *g;
         *g = g.wrapping_add(1);
 
         // Safety: we are only one creating producers for to_worker
-        let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
+        let p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
 
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
@@ -305,7 +310,6 @@ impl OwnedRequester {
 
         // as part of the first write, make sure that the worker is woken up.
         if might_wait {
-            // println!("waking up after");
             sem.post();
         }
 
@@ -326,16 +330,13 @@ impl OwnedRequester {
         let _sem =
             unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
 
-        if false && c.is_empty() {
+        if USE_EVENTFD_ON_RESPONSE {
             _sem.wait();
-            // println!("recv_response woken up");
         }
 
         let mut read = 0;
         let mut consecutive_spins = 0;
         let mut loops = 0;
-
-        // println!("recv_response: beginning with {} bytes in buffer", c.len());
 
         loop {
             loops += 1;
@@ -484,8 +485,6 @@ impl OwnedResponder {
 
         assert_eq!(read, remaining as usize);
         self.remaining = None;
-
-        // eprintln!("read_exact({}) -> {}", buf.len(), read);
         read
     }
 
@@ -494,7 +493,7 @@ impl OwnedResponder {
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
 
         let mut read = 0;
-        let mut waited = true;
+        let mut waited = false;
         let mut loops = 0;
         let mut consecutive_spins = 0;
 
@@ -510,17 +509,11 @@ impl OwnedResponder {
                 return read;
             } else if n != 0 {
                 consecutive_spins = 0;
-                std::hint::spin_loop();
+                std::thread::yield_now();
             } else if n == 0 && (!waited || consecutive_spins < 1024) {
                 if !waited {
                     while can_wait && self.ptr.to_worker_waiters.load(Acquire) == 0 {
-                        // eprintln!("recv: entering asleep");
                         sem.wait();
-                        // eprintln!(
-                        //     "recv: woke up from sleep with {}/{} bytes in buffer",
-                        //     c.len(),
-                        //     buf.len()
-                        // );
                         waited = true;
                     }
                 }
@@ -530,15 +523,14 @@ impl OwnedResponder {
                 }
 
                 consecutive_spins += 1;
-                std::hint::spin_loop();
-            } else {
                 std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
             }
         }
     }
 
     pub fn write_all(&mut self, mut buf: &[u8]) -> usize {
-        // eprintln!("entered write_all");
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
 
         let _sem =
@@ -550,7 +542,7 @@ impl OwnedResponder {
 
         let len = buf.len();
 
-        let mut woken = true;
+        let mut woken = !USE_EVENTFD_ON_RESPONSE;
         let mut consecutive_spins = 0;
         let mut loops = 0;
 
@@ -559,13 +551,12 @@ impl OwnedResponder {
             let n = p.push_slice(buf);
             buf = &buf[n..];
 
-            if !woken && n > 0 {
+            if !woken {
                 woken = true;
                 _sem.post();
             }
 
             if buf.is_empty() {
-                // eprintln!("wrote {len} bytes");
                 self.ptr.write_loops.fetch_add(loops, Relaxed);
                 self.ptr.to_worker_waiters.fetch_sub(1, Release);
                 return len;
@@ -573,12 +564,12 @@ impl OwnedResponder {
 
             if n != 0 {
                 consecutive_spins = 0;
-                std::hint::spin_loop();
+                std::thread::yield_now();
             } else if consecutive_spins < 1024 {
                 consecutive_spins += 1;
-                std::hint::spin_loop();
-            } else {
                 std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
             }
         }
     }
