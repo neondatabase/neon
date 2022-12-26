@@ -86,8 +86,8 @@ pub async fn handle_user(
     Ok(AuthSuccess {
         reported_auth_ok: true,
         value: NodeInfo {
-            project: db_info.project,
             config,
+            aux: db_info.aux,
         },
     })
 }

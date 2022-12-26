@@ -8,6 +8,7 @@ mod auth;
 mod cancellation;
 mod compute;
 mod config;
+mod console;
 mod error;
 mod http;
 mod mgmt;

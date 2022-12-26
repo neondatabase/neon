@@ -63,7 +63,11 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
                         "port": local_vanilla_pg.default_options["port"],
                         "dbname": local_vanilla_pg.default_options["dbname"],
                         "user": pg_user,
-                        "project": "irrelevant",
+                        "aux": {
+                            "project_id": "project",
+                            "endpoint_id": "endpoint",
+                            "branch_id": "branch",
+                        },
                     }
                 },
             }
