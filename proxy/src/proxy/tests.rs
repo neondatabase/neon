@@ -140,7 +140,7 @@ async fn dummy_proxy(
     stream
         .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&Be::CLIENT_ENCODING)?
-        .write_message(&BeMessage::ReadyForQuery)
+        .write_message(&Be::ReadyForQuery)
         .await?;
 
     Ok(())

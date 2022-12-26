@@ -2,7 +2,7 @@
 
 use super::{
     console::{self, AuthInfo, GetAuthInfoError, WakeComputeError},
-    AuthSuccess,
+    AuthSuccess, NodeInfo,
 };
 use crate::{
     auth::{self, ClientCredentials},
@@ -57,7 +57,7 @@ impl<'a> Api<'a> {
     pub(super) async fn handle_user(
         &'a self,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<AuthSuccess<compute::ConnCfg>> {
+    ) -> auth::Result<AuthSuccess<NodeInfo>> {
         // We reuse user handling logic from a production module.
         console::handle_user(client, self, Self::get_auth_info, Self::wake_compute).await
     }
@@ -103,7 +103,7 @@ impl Api<'_> {
     }
 
     /// We don't need to wake anything locally, so we just return the connection info.
-    pub async fn wake_compute(&self) -> Result<compute::ConnCfg, WakeComputeError> {
+    pub async fn wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let mut config = compute::ConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
@@ -111,7 +111,10 @@ impl Api<'_> {
             .dbname(self.creds.dbname)
             .user(self.creds.user);
 
-        Ok(config)
+        Ok(NodeInfo {
+            config,
+            aux: Default::default(),
+        })
     }
 }
 

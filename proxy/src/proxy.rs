@@ -11,7 +11,7 @@ use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
-use pq_proto::{BeMessage as Be, *};
+use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, info_span, Instrument};
@@ -39,12 +39,7 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes_per_client",
         "Number of bytes sent/received between client and backend.",
-        &[
-            // Received (rx) / sent (tx).
-            "direction",
-            // Proxy can keep calling it `project` internally.
-            "endpoint_id"
-        ]
+        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
     )
     .unwrap()
 });
@@ -271,19 +266,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
 
         stream
             .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-            .write_message(&BeMessage::ReadyForQuery)
+            .write_message(&Be::ReadyForQuery)
             .await?;
 
-        // TODO: add more identifiers.
-        let metric_id = node.project;
-
-        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx", &metric_id]);
+        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("tx"));
         let mut client = MeasuredStream::new(stream.into_inner(), |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
         });
 
-        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx", &metric_id]);
+        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("rx"));
         let mut db = MeasuredStream::new(db.stream, |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             m_recv.inc_by(cnt as u64);
