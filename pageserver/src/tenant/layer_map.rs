@@ -326,14 +326,16 @@ where
                 latest_delta.replace(Arc::clone(l));
                 break;
             }
-            // this layer's end LSN is smaller than the requested point. If there's
-            // nothing newer, this is what we need to return. Remember this.
-            if let Some(old_candidate) = &latest_delta {
-                if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
+            if l.get_lsn_range().end > latest_img_lsn.unwrap_or(Lsn(0)) {
+                // this layer's end LSN is smaller than the requested point. If there's
+                // nothing newer, this is what we need to return. Remember this.
+                if let Some(old_candidate) = &latest_delta {
+                    if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
+                        latest_delta.replace(Arc::clone(l));
+                    }
+                } else {
                     latest_delta.replace(Arc::clone(l));
                 }
-            } else {
-                latest_delta.replace(Arc::clone(l));
             }
         }
         if let Some(l) = latest_delta {
