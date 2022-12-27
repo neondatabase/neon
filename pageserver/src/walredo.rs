@@ -260,7 +260,9 @@ impl PostgresRedoManager {
         }
 
         if let Some(pipe) = self.pipe.as_ref() {
+            // trying to avoid this mutex does not seem to make a difference in benchmarks
             drop(process_guard);
+
             let tag_len = 1 + 4 * 4;
             let ch = 1;
             let len = 4;
