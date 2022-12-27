@@ -27,8 +27,8 @@ use utils::{
     postgres_backend::AuthType,
 };
 
-use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
 use crate::tenant::tenant_config::{TenantConf, TenantConfOpt};
+use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX,
 };
