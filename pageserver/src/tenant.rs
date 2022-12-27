@@ -2581,7 +2581,7 @@ pub mod harness {
     };
 
     use super::*;
-    use crate::config::{TenantConf, TenantConfOpt};
+    use crate::tenant::config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
     use utils::id::{TenantId, TimelineId};
 
