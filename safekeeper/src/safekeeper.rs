@@ -727,6 +727,24 @@ where
             return Ok(None);
         }
 
+        // This might happen in a rare race when another (old) connection from
+        // the same walproposer writes + flushes WAL after this connection
+        // already sent flush_lsn in VoteRequest. It is generally safe to
+        // proceed, but to prevent commit_lsn surprisingly going down we should
+        // either refuse the session (simpler) or skip the part we already have
+        // from the stream (can be implemented).
+        if msg.term == self.get_epoch() && self.flush_lsn() > msg.start_streaming_at {
+            bail!("refusing ProposerElected which is going to overwrite correct WAL: term={}, flush_lsn={}, start_streaming_at={}; restarting the handshake should help",
+                   msg.term, self.flush_lsn(), msg.start_streaming_at)
+        }
+        // Otherwise this shouldn't happen.
+        assert!(
+            msg.start_streaming_at >= self.inmem.commit_lsn,
+            "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}",
+            msg.start_streaming_at,
+            self.inmem.commit_lsn
+        );
+
         // TODO: cross check divergence point, check if msg.start_streaming_at corresponds to
         // intersection of our history and history from msg
 
