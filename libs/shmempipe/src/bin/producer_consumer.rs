@@ -61,9 +61,8 @@ fn inner_respond(mut responder: OwnedResponder) -> ! {
     let mut b64 = String::new();
 
     // mostly helpful if you try to hunt down memory corruption, or hdrhistogram'ing
-    [#cfg(not_now)]
+    #[cfg(not_now)]
     let mut seq = 0;
-
 
     loop {
         #[cfg(not_now)]
@@ -104,7 +103,11 @@ fn inner_respond(mut responder: OwnedResponder) -> ! {
                 s.serialize(&histogram, &mut serialized).unwrap();
 
                 b64.clear();
-                base64::encode_engine_string(&serialized, &mut b64, &base64::engine::DEFAULT_ENGINE);
+                base64::encode_engine_string(
+                    &serialized,
+                    &mut b64,
+                    &base64::engine::DEFAULT_ENGINE,
+                );
                 println!("{}", b64);
 
                 println!();
