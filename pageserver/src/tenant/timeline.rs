@@ -931,7 +931,6 @@ impl Timeline {
                 trace!("found layer {}", layer.filename().display());
                 total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
-                layers.rebuild_index();
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -956,7 +955,6 @@ impl Timeline {
                 trace!("found layer {}", layer.filename().display());
                 total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
-                layers.rebuild_index();
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -982,6 +980,7 @@ impl Timeline {
             }
         }
 
+        layers.rebuild_index();
         layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
 
         info!(
