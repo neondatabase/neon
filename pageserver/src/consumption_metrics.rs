@@ -94,6 +94,9 @@ pub enum ConsumptionMetricKind {
     /// Size of the remote storage (S3) directory.
     /// This is an absolute, per-tenant metric.
     RemoteStorageSize,
+    /// Logical size of the data in the timeline
+    /// This is an absolute, per-timeline metric
+    TimelineLogicalSize,
 }
 
 impl FromStr for ConsumptionMetricKind {
@@ -105,6 +108,7 @@ impl FromStr for ConsumptionMetricKind {
             "synthetic_storage_size" => Ok(Self::SyntheticStorageSize),
             "resident_size" => Ok(Self::ResidentSize),
             "remote_storage_size" => Ok(Self::RemoteStorageSize),
+            "timeline_logical_size" => Ok(Self::TimelineLogicalSize),
             _ => anyhow::bail!("invalid value \"{s}\" for metric type"),
         }
     }
@@ -117,6 +121,7 @@ impl fmt::Display for ConsumptionMetricKind {
             ConsumptionMetricKind::SyntheticStorageSize => "synthetic_storage_size",
             ConsumptionMetricKind::ResidentSize => "resident_size",
             ConsumptionMetricKind::RemoteStorageSize => "remote_storage_size",
+            ConsumptionMetricKind::TimelineLogicalSize => "timeline_logical_size",
         })
     }
 }
@@ -191,23 +196,35 @@ pub async fn collect_metrics_task(
 
         // iterate through list of timelines in tenant
         for timeline in tenant.list_timelines().iter() {
-            let timeline_written_size = u64::from(timeline.get_last_record_lsn());
+            // collect per-timeline metrics only for active timelines
+            if timeline.is_active() {
+                let timeline_written_size = u64::from(timeline.get_last_record_lsn());
 
-            current_metrics.push((
-                ConsumptionMetricsKey {
-                    tenant_id,
-                    timeline_id: Some(timeline.timeline_id),
-                    metric: ConsumptionMetricKind::WrittenSize,
-                },
-                timeline_written_size,
-            ));
+                current_metrics.push((
+                    ConsumptionMetricsKey {
+                        tenant_id,
+                        timeline_id: Some(timeline.timeline_id),
+                        metric: ConsumptionMetricKind::WrittenSize,
+                    },
+                    timeline_written_size,
+                ));
+
+                let (timeline_logical_size, is_exact) = timeline.get_current_logical_size()?;
+                // Only send timeline logical size when it is fully calculated.
+                if is_exact {
+                    current_metrics.push((
+                        ConsumptionMetricsKey {
+                            tenant_id,
+                            timeline_id: Some(timeline.timeline_id),
+                            metric: ConsumptionMetricKind::TimelineLogicalSize,
+                        },
+                        timeline_logical_size,
+                    ));
+                }
+            }
 
             let timeline_resident_size = timeline.get_resident_physical_size();
             tenant_resident_size += timeline_resident_size;
-
-            debug!(
-                "per-timeline current metrics for tenant: {}: timeline {} resident_size={} last_record_lsn {} (as bytes)",
-                tenant_id, timeline.timeline_id, timeline_resident_size, timeline_written_size)
         }
 
         let tenant_remote_size = tenant.get_remote_size().await?;
