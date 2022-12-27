@@ -634,10 +634,12 @@ where
 
         // system_id will be updated on mismatch
         if self.state.server.system_id != msg.system_id {
-            warn!(
-                "unexpected system ID arrived, got {}, expected {}",
-                msg.system_id, self.state.server.system_id
-            );
+            if self.state.server.system_id != 0 {
+                warn!(
+                    "unexpected system ID arrived, got {}, expected {}",
+                    msg.system_id, self.state.server.system_id
+                );
+            }
 
             let mut state = self.state.clone();
             state.server.system_id = msg.system_id;
@@ -648,8 +650,9 @@ where
         }
 
         info!(
-            "processed greeting from proposer {:?}, sending term {:?}",
-            msg.proposer_id, self.state.acceptor_state.term
+            "processed greeting from walproposer {}, sending term {:?}",
+            msg.proposer_id.map(|b| format!("{:X}", b)).join(""),
+            self.state.acceptor_state.term
         );
         Ok(Some(AcceptorProposerMessage::Greeting(AcceptorGreeting {
             term: self.state.acceptor_state.term,

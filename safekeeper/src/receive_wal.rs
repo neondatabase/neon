@@ -52,7 +52,7 @@ impl<'pg> ReceiveWalConn<'pg> {
 
     /// Receive WAL from wal_proposer
     pub fn run(&mut self, spg: &mut SafekeeperPostgresHandler) -> Result<()> {
-        let _enter = info_span!("WAL acceptor", timeline = %spg.timeline_id.unwrap()).entered();
+        let _enter = info_span!("WAL acceptor", ttid = %spg.ttid).entered();
 
         // Notify the libpq client that it's allowed to send `CopyData` messages
         self.pg_backend
@@ -69,7 +69,7 @@ impl<'pg> ReceiveWalConn<'pg> {
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
-                    "start handshake with wal proposer {} sysid {} timeline {}",
+                    "start handshake with walproposer {} sysid {} timeline {}",
                     self.peer_addr, greeting.system_id, greeting.tli,
                 );
                 let server_info = ServerInfo {

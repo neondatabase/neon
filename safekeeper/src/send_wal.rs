@@ -161,7 +161,7 @@ impl ReplicationConn {
         pgb: &mut PostgresBackend,
         mut start_pos: Lsn,
     ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.timeline_id.unwrap()).entered();
+        let _enter = info_span!("WAL sender", ttid = %spg.ttid).entered();
 
         let tli = GlobalTimelines::get(spg.ttid)?;
 
