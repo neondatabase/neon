@@ -17,7 +17,7 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::task_mgr::{self, TaskKind};
-use crate::tenant::tenant_config::TenantConfOpt;
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{Tenant, TenantState};
 use crate::IGNORED_TENANT_FILE_NAME;
 

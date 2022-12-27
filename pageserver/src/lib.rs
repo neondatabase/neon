@@ -23,11 +23,8 @@ pub mod walredo;
 
 use std::path::Path;
 
-use tracing::info;
-
-use crate::tenant::tenant_config;
-
 use crate::task_mgr::TaskKind;
+use tracing::info;
 
 /// Current storage format version
 ///
@@ -56,7 +53,7 @@ pub async fn shutdown_pageserver(exit_code: i32) {
 
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
-    tenant::tenant_mgr::shutdown_all_tenants().await;
+    tenant::mgr::shutdown_all_tenants().await;
 
     // Stop syncing with remote storage.
     //

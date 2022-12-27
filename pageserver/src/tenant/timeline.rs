@@ -42,7 +42,7 @@ use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
-use crate::tenant_config::TenantConfOpt;
+use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
 
 use postgres_connection::PgConnectionConfig;
