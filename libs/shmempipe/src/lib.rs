@@ -1123,15 +1123,10 @@ mod tests {
         uio.unpark_front(1); // there is no front() right now
 
         uio.store_current(2);
-        println!("{uio:?}");
         uio.store_current(1);
-        println!("{uio:?}");
         assert!(uio.current_is_front(1));
-        println!("{uio:?}");
         uio.pop_front(1);
-        println!("{uio:?}");
         uio.unpark_front(2); // unparking 2 => ThreadId(11)
-        println!("{uio:?}");
         uio.store_current(3);
     }
 }
