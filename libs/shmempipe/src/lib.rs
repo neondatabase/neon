@@ -7,8 +7,8 @@ use std::os::unix::prelude::FromRawFd;
 use std::path::Path;
 use std::pin::Pin;
 use std::ptr::NonNull;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
-use std::sync::atomic::{AtomicU32, AtomicUsize};
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
 
 use nix::sys::mman::{MapFlags, ProtFlags};
 use shared::{IntoGuard, TryLockError};
@@ -20,13 +20,15 @@ const FROM_WORKER_LEN: usize = 4 * 4096;
 
 /// Whether or not to put the `request_response` function to sleep while waiting for the response
 /// written by `write_all`.
+///
+/// Not using it should lead to busier waiting, and faster operation, but it only helps with more
+/// than 1 thread cases.
 const USE_EVENTFD_ON_RESPONSE: bool = true;
 
 /// Input/output over a shared memory "pipe" which attempts to be faster than using standard input
 /// and output with inter-process communication.
 ///
 /// repr(C): this struct could be shared between recompilations.
-// TODO: this should be inside manuallydrop?
 #[repr(C)]
 pub struct RawSharedMemPipe {
     /// States:
@@ -36,30 +38,25 @@ pub struct RawSharedMemPipe {
     pub magic: AtomicU32,
 
     /// Eventfd used in semaphore mode, used to wakeup the request reader (walredoproc.c)
-    pub notify_request_written: i32,
+    pub notify_worker: i32,
+
+    pub nw_count: AtomicU32,
 
     /// Eventfd used in semaphore mode, used to wakeup the response reader
-    pub notify_response_written: i32,
+    pub notify_owner: i32,
 
-    pub requests: AtomicUsize,
-    pub send_request_loops: AtomicUsize,
-    pub receive_request_loops: AtomicUsize,
-    pub recv_loops: AtomicUsize,
-    pub write_loops: AtomicUsize,
+    pub no_count: AtomicU32,
 
     /// The processes participating in this.
     ///
     /// First is the pageserver process, second is the single threaded walredo process.
     ///
     /// FIXME: these are unsafe in security barriers.
+    ///
+    /// use an adhoc spinlock instead?
     pub participants: [shared::PinnedMutex<Option<u32>>; 2],
 
     pub to_worker_waiters: AtomicU32,
-    pub to_worker_writer: shared::PinnedMutex<()>,
-    pub to_worker_cond: shared::PinnedCondvar,
-
-    pub from_worker_writer: shared::PinnedMutex<()>,
-    pub from_worker_cond: shared::PinnedCondvar,
 
     // this wouldn't be too difficult to make a generic parameter, but let's hold off still.
     //
@@ -97,6 +94,7 @@ impl SharedMemPipePtr<Created> {
             producer: std::sync::Mutex::default(),
             consumer: std::sync::Mutex::default(),
             ptr: self,
+            next: AtomicU32::new(0),
         }))
     }
 
@@ -131,73 +129,94 @@ impl SharedMemPipePtr<Joined> {
 pub struct OwnedRequester {
     producer: std::sync::Mutex<u32>,
     consumer: std::sync::Mutex<Wakeup>,
+    /// id of the next thread to receive response. Waiting is managed through parking_lot.
+    next: AtomicU32,
     ptr: SharedMemPipePtr<Created>,
-}
-
-impl Drop for OwnedRequester {
-    fn drop(&mut self) {
-        self.dump_loops(true);
-    }
 }
 
 #[derive(Default)]
 struct Wakeup {
+    // Move this behind a separate spinlock? or otherwise figure out a way for others proceed while
+    // the response reception waits on semaphore.
     waiting: UnparkInOrder,
-    next: u32,
 }
 
-#[derive(Default)]
-struct UnparkInOrder(std::collections::VecDeque<Option<std::thread::Thread>>);
+#[derive(Default, Debug)]
+struct UnparkInOrder(std::collections::BinaryHeap<HeapEntry>);
+
+impl Drop for UnparkInOrder {
+    fn drop(&mut self) {
+        println!("{} capacity", self.0.capacity());
+    }
+}
+
+#[derive(Debug)]
+struct HeapEntry(std::cmp::Reverse<u32>, std::thread::Thread);
+
+impl PartialEq for HeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.1.id() == other.1.id()
+    }
+}
+
+impl Eq for HeapEntry {}
+
+impl PartialOrd for HeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl From<(u32, std::thread::Thread)> for HeapEntry {
+    fn from(value: (u32, std::thread::Thread)) -> Self {
+        HeapEntry(std::cmp::Reverse(value.0), value.1)
+    }
+}
 
 impl UnparkInOrder {
-    fn store_current(&mut self, distance: usize) {
-        // it was thought originally that this would be *enough*, as in we'd unlikely have so many
-        // threads waiting that we'd have to have an alternative place for the overflow to go.
-        //
-        // let's check the popular thread count invariant :)
-        assert!(distance < 4096);
-        while self.0.len() <= distance {
-            self.0.push_back(None);
-        }
-        let me = Some(std::thread::current());
-        let slot = self.0.get_mut(distance).expect("just added the None in");
-        assert!(
-            slot.is_none(),
-            "was expecting None, but found {:?} in place of {:?}",
-            slot.as_ref().map(|x| x.id()),
-            me.as_ref().map(|x| x.id())
-        );
-        *slot = me;
+    fn store_current(&mut self, id: u32) {
+        self.0.push(HeapEntry::from((id, std::thread::current())));
     }
 
-    fn current_is_front(&self) -> bool {
-        match self.0.front() {
-            Some(Some(first)) => {
+    fn current_is_front(&self, expected_id: u32) -> bool {
+        let ret = match self.0.peek() {
+            Some(HeapEntry(id, first)) => {
                 let cur = std::thread::current();
-                cur.id() == first.id()
+                id.0 == expected_id && cur.id() == first.id()
             }
-            Some(None) | None => false,
-        }
+            None => false,
+        };
+        ret
     }
 
-    fn pop_current(&mut self) {
+    fn pop_front(&mut self, expected_id: u32) {
+        use std::collections::binary_heap::PeekMut;
+
         let cur = std::thread::current();
-        let next = self.0.front();
-        let next = next
-            .expect("should not be empty because we were just unparked")
-            .as_ref()
-            .expect("should had had the current thread in front because we were just unparked");
-        assert_eq!(cur.id(), next.id());
+        let next = self.0.peek_mut();
+        let next = next.expect("should not be empty because we were just unparked");
+        let t = &next.1;
+        assert_eq!(cur.id(), t.id());
+        assert_eq!(next.0 .0, expected_id);
 
-        self.0.pop_front().expect("just verified");
+        PeekMut::<'_, HeapEntry>::pop(next);
     }
 
-    fn unpark_front(&self) {
-        if let Some(x) = self.0.front().and_then(|x| x.as_ref()) {
-            x.unpark();
-        } else {
-            // Not an error, the thread we are hoping to wakeup just hasn't yet arrived to the
-            // parking lot.
+    fn unpark_front(&self, turn: u32) {
+        match self.0.peek() {
+            Some(HeapEntry(id, t)) if id.0 == turn => {
+                t.unpark();
+            }
+            Some(_) | None => {
+                // Not an error, the thread we are hoping to wakeup just hasn't yet arrived to the
+                // parking lot.
+            }
         }
     }
 
@@ -209,7 +228,7 @@ impl UnparkInOrder {
     where
         F: FnMut(&mut T) -> bool,
     {
-        while !cond(&mut *guard) {
+        while cond(&mut *guard) {
             drop(guard);
             std::thread::park();
             guard = consumer.lock().unwrap();
@@ -225,12 +244,13 @@ impl OwnedRequester {
             // FIXME: one should be enough for waiting for the worker, or the worker waiting for
             // new input -- nope, it's not, because there's an affinity to read it yourself when
             // immediatedly reading it after posting.
-            self.ptr.notify_request_written,
-            self.ptr.notify_response_written,
+            self.ptr.notify_worker,
+            self.ptr.notify_owner,
         ]
     }
 
-    pub fn request_response(&self, req: &[u8], resp: &mut [u8]) {
+    #[inline(never)]
+    pub fn request_response(&self, req: &[u8], resp: &mut [u8]) -> u32 {
         // Overview:
         // - `self.producer` creates an order amongst competing request_response callers (id).
         // - the same token (id) is used to find some order with `self.consumer` to read the
@@ -238,57 +258,68 @@ impl OwnedRequester {
 
         let id = self.send_request(req);
 
-        let mut g = self.consumer.lock().unwrap();
-        let distance = id.wrapping_sub(g.next) as usize;
+        let mut next = self.next.load(Acquire);
 
-        // FIXME: current impl stores the thread even in `id == g.next`
-        g.waiting.store_current(distance);
+        if next != id {
+            let mut g = self.consumer.lock().unwrap();
 
-        g = UnparkInOrder::park_while(g, &self.consumer, |g| g.next == id);
+            // recheck in case it's our turn now after locking the mutex
+            next = self.next.load(Acquire);
+            if next != id {
+                g.waiting.store_current(id);
 
-        assert!(g.waiting.current_is_front());
-        g.waiting.pop_current();
+                g = UnparkInOrder::park_while(g, &self.consumer, |_| {
+                    next = self.next.load(Acquire);
+                    next != id
+                });
 
-        let mut g = self.recv_response(id, g, resp);
+                assert!(g.waiting.current_is_front(id));
+                g.waiting.pop_front(id);
+            }
+            drop(g);
+        }
 
-        g.next = g.next.wrapping_add(1);
-        g.waiting.unpark_front();
-        drop(g);
+        assert_eq!(next, id);
 
-        self.ptr.requests.fetch_add(1, Relaxed);
+        self.recv_response(id, resp);
+
+        let prev = self.next.fetch_add(1, Release);
+        assert_eq!(id, prev);
+
+        // contending on this could be avoided by reserving a bit for "wakeup next" for anyone
+        // coming after
+        let g = self.consumer.lock().unwrap();
+
+        g.waiting.unpark_front(prev.wrapping_add(1));
+
+        id
     }
 
     fn send_request(&self, req: &[u8]) -> u32 {
+        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_worker) };
+
+        // this will be contended if there's anyone else interested in writing
         let mut g = self.producer.lock().unwrap();
 
+        // this will be decremented by `write_all` on each response
         let mut might_wait = self.ptr.to_worker_waiters.fetch_add(1, Release) == 0;
 
         let id = *g;
         *g = g.wrapping_add(1);
 
         // Safety: we are only one creating producers for to_worker
-        let p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
-
-        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
-
-        let mut loops = 0;
-
-        let mut p = p.into_postponed();
+        let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
 
         let mut send = |mut req| {
             let mut consecutive_spins = 0;
             loop {
-                loops += 1;
                 let n = p.push_slice(req);
                 req = &req[n..];
 
                 if req.is_empty() {
                     break;
                 } else if n == 0 {
-                    p.sync();
-
                     if might_wait {
-                        // println!("woking it up");
                         sem.post();
                         might_wait = false;
                     }
@@ -299,29 +330,28 @@ impl OwnedRequester {
                     consecutive_spins += 1;
                     std::hint::spin_loop();
                 } else {
+                    consecutive_spins = 0;
                     std::thread::yield_now();
                 }
             }
         };
 
+        let len = req.len();
+
         // framing doesn't require us to manage state, as we always send both
-        // TODO: try with postponed producer, this syncs twice, might might be a good or bad thing.
-        let frame_len = u32::try_from(req.len())
+        let frame_len = u64::try_from(len)
             .expect("message cannot be more than 4GB")
             .to_ne_bytes();
 
+        // using the postponed version here between the two pushes most definitely leads to
+        // corruption, also it can trigger a debug_assert! within ringbuf
         send(&frame_len);
-        // println!("sent frame length: {}", req.len());
         send(req);
-        // println!("sent req: {}", req.len());
-
-        p.sync();
 
         drop(g);
 
-        self.ptr.send_request_loops.fetch_add(loops, Relaxed);
-
         // as part of the first write, make sure that the worker is woken up.
+        // FIXME: remove if the first one seems to work better
         if might_wait {
             sem.post();
         }
@@ -329,38 +359,38 @@ impl OwnedRequester {
         id
     }
 
-    fn recv_response<'a>(
-        &self,
-        id: u32,
-        g: std::sync::MutexGuard<'a, Wakeup>,
-        resp: &mut [u8],
-    ) -> std::sync::MutexGuard<'a, Wakeup> {
-        assert_eq!(g.next, id);
-
-        // Safety: we are the only one creating consumers for from_worker
+    fn recv_response<'a>(&self, _id: u32, resp: &mut [u8]) {
+        // Safety: we are the only one creating consumers for from_worker because we've awaited our
+        // turn
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.from_worker) };
 
-        let _sem =
-            unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
+        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_owner) };
 
         if USE_EVENTFD_ON_RESPONSE {
-            _sem.wait();
+            sem.wait();
         }
 
         let mut read = 0;
         let mut consecutive_spins = 0;
-        let mut loops = 0;
+        let mut div = 0;
 
         loop {
-            loops += 1;
             let n = c.pop_slice(&mut resp[read..]);
 
             read += n;
+            div += 1;
+
+            if div == 100_000 {
+                // when using the eventfd this printout should never happen.
+                println!("owner: 100k attempts and read {read} bytes, last {n}");
+            }
 
             if read == resp.len() {
                 break;
             }
 
+            // these spins are not as effective as with shmempipe, because we dont have any
+            // spinlocks shared with the other side.
             if n != 0 {
                 consecutive_spins = 0;
                 std::hint::spin_loop();
@@ -368,43 +398,8 @@ impl OwnedRequester {
                 consecutive_spins += 1;
                 std::hint::spin_loop();
             } else {
+                consecutive_spins = 0;
                 std::thread::yield_now();
-            }
-        }
-
-        self.ptr.receive_request_loops.fetch_add(loops, Relaxed);
-
-        g
-    }
-
-    pub fn dump_loops(&self, print: bool) {
-        {
-            let mut it = [
-                &self.ptr.send_request_loops,
-                &self.ptr.receive_request_loops,
-                &self.ptr.recv_loops,
-                &self.ptr.write_loops,
-                &self.ptr.requests,
-            ]
-            .into_iter()
-            .map(|x| {
-                let mut current = x.load(Relaxed);
-                loop {
-                    match x.compare_exchange(current, 0, Relaxed, Relaxed) {
-                        Ok(zeroed) => return zeroed,
-                        Err(loaded) => current = loaded,
-                    }
-                }
-            });
-
-            let sr = it.next().unwrap();
-            let rr = it.next().unwrap();
-            let rx = it.next().unwrap();
-            let tx = it.next().unwrap();
-            let reqs = it.next().unwrap();
-
-            if print {
-                eprintln!("loops: {sr}/{rr} -- {rx}/{tx} -- {reqs}");
             }
         }
     }
@@ -422,7 +417,6 @@ pub struct OwnedResponder {
 
 impl OwnedResponder {
     pub fn read_next_frame_len(&mut self) -> Result<u32, u32> {
-        // println!("reading next frame len");
         match self.remaining.as_mut() {
             Some((_, remaining)) => Err(*remaining),
             None => {
@@ -437,10 +431,16 @@ impl OwnedResponder {
 
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         if self.remaining.is_none() {
-            // read the new frame length
-            let mut len = [0u8; 4];
-            assert_eq!(self.recv(&mut len, 3, true), 4);
-            let len = u32::from_ne_bytes(len);
+            // read the new frame length, as u64 where the extra 4 bytes are used as verification
+            // against corruption, which happens with the postponed writer in send_request.
+            let mut raw = [0u8; 8];
+            assert_eq!(self.recv(&mut raw, 7, true), 8);
+
+            assert_eq!(&raw[4..], &[0, 0, 0, 0], "read: {raw:?}");
+
+            let len = u64::from_ne_bytes(raw);
+            let len = u32::try_from(len).unwrap();
+
             // store it as frame size, remaining size
             self.remaining = Some((len, len));
         }
@@ -479,16 +479,12 @@ impl OwnedResponder {
         // TODO: panics should not be leaked to ffi, it is UB right now but might become abort in
         // future. it is easy to take all common pointer handling out and make that wrapper also
         // catch_unwind, then abort.
-        // eprintln!("read_exact({})", buf.len());
         let remaining = match self.remaining.as_ref() {
             Some((_, remaining)) => *remaining,
             None => unreachable!("cannot panic here but the frame length should be known"),
         };
 
         assert!(remaining as usize <= buf.len());
-
-        // can remaining be 1? probably by bug.
-        assert!(remaining > 1);
 
         let read = self.recv(
             &mut buf[..remaining as usize],
@@ -503,42 +499,41 @@ impl OwnedResponder {
 
     fn recv(&mut self, buf: &mut [u8], read_more_than: usize, can_wait: bool) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
-        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_request_written) };
+        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_worker) };
 
         let mut read = 0;
         let mut waited = false;
-        let mut loops = 0;
         let mut consecutive_spins = 0;
+        let mut div = 0;
 
         loop {
-            loops += 1;
             let n = c.pop_slice(&mut buf[read..]);
 
             read += n;
+            div += 1;
+
+            if div == 100_000 {
+                println!("worker: after 100k attempts, have read {read} bytes");
+            }
 
             if read > read_more_than {
                 // interestingly this sleeps the most, probably while the response is being read.
-                self.ptr.recv_loops.fetch_add(loops, Relaxed);
                 return read;
+            } else if !waited && can_wait {
+                // go to sleep, which is few microseconds costlier
+                while self.ptr.to_worker_waiters.load(Acquire) == 0 {
+                    sem.wait();
+                    waited = true;
+                }
             } else if n != 0 {
                 consecutive_spins = 0;
-                std::thread::yield_now();
-            } else if n == 0 && (!waited || consecutive_spins < 1024) {
-                if !waited {
-                    while can_wait && self.ptr.to_worker_waiters.load(Acquire) == 0 {
-                        sem.wait();
-                        waited = true;
-                    }
-                }
-
-                if waited {
-                    continue;
-                }
-
-                consecutive_spins += 1;
-                std::thread::yield_now();
-            } else {
                 std::hint::spin_loop();
+            } else if consecutive_spins < 1024 {
+                consecutive_spins += 1;
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+                consecutive_spins = 0;
             }
         }
     }
@@ -546,31 +541,22 @@ impl OwnedResponder {
     pub fn write_all(&mut self, mut buf: &[u8]) -> usize {
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.from_worker) };
 
-        let _sem =
-            unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_response_written) };
-
-        if buf.is_empty() {
-            return 0;
-        }
+        let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_owner) };
 
         let len = buf.len();
 
-        let mut woken = !USE_EVENTFD_ON_RESPONSE;
         let mut consecutive_spins = 0;
-        let mut loops = 0;
 
         loop {
-            loops += 1;
             let n = p.push_slice(buf);
             buf = &buf[n..];
 
-            if !woken {
-                woken = true;
-                _sem.post();
-            }
-
             if buf.is_empty() {
-                self.ptr.write_loops.fetch_add(loops, Relaxed);
+                if USE_EVENTFD_ON_RESPONSE {
+                    sem.post();
+                }
+
+                // allow waiting on recv
                 self.ptr.to_worker_waiters.fetch_sub(1, Release);
                 return len;
             }
@@ -580,7 +566,7 @@ impl OwnedResponder {
                 std::thread::yield_now();
             } else if consecutive_spins < 1024 {
                 consecutive_spins += 1;
-                std::thread::yield_now();
+                std::hint::spin_loop();
             } else {
                 std::hint::spin_loop();
             }
@@ -714,14 +700,12 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
     assert!(path.is_absolute());
     assert!(path.as_os_str().len() < 255);
 
-    // synchronization between the creator and the
+    // synchronization between the creator and the joiner/worker
     // FIXME: OwnedFd
-    let notify_request_written =
-        unsafe { std::fs::File::from_raw_fd(eventfd(0, EfdFlags::EFD_SEMAPHORE)?) };
-    let notify_response_written =
-        unsafe { std::fs::File::from_raw_fd(eventfd(0, EfdFlags::EFD_SEMAPHORE)?) };
+    let notify_worker = unsafe { std::fs::File::from_raw_fd(eventfd(0, EfdFlags::EFD_SEMAPHORE)?) };
+    let notify_owner = unsafe { std::fs::File::from_raw_fd(eventfd(0, EfdFlags::EFD_SEMAPHORE)?) };
 
-    // O_CLOEXEC, maybe?
+    // O_CLOEXEC, the other process does not need to inherit this, it opens it by name
     let flags = OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_TRUNC | OFlag::O_CLOEXEC;
     let mode = Mode::S_IRUSR | Mode::S_IWUSR;
 
@@ -763,7 +747,7 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
     // fd's, unless the mmap's hold an "fd" to the shared
     drop(handle);
 
-    initialize_at(res, notify_request_written, notify_response_written)
+    initialize_at(res, notify_worker, notify_owner)
 }
 
 /// Initialize the RawSharedMemPipe *in place*.
@@ -773,8 +757,8 @@ pub fn create(path: &Path) -> std::io::Result<SharedMemPipePtr<Created>> {
 /// conversions.
 fn initialize_at(
     res: SharedMemPipePtr<MMapped>,
-    notify_request_written: std::fs::File,
-    notify_response_written: std::fs::File,
+    notify_worker: std::fs::File,
+    notify_owner: std::fs::File,
 ) -> std::io::Result<SharedMemPipePtr<Created>> {
     let inner = res.ptr();
     // Safety: lot of requirements, TODO
@@ -828,49 +812,31 @@ fn initialize_at(
     }
 
     {
-        let field = uninit_field!(requests);
-        field.write(AtomicUsize::new(0));
-        unsafe { field.assume_init_mut() };
-    }
-
-    {
-        let field = uninit_field!(send_request_loops);
-        field.write(AtomicUsize::new(0));
-        unsafe { field.assume_init_mut() };
-    }
-
-    {
-        let field = uninit_field!(receive_request_loops);
-        field.write(AtomicUsize::new(0));
-        unsafe { field.assume_init_mut() };
-    }
-
-    {
-        let field = uninit_field!(recv_loops);
-        field.write(AtomicUsize::new(0));
-        unsafe { field.assume_init_mut() };
-    }
-
-    {
-        let field = uninit_field!(write_loops);
-        field.write(AtomicUsize::new(0));
-        unsafe { field.assume_init_mut() };
-    }
-
-    {
-        let fd = uninit_field!(notify_request_written);
-        fd.write(notify_request_written.as_raw_fd());
+        let fd = uninit_field!(notify_worker);
+        fd.write(notify_worker.as_raw_fd());
         unsafe { fd.assume_init_mut() };
+        // the file is forgotten if the init completes
+    }
 
+    // FIXME: For some reason these counter (nw_count, no_count) fields cannot be removed, or EBADF
+    // errors start coming from using the eventfd
+    {
+        let count = uninit_field!(nw_count);
+        count.write(AtomicU32::default());
+        unsafe { count.assume_init_mut() };
+    }
+
+    {
+        let fd = uninit_field!(notify_owner);
+        fd.write(notify_owner.as_raw_fd());
+        unsafe { fd.assume_init_mut() };
         // the file is forgotten if the init completes
     }
 
     {
-        let fd = uninit_field!(notify_response_written);
-        fd.write(notify_response_written.as_raw_fd());
-        unsafe { fd.assume_init_mut() };
-
-        // the file is forgotten if the init completes
+        let count = uninit_field!(no_count);
+        count.write(AtomicU32::default());
+        unsafe { count.assume_init_mut() };
     }
 
     {
@@ -916,53 +882,23 @@ fn initialize_at(
     }
 
     {
-        let to_worker_writer = uninit_field!(to_worker_writer);
-        shared::PinnedMutex::initialize_at(to_worker_writer, ()).unwrap();
-    }
-
-    {
-        let to_worker_cond = uninit_field!(to_worker_cond);
-        shared::PinnedCondvar::initialize_at(to_worker_cond).unwrap();
-    }
-
-    {
         let from_worker = uninit_field!(from_worker);
         from_worker.write(ringbuf::StaticRb::default());
         unsafe { from_worker.assume_init_mut() };
-    }
-
-    {
-        let from_worker_writer = uninit_field!(from_worker_writer);
-        shared::PinnedMutex::initialize_at(from_worker_writer, ()).unwrap();
-    }
-
-    {
-        let from_worker_cond = uninit_field!(from_worker_cond);
-        shared::PinnedCondvar::initialize_at(from_worker_cond).unwrap();
     }
 
     // FIXME: above, we need to do manual drop handling
 
     // Safety: it is now initialized
     let _ = unsafe { place.assume_init_mut() };
-    std::mem::forget(notify_request_written);
-    std::mem::forget(notify_response_written);
+    std::mem::forget(notify_worker);
+    std::mem::forget(notify_owner);
     drop(place);
 
     let res = res.post_initialization::<Created>();
 
-    // FIXME: how exactly to do an Arc out of this? Maybe an Arc<Box<RawSharedMemPipe>>, since we
-    // cannot access ArcInner ... which does have a repr(c) but the layout would be version
-    // dependent... maybe the custom arc crate with only strong counts?
-    //
-    // Or just give deref to SharedMemPipePtr and that's it, the ptr can be Arc'd
-
     res.magic
         .store(0xcafebabe, std::sync::atomic::Ordering::SeqCst);
-
-    // FIXME: it is very ackward to *not* take the lock participants[0] here. We could have an
-    // additional wrapper data structure living in where-ever, which would record that a lock was
-    // taken and it needs to be unlocked before drop or better yet, have that happen automatically.
 
     Ok(res)
 }
@@ -988,6 +924,9 @@ pub struct SharedMemPipePtr<Stage> {
 }
 
 unsafe impl Send for SharedMemPipePtr<Created> {}
+// nothing bad with this send impl, but it just hasn't been needed.
+#[cfg(any(test, feature = "demo"))]
+unsafe impl Send for SharedMemPipePtr<Joined> {}
 unsafe impl Sync for SharedMemPipePtr<Created> {}
 
 impl SharedMemPipePtr<MMapped> {
@@ -1184,7 +1123,7 @@ fn join_initialized_at(
                 .expect("valid non-null pointer")
         };
 
-        // Safety: atomics don't need to be init
+        // Safety: creator has already initialized, hopefully
         let magic = unsafe { magic.assume_init_ref() };
 
         let mut ready = false;
@@ -1228,7 +1167,7 @@ fn join_initialized_at(
     Ok(res.post_initialization())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not_now))]
 mod tests {
     use std::sync::atomic::Ordering::SeqCst;
     use std::{mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull};
@@ -1298,5 +1237,31 @@ mod tests {
             // Safety: we never deallocate (might munmap) in tests
             unsafe { Box::from_raw(self.0) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::UnparkInOrder;
+
+    #[test]
+    fn unparks_in_order() {
+        let mut uio = UnparkInOrder::default();
+        uio.store_current(0);
+        assert!(uio.current_is_front(0));
+        uio.pop_front(0);
+        uio.unpark_front(1); // there is no front() right now
+
+        uio.store_current(2);
+        println!("{uio:?}");
+        uio.store_current(1);
+        println!("{uio:?}");
+        assert!(uio.current_is_front(1));
+        println!("{uio:?}");
+        uio.pop_front(1);
+        println!("{uio:?}");
+        uio.unpark_front(2); // unparking 2 => ThreadId(11)
+        println!("{uio:?}");
+        uio.store_current(3);
     }
 }
