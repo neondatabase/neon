@@ -120,7 +120,7 @@ fn build_timeline_info_common(timeline: &Arc<Timeline>) -> anyhow::Result<Timeli
         lsn @ Lsn(_) => Some(lsn),
     };
     let current_logical_size = match timeline.get_current_logical_size() {
-        Ok(size) => Some(size),
+        Ok((size, _)) => Some(size),
         Err(err) => {
             error!("Timeline info creation failed to get current logical size: {err:?}");
             None

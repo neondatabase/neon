@@ -42,16 +42,28 @@ def metrics_handler(request: Request) -> Response:
         # >= 0 check here is to avoid race condition when we receive metrics before
         # remote_uploaded is updated
         "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
+        # logical size may lag behind the actual size, so allow 0 here
+        "timeline_logical_size": lambda value: value >= 0,
     }
 
+    events_received = 0
     for event in events:
-        assert checks.pop(event["metric"])(event["value"]), f"{event['metric']} isn't valid"
+        check = checks.get(event["metric"])
+        # calm down mypy
+        if check is not None:
+            assert check(event["value"]), f"{event['metric']} isn't valid"
+            events_received += 1
 
     global first_request
     # check that all checks were sent
     # but only on the first request, because we don't send non-changed metrics
     if first_request:
-        assert not checks, f"{' '.join(checks.keys())} wasn't/weren't received"
+        # we may receive more metrics than we check,
+        # because there are two timelines
+        # and we may receive per-timeline metrics from both
+        # if the test was slow enough for these metrics to be collected
+        # -1 because that is ok to not receive timeline_logical_size
+        assert events_received >= len(checks) - 1
         first_request = False
 
     global num_metrics_received

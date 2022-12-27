@@ -752,18 +752,22 @@ impl Timeline {
     ///
     /// The size could be lagging behind the actual number, in case
     /// the initial size calculation has not been run (gets triggered on the first size access).
-    pub fn get_current_logical_size(self: &Arc<Self>) -> anyhow::Result<u64> {
+    ///
+    /// return size and boolean flag that shows if the size is exact
+    pub fn get_current_logical_size(self: &Arc<Self>) -> anyhow::Result<(u64, bool)> {
         let current_size = self.current_logical_size.current_size()?;
         debug!("Current size: {current_size:?}");
 
+        let mut is_exact = true;
         let size = current_size.size();
         if let (CurrentLogicalSize::Approximate(_), Some(init_lsn)) =
             (current_size, self.current_logical_size.initial_part_end)
         {
+            is_exact = false;
             self.try_spawn_size_init_task(init_lsn);
         }
 
-        Ok(size)
+        Ok((size, is_exact))
     }
 
     /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
