@@ -312,30 +312,24 @@ impl OwnedRequester {
         // Safety: we are only one creating producers for to_worker
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
 
-        let mut send = |mut req| {
-            let mut consecutive_spins = 0;
-            loop {
-                let n = p.push_slice(req);
-                req = &req[n..];
+        let mut spin = SpinWait::default();
 
-                if req.is_empty() {
-                    break;
-                } else if n == 0 {
-                    if might_wait {
-                        sem.post();
-                        might_wait = false;
-                    }
-                } else if n != 0 {
-                    consecutive_spins = 0;
-                    std::hint::spin_loop();
-                } else if consecutive_spins < 1024 {
-                    consecutive_spins += 1;
-                    std::hint::spin_loop();
-                } else {
-                    consecutive_spins = 0;
-                    std::thread::yield_now();
+        let mut send = |mut req| loop {
+            let n = p.push_slice(req);
+            req = &req[n..];
+
+            if req.is_empty() {
+                break;
+            } else if n == 0 {
+                if might_wait {
+                    sem.post();
+                    might_wait = false;
                 }
+            } else if n != 0 {
+                spin.reset();
             }
+
+            spin.spin();
         };
 
         let len = req.len();
@@ -373,8 +367,8 @@ impl OwnedRequester {
         }
 
         let mut read = 0;
-        let mut consecutive_spins = 0;
         let mut div = 0;
+        let mut spin = SpinWait::default();
 
         loop {
             let n = c.pop_slice(&mut resp[read..]);
@@ -391,18 +385,11 @@ impl OwnedRequester {
                 break;
             }
 
-            // these spins are not as effective as with shmempipe, because we dont have any
-            // spinlocks shared with the other side.
             if n != 0 {
-                consecutive_spins = 0;
-                std::hint::spin_loop();
-            } else if consecutive_spins < 1024 {
-                consecutive_spins += 1;
-                std::hint::spin_loop();
-            } else {
-                consecutive_spins = 0;
-                std::thread::yield_now();
+                spin.reset();
             }
+
+            spin.spin();
         }
     }
 }
@@ -505,8 +492,8 @@ impl OwnedResponder {
 
         let mut read = 0;
         let mut waited = false;
-        let mut consecutive_spins = 0;
         let mut div = 0;
+        let mut spin = SpinWait::default();
 
         loop {
             let n = c.pop_slice(&mut buf[read..]);
@@ -528,15 +515,9 @@ impl OwnedResponder {
                     waited = true;
                 }
             } else if n != 0 {
-                consecutive_spins = 0;
-                std::hint::spin_loop();
-            } else if consecutive_spins < 1024 {
-                consecutive_spins += 1;
-                std::hint::spin_loop();
-            } else {
-                std::thread::yield_now();
-                consecutive_spins = 0;
+                spin.reset();
             }
+            spin.spin();
         }
     }
 
@@ -547,7 +528,7 @@ impl OwnedResponder {
 
         let len = buf.len();
 
-        let mut consecutive_spins = 0;
+        let mut spin = SpinWait::default();
 
         loop {
             let n = p.push_slice(buf);
@@ -564,15 +545,35 @@ impl OwnedResponder {
             }
 
             if n != 0 {
-                consecutive_spins = 0;
-                std::thread::yield_now();
-            } else if consecutive_spins < 1024 {
-                consecutive_spins += 1;
-                std::hint::spin_loop();
-            } else {
+                spin.reset();
+            }
+            spin.spin();
+        }
+    }
+}
+
+/// Spin or yield.
+///
+/// Adapted from parking_lot's adaptive spinning.
+#[derive(Default)]
+struct SpinWait(u32);
+
+impl SpinWait {
+    fn spin(&mut self) {
+        self.0 += 1;
+        // this is parking_lot's adaptive spinning
+        if self.0 < 10 {
+            for _ in 0..(1 << self.0) {
                 std::hint::spin_loop();
             }
+        } else {
+            self.0 = 10;
+            std::thread::yield_now();
         }
+    }
+
+    fn reset(&mut self) {
+        self.0 = 0;
     }
 }
 
