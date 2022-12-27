@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
 
 use nix::sys::mman::{MapFlags, ProtFlags};
-use shared::{IntoGuard, TryLockError};
+use shared::IntoGuard;
 
 /// C-api as defined in the `shmempipe.h`
 mod c_api;
@@ -874,10 +874,7 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
 
             for (i, m) in particpants.into_iter().enumerate() {
                 let m = unsafe { Pin::new_unchecked(m) };
-                res[i] = match m.try_lock() {
-                    Ok(g) | Err(TryLockError::PreviousOwnerDied(g)) => Some(g),
-                    Err(TryLockError::WouldBlock) => None,
-                }
+                res[i] = m.try_lock().into_guard();
             }
 
             res
@@ -899,8 +896,6 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
                         drop(locked);
 
                         unsafe { std::ptr::drop_in_place(ptr.as_ptr()) };
-
-                        // now we are good to drop in place, if need be
                     }
                 }
 
