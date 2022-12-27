@@ -12,9 +12,9 @@ use super::models::{
     TimelineCreateRequest, TimelineInfo,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
+use crate::tenant::tenant_config::TenantConfOpt;
 use crate::tenant::{with_ondemand_download, Timeline};
-use crate::tenant_config::TenantConfOpt;
-use crate::{config::PageServerConf, tenant_mgr};
+use crate::{config::PageServerConf, tenant::tenant_mgr};
 use utils::{
     auth::JwtAuth,
     http::{

@@ -28,13 +28,13 @@ use utils::{
 };
 
 use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
-use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::tenant::tenant_config::{TenantConf, TenantConfOpt};
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
 pub mod defaults {
-    use crate::tenant_config::defaults::*;
+    use crate::tenant::tenant_config::defaults::*;
     use const_format::formatcp;
 
     pub use pageserver_api::{

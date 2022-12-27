@@ -9,7 +9,7 @@ use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
-use crate::tenant_mgr;
+use crate::tenant::tenant_mgr;
 use tracing::*;
 use utils::id::TenantId;
 

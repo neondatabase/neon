@@ -48,8 +48,8 @@ use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::profiling::profpoint_start;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::tenant_mgr;
 use crate::tenant::{Tenant, Timeline};
-use crate::tenant_mgr;
 use crate::trace::Tracer;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;

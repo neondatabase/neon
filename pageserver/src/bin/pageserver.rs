@@ -18,7 +18,8 @@ use pageserver::{
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
     },
-    tenant_mgr, virtual_file,
+    tenant::tenant_mgr,
+    virtual_file,
 };
 use utils::{
     auth::JwtAuth,

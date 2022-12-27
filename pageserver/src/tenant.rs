@@ -59,7 +59,8 @@ use crate::tenant::metadata::load_metadata;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
-use crate::tenant_config::TenantConfOpt;
+use crate::tenant::tenant_config::TenantConfOpt;
+
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
 use crate::walredo::WalRedoManager;
@@ -83,6 +84,10 @@ pub mod metadata;
 mod par_fsync;
 pub mod storage_layer;
 mod storage_sync;
+
+pub mod tenant_config;
+pub mod tenant_mgr;
+pub mod tenant_tasks;
 
 mod timeline;
 
@@ -1422,7 +1427,7 @@ impl Tenant {
 
                     // Spawn gc and compaction loops. The loops will shut themselves
                     // down when they notice that the tenant is inactive.
-                    crate::tenant_tasks::start_background_loops(self.tenant_id);
+                    tenant_tasks::start_background_loops(self.tenant_id);
 
                     for timeline in not_broken_timelines {
                         timeline.set_state(TimelineState::Active);

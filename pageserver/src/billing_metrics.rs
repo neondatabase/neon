@@ -9,7 +9,7 @@ use tracing::*;
 use utils::id::TimelineId;
 
 use crate::task_mgr;
-use crate::tenant_mgr;
+use crate::tenant::tenant_mgr;
 use pageserver_api::models::TenantState;
 use utils::id::TenantId;
 
