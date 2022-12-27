@@ -55,11 +55,11 @@ use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
-use crate::tenant::config::TenantConfOpt;
 
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
