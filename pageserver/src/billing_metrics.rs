@@ -14,6 +14,7 @@ use pageserver_api::models::TenantState;
 use utils::id::TenantId;
 
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
@@ -32,16 +33,23 @@ use reqwest::Url;
 /// "tenant_id": "5d07d9ce9237c4cd845ea7918c0afa7d",
 /// "timeline_id": "00000000000000000000000000000000",
 /// "time": ...,
+/// "idempotency_key":
 /// "value": 12345454,
 /// }
 /// ```
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BillingMetric {
     pub metric: BillingMetricKind,
+    #[serde(rename = "type")]
     pub metric_type: &'static str,
+    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline_id: Option<TimelineId>,
     pub time: DateTime<Utc>,
+    pub idempotency_key: String,
     pub value: u64,
 }
 
@@ -58,6 +66,7 @@ impl BillingMetric {
             tenant_id,
             timeline_id,
             time: Utc::now(),
+            idempotency_key: format!("{}", Utc::now()),
             value,
         }
     }
