@@ -34,6 +34,8 @@ const USE_EVENTFD_ON_RESPONSE: bool = true;
 /// and output with inter-process communication.
 ///
 /// repr(C): this struct could be shared between recompilations.
+/// Note: if benchmark starts to get bus errors, you most likely failed to recompile the
+/// neon_walredo.so after the changes.
 #[repr(C)]
 pub struct RawSharedMemPipe {
     /// States:
@@ -45,22 +47,17 @@ pub struct RawSharedMemPipe {
     /// Eventfd used in semaphore mode, used to wakeup the request reader (walredoproc.c)
     pub notify_worker: i32,
 
-    pub nw_count: AtomicU32,
-
     /// Eventfd used in semaphore mode, used to wakeup the response reader
     pub notify_owner: i32,
-
-    pub no_count: AtomicU32,
 
     /// The processes participating in this.
     ///
     /// First is the pageserver process, second is the single threaded walredo process.
     ///
-    /// FIXME: these are unsafe in security barriers.
-    ///
-    /// use an adhoc spinlock instead?
+    /// FIXME: these are unsafe in security barriers. use an adhoc spinlock instead?
     pub participants: [shared::PinnedMutex<Option<u32>>; 2],
 
+    /// When non-zero, the worker side OwnedRequester::recv cannot go to sleep.
     pub to_worker_waiters: AtomicU32,
 
     // this wouldn't be too difficult to make a generic parameter, but let's hold off still.
@@ -706,25 +703,11 @@ fn initialize_at(
         // the file is forgotten if the init completes
     }
 
-    // FIXME: For some reason these counter (nw_count, no_count) fields cannot be removed, or EBADF
-    // errors start coming from using the eventfd
-    {
-        let count = uninit_field!(nw_count);
-        count.write(AtomicU32::default());
-        unsafe { count.assume_init_mut() };
-    }
-
     {
         let fd = uninit_field!(notify_owner);
         fd.write(notify_owner.as_raw_fd());
         unsafe { fd.assume_init_mut() };
         // the file is forgotten if the init completes
-    }
-
-    {
-        let count = uninit_field!(no_count);
-        count.write(AtomicU32::default());
-        unsafe { count.assume_init_mut() };
     }
 
     {
@@ -802,6 +785,10 @@ pub struct Created;
 /// Type state to fully cleanup on drop pointer, created with [`open_existing`].
 pub struct Joined;
 
+/// Owning pointer to the mmap'd shared memory section.
+///
+/// This has a phantom type parameter, which differentiates the pointed memory in different states,
+/// and doesn't allow for example the `join_initialized_at` to call `try_acquire_responder`.
 pub struct SharedMemPipePtr<Stage> {
     ptr: Option<NonNull<RawSharedMemPipe>>,
     size: NonZeroUsize,
