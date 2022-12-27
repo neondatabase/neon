@@ -1684,6 +1684,8 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
+	lfc_write(reln->smgr_rnode.node, forkNum, blkno, buffer);
+
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
 		mdextend(reln, forkNum, blkno, buffer, skipFsync);
@@ -1756,6 +1758,9 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 		default:
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
+
+	if (lfc_cache_contains(reln->smgr_rnode.node, forknum, blocknum))
+		return false;
 
 	tag = (BufferTag) {
 		.rnode = reln->smgr_rnode.node,
@@ -1899,6 +1904,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	{
 		case T_NeonGetPageResponse:
 			memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
+			lfc_write(rnode, forkNum, blkno, buffer);
 			break;
 
 		case T_NeonErrorResponse:
@@ -1948,6 +1954,12 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 
 		default:
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+	}
+
+	/* Try to read from local file cache */
+	if (lfc_read(reln->smgr_rnode.node, forkNum, blkno, buffer))
+	{
+		return;
 	}
 
 	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno);
@@ -2110,6 +2122,8 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 reln->smgr_rnode.node.relNode,
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
+
+	lfc_write(reln->smgr_rnode.node, forknum, blocknum, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))

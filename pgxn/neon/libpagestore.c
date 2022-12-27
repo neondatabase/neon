@@ -516,4 +516,5 @@ pg_init_libpagestore(void)
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
 	}
+	lfc_init();
 }
