@@ -99,6 +99,19 @@ impl SharedMemPipePtr<Created> {
             ptr: self,
         }))
     }
+
+    #[cfg(any(test, feature = "demo"))]
+    pub unsafe fn as_joined(&self) -> SharedMemPipePtr<Joined> {
+        // this is easier to debug with only one debugger
+        SharedMemPipePtr {
+            ptr: self.ptr,
+            size: self.size,
+            attempt_drop: false,
+            #[cfg(test)]
+            munmap: false,
+            _marker: std::marker::PhantomData,
+        }
+    }
 }
 
 impl SharedMemPipePtr<Joined> {
