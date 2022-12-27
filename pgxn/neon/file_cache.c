@@ -54,15 +54,17 @@
  *    1Mb chunks can reduce hash map size to 320Mb.
  * 2. Improve access locality, subsequent pages will be allocated together improving seqscan speed
  */
-#define CHUNK_SIZE 128 /* 1Mb chunk */
-#define MB         ((uint64)1024*1024)
+#define BLOCKS_PER_CHUNK	128 /* 1Mb chunk */
+#define MB					((uint64)1024*1024)
+
+#define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ / BLOCKS_PER_CHUNK))
 
 typedef struct FileCacheEntry
 {
 	BufferTag	key;
 	uint32		offset;
 	uint32		access_count;
-	uint32		bitmap[CHUNK_SIZE/32];
+	uint32		bitmap[BLOCKS_PER_CHUNK/32];
 	dlist_node	lru_node; /* LRU list node */
 } FileCacheEntry;
 
@@ -100,7 +102,7 @@ lfc_shmem_startup(void)
 	lfc_ctl = (FileCacheControl*)ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
 	{
-		uint32 lfc_size = (uint32)(lfc_max_size*MB/BLCKSZ/CHUNK_SIZE);
+		uint32 lfc_size = SIZE_MB_TO_CHUNKS(lfc_max_size);
 		lfc_lock = (LWLockId)GetNamedLWLockTranche("lfc_lock");
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(FileCacheEntry);
@@ -126,7 +128,7 @@ lfc_shmem_request(void)
 		prev_shmem_request_hook();
 #endif
 
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(lfc_max_size*MB/BLCKSZ/CHUNK_SIZE+1, sizeof(FileCacheEntry)));
+	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size)+1, sizeof(FileCacheEntry)));
 	RequestNamedLWLockTranche("lfc_lock", 1);
 }
 
@@ -144,7 +146,7 @@ lfc_check_limit_hook(int *newval, void **extra, GucSource source)
 void
 lfc_change_limit_hook(int newval, void *extra)
 {
-	uint32 new_size = (uint32)(newval*MB/BLCKSZ/CHUNK_SIZE);
+	uint32 new_size = SIZE_MB_TO_CHUNKS(newval);
 	/*
 	 * Stats collector detach shared memory, so we should not try to access shared memory here.
 	 * Parallel workers first assign default value (0), so not perform truncation in parallel workers.
@@ -169,7 +171,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
 		Assert(victim->access_count == 0);
 #ifdef FALLOC_FL_PUNCH_HOLE
-		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)victim->offset*CHUNK_SIZE*BLCKSZ, CHUNK_SIZE*BLCKSZ) < 0)
+		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)victim->offset*BLOCKS_PER_CHUNK*BLCKSZ, BLOCKS_PER_CHUNK*BLCKSZ) < 0)
 			elog(LOG, "Failed to punch hole in file: %m");
 #endif
 		hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
@@ -248,7 +250,7 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 {
 	BufferTag tag;
 	FileCacheEntry* entry;
-	int chunk_offs = blkno & (CHUNK_SIZE-1);
+	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	bool found;
 	uint32 hash;
 
@@ -257,7 +259,7 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 
 	tag.rnode = rnode;
 	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(CHUNK_SIZE-1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
@@ -279,7 +281,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	BufferTag tag;
 	FileCacheEntry* entry;
 	ssize_t rc;
-	int chunk_offs = blkno & (CHUNK_SIZE-1);
+	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	bool result = true;
 	uint32 hash;
 
@@ -288,7 +290,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 
 	tag.rnode = rnode;
 	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(CHUNK_SIZE-1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -317,7 +319,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 
 	if (lfc_desc > 0)
 	{
-		rc = pread(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*CHUNK_SIZE + chunk_offs)*BLCKSZ);
+		rc = pread(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
 		if (rc != BLCKSZ)
 		{
 			elog(INFO, "Failed to read file cache: %m");
@@ -348,7 +350,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	FileCacheEntry* entry;
 	ssize_t rc;
 	bool found;
-	int chunk_offs = blkno & (CHUNK_SIZE-1);
+	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	uint32 hash;
 
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
@@ -356,7 +358,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 
 	tag.rnode = rnode;
 	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(CHUNK_SIZE-1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -378,7 +380,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		 * there are should be very large number of concurrent IO operations and them are limited by max_connections,
 		 * we prefer not to complicate code and use second approach.
 		 */
-		if (lfc_ctl->size >= lfc_size_limit*MB/BLCKSZ/CHUNK_SIZE && !dlist_is_empty(&lfc_ctl->lru))
+		if (lfc_ctl->size >= SIZE_MB_TO_CHUNKS(lfc_size_limit) && !dlist_is_empty(&lfc_ctl->lru))
 		{
 			/* Cache overflow: evict least recently used chunk */
 			FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
@@ -405,7 +407,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	}
 	if (lfc_desc > 0)
 	{
-		rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*CHUNK_SIZE + chunk_offs)*BLCKSZ);
+		rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
 		if (rc != BLCKSZ)
 		{
 			elog(INFO, "Failed to write file cache: %m");
@@ -518,7 +520,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
         hash_seq_init(&status, lfc_hash);
         while ((entry = hash_seq_search(&status)) != NULL)
 		{
-			for (int i = 0; i < CHUNK_SIZE; i++)
+			for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				n_pages += (entry->bitmap[i >> 5] & (1 << (i & 31))) != 0;
 		}
 		fctx->record = (LocalCachePagesRec *)
@@ -544,11 +546,11 @@ local_cache_pages(PG_FUNCTION_ARGS)
         hash_seq_init(&status, lfc_hash);
         while ((entry = hash_seq_search(&status)) != NULL)
 		{
-			for (int i = 0; i < CHUNK_SIZE; i++)
+			for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 			{
 				if (entry->bitmap[i >> 5] & (1 << (i & 31)))
 				{
-					fctx->record[n_pages].pageoffs = entry->offset*CHUNK_SIZE + i;
+					fctx->record[n_pages].pageoffs = entry->offset*BLOCKS_PER_CHUNK + i;
 					fctx->record[n_pages].relfilenode = entry->key.rnode.relNode;
 					fctx->record[n_pages].reltablespace = entry->key.rnode.spcNode;
 					fctx->record[n_pages].reldatabase = entry->key.rnode.dbNode;
