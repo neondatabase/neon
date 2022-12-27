@@ -125,6 +125,13 @@ impl<Value: Clone> PersistentLayerMap<Value> {
             .map(|(_, v)| v.clone())
     }
 
+    pub fn get_coverage(
+        self: &Self,
+        lsn: u64,
+    ) -> Option<&RedBlackTreeMapSync<i128, Option<(u64, Value)>>> {
+        Some(self.historic.range(..=lsn).rev().next()?.1)
+    }
+
     pub fn trim(self: &mut Self, begin: &u64) {
         self.historic.split_off(begin);
         self.head = self
@@ -370,6 +377,17 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         }
 
         self.map.query(key, lsn)
+    }
+
+    pub fn get_coverage(
+        self: &Self,
+        lsn: u64,
+    ) -> Option<&RedBlackTreeMapSync<i128, Option<(u64, Value)>>> {
+        if !self.buffer.is_empty() {
+            panic!("rebuild pls")
+        }
+
+        self.map.get_coverage(lsn)
     }
 }
 

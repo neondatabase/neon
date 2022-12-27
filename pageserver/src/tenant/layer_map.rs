@@ -298,10 +298,7 @@ impl LayerMap {
                     lsn_floor = std::cmp::max(lsn_floor, image.get_lsn_range().start + 1)
                 }
             }
-            SearchResult {
-                layer,
-                lsn_floor,
-            }
+            SearchResult { layer, lsn_floor }
         }));
     }
 
@@ -483,6 +480,7 @@ impl LayerMap {
         key_range: &Range<Key>,
         lsn_range: &Range<Lsn>,
     ) -> Result<bool> {
+        // TODO implement using new index
         let mut range_remain = key_range.clone();
 
         loop {
@@ -524,12 +522,18 @@ impl LayerMap {
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<dyn Layer>> {
+        // TODO implement using new index
         self.historic_layers.iter().map(|e| e.layer.clone())
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
     fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+        let use_new_method = true;
+        if use_new_method {
+            return self.images.query(key.to_i128(), lsn.0);
+        }
+
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         let envelope = AABB::from_corners(
@@ -572,6 +576,40 @@ impl LayerMap {
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
+        let use_new_method = true;
+        if use_new_method {
+            let bounds = match self.images.get_coverage(lsn.0) {
+                Some(x) => x,
+                None => return Ok(vec![]),
+            };
+
+            let start = key_range.start.to_i128();
+            let end = key_range.end.to_i128();
+
+            // Initialize loop variables
+            let mut coverage: Vec<(Range<Key>, Option<Arc<dyn Layer>>)> = vec![];
+            let mut current_key = start.clone();
+            let mut current_val = match bounds.range(..=start).rev().next() {
+                Some((_, Some((_, v)))) => Some(v.clone()),
+                Some((_, None)) => None,
+                None => None,
+            };
+
+            // Loop through the change events and push intervals
+            for (change_key, change_val) in bounds.range(start..end) {
+                let kr = Key::from_i128(current_key)..Key::from_i128(*change_key);
+                coverage.push((kr, current_val.take()));
+                current_key = change_key.clone();
+                current_val = change_val.as_ref().map(|(_, v)| v.clone());
+            }
+
+            // Add the final interval
+            let kr = Key::from_i128(current_key)..Key::from_i128(end);
+            coverage.push((kr, current_val.take()));
+
+            return Ok(coverage);
+        }
+
         let mut points = vec![key_range.start];
         let envelope = AABB::from_corners(
             [IntKey::from(key_range.start.to_i128()), IntKey::from(0)],
@@ -617,6 +655,7 @@ impl LayerMap {
     /// Count how many L1 delta layers there are that overlap with the
     /// given key and LSN range.
     pub fn count_deltas(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>) -> Result<usize> {
+        // TODO implement using new index
         let mut result = 0;
         if lsn_range.start >= lsn_range.end {
             return Ok(0);
