@@ -8,7 +8,10 @@ use anyhow::Context;
 use postgres_connection::PgConnectionConfig;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
+use safekeeper_api::models::SkTimelineInfo;
 use thiserror::Error;
+use utils::auth::{Claims, Scope};
+use utils::id::{TenantId, TimelineId};
 use utils::{http::error::HttpErrorBody, id::NodeId};
 
 use crate::pageserver::PageServerNode;
@@ -188,11 +191,16 @@ impl SafekeeperNode {
     }
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        // TODO: authentication
-        //if self.env.auth_type == AuthType::NeonJWT {
-        //    builder = builder.bearer_auth(&self.env.safekeeper_auth_token)
-        //}
-        self.http_client.request(method, url)
+        let mut builder = self.http_client.request(method, url);
+        if self.conf.auth_enabled {
+            builder = builder.bearer_auth(
+                &self
+                    .env
+                    .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))
+                    .unwrap(),
+            );
+        }
+        builder
     }
 
     pub fn check_status(&self) -> Result<()> {
@@ -200,5 +208,22 @@ impl SafekeeperNode {
             .send()?
             .error_from_body()?;
         Ok(())
+    }
+
+    pub fn timeline_info(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> anyhow::Result<SkTimelineInfo> {
+        self.http_request(
+            Method::GET,
+            format!("{}/tenant/{}/timeline/{}", self.http_base_url, tenant_id, timeline_id),
+        )
+            .send()?
+            .error_from_body()?
+            .json::<SkTimelineInfo>()
+            .with_context(|| {
+                format!("Failed to retrieve or parse timeline info response for tenant {tenant_id} and timeline {timeline_id}")
+            })
     }
 }

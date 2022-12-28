@@ -1,13 +1,17 @@
+from contextlib import closing
 from typing import cast
 
 import requests
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
     PageserverHttpClient,
+    last_record_lsn,
 )
-from fixtures.types import TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import query_scalar
 
 
 def helper_compare_timeline_list(
@@ -131,3 +135,41 @@ def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
     # Default stop
     res = env.neon_cli.raw_cli(["stop"])
     res.check_returncode()
+
+
+def test_branch_at_head_no_lag(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    pageserver_http = env.pageserver.http_client()
+
+    branch1 = "test_branch_at_head_no_lag1"
+    branch2 = "test_branch_at_head_no_lag2"
+    timeline_id = env.neon_cli.create_branch(branch1)
+
+    with closing(env.postgres.create_start(branch1).connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE t(key int primary key, value text)")
+            cur.execute("INSERT INTO t VALUES (1000000, 'payload')")
+            # Mage Pageserver lag behind: 10ms delay for each XLogData message.
+            # It takes about 2.5s to catch up.
+            pageserver_http.configure_failpoints(("walreceiver-after-ingest", "sleep(10)"))
+            cur.execute("INSERT INTO t SELECT generate_series(1, 100), 'payload'")
+
+            real_last_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_insert_lsn()"))
+
+    # Sanity check: make sure Pageserver lags behind. Otherwise the test passes.
+    pageserver_lsn = last_record_lsn(pageserver_http, env.initial_tenant, timeline_id)
+    log.info(
+        "Pageserver's LSN is %s, but insert LSN is %s, lag is %d",
+        pageserver_lsn,
+        real_last_lsn,
+        real_last_lsn - pageserver_lsn,
+    )
+    # Typical initial lag on a local machine is about 13000.
+    assert real_last_lsn - pageserver_lsn >= 4000
+
+    env.neon_cli.create_branch(branch2, ancestor_branch_name=branch1)
+    with closing(env.postgres.create_start(branch2).connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT sum(key) FROM t")
+            assert cur.fetchone() == (5050 + 1000000,)

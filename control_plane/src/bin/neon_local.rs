@@ -22,6 +22,7 @@ use safekeeper_api::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
 use std::collections::{BTreeSet, HashMap};
+use std::iter;
 use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
@@ -502,13 +503,47 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             {
                 Some(x) => x,
                 None => {
-                    // Although race condition is possible here, we do not warn about it for clearer output.
-                    // The exact LSN of the new branch will be printed below. Still, may not help the user:
-                    // https://github.com/neondatabase/neon/issues/2063
-                    pageserver
-                        .timeline_info(tenant_id, ancestor_timeline_id)
-                        .unwrap()
-                        .last_record_lsn
+                    // Although race condition is possible here if there are concurrent writes,
+                    // we do not warn about it for clearer output. The exact LSN of the new
+                    // branch will be printed below.
+                    //
+                    // Initially, safekeepers may know nothing about timelines, so we ask pageserver.
+                    // But in general the pageserver lags behing safekeepers a little, so we ask
+                    // for the most recent commit_lsn among safekeepers and the pageserver.
+                    // See `test_branch_at_head_no_lag`.
+                    //
+                    // See https://github.com/neondatabase/neon/issues/2063
+                    let mut sk_commit_lsns = Vec::new();
+                    for sk_conf in &env.safekeepers {
+                        match get_safekeeper(env, sk_conf.id)?
+                            .timeline_info(tenant_id, ancestor_timeline_id)
+                        {
+                            Ok(tli) => sk_commit_lsns.push(tli.commit_lsn),
+                            Err(e) if e.to_string().contains("was not found in global map") => {
+                                // Do nothing, safekeeper does not know about the timeline
+                            }
+                            Err(e) => Err(e).context(
+                                "Unable to retrieve timeline information from a safekeeper",
+                            )?,
+                        }
+                    }
+                    // Everything up to a commit_lsn is committed, so we just return the maximum.
+                    // It should be a majority automatically.
+                    let pageserver_lsn = pageserver
+                        .timeline_info(tenant_id, ancestor_timeline_id)?
+                        .last_record_lsn;
+                    let max_commit_lsn = *sk_commit_lsns
+                        .iter()
+                        .chain(iter::once(&pageserver_lsn))
+                        .max()
+                        .unwrap();
+                    if pageserver_lsn < max_commit_lsn {
+                        println!("Pageserver is lagging behind at {}, branch creation may take a while until it catches up to {}",
+                                 pageserver_lsn,
+                                 max_commit_lsn
+                        );
+                    }
+                    max_commit_lsn
                 }
             };
             let timeline_info = pageserver.timeline_create(
