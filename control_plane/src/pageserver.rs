@@ -320,7 +320,7 @@ impl PageServerNode {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
-            vec![("ZENITH_AUTH_TOKEN".to_owned(), token)]
+            vec![("NEON_AUTH_TOKEN".to_owned(), token)]
         } else {
             Vec::new()
         })

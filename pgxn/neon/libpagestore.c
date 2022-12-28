@@ -420,7 +420,7 @@ pg_init_libpagestore(void)
 							   NULL, NULL, NULL);
 
     DefineCustomStringVariable("neon.safekeeper_token_env",
-                               "the environment variable containing JWT token for authentication with Safekeepers, the convention is to either unset or set to $ZENITH_AUTH_TOKEN",
+                               "the environment variable containing JWT token for authentication with Safekeepers, the convention is to either unset or set to $NEON_AUTH_TOKEN",
                                NULL,
                                &safekeeper_token_env,
                                NULL,

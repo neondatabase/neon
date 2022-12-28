@@ -201,7 +201,7 @@ impl PostgresNode {
             .stderr(Stdio::piped());
 
         if let Some(token) = auth_token {
-            cmd.env("ZENITH_AUTH_TOKEN", token);
+            cmd.env("NEON_AUTH_TOKEN", token);
         }
 
         let sync_handle = cmd
@@ -304,17 +304,17 @@ impl PostgresNode {
 
             // Set up authentication
             //
-            // $ZENITH_AUTH_TOKEN will be replaced with value from environment
+            // $NEON_AUTH_TOKEN will be replaced with value from environment
             // variable during compute pg startup. It is done this way because
             // otherwise user will be able to retrieve the value using SHOW
             // command or pg_settings
             let password = if let AuthType::NeonJWT = auth_type {
-                "$ZENITH_AUTH_TOKEN"
+                "$NEON_AUTH_TOKEN"
             } else {
                 ""
             };
             // NOTE avoiding spaces in connection string, because it is less error prone if we forward it somewhere.
-            // Also note that not all parameters are supported here. Because in compute we substitute $ZENITH_AUTH_TOKEN
+            // Also note that not all parameters are supported here. Because in compute we substitute $NEON_AUTH_TOKEN
             // We parse this string and build it back with token from env var, and for simplicity rebuild
             // uses only needed variables namely host, port, user, password.
             format!("postgresql://no_user:{password}@{host}:{port}")
@@ -323,7 +323,7 @@ impl PostgresNode {
         conf.append_line("");
         conf.append("neon.pageserver_connstring", &pageserver_connstr);
         if let AuthType::NeonJWT = auth_type {
-            conf.append("neon.safekeeper_token_env", "$ZENITH_AUTH_TOKEN");
+            conf.append("neon.safekeeper_token_env", "$NEON_AUTH_TOKEN");
         }
         conf.append("neon.tenant_id", &self.tenant_id.to_string());
         conf.append("neon.timeline_id", &self.timeline_id.to_string());
@@ -448,7 +448,7 @@ impl PostgresNode {
             self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
         );
         if let Some(token) = auth_token {
-            cmd.env("ZENITH_AUTH_TOKEN", token);
+            cmd.env("NEON_AUTH_TOKEN", token);
         }
 
         let pg_ctl = cmd.output().context("pg_ctl failed")?;
