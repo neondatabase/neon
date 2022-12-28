@@ -236,16 +236,60 @@ impl LayerMap {
         return Ok(coverage);
     }
 
-    /// Count how many L1 delta layers there are that overlap with the
-    /// given key and LSN range.
-    pub fn count_deltas(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>) -> Result<usize> {
-        // TODO write recursive function:
-        // 1. Get delta coverage
-        // 2. Recurse on each part
-        //
-        // This will count some layers twice, but we're interested in the max number of
-        // stacked deltas anyway (parallel deltas don't matter) so that's fine.
-        todo!()
+    /// Count the height of the tallest stack of deltas in this 2d region.
+    /// This number is used to compute the largest number of deltas that
+    /// we'll need to visit for any page reconstruction in this region.
+    /// We use this heuristic to decide whether to create an image layer.
+    pub fn count_deltas(&self, key: &Range<Key>, lsn: &Range<Lsn>) -> Result<usize> {
+        // We get the delta coverage of the region, and for each part of the coverage
+        // we recurse right underneath the delta. The recursion depth is limited by
+        // the largest result this function could return, which is in practice between
+        // 3 and 10 (since we usually try to create an image when the number gets larger).
+
+        let version = match self.index.get_version(lsn.end.0) {
+            Some(v) => v,
+            None => return Ok(0),
+        };
+
+        let start = key.start.to_i128();
+        let end = key.end.to_i128();
+
+        // Initialize loop variables
+        let mut max_stacked_deltas = 0;
+        let mut current_key = start.clone();
+        let mut current_val = version.query(start).1;
+
+        // Loop through the delta coverage and recurse on each part
+        for (change_key, change_val) in version.delta_coverage(start..end) {
+            // If there's a relevant delta in this part, add 1 and recurse down
+            if let Some(val) = current_val {
+                if val.get_lsn_range().end.0 >= lsn.start.0 {
+                    let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
+                    let lr = lsn.start..val.get_lsn_range().start;
+                    let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr)?;
+
+                    max_stacked_deltas =
+                        std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
+                }
+            }
+
+            current_key = change_key.clone();
+            current_val = change_val.clone();
+        }
+
+        // Consider the last part
+        if let Some(val) = current_val {
+            if val.get_lsn_range().end.0 >= lsn.start.0 {
+                let kr = Key::from_i128(current_key)..Key::from_i128(end);
+                let lr = lsn.start..val.get_lsn_range().start;
+                let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr)?;
+
+                max_stacked_deltas =
+                    std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
+            }
+        }
+
+        Ok(max_stacked_deltas)
     }
 
     /// Return all L0 delta layers
@@ -269,8 +313,8 @@ impl LayerMap {
         }
 
         println!("historic_layers:");
-        for e in self.historic_layers.iter() {
-            e.layer.dump(verbose)?;
+        for layer in self.iter_historic_layers() {
+            layer.dump(verbose)?;
         }
         println!("End dump LayerMap");
         Ok(())
