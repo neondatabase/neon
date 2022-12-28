@@ -18,7 +18,8 @@ use pageserver::{
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
     },
-    tenant_mgr, virtual_file,
+    tenant::mgr,
+    virtual_file,
 };
 use utils::{
     auth::JwtAuth,
@@ -284,7 +285,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     let remote_storage = create_remote_storage_client(conf)?;
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    BACKGROUND_RUNTIME.block_on(tenant_mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
+    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.

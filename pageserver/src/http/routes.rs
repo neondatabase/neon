@@ -12,9 +12,9 @@ use super::models::{
     TimelineCreateRequest, TimelineInfo,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{with_ondemand_download, Timeline};
-use crate::tenant_config::TenantConfOpt;
-use crate::{config::PageServerConf, tenant_mgr};
+use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
     http::{
@@ -170,7 +170,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         .new_timeline_id
         .unwrap_or_else(TimelineId::generate);
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+    let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
     match tenant.create_timeline(
@@ -199,7 +199,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     check_permission(&request, Some(tenant_id))?;
 
     let response_data = async {
-        let tenant = tenant_mgr::get_tenant(tenant_id, true)
+        let tenant = mgr::get_tenant(tenant_id, true)
             .await
             .map_err(ApiError::NotFound)?;
         let timelines = tenant.list_timelines();
@@ -262,7 +262,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_info = async {
-        let tenant = tenant_mgr::get_tenant(tenant_id, true)
+        let tenant = mgr::get_tenant(tenant_id, true)
             .await
             .map_err(ApiError::NotFound)?;
 
@@ -294,7 +294,7 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
-    let timeline = tenant_mgr::get_tenant(tenant_id, true)
+    let timeline = mgr::get_tenant(tenant_id, true)
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
         .map_err(ApiError::NotFound)?;
@@ -322,7 +322,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
 
     if let Some(remote_storage) = &state.remote_storage {
         // FIXME: distinguish between "Tenant already exists" and other errors
-        tenant_mgr::attach_tenant(state.conf, tenant_id, remote_storage.clone())
+        mgr::attach_tenant(state.conf, tenant_id, remote_storage.clone())
             .instrument(info_span!("tenant_attach", tenant = %tenant_id))
             .await
             .map_err(ApiError::InternalServerError)?;
@@ -340,7 +340,7 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    tenant_mgr::delete_timeline(tenant_id, timeline_id)
+    mgr::delete_timeline(tenant_id, timeline_id)
         .instrument(info_span!("timeline_delete", tenant = %tenant_id, timeline = %timeline_id))
         .await
         // FIXME: Errors from `delete_timeline` can occur for a number of reasons, incuding both
@@ -357,7 +357,7 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
 
     let state = get_state(&request);
     let conf = state.conf;
-    tenant_mgr::detach_tenant(conf, tenant_id)
+    mgr::detach_tenant(conf, tenant_id)
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await
         // FIXME: Errors from `detach_tenant` can be caused by both both user and internal errors.
@@ -372,7 +372,7 @@ async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, A
     check_permission(&request, Some(tenant_id))?;
 
     let state = get_state(&request);
-    tenant_mgr::load_tenant(state.conf, tenant_id, state.remote_storage.clone())
+    mgr::load_tenant(state.conf, tenant_id, state.remote_storage.clone())
         .instrument(info_span!("load", tenant = %tenant_id))
         .await
         .map_err(ApiError::InternalServerError)?;
@@ -386,7 +386,7 @@ async fn tenant_ignore_handler(request: Request<Body>) -> Result<Response<Body>,
 
     let state = get_state(&request);
     let conf = state.conf;
-    tenant_mgr::ignore_tenant(conf, tenant_id)
+    mgr::ignore_tenant(conf, tenant_id)
         .instrument(info_span!("ignore_tenant", tenant = %tenant_id))
         .await
         // FIXME: Errors from `ignore_tenant` can be caused by both both user and internal errors.
@@ -399,7 +399,7 @@ async fn tenant_ignore_handler(request: Request<Body>) -> Result<Response<Body>,
 async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
-    let response_data = tenant_mgr::list_tenants()
+    let response_data = mgr::list_tenants()
         .instrument(info_span!("tenant_list"))
         .await
         .iter()
@@ -419,7 +419,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     check_permission(&request, Some(tenant_id))?;
 
     let tenant_info = async {
-        let tenant = tenant_mgr::get_tenant(tenant_id, false).await?;
+        let tenant = mgr::get_tenant(tenant_id, false).await?;
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
@@ -446,7 +446,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+    let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -567,7 +567,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let state = get_state(&request);
 
-    let new_tenant = tenant_mgr::create_tenant(
+    let new_tenant = mgr::create_tenant(
         state.conf,
         tenant_conf,
         target_tenant_id,
@@ -669,7 +669,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
 
     let state = get_state(&request);
-    tenant_mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
+    mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", tenant = ?tenant_id))
         .await
         // FIXME: `update_tenant_config` can fail because of both user and internal errors.
@@ -721,7 +721,7 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
 
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
-    let wait_task_done = tenant_mgr::immediate_gc(tenant_id, timeline_id, gc_req).await?;
+    let wait_task_done = mgr::immediate_gc(tenant_id, timeline_id, gc_req).await?;
     let gc_result = wait_task_done
         .await
         .context("wait for gc task")
@@ -738,7 +738,7 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+    let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
     let timeline = tenant
@@ -759,7 +759,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+    let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
     let timeline = tenant
@@ -784,7 +784,7 @@ async fn timeline_download_remote_layers_handler_post(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+    let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
     let timeline = tenant
@@ -803,7 +803,7 @@ async fn timeline_download_remote_layers_handler_get(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+    let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
     let timeline = tenant

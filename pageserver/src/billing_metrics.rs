@@ -9,7 +9,7 @@ use tracing::*;
 use utils::id::TimelineId;
 
 use crate::task_mgr;
-use crate::tenant_mgr;
+use crate::tenant::mgr;
 use pageserver_api::models::TenantState;
 use utils::id::TenantId;
 
@@ -161,7 +161,7 @@ pub async fn collect_metrics_task(
     );
 
     // get list of tenants
-    let tenants = tenant_mgr::list_tenants().await;
+    let tenants = mgr::list_tenants().await;
 
     // iterate through list of Active tenants and collect metrics
     for (tenant_id, tenant_state) in tenants {
@@ -169,7 +169,7 @@ pub async fn collect_metrics_task(
             continue;
         }
 
-        let tenant = tenant_mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id, true).await?;
 
         let mut tenant_resident_size = 0;
 

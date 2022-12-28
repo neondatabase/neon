@@ -8,8 +8,8 @@ use std::time::Duration;
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::mgr;
 use crate::tenant::{Tenant, TenantState};
-use crate::tenant_mgr;
 use tracing::*;
 use utils::id::TenantId;
 
@@ -155,7 +155,7 @@ async fn wait_for_active_tenant(
     wait: Duration,
 ) -> ControlFlow<(), Arc<Tenant>> {
     let tenant = loop {
-        match tenant_mgr::get_tenant(tenant_id, false).await {
+        match mgr::get_tenant(tenant_id, false).await {
             Ok(tenant) => break tenant,
             Err(e) => {
                 error!("Failed to get a tenant {tenant_id}: {e:#}");

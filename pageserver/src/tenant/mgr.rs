@@ -17,8 +17,8 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::task_mgr::{self, TaskKind};
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{Tenant, TenantState};
-use crate::tenant_config::TenantConfOpt;
 use crate::IGNORED_TENANT_FILE_NAME;
 
 use utils::fs_ext::PathExt;
@@ -216,8 +216,7 @@ pub async fn create_tenant(
         hash_map::Entry::Vacant(v) => {
             // Hold the write_tenants() lock, since all of this is local IO.
             // If this section ever becomes contentious, introduce a new `TenantState::Creating`.
-            let tenant_directory =
-                super::tenant::create_tenant_files(conf, tenant_conf, tenant_id)?;
+            let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id)?;
             let created_tenant =
                 schedule_local_tenant_processing(conf, &tenant_directory, remote_storage)?;
             let crated_tenant_id = created_tenant.tenant_id();
