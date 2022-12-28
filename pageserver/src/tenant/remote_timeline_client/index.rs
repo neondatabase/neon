@@ -309,7 +309,7 @@ mod tests {
         let example = r#"{
             "version":1,
             "timeline_layers":["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"],
-            "missing_layers":["aaaaa"],
+            "missing_layers":["This shouldn't fail deserialization"],
             "layer_metadata":{
                 "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000 },
                 "LAYER_FILE_NAME::test/not_a_real_layer_but_adding_coverage": { "file_size": 9007199254741001 }
