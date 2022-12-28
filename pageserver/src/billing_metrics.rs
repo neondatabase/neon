@@ -33,9 +33,9 @@ use reqwest::Url;
 /// "metric": "remote_storage_size",
 /// "type": "absolute",
 /// "tenant_id": "5d07d9ce9237c4cd845ea7918c0afa7d",
-/// "timeline_id": "00000000000000000000000000000000",
-/// "time": ...,
-/// "idempotency_key":
+/// "timeline_id": "a03ebb4f5922a1c56ff7485cc8854143",
+/// "time": "2022-12-28T11:07:19.317310284Z",
+/// "idempotency_key": "2022-12-28 11:07:19.317310324 UTC-1-4019",
 /// "value": 12345454,
 /// }
 /// ```
