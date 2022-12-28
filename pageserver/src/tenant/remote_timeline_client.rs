@@ -214,7 +214,7 @@ use anyhow::ensure;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use std::ops::DerefMut;
 use tokio::runtime::Runtime;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
@@ -675,7 +675,7 @@ impl RemoteTimelineClient {
             // We can launch this task. Remove it from the queue first.
             let next_op = upload_queue.queued_operations.pop_front().unwrap();
 
-            info!("starting op: {}", next_op);
+            debug!("starting op: {}", next_op);
 
             // Update the counters
             match next_op {
@@ -867,7 +867,7 @@ impl RemoteTimelineClient {
                 task.op, retries
             );
         } else {
-            info!("remote task {} completed successfully", task.op);
+            debug!("remote task {} completed successfully", task.op);
         }
 
         // The task has completed succesfully. Remove it from the in-progress list.
