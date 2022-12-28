@@ -287,6 +287,29 @@ pub struct RemoteTimelineClient {
 }
 
 impl RemoteTimelineClient {
+    ///
+    /// Create a remote storage client for given timeline
+    ///
+    /// Note: the caller must initialize the upload queue before any uploads can be scheduled,
+    /// by calling init_upload_queue.
+    ///
+    pub fn new(
+        remote_storage: GenericRemoteStorage,
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> anyhow::Result<RemoteTimelineClient> {
+        Ok(RemoteTimelineClient {
+            conf,
+            runtime: &BACKGROUND_RUNTIME,
+            tenant_id,
+            timeline_id,
+            storage_impl: remote_storage,
+            upload_queue: Mutex::new(UploadQueue::Uninitialized),
+            metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
+        })
+    }
+
     /// Initialize the upload queue for a remote storage that already received
     /// an index file upload, i.e., it's not empty.
     /// The given `index_part` must be the one on the remote.
@@ -955,29 +978,6 @@ impl RemoteTimelineClient {
             }
         }
     }
-}
-
-///
-/// Create a remote storage client for given timeline
-///
-/// Note: the caller must initialize the upload queue before any uploads can be scheduled,
-/// by calling init_upload_queue.
-///
-pub fn create_remote_timeline_client(
-    remote_storage: GenericRemoteStorage,
-    conf: &'static PageServerConf,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-) -> anyhow::Result<RemoteTimelineClient> {
-    Ok(RemoteTimelineClient {
-        conf,
-        runtime: &BACKGROUND_RUNTIME,
-        tenant_id,
-        timeline_id,
-        storage_impl: remote_storage,
-        upload_queue: Mutex::new(UploadQueue::Uninitialized),
-        metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
-    })
 }
 
 #[cfg(test)]

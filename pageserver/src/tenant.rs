@@ -45,7 +45,6 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
-use self::remote_timeline_client::create_remote_timeline_client;
 use self::remote_timeline_client::RemoteTimelineClient;
 use crate::config::PageServerConf;
 use crate::import_datadir;
@@ -738,7 +737,7 @@ impl Tenant {
             .context("Failed to create new timeline directory")?;
 
         let remote_client =
-            create_remote_timeline_client(remote_storage, self.conf, self.tenant_id, timeline_id)?;
+            RemoteTimelineClient::new(remote_storage, self.conf, self.tenant_id, timeline_id)?;
 
         let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
             let timelines = self.timelines.lock().unwrap();
@@ -1000,7 +999,7 @@ impl Tenant {
             .remote_storage
             .as_ref()
             .map(|remote_storage| {
-                create_remote_timeline_client(
+                RemoteTimelineClient::new(
                     remote_storage.clone(),
                     self.conf,
                     self.tenant_id,
@@ -2197,7 +2196,7 @@ impl Tenant {
         let tenant_id = self.tenant_id;
 
         let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
-            let remote_client = create_remote_timeline_client(
+            let remote_client = RemoteTimelineClient::new(
                 remote_storage.clone(),
                 self.conf,
                 tenant_id,
