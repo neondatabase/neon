@@ -2674,29 +2674,27 @@ impl Timeline {
     ///
     /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
     /// whether a record is needed for PITR.
+    ///
+    /// NOTE: This function holds a short-lived lock to protect the 'gc_info'
+    /// field, so that the three values passed as argument are stored
+    /// atomically. But the caller is responsible for ensuring that no new
+    /// branches are created that would need to be included in 'retain_lsns',
+    /// for example. The caller should hold `Tenant::gc_cs` lock to ensure
+    /// that.
+    ///
     pub(super) async fn update_gc_info(
         &self,
         retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
     ) -> anyhow::Result<()> {
-        let mut gc_info = self.gc_info.write().unwrap();
-
-        gc_info.horizon_cutoff = cutoff_horizon;
-        gc_info.retain_lsns = retain_lsns;
-
-        // Calculate pitr cutoff point.
-        // If we cannot determine a cutoff LSN, be conservative and don't GC anything.
-        let mut pitr_cutoff_lsn: Lsn;
-
-        if pitr != Duration::ZERO {
-            // conservative, safe default is to remove nothing, when we have no
-            // commit timestamp data available
-            pitr_cutoff_lsn = *self.get_latest_gc_cutoff_lsn();
-
-            // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
-            // If we don't have enough data to convert to LSN,
-            // play safe and don't remove any layers.
+        // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
+        //
+        // Some unit tests depend on garbage-collection working even when
+        // CLOG data is missing, so that find_lsn_for_timestamp() doesn't
+        // work, so avoid calling it altogether if time-based retention is not
+        // configured. It would be pointless anyway.
+        let pitr_cutoff = if pitr != Duration::ZERO {
             let now = SystemTime::now();
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
@@ -2705,27 +2703,44 @@ impl Timeline {
                     .find_lsn_for_timestamp(pitr_timestamp)
                     .no_ondemand_download()?
                 {
-                    LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
+                    LsnForTimestamp::Present(lsn) => lsn,
                     LsnForTimestamp::Future(lsn) => {
+                        // The timestamp is in the future. That sounds impossible,
+                        // but what it really means is that there hasn't been
+                        // any commits since the cutoff timestamp.
                         debug!("future({})", lsn);
-                        pitr_cutoff_lsn = gc_info.horizon_cutoff;
+                        cutoff_horizon
                     }
                     LsnForTimestamp::Past(lsn) => {
                         debug!("past({})", lsn);
+                        // conservative, safe default is to remove nothing, when we
+                        // have no commit timestamp data available
+                        *self.get_latest_gc_cutoff_lsn()
                     }
                     LsnForTimestamp::NoData(lsn) => {
                         debug!("nodata({})", lsn);
+                        // conservative, safe default is to remove nothing, when we
+                        // have no commit timestamp data available
+                        *self.get_latest_gc_cutoff_lsn()
                     }
                 }
-                debug!("pitr_cutoff_lsn = {:?}", pitr_cutoff_lsn)
+            } else {
+                // If we don't have enough data to convert to LSN,
+                // play safe and don't remove any layers.
+                *self.get_latest_gc_cutoff_lsn()
             }
         } else {
-            // No time-based retention. (Some unit tests depend on garbage-collection
-            // working even when CLOG data is missing, so that find_lsn_for_timestamp()
-            // above doesn't work.)
-            pitr_cutoff_lsn = gc_info.horizon_cutoff;
-        }
-        gc_info.pitr_cutoff = pitr_cutoff_lsn;
+            // No time-based retention was configured. Set time-based cutoff to
+            // same as LSN based.
+            cutoff_horizon
+        };
+
+        // Grab the lock and update the values
+        *self.gc_info.write().unwrap() = GcInfo {
+            retain_lsns,
+            horizon_cutoff: cutoff_horizon,
+            pitr_cutoff,
+        };
 
         Ok(())
     }
