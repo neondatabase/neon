@@ -88,6 +88,7 @@ mod storage_sync;
 pub mod config;
 pub mod mgr;
 pub mod tasks;
+pub mod upload_queue;
 
 mod timeline;
 
