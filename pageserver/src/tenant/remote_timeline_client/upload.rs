@@ -5,7 +5,7 @@ use fail::fail_point;
 use std::path::Path;
 use tokio::fs;
 
-use crate::{config::PageServerConf, tenant::storage_sync::index::IndexPart};
+use crate::{config::PageServerConf, tenant::remote_timeline_client::index::IndexPart};
 use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
 

@@ -45,9 +45,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
-use self::storage_sync::create_remote_timeline_client;
-use self::storage_sync::index::IndexPart;
-use self::storage_sync::RemoteTimelineClient;
+use self::remote_timeline_client::RemoteTimelineClient;
 use crate::config::PageServerConf;
 use crate::import_datadir;
 use crate::is_uninit_mark;
@@ -57,6 +55,7 @@ use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
+use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
@@ -82,12 +81,13 @@ pub mod layer_map;
 
 pub mod metadata;
 mod par_fsync;
+mod remote_timeline_client;
 pub mod storage_layer;
-mod storage_sync;
 
 pub mod config;
 pub mod mgr;
 pub mod tasks;
+pub mod upload_queue;
 
 mod timeline;
 
@@ -648,8 +648,12 @@ impl Tenant {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
-        let remote_timelines =
-            storage_sync::list_remote_timelines(remote_storage, self.conf, self.tenant_id).await?;
+        let remote_timelines = remote_timeline_client::list_remote_timelines(
+            remote_storage,
+            self.conf,
+            self.tenant_id,
+        )
+        .await?;
 
         info!("found {} timelines", remote_timelines.len());
 
@@ -733,7 +737,7 @@ impl Tenant {
             .context("Failed to create new timeline directory")?;
 
         let remote_client =
-            create_remote_timeline_client(remote_storage, self.conf, self.tenant_id, timeline_id)?;
+            RemoteTimelineClient::new(remote_storage, self.conf, self.tenant_id, timeline_id)?;
 
         let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
             let timelines = self.timelines.lock().unwrap();
@@ -995,7 +999,7 @@ impl Tenant {
             .remote_storage
             .as_ref()
             .map(|remote_storage| {
-                create_remote_timeline_client(
+                RemoteTimelineClient::new(
                     remote_storage.clone(),
                     self.conf,
                     self.tenant_id,
@@ -2192,7 +2196,7 @@ impl Tenant {
         let tenant_id = self.tenant_id;
 
         let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
-            let remote_client = create_remote_timeline_client(
+            let remote_client = RemoteTimelineClient::new(
                 remote_storage.clone(),
                 self.conf,
                 tenant_id,

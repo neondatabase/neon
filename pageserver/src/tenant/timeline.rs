@@ -23,11 +23,11 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
     DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer, LayerFileName,
     RemoteLayer,
 };
-use crate::tenant::storage_sync::{self, index::LayerFileMetadata};
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file,
     layer_map::{LayerMap, SearchResult},
@@ -64,9 +64,9 @@ use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 
+use super::remote_timeline_client::index::IndexPart;
+use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
-use super::storage_sync::index::IndexPart;
-use super::storage_sync::RemoteTimelineClient;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -1122,7 +1122,7 @@ impl Timeline {
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
-            } else if storage_sync::is_temp_download_file(&direntry_path) {
+            } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
                 info!(
                     "skipping temp download file, reconcile_with_remote will resume / clean up: {}",
                     fname
