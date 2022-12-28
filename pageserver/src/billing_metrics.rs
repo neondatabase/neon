@@ -6,6 +6,7 @@
 
 use anyhow;
 use tracing::*;
+use utils::id::NodeId;
 use utils::id::TimelineId;
 
 use crate::task_mgr;
@@ -21,6 +22,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use rand::Rng;
 use reqwest::Url;
 
 /// BillingMetric struct that defines the format for one metric entry
@@ -59,6 +61,7 @@ impl BillingMetric {
         tenant_id: TenantId,
         timeline_id: Option<TimelineId>,
         value: u64,
+        node_id: NodeId,
     ) -> Self {
         Self {
             metric,
@@ -66,7 +69,13 @@ impl BillingMetric {
             tenant_id,
             timeline_id,
             time: Utc::now(),
-            idempotency_key: format!("{}", Utc::now()),
+            // key that allows metric collector to distinguish unique events
+            idempotency_key: format!(
+                "{}-{}-{:04}",
+                Utc::now(),
+                node_id,
+                rand::thread_rng().gen_range(0..=9999)
+            ),
             value,
         }
     }
@@ -132,6 +141,7 @@ struct EventChunk<'a> {
 pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
     metric_collection_interval: Duration,
+    node_id: NodeId,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(metric_collection_interval);
 
@@ -148,7 +158,7 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
-                collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint).await?;
+                collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await?;
             }
         }
     }
@@ -162,6 +172,7 @@ pub async fn collect_metrics_task(
     client: &reqwest::Client,
     cached_metrics: &mut HashMap<BillingMetricsKey, u64>,
     metric_collection_endpoint: &reqwest::Url,
+    node_id: NodeId,
 ) -> anyhow::Result<()> {
     let mut current_metrics: Vec<(BillingMetricsKey, u64)> = Vec::new();
     trace!(
@@ -257,6 +268,7 @@ pub async fn collect_metrics_task(
                 curr_key.tenant_id,
                 curr_key.timeline_id,
                 *curr_val,
+                node_id,
             )
         }));
 
