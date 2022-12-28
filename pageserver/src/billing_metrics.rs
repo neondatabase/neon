@@ -56,12 +56,13 @@ pub struct BillingMetric {
 }
 
 impl BillingMetric {
-    pub fn new_absolute(
+    pub fn new_absolute<R: Rng + ?Sized>(
         metric: BillingMetricKind,
         tenant_id: TenantId,
         timeline_id: Option<TimelineId>,
         value: u64,
         node_id: NodeId,
+        rng: &mut R,
     ) -> Self {
         Self {
             metric,
@@ -70,12 +71,7 @@ impl BillingMetric {
             timeline_id,
             time: Utc::now(),
             // key that allows metric collector to distinguish unique events
-            idempotency_key: format!(
-                "{}-{}-{:04}",
-                Utc::now(),
-                node_id,
-                rand::thread_rng().gen_range(0..=9999)
-            ),
+            idempotency_key: format!("{}-{}-{:04}", Utc::now(), node_id, rng.gen_range(0..=9999)),
             value,
         }
     }
@@ -261,16 +257,23 @@ pub async fn collect_metrics_task(
 
     for chunk in chunks {
         chunk_to_send.clear();
-        // enrich metrics with timestamp and metric_kind before sending
-        chunk_to_send.extend(chunk.iter().map(|(curr_key, curr_val)| {
-            BillingMetric::new_absolute(
-                curr_key.metric,
-                curr_key.tenant_id,
-                curr_key.timeline_id,
-                *curr_val,
-                node_id,
-            )
-        }));
+
+        // this code block is needed to convince compiler
+        // that rng is not reused aroung await point
+        {
+            // enrich metrics with timestamp and metric_kind before sending
+            let mut rng = rand::thread_rng();
+            chunk_to_send.extend(chunk.iter().map(|(curr_key, curr_val)| {
+                BillingMetric::new_absolute(
+                    curr_key.metric,
+                    curr_key.tenant_id,
+                    curr_key.timeline_id,
+                    *curr_val,
+                    node_id,
+                    &mut rng,
+                )
+            }));
+        }
 
         let chunk_json = serde_json::value::to_raw_value(&EventChunk {
             events: &chunk_to_send,
