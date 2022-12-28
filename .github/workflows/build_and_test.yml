@@ -22,7 +22,7 @@ env:
 
 jobs:
   tag:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -50,7 +50,7 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cloud:pinned
       options: --init
@@ -85,7 +85,7 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -133,7 +133,7 @@ jobs:
         run: cargo deny check
 
   build-neon:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -301,7 +301,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -334,7 +334,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -365,7 +365,7 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   merge-allure-report:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -402,7 +402,7 @@ jobs:
           DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
 
   coverage-report:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -477,7 +477,7 @@ jobs:
             }"
 
   trigger-e2e-tests:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -522,7 +522,7 @@ jobs:
             }"
 
   neon-image:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     defaults:
@@ -543,7 +543,7 @@ jobs:
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
 
   compute-tools-image:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     defaults:
@@ -561,7 +561,7 @@ jobs:
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
   compute-node-image:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
     strategy:
@@ -586,7 +586,7 @@ jobs:
         run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --build-arg PG_VERSION=${{ matrix.version }} --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
   vm-compute-node-image:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     needs: [ tag, compute-node-image ]
     strategy:
       fail-fast: false
@@ -631,7 +631,7 @@ jobs:
 
   test-images:
     needs: [ tag, neon-image, compute-node-image, compute-tools-image ]
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
 
     steps:
       - name: Checkout
@@ -673,7 +673,7 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     needs: [ tag, test-images, vm-compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
@@ -689,7 +689,7 @@ jobs:
           aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
 
   push-docker-hub:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     needs: [ promote-images, tag ]
     container: golang:1.19-bullseye
 
@@ -777,7 +777,7 @@ jobs:
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
   calculate-deploy-targets:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     if: |
       github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
@@ -795,7 +795,7 @@ jobs:
           fi
 
   deploy:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -843,7 +843,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-new:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -883,7 +883,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-pr-test-new:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -958,7 +958,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -1003,7 +1003,7 @@ jobs:
 
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -1045,7 +1045,7 @@ jobs:
           helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install --atomic -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
   deploy-proxy-new:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1098,7 +1098,7 @@ jobs:
           helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-dev-new:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1225,7 +1225,7 @@ jobs:
           helm upgrade neon-storage-broker-lb neondatabase/neon-storage-broker --namespace neon-storage-broker-lb --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
   promote-compatibility-data:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
