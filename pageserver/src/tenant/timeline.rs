@@ -2699,9 +2699,7 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match self
-                    .find_lsn_for_timestamp(pitr_timestamp)
-                    .no_ondemand_download()?
+                match with_ondemand_download(|| self.find_lsn_for_timestamp(pitr_timestamp)).await?
                 {
                     LsnForTimestamp::Present(lsn) => lsn,
                     LsnForTimestamp::Future(lsn) => {
