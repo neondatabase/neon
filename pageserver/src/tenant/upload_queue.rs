@@ -2,8 +2,8 @@ use crate::metrics::RemoteOpFileKind;
 
 use super::storage_layer::LayerFileName;
 use crate::tenant::metadata::TimelineMetadata;
-use crate::tenant::storage_sync::index::IndexPart;
-use crate::tenant::storage_sync::index::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::index::IndexPart;
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 

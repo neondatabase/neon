@@ -3,8 +3,8 @@
 //!
 use crate::config::PageServerConf;
 use crate::repository::Key;
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use crate::tenant::storage_sync::index::LayerFileMetadata;
 use anyhow::{bail, Result};
 use std::ops::Range;
 use std::path::PathBuf;

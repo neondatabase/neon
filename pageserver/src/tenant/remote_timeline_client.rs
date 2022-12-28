@@ -221,7 +221,7 @@ use utils::lsn::Lsn;
 use crate::metrics::RemoteOpFileKind;
 use crate::metrics::RemoteOpKind;
 use crate::metrics::{MeasureRemoteOp, RemoteTimelineClientMetrics};
-use crate::tenant::storage_sync::index::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::{
     config::PageServerConf,
     task_mgr,
