@@ -274,7 +274,8 @@ def test_tenant_upgrades_index_json_from_v0(
         orig_index_part = json.load(timeline_file)
 
         v0_index_part = {
-            key: orig_index_part[key] for key in v0_skeleton.keys() - ["missing_layers"] # pgserver doesn't have it anymore
+            key: orig_index_part[key]
+            for key in v0_skeleton.keys() - ["missing_layers"]  # pgserver doesn't have it anymore
         }
 
         timeline_file.seek(0)
