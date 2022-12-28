@@ -264,19 +264,35 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
-    match var("ZENITH_AUTH_TOKEN") {
-        Ok(v) => {
+    // TODO: remove ZENITH_AUTH_TOKEN once it's not used anywhere in development/staging/prod configuration.
+    match (var("ZENITH_AUTH_TOKEN"), var("NEON_AUTH_TOKEN")) {
+        (old, Ok(v)) => {
             info!("Loaded JWT token for authentication with Safekeeper");
+            if let Ok(v_old) = old {
+                warn!(
+                    "JWT token for Safekeeper is specified twice, ZENITH_AUTH_TOKEN is deprecated"
+                );
+                if v_old != v {
+                    warn!("JWT token for Safekeeper has two different values, choosing NEON_AUTH_TOKEN");
+                }
+            }
             pageserver::config::SAFEKEEPER_AUTH_TOKEN
                 .set(Arc::new(v))
                 .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
         }
-        Err(VarError::NotPresent) => {
+        (Ok(v), _) => {
+            info!("Loaded JWT token for authentication with Safekeeper");
+            warn!("Please update pageserver configuration: the JWT token should be NEON_AUTH_TOKEN, not ZENITH_AUTH_TOKEN");
+            pageserver::config::SAFEKEEPER_AUTH_TOKEN
+                .set(Arc::new(v))
+                .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
+        }
+        (_, Err(VarError::NotPresent)) => {
             info!("No JWT token for authentication with Safekeeper detected");
         }
-        Err(e) => {
+        (_, Err(e)) => {
             return Err(e).with_context(|| {
-                "Failed to either load to detect non-present ZENITH_AUTH_TOKEN environment variable"
+                "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable"
             })
         }
     };
