@@ -1,38 +1,14 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::Arc;
 
-// TODO the `im` crate has 20x more downloads and also has
-// persistent/immutable BTree. See if it's better.
-use rpds::RedBlackTreeMapSync;
+use super::latest_layer_map::LatestLayerMap;
 
-/// Layer map implemented using persistent/immutable binary search tree.
-/// It supports historical queries, but no retroactive inserts. For that
-/// see RetroactiveLayerMap.
-///
-/// Layer type is abstracted as Value to make unit testing easier.
 pub struct PersistentLayerMap<Value> {
-    /// Mapping key to the latest layer (if any) until the next key.
-    /// We use the Sync version of the map because we want Self to
-    /// be Sync.
-    ///
-    /// TODO Separate Head into its own struct LatestLayerMap
-    /// TODO Merge historic with retroactive, into HistoricLayerMap
-    /// TODO Maintain a pair of heads, one for images, one for deltas.
-    ///      This way we can query both of them with one BTreeMap query.
-    head: RedBlackTreeMapSync<i128, Option<(u64, Value)>>,
+    /// The latest-only solution
+    head: LatestLayerMap<Value>,
 
-    /// All previous states of `self.head`
-    ///
-    /// TODO: Sorted Vec + binary search could be slightly faster.
-    historic: BTreeMap<u64, RedBlackTreeMapSync<i128, Option<(u64, Value)>>>,
-}
-
-impl<Value: std::fmt::Debug> std::fmt::Debug for PersistentLayerMap<Value> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let head_vec: Vec<_> = self.head.iter().collect();
-        write!(f, "PersistentLayerMap: head: {:?}", head_vec)
-    }
+    /// All previous states
+    historic: BTreeMap<u64, LatestLayerMap<Value>>,
 }
 
 impl<T: Clone> Default for PersistentLayerMap<T> {
@@ -44,22 +20,18 @@ impl<T: Clone> Default for PersistentLayerMap<T> {
 impl<Value: Clone> PersistentLayerMap<Value> {
     pub fn new() -> Self {
         Self {
-            head: RedBlackTreeMapSync::default(),
+            head: LatestLayerMap::default(),
             historic: BTreeMap::default(),
         }
     }
 
-    /// Helper function to subdivide the key range without changing any values
-    fn add_node(self: &mut Self, key: i128) {
-        let value = match self.head.range(..=key).last() {
-            Some((_, Some(v))) => Some(v.clone()),
-            Some((_, None)) => None,
-            None => None,
-        };
-        self.head.insert_mut(key, value);
-    }
-
-    pub fn insert(self: &mut Self, key: Range<i128>, lsn: Range<u64>, value: Value) {
+    pub fn insert(
+        self: &mut Self,
+        key: Range<i128>,
+        lsn: Range<u64>,
+        value: Value,
+        is_image: bool,
+    ) {
         // It's only a persistent map, not a retroactive one
         if let Some(last_entry) = self.historic.iter().rev().next() {
             let last_lsn = last_entry.0;
@@ -71,65 +43,25 @@ impl<Value: Clone> PersistentLayerMap<Value> {
             }
         }
 
-        // NOTE The order of the following lines is important!!
-
-        // Add nodes at endpoints
-        self.add_node(key.start);
-        self.add_node(key.end);
-
-        // Raise the height where necessary
-        //
-        // NOTE This loop is worst case O(N), but amortized O(log N) in the special
-        // case when rectangles have no height. In practice I don't think we'll see
-        // the kind of layer intersections needed to trigger O(N) behavior. If we
-        // do it can be fixed using lazy propagation.
-        let mut to_update = Vec::new();
-        let mut to_remove = Vec::new();
-        let mut prev_covered = false;
-        for (k, node) in self.head.range(key.clone()) {
-            let needs_cover = match node {
-                None => true,
-                Some((h, _)) => h < &lsn.end,
-            };
-            if needs_cover {
-                match prev_covered {
-                    true => to_remove.push(k.clone()),
-                    false => to_update.push(k.clone()),
-                }
-            }
-            prev_covered = needs_cover;
-        }
-        if !prev_covered {
-            to_remove.push(key.end);
-        }
-        for k in to_update {
-            self.head
-                .insert_mut(k.clone(), Some((lsn.end.clone(), value.clone())));
-        }
-        for k in to_remove {
-            self.head.remove_mut(&k);
-        }
+        self.head.insert(key, lsn.clone(), value, is_image);
 
         // Remember history. Clone is O(1)
         self.historic.insert(lsn.start, self.head.clone());
     }
 
-    pub fn query(self: &Self, key: i128, lsn: u64) -> Option<Value> {
-        let version = self.historic.range(..=lsn).rev().next()?.1;
-        version
-            .range(..=key)
-            .rev()
-            .next()?
-            .1
-            .as_ref()
-            .map(|(_, v)| v.clone())
+    pub fn query(self: &Self, key: i128, lsn: u64) -> (Option<Value>, Option<Value>) {
+        let version = match self.historic.range(..=lsn).rev().next() {
+            Some((_, v)) => v,
+            None => return (None, None),
+        };
+        version.query(key)
     }
 
-    pub fn get_coverage(
-        self: &Self,
-        lsn: u64,
-    ) -> Option<&RedBlackTreeMapSync<i128, Option<(u64, Value)>>> {
-        Some(self.historic.range(..=lsn).rev().next()?.1)
+    pub fn get_version(self: &Self, lsn: u64) -> Option<&LatestLayerMap<Value>> {
+        match self.historic.range(..=lsn).rev().next() {
+            Some((_, v)) => Some(v),
+            None => None,
+        }
     }
 
     pub fn trim(self: &mut Self, begin: &u64) {
@@ -144,64 +76,46 @@ impl<Value: Clone> PersistentLayerMap<Value> {
     }
 }
 
-/// Basic test for the immutable bst library, just to show usage.
-#[test]
-fn test_immutable_bst_dependency() {
-    let map = RedBlackTreeMapSync::<i32, i32>::default();
-
-    let mut v1 = map.clone();
-    let v2 = map.insert(1, 5);
-
-    // We can query current and past versions of key 1
-    assert_eq!(v1.get(&1), None);
-    assert_eq!(v2.get(&1), Some(&5));
-
-    // We can mutate old state, but it creates a branch.
-    // It doesn't retroactively change future versions.
-    v1.insert_mut(2, 6);
-    assert_eq!(v1.get(&2), Some(&6));
-    assert_eq!(v2.get(&2), None);
-}
-
 /// This is the most basic test that demonstrates intended usage.
 /// All layers in this test have height 1.
 #[test]
 fn test_persistent_simple() {
     let mut map = PersistentLayerMap::<String>::new();
-    map.insert(0..5, 100..101, "Layer 1".to_string());
-    map.insert(3..9, 110..111, "Layer 2".to_string());
-    map.insert(5..6, 120..121, "Layer 3".to_string());
+    map.insert(0..5, 100..101, "Layer 1".to_string(), true);
+    map.insert(3..9, 110..111, "Layer 2".to_string(), true);
+    map.insert(5..6, 120..121, "Layer 3".to_string(), true);
 
     // After Layer 1 insertion
-    assert_eq!(map.query(1, 105), Some("Layer 1".to_string()));
-    assert_eq!(map.query(4, 105), Some("Layer 1".to_string()));
+    assert_eq!(map.query(1, 105).1, Some("Layer 1".to_string()));
+    assert_eq!(map.query(4, 105).1, Some("Layer 1".to_string()));
 
     // After Layer 2 insertion
-    assert_eq!(map.query(4, 115), Some("Layer 2".to_string()));
-    assert_eq!(map.query(8, 115), Some("Layer 2".to_string()));
-    assert_eq!(map.query(11, 115), None);
+    assert_eq!(map.query(4, 115).1, Some("Layer 2".to_string()));
+    assert_eq!(map.query(8, 115).1, Some("Layer 2".to_string()));
+    assert_eq!(map.query(11, 115).1, None);
 
     // After Layer 3 insertion
-    assert_eq!(map.query(4, 125), Some("Layer 2".to_string()));
-    assert_eq!(map.query(5, 125), Some("Layer 3".to_string()));
-    assert_eq!(map.query(7, 125), Some("Layer 2".to_string()));
+    assert_eq!(map.query(4, 125).1, Some("Layer 2".to_string()));
+    assert_eq!(map.query(5, 125).1, Some("Layer 3".to_string()));
+    assert_eq!(map.query(7, 125).1, Some("Layer 2".to_string()));
 }
 
 /// Cover simple off-by-one edge cases
 #[test]
 fn test_off_by_one() {
     let mut map = PersistentLayerMap::<String>::new();
-    map.insert(3..5, 100..110, "Layer 1".to_string());
+    map.insert(3..5, 100..110, "Layer 1".to_string(), true);
 
     // Check different LSNs
-    assert_eq!(map.query(4, 99), None);
-    assert_eq!(map.query(4, 100), Some("Layer 1".to_string()));
+    assert_eq!(map.query(4, 99).1, None);
+    assert_eq!(map.query(4, 100).1, Some("Layer 1".to_string()));
+    assert_eq!(map.query(4, 110).1, Some("Layer 1".to_string()));
 
     // Check different keys
-    assert_eq!(map.query(2, 105), None);
-    assert_eq!(map.query(3, 105), Some("Layer 1".to_string()));
-    assert_eq!(map.query(4, 105), Some("Layer 1".to_string()));
-    assert_eq!(map.query(5, 105), None);
+    assert_eq!(map.query(2, 105).1, None);
+    assert_eq!(map.query(3, 105).1, Some("Layer 1".to_string()));
+    assert_eq!(map.query(4, 105).1, Some("Layer 1".to_string()));
+    assert_eq!(map.query(5, 105).1, None);
 }
 
 /// Cover edge cases where layers begin or end on the same key
@@ -209,24 +123,24 @@ fn test_off_by_one() {
 fn test_key_collision() {
     let mut map = PersistentLayerMap::<String>::new();
 
-    map.insert(3..5, 100..110, "Layer 10".to_string());
-    map.insert(5..8, 100..110, "Layer 11".to_string());
+    map.insert(3..5, 100..110, "Layer 10".to_string(), true);
+    map.insert(5..8, 100..110, "Layer 11".to_string(), true);
 
-    map.insert(3..4, 200..210, "Layer 20".to_string());
+    map.insert(3..4, 200..210, "Layer 20".to_string(), true);
 
     // Check after layer 11
-    assert_eq!(map.query(2, 105), None);
-    assert_eq!(map.query(3, 105), Some("Layer 10".to_string()));
-    assert_eq!(map.query(5, 105), Some("Layer 11".to_string()));
-    assert_eq!(map.query(7, 105), Some("Layer 11".to_string()));
-    assert_eq!(map.query(8, 105), None);
+    assert_eq!(map.query(2, 105).1, None);
+    assert_eq!(map.query(3, 105).1, Some("Layer 10".to_string()));
+    assert_eq!(map.query(5, 105).1, Some("Layer 11".to_string()));
+    assert_eq!(map.query(7, 105).1, Some("Layer 11".to_string()));
+    assert_eq!(map.query(8, 105).1, None);
 
     // Check after layer 20
-    assert_eq!(map.query(2, 205), None);
-    assert_eq!(map.query(3, 205), Some("Layer 20".to_string()));
-    assert_eq!(map.query(5, 205), Some("Layer 11".to_string()));
-    assert_eq!(map.query(7, 205), Some("Layer 11".to_string()));
-    assert_eq!(map.query(8, 205), None);
+    assert_eq!(map.query(2, 205).1, None);
+    assert_eq!(map.query(3, 205).1, Some("Layer 20".to_string()));
+    assert_eq!(map.query(5, 205).1, Some("Layer 11".to_string()));
+    assert_eq!(map.query(7, 205).1, Some("Layer 11".to_string()));
+    assert_eq!(map.query(8, 205).1, None);
 }
 
 /// Test when rectangles have nontrivial height and possibly overlap
@@ -235,45 +149,45 @@ fn test_persistent_overlapping() {
     let mut map = PersistentLayerMap::<String>::new();
 
     // Add 3 key-disjoint layers with varying LSN ranges
-    map.insert(1..2, 100..200, "Layer 1".to_string());
-    map.insert(4..5, 110..200, "Layer 2".to_string());
-    map.insert(7..8, 120..300, "Layer 3".to_string());
+    map.insert(1..2, 100..200, "Layer 1".to_string(), true);
+    map.insert(4..5, 110..200, "Layer 2".to_string(), true);
+    map.insert(7..8, 120..300, "Layer 3".to_string(), true);
 
     // Add wide and short layer
-    map.insert(0..9, 130..199, "Layer 4".to_string());
+    map.insert(0..9, 130..199, "Layer 4".to_string(), true);
 
     // Add wide layer taller than some
-    map.insert(0..9, 140..201, "Layer 5".to_string());
+    map.insert(0..9, 140..201, "Layer 5".to_string(), true);
 
     // Add wide layer taller than all
-    map.insert(0..9, 150..301, "Layer 6".to_string());
+    map.insert(0..9, 150..301, "Layer 6".to_string(), true);
 
     // After layer 4 insertion
-    assert_eq!(map.query(0, 135), Some("Layer 4".to_string()));
-    assert_eq!(map.query(1, 135), Some("Layer 1".to_string()));
-    assert_eq!(map.query(2, 135), Some("Layer 4".to_string()));
-    assert_eq!(map.query(4, 135), Some("Layer 2".to_string()));
-    assert_eq!(map.query(5, 135), Some("Layer 4".to_string()));
-    assert_eq!(map.query(7, 135), Some("Layer 3".to_string()));
-    assert_eq!(map.query(8, 135), Some("Layer 4".to_string()));
+    assert_eq!(map.query(0, 135).1, Some("Layer 4".to_string()));
+    assert_eq!(map.query(1, 135).1, Some("Layer 1".to_string()));
+    assert_eq!(map.query(2, 135).1, Some("Layer 4".to_string()));
+    assert_eq!(map.query(4, 135).1, Some("Layer 2".to_string()));
+    assert_eq!(map.query(5, 135).1, Some("Layer 4".to_string()));
+    assert_eq!(map.query(7, 135).1, Some("Layer 3".to_string()));
+    assert_eq!(map.query(8, 135).1, Some("Layer 4".to_string()));
 
     // After layer 5 insertion
-    assert_eq!(map.query(0, 145), Some("Layer 5".to_string()));
-    assert_eq!(map.query(1, 145), Some("Layer 5".to_string()));
-    assert_eq!(map.query(2, 145), Some("Layer 5".to_string()));
-    assert_eq!(map.query(4, 145), Some("Layer 5".to_string()));
-    assert_eq!(map.query(5, 145), Some("Layer 5".to_string()));
-    assert_eq!(map.query(7, 145), Some("Layer 3".to_string()));
-    assert_eq!(map.query(8, 145), Some("Layer 5".to_string()));
+    assert_eq!(map.query(0, 145).1, Some("Layer 5".to_string()));
+    assert_eq!(map.query(1, 145).1, Some("Layer 5".to_string()));
+    assert_eq!(map.query(2, 145).1, Some("Layer 5".to_string()));
+    assert_eq!(map.query(4, 145).1, Some("Layer 5".to_string()));
+    assert_eq!(map.query(5, 145).1, Some("Layer 5".to_string()));
+    assert_eq!(map.query(7, 145).1, Some("Layer 3".to_string()));
+    assert_eq!(map.query(8, 145).1, Some("Layer 5".to_string()));
 
     // After layer 6 insertion
-    assert_eq!(map.query(0, 155), Some("Layer 6".to_string()));
-    assert_eq!(map.query(1, 155), Some("Layer 6".to_string()));
-    assert_eq!(map.query(2, 155), Some("Layer 6".to_string()));
-    assert_eq!(map.query(4, 155), Some("Layer 6".to_string()));
-    assert_eq!(map.query(5, 155), Some("Layer 6".to_string()));
-    assert_eq!(map.query(7, 155), Some("Layer 6".to_string()));
-    assert_eq!(map.query(8, 155), Some("Layer 6".to_string()));
+    assert_eq!(map.query(0, 155).1, Some("Layer 6".to_string()));
+    assert_eq!(map.query(1, 155).1, Some("Layer 6".to_string()));
+    assert_eq!(map.query(2, 155).1, Some("Layer 6".to_string()));
+    assert_eq!(map.query(4, 155).1, Some("Layer 6".to_string()));
+    assert_eq!(map.query(5, 155).1, Some("Layer 6".to_string()));
+    assert_eq!(map.query(7, 155).1, Some("Layer 6".to_string()));
+    assert_eq!(map.query(8, 155).1, Some("Layer 6".to_string()));
 }
 
 /// Layer map that supports:
@@ -292,15 +206,18 @@ pub struct RetroactiveLayerMap<Value> {
 
     /// We buffer insertion into the PersistentLayerMap to decrease the number of rebuilds.
     /// A value of None means we want to delete this item.
-    buffer: BTreeMap<(u64, u64, i128, i128), Option<Value>>,
+    buffer: BTreeMap<(u64, u64, i128, i128, bool), Option<Value>>,
 
     /// All current layers. This is not used for search. Only to make rebuilds easier.
-    layers: BTreeMap<(u64, u64, i128, i128), Value>,
+    layers: BTreeMap<(u64, u64, i128, i128, bool), Value>,
 }
 
-impl<Value: std::fmt::Debug> std::fmt::Debug for RetroactiveLayerMap<Value> {
+impl<T: std::fmt::Debug> std::fmt::Debug for RetroactiveLayerMap<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RetroactiveLayerMap: head: {:?}", self.map)
+        f.debug_struct("RetroactiveLayerMap")
+            .field("buffer", &self.buffer)
+            .field("layers", &self.layers)
+            .finish()
     }
 }
 
@@ -319,22 +236,28 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         }
     }
 
-    pub fn insert(self: &mut Self, key: Range<i128>, lsn: Range<u64>, value: Value) {
+    pub fn insert(
+        self: &mut Self,
+        key: Range<i128>,
+        lsn: Range<u64>,
+        value: Value,
+        is_image: bool,
+    ) {
         self.buffer.insert(
-            (lsn.start, lsn.end, key.start, key.end),
+            (lsn.start, lsn.end, key.start, key.end, is_image),
             Some(value.clone()),
         );
     }
 
-    pub fn remove(self: &mut Self, key: Range<i128>, lsn: Range<u64>) {
+    pub fn remove(self: &mut Self, key: Range<i128>, lsn: Range<u64>, is_image: bool) {
         self.buffer
-            .insert((lsn.start, lsn.end, key.start, key.end), None);
+            .insert((lsn.start, lsn.end, key.start, key.end, is_image), None);
     }
 
     pub fn rebuild(self: &mut Self) {
         // Find the first LSN that needs to be rebuilt
         let rebuild_since: u64 = match self.buffer.iter().next() {
-            Some(((lsn_start, _, _, _), _)) => lsn_start.clone(),
+            Some(((lsn_start, _, _, _, _), _)) => lsn_start.clone(),
             None => return, // No need to rebuild if buffer is empty
         };
 
@@ -359,11 +282,15 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
 
         // Rebuild
         self.map.trim(&rebuild_since);
-        for ((lsn_start, lsn_end, key_start, key_end), layer) in
-            self.layers.range((rebuild_since, 0, 0, 0)..)
+        for ((lsn_start, lsn_end, key_start, key_end, is_image), layer) in
+            self.layers.range((rebuild_since, 0, 0, 0, false)..)
         {
-            self.map
-                .insert(*key_start..*key_end, *lsn_start..*lsn_end, layer.clone());
+            self.map.insert(
+                *key_start..*key_end,
+                *lsn_start..*lsn_end,
+                layer.clone(),
+                *is_image,
+            );
         }
     }
 
@@ -371,7 +298,7 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         self.map.trim(&0);
     }
 
-    pub fn query(self: &Self, key: i128, lsn: u64) -> Option<Value> {
+    pub fn query(self: &Self, key: i128, lsn: u64) -> (Option<Value>, Option<Value>) {
         if !self.buffer.is_empty() {
             panic!("rebuild pls")
         }
@@ -379,16 +306,37 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         self.map.query(key, lsn)
     }
 
-    pub fn get_coverage(
-        self: &Self,
-        lsn: u64,
-    ) -> Option<&RedBlackTreeMapSync<i128, Option<(u64, Value)>>> {
+    pub fn get_version(self: &Self, lsn: u64) -> Option<&LatestLayerMap<Value>> {
         if !self.buffer.is_empty() {
             panic!("rebuild pls")
         }
 
-        self.map.get_coverage(lsn)
+        self.map.get_version(lsn)
     }
+
+    pub fn iter(self: &Self) -> impl '_ + Iterator<Item = Value> {
+        if !self.buffer.is_empty() {
+            panic!("rebuild pls")
+        }
+
+        self.layers.iter().map(|(_, v)| v.clone())
+    }
+}
+
+#[test]
+fn test_retroactive_regression_1() {
+    let mut map = RetroactiveLayerMap::new();
+
+    map.insert(
+        0..21267647932558653966460912964485513215,
+        23761336..23761457,
+        "sdfsdfs".to_string(),
+        false,
+    );
+
+    map.rebuild();
+
+    assert_eq!(map.query(100, 23761457).0, Some("sdfsdfs".to_string()));
 }
 
 #[test]
@@ -396,29 +344,29 @@ fn test_retroactive_simple() {
     let mut map = RetroactiveLayerMap::new();
 
     // Append some images in increasing LSN order
-    map.insert(0..5, 100..101, "Image 1".to_string());
-    map.insert(3..9, 110..111, "Image 2".to_string());
-    map.insert(4..6, 120..121, "Image 3".to_string());
-    map.insert(8..9, 120..121, "Image 4".to_string());
+    map.insert(0..5, 100..101, "Image 1".to_string(), true);
+    map.insert(3..9, 110..111, "Image 2".to_string(), true);
+    map.insert(4..6, 120..121, "Image 3".to_string(), true);
+    map.insert(8..9, 120..121, "Image 4".to_string(), true);
 
     // Add a delta layer out of order
-    map.insert(2..5, 105..106, "Delta 1".to_string());
+    map.insert(2..5, 105..106, "Delta 1".to_string(), true);
 
     // Rebuild so we can start querying
     map.rebuild();
 
     // Query key 4
-    assert_eq!(map.query(4, 90), None);
-    assert_eq!(map.query(4, 102), Some("Image 1".to_string()));
-    assert_eq!(map.query(4, 107), Some("Delta 1".to_string()));
-    assert_eq!(map.query(4, 115), Some("Image 2".to_string()));
-    assert_eq!(map.query(4, 125), Some("Image 3".to_string()));
+    assert_eq!(map.query(4, 90).1, None);
+    assert_eq!(map.query(4, 102).1, Some("Image 1".to_string()));
+    assert_eq!(map.query(4, 107).1, Some("Delta 1".to_string()));
+    assert_eq!(map.query(4, 115).1, Some("Image 2".to_string()));
+    assert_eq!(map.query(4, 125).1, Some("Image 3".to_string()));
 
     // Remove Image 3
-    map.remove(4..6, 120..121);
+    map.remove(4..6, 120..121, true);
     map.rebuild();
 
     // Check deletion worked
-    assert_eq!(map.query(4, 125), Some("Image 2".to_string()));
-    assert_eq!(map.query(8, 125), Some("Image 4".to_string()));
+    assert_eq!(map.query(4, 125).1, Some("Image 2".to_string()));
+    assert_eq!(map.query(8, 125).1, Some("Image 4".to_string()));
 }

@@ -151,3 +151,11 @@ pub trait Layer: Send + Sync {
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
 }
+
+impl std::fmt::Debug for dyn Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Layer")
+            .field("filename", &self.filename())
+            .finish()
+    }
+}

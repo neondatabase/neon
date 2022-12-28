@@ -54,179 +54,12 @@ pub struct LayerMap {
     ///
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
-    /// All the historic layers are kept here
-    historic_layers: RTree<LayerRTreeObject>,
-
-    /// HACK I'm experimenting with a new index to reaplace the RTree. If this
-    ///      works out I'll clean up the struct later.
+    /// Index of the historic layers optimized for search
     index: RetroactiveLayerMap<Arc<dyn Layer>>,
-    images: RetroactiveLayerMap<Arc<dyn Layer>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
     l0_delta_layers: Vec<Arc<dyn Layer>>,
-}
-
-struct LayerRTreeObject {
-    layer: Arc<dyn Layer>,
-
-    envelope: AABB<[IntKey; 2]>,
-}
-
-// Representation of Key as numeric type.
-// We can not use native implementation of i128, because rstar::RTree
-// doesn't handle properly integer overflow during area calculation: sum(Xi*Yi).
-// Overflow will cause panic in debug mode and incorrect area calculation in release mode,
-// which leads to non-optimally balanced R-Tree (but doesn't fit correctness of R-Tree work).
-// By using i256 as the type, even though all the actual values would fit in i128, we can be
-// sure that multiplication doesn't overflow.
-//
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Debug)]
-struct IntKey(i256);
-
-impl Copy for IntKey {}
-
-impl IntKey {
-    fn from(i: i128) -> Self {
-        IntKey(i256::from(i))
-    }
-}
-
-impl Bounded for IntKey {
-    fn min_value() -> Self {
-        IntKey(i256::MIN)
-    }
-    fn max_value() -> Self {
-        IntKey(i256::MAX)
-    }
-}
-
-impl Signed for IntKey {
-    fn is_positive(&self) -> bool {
-        self.0 > i256::ZERO
-    }
-    fn is_negative(&self) -> bool {
-        self.0 < i256::ZERO
-    }
-    fn signum(&self) -> Self {
-        match self.0.cmp(&i256::ZERO) {
-            Ordering::Greater => IntKey(i256::ONE),
-            Ordering::Less => IntKey(-i256::ONE),
-            Ordering::Equal => IntKey(i256::ZERO),
-        }
-    }
-    fn abs(&self) -> Self {
-        IntKey(self.0.abs())
-    }
-    fn abs_sub(&self, other: &Self) -> Self {
-        if self.0 <= other.0 {
-            IntKey(i256::ZERO)
-        } else {
-            IntKey(self.0 - other.0)
-        }
-    }
-}
-
-impl Neg for IntKey {
-    type Output = Self;
-    fn neg(self) -> Self::Output {
-        IntKey(-self.0)
-    }
-}
-
-impl Rem for IntKey {
-    type Output = Self;
-    fn rem(self, rhs: Self) -> Self::Output {
-        IntKey(self.0 % rhs.0)
-    }
-}
-
-impl Div for IntKey {
-    type Output = Self;
-    fn div(self, rhs: Self) -> Self::Output {
-        IntKey(self.0 / rhs.0)
-    }
-}
-
-impl Add for IntKey {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self::Output {
-        IntKey(self.0 + rhs.0)
-    }
-}
-
-impl Sub for IntKey {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self::Output {
-        IntKey(self.0 - rhs.0)
-    }
-}
-
-impl Mul for IntKey {
-    type Output = Self;
-    fn mul(self, rhs: Self) -> Self::Output {
-        IntKey(self.0 * rhs.0)
-    }
-}
-
-impl One for IntKey {
-    fn one() -> Self {
-        IntKey(i256::ONE)
-    }
-}
-
-impl Zero for IntKey {
-    fn zero() -> Self {
-        IntKey(i256::ZERO)
-    }
-    fn is_zero(&self) -> bool {
-        self.0 == i256::ZERO
-    }
-}
-
-impl Num for IntKey {
-    type FromStrRadixErr = <i128 as Num>::FromStrRadixErr;
-    fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
-        Ok(IntKey(i256::from(i128::from_str_radix(str, radix)?)))
-    }
-}
-
-impl PartialEq for LayerRTreeObject {
-    fn eq(&self, other: &Self) -> bool {
-        // FIXME: ptr_eq might fail to return true for 'dyn'
-        // references.  Clippy complains about this. In practice it
-        // seems to work, the assertion below would be triggered
-        // otherwise but this ought to be fixed.
-        #[allow(clippy::vtable_address_comparisons)]
-        Arc::ptr_eq(&self.layer, &other.layer)
-    }
-}
-
-impl RTreeObject for LayerRTreeObject {
-    type Envelope = AABB<[IntKey; 2]>;
-    fn envelope(&self) -> Self::Envelope {
-        self.envelope
-    }
-}
-
-impl LayerRTreeObject {
-    fn new(layer: Arc<dyn Layer>) -> Self {
-        let key_range = layer.get_key_range();
-        let lsn_range = layer.get_lsn_range();
-
-        let envelope = AABB::from_corners(
-            [
-                IntKey::from(key_range.start.to_i128()),
-                IntKey::from(lsn_range.start.0 as i128),
-            ],
-            [
-                IntKey::from(key_range.end.to_i128() - 1),
-                IntKey::from(lsn_range.end.0 as i128 - 1),
-            ], // AABB::upper is inclusive, while `key_range.end` and `lsn_range.end` are exclusive
-        );
-        LayerRTreeObject { layer, envelope }
-    }
 }
 
 /// Return value of LayerMap::search
@@ -248,159 +81,40 @@ impl LayerMap {
     /// layer.
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
-        // let old = self.search_old(key, end_lsn)?;
-        let new = self.search_new(key, end_lsn)?;
-        // match (&old, &new) {
-        //     (None, None) => {}
-        //     (None, Some(_)) => panic!("returned Some, expected None"),
-        //     (Some(_), None) => panic!("returned None, expected Some"),
-        //     (Some(old), Some(new)) => {
-        //         // TODO be more verbose and flexible
-        //         let context = format!("query: key {}, end_lsn: {}", key, end_lsn);
-        //         assert_eq!(old.layer.filename(), new.layer.filename(), "{}", context);
-        //         assert_eq!(old.lsn_floor, new.lsn_floor, "{}", context);
-        //     }
-        // }
-        return Ok(new);
-    }
-
-    // HACK just testing correctness
-    fn search_new(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
-        // TODO I'm making two separate queries, which is 2x the cost, but that
-        //      can be avoided in varous ways. Caching latest_image queries is
-        //      probably the simplest, but combining the two data structures
-        //      might be better.
-        let latest_layer = self.index.query(key.to_i128(), end_lsn.0 - 1);
-        let latest_image = self.images.query(key.to_i128(), end_lsn.0 - 1);
-
-        // Check for exact match
-        let latest_image = if let Some(image) = latest_image {
-            let img_lsn = image.get_lsn_range().start;
-            if Lsn(img_lsn.0 + 1) == end_lsn {
-                return Ok(Some(SearchResult {
+        match self.index.query(key.to_i128(), end_lsn.0 - 1) {
+            (None, None) => Ok(None),
+            (None, Some(image)) => {
+                let lsn_floor = image.get_lsn_range().start;
+                Ok(Some(SearchResult {
                     layer: image,
-                    lsn_floor: img_lsn,
-                }));
+                    lsn_floor,
+                }))
             }
-
-            // HACK just to give back ownership of latest_image to parent scope.
-            //      There's definitely a cleaner way to do it.
-            Some(image)
-        } else {
-            None
-        };
-
-        return Ok(latest_layer.map(|layer| {
-            // Compute lsn_floor
-            let mut lsn_floor = layer.get_lsn_range().start;
-            if let Some(image) = latest_image {
-                if layer.is_incremental() {
-                    lsn_floor = std::cmp::max(lsn_floor, image.get_lsn_range().start + 1)
+            (Some(delta), None) => {
+                let lsn_floor = delta.get_lsn_range().start;
+                Ok(Some(SearchResult {
+                    layer: delta,
+                    lsn_floor,
+                }))
+            }
+            (Some(delta), Some(image)) => {
+                let img_lsn = image.get_lsn_range().start;
+                let image_is_newer = image.get_lsn_range().end > delta.get_lsn_range().end;
+                let image_exact_match = Lsn(img_lsn.0 + 1) == end_lsn;
+                if image_is_newer || image_exact_match {
+                    Ok(Some(SearchResult {
+                        layer: image,
+                        lsn_floor: img_lsn,
+                    }))
+                } else {
+                    let lsn_floor =
+                        std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
+                    Ok(Some(SearchResult {
+                        layer: delta,
+                        lsn_floor,
+                    }))
                 }
             }
-            SearchResult { layer, lsn_floor }
-        }));
-    }
-
-    // HACK just testing correctness
-    fn search_old(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
-        // linear search
-        // Find the latest image layer that covers the given key
-        let mut latest_img: Option<Arc<dyn Layer>> = None;
-        let mut latest_img_lsn: Option<Lsn> = None;
-        let envelope = AABB::from_corners(
-            [IntKey::from(key.to_i128()), IntKey::from(0i128)],
-            [
-                IntKey::from(key.to_i128()),
-                IntKey::from(end_lsn.0 as i128 - 1),
-            ],
-        );
-        for e in self
-            .historic_layers
-            .locate_in_envelope_intersecting(&envelope)
-        {
-            let l = &e.layer;
-            if l.is_incremental() {
-                continue;
-            }
-            assert!(l.get_key_range().contains(&key));
-            let img_lsn = l.get_lsn_range().start;
-            assert!(img_lsn < end_lsn);
-            if Lsn(img_lsn.0 + 1) == end_lsn {
-                // found exact match
-                return Ok(Some(SearchResult {
-                    layer: Arc::clone(l),
-                    lsn_floor: img_lsn,
-                }));
-            }
-            if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
-                latest_img = Some(Arc::clone(l));
-                latest_img_lsn = Some(img_lsn);
-            }
-        }
-
-        // Search the delta layers
-        let mut latest_delta: Option<Arc<dyn Layer>> = None;
-        for e in self
-            .historic_layers
-            .locate_in_envelope_intersecting(&envelope)
-        {
-            let l = &e.layer;
-            if !l.is_incremental() {
-                continue;
-            }
-            assert!(l.get_key_range().contains(&key));
-            if l.get_lsn_range().start >= end_lsn {
-                info!(
-                    "Candidate delta layer {}..{} is too new for lsn {}",
-                    l.get_lsn_range().start,
-                    l.get_lsn_range().end,
-                    end_lsn
-                );
-            }
-            assert!(l.get_lsn_range().start < end_lsn);
-            if l.get_lsn_range().end >= end_lsn {
-                // this layer contains the requested point in the key/lsn space.
-                // No need to search any further
-                trace!(
-                    "found layer {} for request on {key} at {end_lsn}",
-                    l.filename().display(),
-                );
-                latest_delta.replace(Arc::clone(l));
-                break;
-            }
-            // this layer's end LSN is smaller than the requested point. If there's
-            // nothing newer, this is what we need to return. Remember this.
-            if let Some(old_candidate) = &latest_delta {
-                if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
-                    latest_delta.replace(Arc::clone(l));
-                }
-            } else {
-                latest_delta.replace(Arc::clone(l));
-            }
-        }
-        if let Some(l) = latest_delta {
-            trace!(
-                "found (old) layer {} for request on {key} at {end_lsn}",
-                l.filename().display(),
-            );
-            let lsn_floor = std::cmp::max(
-                Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
-                l.get_lsn_range().start,
-            );
-            Ok(Some(SearchResult {
-                lsn_floor,
-                layer: l,
-            }))
-        } else if let Some(l) = latest_img {
-            trace!("found img layer and no deltas for request on {key} at {end_lsn}");
-            Ok(Some(SearchResult {
-                lsn_floor: latest_img_lsn.unwrap(),
-                layer: l,
-            }))
-        } else {
-            trace!("no layer found for request on {key} at {end_lsn}");
-            Ok(None)
         }
     }
 
@@ -414,27 +128,19 @@ impl LayerMap {
             kr.start.to_i128()..kr.end.to_i128(),
             lr.start.0..lr.end.0,
             Arc::clone(&layer),
+            !layer.is_incremental(),
         );
-        if !layer.is_incremental() {
-            self.images.insert(
-                kr.start.to_i128()..kr.end.to_i128(),
-                lr.start.0..lr.end.0,
-                Arc::clone(&layer),
-            );
-        }
 
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
         }
-        // TODO remove this so insert isn't slow. I need it for now for iter_historic()
-        self.historic_layers.insert(LayerRTreeObject::new(layer));
+
         NUM_ONDISK_LAYERS.inc();
     }
 
     /// Must be called after a batch of insert_historic calls, before querying
     pub fn rebuild_index(&mut self) {
         self.index.rebuild();
-        self.images.rebuild();
     }
 
     ///
@@ -445,12 +151,11 @@ impl LayerMap {
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
-        self.index
-            .remove(kr.start.to_i128()..kr.end.to_i128(), lr.start.0..lr.end.0);
-        if !layer.is_incremental() {
-            self.images
-                .remove(kr.start.to_i128()..kr.end.to_i128(), lr.start.0..lr.end.0);
-        }
+        self.index.remove(
+            kr.start.to_i128()..kr.end.to_i128(),
+            lr.start.0..lr.end.0,
+            !layer.is_incremental(),
+        );
 
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             let len_before = self.l0_delta_layers.len();
@@ -464,10 +169,7 @@ impl LayerMap {
                 .retain(|other| !Arc::ptr_eq(other, &layer));
             assert_eq!(self.l0_delta_layers.len(), len_before - 1);
         }
-        assert!(self
-            .historic_layers
-            .remove(&LayerRTreeObject::new(layer))
-            .is_some());
+
         NUM_ONDISK_LAYERS.dec();
     }
 
@@ -480,87 +182,17 @@ impl LayerMap {
         key_range: &Range<Key>,
         lsn_range: &Range<Lsn>,
     ) -> Result<bool> {
-        // TODO implement using new index
-        let mut range_remain = key_range.clone();
-
-        loop {
-            let mut made_progress = false;
-            let envelope = AABB::from_corners(
-                [
-                    IntKey::from(range_remain.start.to_i128()),
-                    IntKey::from(lsn_range.start.0 as i128),
-                ],
-                [
-                    IntKey::from(range_remain.end.to_i128() - 1),
-                    IntKey::from(lsn_range.end.0 as i128 - 1),
-                ],
-            );
-            for e in self
-                .historic_layers
-                .locate_in_envelope_intersecting(&envelope)
-            {
-                let l = &e.layer;
-                if l.is_incremental() {
-                    continue;
-                }
-                let img_lsn = l.get_lsn_range().start;
-                if l.get_key_range().contains(&range_remain.start) && lsn_range.contains(&img_lsn) {
-                    made_progress = true;
-                    let img_key_end = l.get_key_range().end;
-
-                    if img_key_end >= range_remain.end {
-                        return Ok(true);
-                    }
-                    range_remain.start = img_key_end;
-                }
-            }
-
-            if !made_progress {
-                return Ok(false);
-            }
-        }
+        todo!()
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<dyn Layer>> {
-        // TODO implement using new index
-        self.historic_layers.iter().map(|e| e.layer.clone())
+        self.index.iter()
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
     fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
-        let use_new_method = true;
-        if use_new_method {
-            return self.images.query(key.to_i128(), lsn.0);
-        }
-
-        let mut candidate_lsn = Lsn(0);
-        let mut candidate = None;
-        let envelope = AABB::from_corners(
-            [IntKey::from(key.to_i128()), IntKey::from(0)],
-            [IntKey::from(key.to_i128()), IntKey::from(lsn.0 as i128)],
-        );
-        for e in self
-            .historic_layers
-            .locate_in_envelope_intersecting(&envelope)
-        {
-            let l = &e.layer;
-            if l.is_incremental() {
-                continue;
-            }
-
-            assert!(l.get_key_range().contains(&key));
-            let this_lsn = l.get_lsn_range().start;
-            assert!(this_lsn <= lsn);
-            if this_lsn < candidate_lsn {
-                // our previous candidate was better
-                continue;
-            }
-            candidate_lsn = this_lsn;
-            candidate = Some(Arc::clone(l));
-        }
-
-        candidate
+        return self.index.query(key.to_i128(), lsn.0).1;
     }
 
     ///
@@ -576,122 +208,44 @@ impl LayerMap {
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
-        let use_new_method = true;
-        if use_new_method {
-            let bounds = match self.images.get_coverage(lsn.0) {
-                Some(x) => x,
-                None => return Ok(vec![]),
-            };
+        let version = match self.index.get_version(lsn.0) {
+            Some(v) => v,
+            None => return Ok(vec![]),
+        };
 
-            let start = key_range.start.to_i128();
-            let end = key_range.end.to_i128();
+        let start = key_range.start.to_i128();
+        let end = key_range.end.to_i128();
 
-            // Initialize loop variables
-            let mut coverage: Vec<(Range<Key>, Option<Arc<dyn Layer>>)> = vec![];
-            let mut current_key = start.clone();
-            let mut current_val = match bounds.range(..=start).rev().next() {
-                Some((_, Some((_, v)))) => Some(v.clone()),
-                Some((_, None)) => None,
-                None => None,
-            };
+        // Initialize loop variables
+        let mut coverage: Vec<(Range<Key>, Option<Arc<dyn Layer>>)> = vec![];
+        let mut current_key = start.clone();
+        let mut current_val = version.query(start).1;
 
-            // Loop through the change events and push intervals
-            for (change_key, change_val) in bounds.range(start..end) {
-                let kr = Key::from_i128(current_key)..Key::from_i128(*change_key);
-                coverage.push((kr, current_val.take()));
-                current_key = change_key.clone();
-                current_val = change_val.as_ref().map(|(_, v)| v.clone());
-            }
-
-            // Add the final interval
-            let kr = Key::from_i128(current_key)..Key::from_i128(end);
+        // Loop through the change events and push intervals
+        for (change_key, change_val) in version.image_coverage(start..end) {
+            let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
             coverage.push((kr, current_val.take()));
-
-            return Ok(coverage);
+            current_key = change_key.clone();
+            current_val = change_val.clone();
         }
 
-        let mut points = vec![key_range.start];
-        let envelope = AABB::from_corners(
-            [IntKey::from(key_range.start.to_i128()), IntKey::from(0)],
-            [
-                IntKey::from(key_range.end.to_i128()),
-                IntKey::from(lsn.0 as i128),
-            ],
-        );
-        for e in self
-            .historic_layers
-            .locate_in_envelope_intersecting(&envelope)
-        {
-            let l = &e.layer;
-            assert!(l.get_lsn_range().start <= lsn);
-            let range = l.get_key_range();
-            if key_range.contains(&range.start) {
-                points.push(l.get_key_range().start);
-            }
-            if key_range.contains(&range.end) {
-                points.push(l.get_key_range().end);
-            }
-        }
-        points.push(key_range.end);
+        // Add the final interval
+        let kr = Key::from_i128(current_key)..Key::from_i128(end);
+        coverage.push((kr, current_val.take()));
 
-        points.sort();
-        points.dedup();
-
-        // Ok, we now have a list of "interesting" points in the key space
-
-        // For each range between the points, find the latest image
-        let mut start = *points.first().unwrap();
-        let mut ranges = Vec::new();
-        for end in points[1..].iter() {
-            let img = self.find_latest_image(start, lsn);
-
-            ranges.push((start..*end, img));
-
-            start = *end;
-        }
-        Ok(ranges)
+        return Ok(coverage);
     }
 
     /// Count how many L1 delta layers there are that overlap with the
     /// given key and LSN range.
     pub fn count_deltas(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>) -> Result<usize> {
-        // TODO implement using new index
-        let mut result = 0;
-        if lsn_range.start >= lsn_range.end {
-            return Ok(0);
-        }
-        let envelope = AABB::from_corners(
-            [
-                IntKey::from(key_range.start.to_i128()),
-                IntKey::from(lsn_range.start.0 as i128),
-            ],
-            [
-                IntKey::from(key_range.end.to_i128() - 1),
-                IntKey::from(lsn_range.end.0 as i128 - 1),
-            ],
-        );
-        for e in self
-            .historic_layers
-            .locate_in_envelope_intersecting(&envelope)
-        {
-            let l = &e.layer;
-            if !l.is_incremental() {
-                continue;
-            }
-            assert!(range_overlaps(&l.get_lsn_range(), lsn_range));
-            assert!(range_overlaps(&l.get_key_range(), key_range));
-
-            // We ignore level0 delta layers. Unless the whole keyspace fits
-            // into one partition
-            if !range_eq(key_range, &(Key::MIN..Key::MAX))
-                && range_eq(&l.get_key_range(), &(Key::MIN..Key::MAX))
-            {
-                continue;
-            }
-
-            result += 1;
-        }
-        Ok(result)
+        // TODO write recursive function:
+        // 1. Get delta coverage
+        // 2. Recurse on each part
+        //
+        // This will count some layers twice, but we're interested in the max number of
+        // stacked deltas anyway (parallel deltas don't matter) so that's fine.
+        todo!()
     }
 
     /// Return all L0 delta layers

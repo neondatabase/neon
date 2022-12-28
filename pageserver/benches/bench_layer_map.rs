@@ -263,6 +263,7 @@ fn bench_from_real_project(c: &mut Criterion) {
             kr.start.to_i128()..kr.end.to_i128(),
             lr.start.0..lr.end.0,
             format!("Layer {}", lr.start.0),
+            !layer.is_incremental(),
         );
     }
     bstlm.rebuild();
@@ -323,6 +324,7 @@ fn bench_sequential(c: &mut Criterion) {
             kr.start.to_i128()..kr.end.to_i128(),
             lr.start.0..lr.end.0,
             format!("Layer {}", lr.start.0),
+            !layer.is_incremental(),
         );
     }
     bstlm.rebuild();

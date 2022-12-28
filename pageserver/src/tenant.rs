@@ -74,12 +74,14 @@ use utils::{
 mod blob_io;
 pub mod block_io;
 pub mod bst_layer_map;
+pub mod coverage;
 mod delta_layer;
 mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod filename;
 mod image_layer;
 mod inmemory_layer;
+pub mod latest_layer_map;
 pub mod layer_map;
 
 pub mod metadata;
