@@ -229,7 +229,7 @@ def test_tenant_upgrades_index_json_from_v0(
         "timeline_layers":[
             "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"
         ],
-        "missing_layers":[],
+        "missing_layers":["This should not fail as its not used anymore"],
         "disk_consistent_lsn":"0/16960E8",
         "metadata_bytes":[]
     }"""
@@ -261,7 +261,6 @@ def test_tenant_upgrades_index_json_from_v0(
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
     pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
-
     env.postgres.stop_all()
     env.pageserver.stop()
 
@@ -274,7 +273,10 @@ def test_tenant_upgrades_index_json_from_v0(
         # keep the deserialized for later inspection
         orig_index_part = json.load(timeline_file)
 
-        v0_index_part = {key: orig_index_part[key] for key in v0_skeleton}
+        v0_index_part = {
+            key: orig_index_part[key]
+            for key in v0_skeleton.keys() - ["missing_layers"]  # pgserver doesn't have it anymore
+        }
 
         timeline_file.seek(0)
         json.dump(v0_index_part, timeline_file)
@@ -306,7 +308,7 @@ def test_tenant_upgrades_index_json_from_v0(
     # make sure the file has been upgraded back to how it started
     index_part = local_fs_index_part(env, tenant_id, timeline_id)
     assert index_part["version"] == orig_index_part["version"]
-    assert index_part["missing_layers"] == orig_index_part["missing_layers"]
+    assert "missing_layers" not in index_part.keys()
 
     # expect one more layer because of the forced checkpoint
     assert len(index_part["timeline_layers"]) == len(orig_index_part["timeline_layers"]) + 1
