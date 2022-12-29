@@ -272,7 +272,7 @@ impl LayerMap {
         // Initialize loop variables
         let mut max_stacked_deltas = 0;
         let mut current_key = start.clone();
-        let mut current_val = version.query(start).1;
+        let mut current_val = version.query(start).0;
 
         // Loop through the delta coverage and recurse on each part
         for (change_key, change_val) in version.delta_coverage(start..end) {
