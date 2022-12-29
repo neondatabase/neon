@@ -1588,7 +1588,7 @@ trait TraversalLayerExt {
 }
 
 impl TraversalLayerExt for Arc<dyn PersistentLayer> {
-    fn traversal_id(&self) -> String {
+    fn traversal_id(&self) -> TraversalId {
         match self.local_path() {
             Some(local_path) => {
                 debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", self.get_timeline_id())),
@@ -1608,7 +1608,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
 }
 
 impl TraversalLayerExt for Arc<InMemoryLayer> {
-    fn traversal_id(&self) -> String {
+    fn traversal_id(&self) -> TraversalId {
         format!(
             "timeline {} in-memory {}",
             self.get_timeline_id(),
@@ -1638,7 +1638,8 @@ impl Timeline {
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
-        let mut traversal_path = Vec::<(ValueReconstructResult, Lsn, TraversalId)>::new();
+        let mut traversal_path =
+            Vec::<(ValueReconstructResult, Lsn, Box<dyn TraversalLayerExt>)>::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -1726,7 +1727,7 @@ impl Timeline {
                         Err(e) => return PageReconstructResult::from(e),
                     };
                     cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
+                    traversal_path.push((result, cont_lsn, Box::new(open_layer.clone())));
                     continue;
                 }
             }
@@ -1744,7 +1745,7 @@ impl Timeline {
                         Err(e) => return PageReconstructResult::from(e),
                     };
                     cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
+                    traversal_path.push((result, cont_lsn, Box::new(frozen_layer.clone())));
                     continue 'outer;
                 }
             }
@@ -1771,7 +1772,7 @@ impl Timeline {
                     Err(e) => return PageReconstructResult::from(e),
                 };
                 cont_lsn = lsn_floor;
-                traversal_path.push((result, cont_lsn, layer.traversal_id()));
+                traversal_path.push((result, cont_lsn, Box::new(layer.clone())));
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
@@ -3344,7 +3345,7 @@ where
 /// to an error, as anyhow context information.
 fn layer_traversal_error(
     msg: String,
-    path: Vec<(ValueReconstructResult, Lsn, TraversalId)>,
+    path: Vec<(ValueReconstructResult, Lsn, Box<dyn TraversalLayerExt>)>,
 ) -> PageReconstructResult<()> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
@@ -3353,7 +3354,9 @@ fn layer_traversal_error(
         .map(|(r, c, l)| {
             format!(
                 "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r, c, l,
+                r,
+                c,
+                l.traversal_id(),
             )
         })
         .chain(std::iter::once(msg));
