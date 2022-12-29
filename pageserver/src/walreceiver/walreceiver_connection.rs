@@ -1,6 +1,7 @@
 //! Actual Postgres connection handler to stream WAL to the server.
 
 use std::{
+    error::Error,
     str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -32,7 +33,7 @@ use crate::{
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
-use utils::lsn::Lsn;
+use utils::{lsn::Lsn, postgres_backend_async::is_expected_io_error};
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
@@ -72,8 +73,8 @@ pub async fn handle_walreceiver_connection(
             Ok(other_res) => match other_res {
                 Ok(client_and_conn) => client_and_conn,
                 Err(other_err) => {
-                    ignore_expected_errors(other_err)?;
-                    info!("DB connection stream got closed");
+                    let expected_error = ignore_expected_errors(other_err)?;
+                    info!("DB connection stream finished: {expected_error}");
                     return Ok(());
                 }
             },
@@ -194,8 +195,8 @@ pub async fn handle_walreceiver_connection(
         let replication_message = match replication_message {
             Ok(message) => message,
             Err(replication_error) => {
-                ignore_expected_errors(replication_error)?;
-                info!("Replication stream got closed");
+                let expected_error = ignore_expected_errors(replication_error)?;
+                info!("Replication stream finished: {expected_error}");
                 return Ok(());
             }
         };
@@ -403,10 +404,15 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
     }
 }
 
-fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<()> {
-    if pg_error.is_closed() {
-        info!("Connection closed regularly: {pg_error}");
-        Ok(())
+fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres::Error> {
+    if pg_error.is_closed()
+        || pg_error
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .map(is_expected_io_error)
+            .unwrap_or(false)
+    {
+        Ok(pg_error)
     } else {
         Err(pg_error).context("connection error")
     }

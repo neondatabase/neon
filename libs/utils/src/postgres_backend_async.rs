@@ -26,7 +26,7 @@ pub enum PostgresBackendError {
     Other(#[from] anyhow::Error),
 }
 
-pub(super) fn is_expected_error(e: &io::Error) -> bool {
+pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(e.kind(), ConnectionRefused | ConnectionAborted)
 }
@@ -467,7 +467,7 @@ impl PostgresBackend {
                 if let Err(e) = handler.process_query(self, query_string).await {
                     let short_error = match &e {
                         PostgresBackendError::Io(io) => {
-                            if is_expected_error(io) {
+                            if is_expected_io_error(io) {
                                 info!(
                                     "query handler for '{query_string}' failed with expected io error: {io}"
                                 );
