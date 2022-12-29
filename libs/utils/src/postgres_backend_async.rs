@@ -502,7 +502,6 @@ impl PostgresBackend {
             FeMessage::Execute(_) => {
                 let query_string = cstr_to_str(unnamed_query_string)?;
                 trace!("got execute {:?}", query_string);
-                // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string).await {
                     error!("query handler for '{}' failed: {:?}", query_string, e);
                     self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;

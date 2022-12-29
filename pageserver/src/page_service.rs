@@ -684,12 +684,10 @@ impl postgres_backend_async::Handler for PageServerHandler {
             .unwrap()
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
-        if matches!(data.claims.scope, Scope::Tenant) {
-            if data.claims.tenant_id.is_none() {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
-                    "jwt token scope is Tenant, but tenant id is missing"
-                )));
-            }
+        if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
+            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                "jwt token scope is Tenant, but tenant id is missing"
+            )));
         }
 
         info!(

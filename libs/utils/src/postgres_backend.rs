@@ -323,15 +323,15 @@ impl PostgresBackend {
     ) -> Result<ProcessMsgResult, PostgresBackendError> {
         // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
         // TODO: change that to proper top-level match of protocol state with separate message handling for each state
-        if self.state < ProtoState::Established {
-            if !matches!(
+        if self.state < ProtoState::Established
+            && !matches!(
                 msg,
                 FeMessage::PasswordMessage(_) | FeMessage::StartupPacket(_)
-            ) {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
-                    "protocol violation"
-                )));
-            }
+            )
+        {
+            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                "protocol violation"
+            )));
         }
 
         let have_tls = self.tls_config.is_some();
@@ -457,7 +457,6 @@ impl PostgresBackend {
             FeMessage::Execute(_) => {
                 let query_string = cstr_to_str(unnamed_query_string)?;
                 trace!("got execute {:?}", query_string);
-                // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string) {
                     error!("query handler for '{}' failed: {:?}", query_string, e);
                     self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;

@@ -122,12 +122,10 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             .unwrap()
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
-        if matches!(data.claims.scope, Scope::Tenant) {
-            if data.claims.tenant_id.is_none() {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
-                    "jwt token scope is Tenant, but tenant id is missing"
-                )));
-            }
+        if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
+            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                "jwt token scope is Tenant, but tenant id is missing"
+            )));
         }
 
         info!(
@@ -167,7 +165,11 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         match cmd {
             SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb).run(self),
             SafekeeperPostgresCommand::StartReplication { start_lsn } => {
-                ReplicationConn::new(pgb).run(self, pgb, start_lsn)
+                match ReplicationConn::new(pgb).run(self, pgb, start_lsn) {
+                    Ok(()) => Ok(()),
+                    io_error @ Err(PostgresBackendError::Io(_)) => return io_error,
+                    Err(PostgresBackendError::Other(e)) => Err(e),
+                }
             }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
