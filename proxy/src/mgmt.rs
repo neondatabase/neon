@@ -9,7 +9,10 @@ use std::{
     thread,
 };
 use tracing::{error, info, info_span};
-use utils::postgres_backend::{self, AuthType, PostgresBackend};
+use utils::{
+    postgres_backend::{self, AuthType, PostgresBackend},
+    postgres_backend_async::PostgresBackendError,
+};
 
 /// Console management API listener thread.
 /// It spawns console response handlers needed for the link auth.
@@ -47,7 +50,7 @@ pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
     }
 }
 
-fn handle_connection(socket: TcpStream) -> anyhow::Result<()> {
+fn handle_connection(socket: TcpStream) -> Result<(), PostgresBackendError> {
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, true)?;
     pgbackend.run(&mut MgmtHandler)
 }
@@ -58,7 +61,11 @@ pub type ComputeReady = Result<DatabaseInfo, String>;
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
 impl postgres_backend::Handler for MgmtHandler {
-    fn process_query(&mut self, pgb: &mut PostgresBackend, query: &str) -> anyhow::Result<()> {
+    fn process_query(
+        &mut self,
+        pgb: &mut PostgresBackend,
+        query: &str,
+    ) -> Result<(), PostgresBackendError> {
         try_process_query(pgb, query).map_err(|e| {
             error!("failed to process response: {e:?}");
             e
@@ -66,8 +73,8 @@ impl postgres_backend::Handler for MgmtHandler {
     }
 }
 
-fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> anyhow::Result<()> {
-    let resp: KickSession = serde_json::from_str(query)?;
+fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), PostgresBackendError> {
+    let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);
     let _enter = span.enter();

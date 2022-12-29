@@ -9,7 +9,7 @@
 //  custom protocol.
 //
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::Context;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::*;
 use utils::id::ConnectionId;
+use utils::postgres_backend_async::PostgresBackendError;
 use utils::{
     auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
@@ -194,23 +195,19 @@ async fn page_service_conn_main(
             // we've been requested to shut down
             Ok(())
         }
-        Err(err) => {
-            let root_cause_io_err_kind = err
-                .root_cause()
-                .downcast_ref::<io::Error>()
-                .map(|e| e.kind());
-
+        Err(PostgresBackendError::Io(io_err)) => {
             // `ConnectionReset` error happens when the Postgres client closes the connection.
             // As this disconnection happens quite often and is expected,
             // we decided to downgrade the logging level to `INFO`.
             // See: https://github.com/neondatabase/neon/issues/1683.
-            if root_cause_io_err_kind == Some(io::ErrorKind::ConnectionReset) {
+            if io_err.kind() == io::ErrorKind::ConnectionReset {
                 info!("Postgres client disconnected");
                 Ok(())
             } else {
-                Err(err)
+                Err(io_err).context("Postgres connection error")
             }
         }
+        Err(PostgresBackendError::Other(e)) => Err(e),
     }
 }
 
@@ -312,7 +309,7 @@ impl PageServerHandler {
                 Some(FeMessage::CopyData(bytes)) => bytes,
                 Some(FeMessage::Terminate) => break,
                 Some(m) => {
-                    bail!("unexpected message: {m:?} during COPY");
+                    anyhow::bail!("unexpected message: {m:?} during COPY");
                 }
                 None => break, // client disconnected
             };
@@ -427,7 +424,7 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
-        ensure!(timeline.get_last_record_lsn() == start_lsn);
+        anyhow::ensure!(timeline.get_last_record_lsn() == start_lsn);
 
         // TODO leave clean state on error. For now you can use detach to clean
         // up broken state from a failed import.
@@ -451,7 +448,7 @@ impl PageServerHandler {
         }
 
         // TODO Does it make sense to overshoot?
-        ensure!(timeline.get_last_record_lsn() >= end_lsn);
+        anyhow::ensure!(timeline.get_last_record_lsn() >= end_lsn);
 
         // Flush data to disk, then upload to s3. No need for a forced checkpoint.
         // We only want to persist the data, and it doesn't matter if it's in the
@@ -480,7 +477,7 @@ impl PageServerHandler {
         mut lsn: Lsn,
         latest: bool,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
-    ) -> Result<Lsn> {
+    ) -> anyhow::Result<Lsn> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint
             // to the page server that there have been no modifications to the
@@ -511,11 +508,11 @@ impl PageServerHandler {
             }
         } else {
             if lsn == Lsn(0) {
-                bail!("invalid LSN(0) in request");
+                anyhow::bail!("invalid LSN(0) in request");
             }
             timeline.wait_lsn(lsn).await?;
         }
-        ensure!(
+        anyhow::ensure!(
             lsn >= **latest_gc_cutoff_lsn,
             "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
             lsn, **latest_gc_cutoff_lsn
@@ -528,7 +525,7 @@ impl PageServerHandler {
         &self,
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
-    ) -> Result<PagestreamBeMessage> {
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
@@ -548,7 +545,7 @@ impl PageServerHandler {
         &self,
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
-    ) -> Result<PagestreamBeMessage> {
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
@@ -568,7 +565,7 @@ impl PageServerHandler {
         &self,
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
-    ) -> Result<PagestreamBeMessage> {
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
@@ -589,7 +586,7 @@ impl PageServerHandler {
         &self,
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
-    ) -> Result<PagestreamBeMessage> {
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
@@ -656,7 +653,7 @@ impl PageServerHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -678,20 +675,21 @@ impl postgres_backend_async::Handler for PageServerHandler {
         &mut self,
         _pgb: &mut PostgresBackend,
         jwt_response: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PostgresBackendError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
             .auth
             .as_ref()
             .unwrap()
-            .decode(str::from_utf8(jwt_response)?)?;
+            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
         if matches!(data.claims.scope, Scope::Tenant) {
-            ensure!(
-                data.claims.tenant_id.is_some(),
-                "jwt token scope is Tenant, but tenant id is missing"
-            )
+            if data.claims.tenant_id.is_none() {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "jwt token scope is Tenant, but tenant id is missing"
+                )));
+            }
         }
 
         info!(
@@ -707,18 +705,21 @@ impl postgres_backend_async::Handler for PageServerHandler {
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
-    ) -> anyhow::Result<()> {
-        debug!("process query {:?}", query_string);
+    ) -> Result<(), PostgresBackendError> {
+        debug!("process query {query_string:?}");
 
         if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
-            ensure!(
-                params.len() == 2,
-                "invalid param number for pagestream command"
-            );
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
+            if params.len() != 2 {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "invalid param number for pagestream command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
 
@@ -728,18 +729,24 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
-            ensure!(
-                params.len() >= 2,
-                "invalid param number for basebackup command"
-            );
+            if params.len() < 2 {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "invalid param number for basebackup command"
+                )));
+            }
 
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
 
             let lsn = if params.len() == 3 {
-                Some(Lsn::from_str(params[2])?)
+                Some(
+                    Lsn::from_str(params[2])
+                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                )
             } else {
                 None
             };
@@ -754,13 +761,16 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
-            ensure!(
-                params.len() == 2,
-                "invalid param number for get_last_record_rlsn command"
-            );
+            if params.len() != 2 {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "invalid param number for get_last_record_rlsn command"
+                )));
+            }
 
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
             let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
@@ -782,22 +792,31 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("fullbackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
-            ensure!(
-                params.len() >= 2,
-                "invalid param number for fullbackup command"
-            );
+            if params.len() < 2 {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "invalid param number for fullbackup command"
+                )));
+            }
 
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
-                Some(Lsn::from_str(params[2])?)
+                Some(
+                    Lsn::from_str(params[2])
+                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                )
             } else {
                 None
             };
             let prev_lsn = if params.len() > 3 {
-                Some(Lsn::from_str(params[3])?)
+                Some(
+                    Lsn::from_str(params[3])
+                        .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?,
+                )
             } else {
                 None
             };
@@ -822,12 +841,21 @@ impl postgres_backend_async::Handler for PageServerHandler {
             //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 5);
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
-            let base_lsn = Lsn::from_str(params[2])?;
-            let end_lsn = Lsn::from_str(params[3])?;
-            let pg_version = u32::from_str(params[4])?;
+            if params.len() != 5 {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "invalid param number for import basebackup command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+            let base_lsn = Lsn::from_str(params[2])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
+            let end_lsn = Lsn::from_str(params[3])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
+            let pg_version = u32::from_str(params[4])
+                .with_context(|| format!("Failed to parse pg_version from {}", params[4]))?;
 
             self.check_permission(Some(tenant_id))?;
 
@@ -855,11 +883,19 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // caller should poll the http api to check when that is done.
             let (_, params_raw) = query_string.split_at("import wal ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 4);
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
-            let start_lsn = Lsn::from_str(params[2])?;
-            let end_lsn = Lsn::from_str(params[3])?;
+            if params.len() != 4 {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "invalid param number for import wal command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+            let start_lsn = Lsn::from_str(params[2])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
+            let end_lsn = Lsn::from_str(params[3])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
 
             self.check_permission(Some(tenant_id))?;
 
@@ -881,8 +917,13 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // show <tenant_id>
             let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
-            ensure!(params.len() == 1, "invalid param number for config command");
-            let tenant_id = TenantId::from_str(params[0])?;
+            if params.len() != 1 {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "invalid param number for config command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
 
             self.check_permission(Some(tenant_id))?;
 
@@ -923,7 +964,9 @@ impl postgres_backend_async::Handler for PageServerHandler {
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
-            bail!("unknown command");
+            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                "unknown command {query_string}"
+            )));
         }
 
         Ok(())
@@ -935,7 +978,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 /// If the tenant is Loading, waits for it to become Active, for up to 30 s. That
 /// ensures that queries don't fail immediately after pageserver startup, because
 /// all tenants are still loading.
-async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> Result<Arc<Tenant>> {
+async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> anyhow::Result<Arc<Tenant>> {
     let tenant = mgr::get_tenant(tenant_id, false).await?;
     match tokio::time::timeout(Duration::from_secs(30), tenant.wait_to_become_active()).await {
         Ok(wait_result) => wait_result
@@ -949,7 +992,7 @@ async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> Result<Arc<Tenan
 async fn get_active_timeline_with_timeout(
     tenant_id: TenantId,
     timeline_id: TimelineId,
-) -> Result<Arc<Timeline>> {
+) -> anyhow::Result<Arc<Timeline>> {
     get_active_tenant_with_timeout(tenant_id)
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))

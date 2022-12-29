@@ -17,6 +17,14 @@ use tracing::{debug, error, trace};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_rustls::TlsAcceptor;
 
+#[derive(thiserror::Error, Debug)]
+pub enum PostgresBackendError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 #[async_trait::async_trait]
 pub trait Handler {
     /// Handle single query.
@@ -27,14 +35,18 @@ pub trait Handler {
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
-    ) -> anyhow::Result<()>;
+    ) -> Result<(), PostgresBackendError>;
 
     /// Called on startup packet receival, allows to process params.
     ///
     /// If Ok(false) is returned postgres_backend will skip auth -- that is needed for new users
     /// creation is the proxy code. That is quite hacky and ad-hoc solution, may be we could allow
     /// to override whole init logic in implementations.
-    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupPacket) -> anyhow::Result<()> {
+    fn startup(
+        &mut self,
+        _pgb: &mut PostgresBackend,
+        _sm: &FeStartupPacket,
+    ) -> Result<(), PostgresBackendError> {
         Ok(())
     }
 
@@ -43,8 +55,10 @@ pub trait Handler {
         &mut self,
         _pgb: &mut PostgresBackend,
         _jwt_response: &[u8],
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("JWT auth failed")
+    ) -> Result<(), PostgresBackendError> {
+        Err(PostgresBackendError::Other(anyhow::anyhow!(
+            "JWT auth failed"
+        )))
     }
 }
 
@@ -235,7 +249,7 @@ impl PostgresBackend {
         mut self,
         handler: &mut impl Handler,
         shutdown_watcher: F,
-    ) -> anyhow::Result<()>
+    ) -> Result<(), PostgresBackendError>
     where
         F: Fn() -> S,
         S: Future,
@@ -249,7 +263,7 @@ impl PostgresBackend {
         &mut self,
         handler: &mut impl Handler,
         shutdown_watcher: F,
-    ) -> anyhow::Result<()>
+    ) -> Result<(), PostgresBackendError>
     where
         F: Fn() -> S,
         S: Future,
@@ -337,7 +351,7 @@ impl PostgresBackend {
         &mut self,
         handler: &mut impl Handler,
         msg: FeMessage,
-    ) -> anyhow::Result<ProcessMsgResult> {
+    ) -> Result<ProcessMsgResult, PostgresBackendError> {
         assert!(self.state < ProtoState::Established);
         let have_tls = self.tls_config.is_some();
         match msg {
@@ -361,7 +375,9 @@ impl PostgresBackend {
                     FeStartupPacket::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
                             self.write_message(&BeMessage::ErrorResponse("must connect with TLS"))?;
-                            anyhow::bail!("client did not connect with TLS");
+                            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                                "client did not connect with TLS"
+                            )));
                         }
 
                         // NB: startup() may change self.auth_type -- we are using that in proxy code
@@ -402,7 +418,7 @@ impl PostgresBackend {
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
                             self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
-                            anyhow::bail!("auth failed: {}", e);
+                            return Err(e);
                         }
                     }
                 }
@@ -425,14 +441,16 @@ impl PostgresBackend {
         handler: &mut impl Handler,
         msg: FeMessage,
         unnamed_query_string: &mut Bytes,
-    ) -> anyhow::Result<ProcessMsgResult> {
+    ) -> Result<ProcessMsgResult, PostgresBackendError> {
         // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
         // TODO: change that to proper top-level match of protocol state with separate message handling for each state
         assert!(self.state == ProtoState::Established);
 
         match msg {
             FeMessage::StartupPacket(_) | FeMessage::PasswordMessage(_) => {
-                anyhow::bail!("protocol violation");
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "protocol violation"
+                )));
             }
 
             FeMessage::Query(body) => {
@@ -440,18 +458,25 @@ impl PostgresBackend {
                 let query_string = cstr_to_str(&body)?;
 
                 trace!("got query {:?}", query_string);
-                // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string).await {
-                    // ":?" uses the alternate formatting style, which makes anyhow display the
-                    // full cause of the error, not just the top-level context + its trace.
-                    // We don't want to send that in the ErrorResponse though,
-                    // because it's not relevant to the compute node logs.
-                    error!("query handler for '{}' failed: {:?}", query_string, e);
-                    self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
-                    // TODO: untangle convoluted control flow
-                    if e.to_string().contains("failed to run") {
-                        return Ok(ProcessMsgResult::Break);
-                    }
+                    let short_error = match &e {
+                        PostgresBackendError::Io(io) => {
+                            error!("query handler for '{query_string}' failed with io error: {io}");
+                            io.to_string()
+                        }
+                        PostgresBackendError::Other(e) => {
+                            // ":?" uses the alternate formatting style, which makes anyhow display the
+                            // full cause of the error, not just the top-level context + its trace.
+                            // We don't want to send that in the ErrorResponse though,
+                            // because it's not relevant to the compute node logs.
+                            //
+                            // We also don't want to log full stacktrace when the error is primitive,
+                            // such as usual connection closed.
+                            error!("query handler for '{query_string}' failed: {e:?}");
+                            format!("{e:#}")
+                        }
+                    };
+                    self.write_message(&BeMessage::ErrorResponse(&short_error))?;
                 }
                 self.write_message(&BeMessage::ReadyForQuery)?;
             }
@@ -499,7 +524,10 @@ impl PostgresBackend {
             // We prefer explicit pattern matching to wildcards, because
             // this helps us spot the places where new variants are missing
             FeMessage::CopyData(_) | FeMessage::CopyDone | FeMessage::CopyFail => {
-                anyhow::bail!("unexpected message type: {:?}", msg);
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "unexpected message type: {:?}",
+                    msg
+                )));
             }
         }
 

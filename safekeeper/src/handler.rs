@@ -8,7 +8,7 @@ use crate::receive_wal::ReceiveWalConn;
 use crate::send_wal::ReplicationConn;
 
 use crate::{GlobalTimelines, SafeKeeperConf};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::Context;
 
 use postgres_ffi::PG_TLI;
 use regex::Regex;
@@ -17,6 +17,7 @@ use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use std::str;
 use tracing::info;
 use utils::auth::{Claims, Scope};
+use utils::postgres_backend_async::PostgresBackendError;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -42,7 +43,7 @@ enum SafekeeperPostgresCommand {
     JSONCtrl { cmd: AppendLogicalMessage },
 }
 
-fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
+fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
     if cmd.starts_with("START_WAL_PUSH") {
         Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
@@ -62,13 +63,17 @@ fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
             cmd: serde_json::from_str(cmd)?,
         })
     } else {
-        bail!("unsupported command {}", cmd);
+        anyhow::bail!("unsupported command {cmd}");
     }
 }
 
 impl postgres_backend::Handler for SafekeeperPostgresHandler {
     // tenant_id and timeline_id are passed in connection string params
-    fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupPacket) -> Result<()> {
+    fn startup(
+        &mut self,
+        _pgb: &mut PostgresBackend,
+        sm: &FeStartupPacket,
+    ) -> Result<(), PostgresBackendError> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(options) = params.options_raw() {
                 for opt in options {
@@ -77,10 +82,14 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
                     // https://github.com/neondatabase/neon/pull/2433#discussion_r970005064
                     match opt.split_once('=') {
                         Some(("ztenantid", value)) | Some(("tenant_id", value)) => {
-                            self.tenant_id = Some(value.parse()?);
+                            self.tenant_id = Some(value.parse().with_context(|| {
+                                format!("Failed to parse {value} as tenant id")
+                            })?);
                         }
                         Some(("ztimelineid", value)) | Some(("timeline_id", value)) => {
-                            self.timeline_id = Some(value.parse()?);
+                            self.timeline_id = Some(value.parse().with_context(|| {
+                                format!("Failed to parse {value} as timeline id")
+                            })?);
                         }
                         _ => continue,
                     }
@@ -93,7 +102,9 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
             Ok(())
         } else {
-            bail!("Safekeeper received unexpected initial message: {:?}", sm);
+            Err(PostgresBackendError::Other(anyhow::anyhow!(
+                "Safekeeper received unexpected initial message: {sm:?}"
+            )))
         }
     }
 
@@ -101,7 +112,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         &mut self,
         _pgb: &mut PostgresBackend,
         jwt_response: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PostgresBackendError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
@@ -109,13 +120,14 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             .auth
             .as_ref()
             .unwrap()
-            .decode(str::from_utf8(jwt_response)?)?;
+            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
         if matches!(data.claims.scope, Scope::Tenant) {
-            ensure!(
-                data.claims.tenant_id.is_some(),
-                "jwt token scope is Tenant, but tenant id is missing"
-            )
+            if data.claims.tenant_id.is_none() {
+                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                    "jwt token scope is Tenant, but tenant id is missing"
+                )));
+            }
         }
 
         info!(
@@ -127,7 +139,11 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         Ok(())
     }
 
-    fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()> {
+    fn process_query(
+        &mut self,
+        pgb: &mut PostgresBackend,
+        query_string: &str,
+    ) -> Result<(), PostgresBackendError> {
         if query_string
             .to_ascii_lowercase()
             .starts_with("set datestyle to ")
@@ -178,7 +194,7 @@ impl SafekeeperPostgresHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
         if self.conf.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -196,7 +212,7 @@ impl SafekeeperPostgresHandler {
     ///
     /// Handle IDENTIFY_SYSTEM replication command
     ///
-    fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<()> {
+    fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> anyhow::Result<()> {
         let tli = GlobalTimelines::get(self.ttid)?;
 
         let lsn = if self.is_walproposer_recovery() {
