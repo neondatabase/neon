@@ -177,12 +177,37 @@ impl LayerMap {
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    pub fn image_layer_exists(
-        &self,
-        key_range: &Range<Key>,
-        lsn_range: &Range<Lsn>,
-    ) -> Result<bool> {
-        todo!()
+    pub fn image_layer_exists(&self, key: &Range<Key>, lsn: &Range<Lsn>) -> Result<bool> {
+        if key.is_empty() {
+            return Ok(true);
+        }
+
+        let version = match self.index.get_version(lsn.end.0) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+
+        let start = key.start.to_i128();
+        let end = key.end.to_i128();
+
+        let layer_covers = |layer: Option<Arc<dyn Layer>>| match layer {
+            Some(layer) => layer.get_lsn_range().start >= lsn.start,
+            None => false,
+        };
+
+        // Check the start is covered
+        if !layer_covers(version.query(start).1) {
+            return Ok(false);
+        }
+
+        // Check after all changes of coverage
+        for (_, change_val) in version.image_coverage(start..end) {
+            if !layer_covers(change_val) {
+                return Ok(false);
+            }
+        }
+
+        return Ok(true);
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<dyn Layer>> {
