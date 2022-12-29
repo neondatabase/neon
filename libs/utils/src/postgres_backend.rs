@@ -4,7 +4,7 @@
 //! is rather narrow, but we can extend it once required.
 
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
 use serde::{Deserialize, Serialize};
@@ -21,20 +21,28 @@ pub trait Handler {
     /// postgres_backend will issue ReadyForQuery after calling this (this
     /// might be not what we want after CopyData streaming, but currently we don't
     /// care).
-    fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()>;
+    fn process_query(
+        &mut self,
+        pgb: &mut PostgresBackend,
+        query_string: &str,
+    ) -> anyhow::Result<()>;
 
     /// Called on startup packet receival, allows to process params.
     ///
     /// If Ok(false) is returned postgres_backend will skip auth -- that is needed for new users
     /// creation is the proxy code. That is quite hacky and ad-hoc solution, may be we could allow
     /// to override whole init logic in implementations.
-    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupPacket) -> Result<()> {
+    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupPacket) -> anyhow::Result<()> {
         Ok(())
     }
 
     /// Check auth jwt
-    fn check_auth_jwt(&mut self, _pgb: &mut PostgresBackend, _jwt_response: &[u8]) -> Result<()> {
-        bail!("JWT auth failed")
+    fn check_auth_jwt(
+        &mut self,
+        _pgb: &mut PostgresBackend,
+        _jwt_response: &[u8],
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("JWT auth failed")
     }
 
     fn is_shutdown_requested(&self) -> bool {
@@ -66,7 +74,7 @@ impl FromStr for AuthType {
         match s {
             "Trust" => Ok(Self::Trust),
             "NeonJWT" => Ok(Self::NeonJWT),
-            _ => bail!("invalid value \"{s}\" for auth type"),
+            _ => anyhow::bail!("invalid value \"{s}\" for auth type"),
         }
     }
 }
@@ -154,7 +162,7 @@ pub fn is_socket_read_timed_out(error: &anyhow::Error) -> bool {
 }
 
 // Cast a byte slice to a string slice, dropping null terminator if there's one.
-fn cstr_to_str(bytes: &[u8]) -> Result<&str> {
+fn cstr_to_str(bytes: &[u8]) -> anyhow::Result<&str> {
     let without_null = bytes.strip_suffix(&[0]).unwrap_or(bytes);
     std::str::from_utf8(without_null).map_err(|e| e.into())
 }
@@ -188,10 +196,10 @@ impl PostgresBackend {
     }
 
     /// Get direct reference (into the Option) to the read stream.
-    fn get_stream_in(&mut self) -> Result<&mut BidiStream> {
+    fn get_stream_in(&mut self) -> anyhow::Result<&mut BidiStream> {
         match &mut self.stream {
             Some(Stream::Bidirectional(stream)) => Ok(stream),
-            _ => bail!("reader taken"),
+            _ => anyhow::bail!("reader taken"),
         }
     }
 
@@ -215,7 +223,7 @@ impl PostgresBackend {
     }
 
     /// Read full message or return None if connection is closed.
-    pub fn read_message(&mut self) -> Result<Option<FeMessage>> {
+    pub fn read_message(&mut self) -> anyhow::Result<Option<FeMessage>> {
         let (state, stream) = (self.state, self.get_stream_in()?);
 
         use ProtoState::*;
@@ -246,7 +254,7 @@ impl PostgresBackend {
     }
 
     // Wrapper for run_message_loop() that shuts down socket when we are done
-    pub fn run(mut self, handler: &mut impl Handler) -> Result<()> {
+    pub fn run(mut self, handler: &mut impl Handler) -> anyhow::Result<()> {
         let ret = self.run_message_loop(handler);
         if let Some(stream) = self.stream.as_mut() {
             let _ = stream.shutdown(Shutdown::Both);
@@ -254,7 +262,7 @@ impl PostgresBackend {
         ret
     }
 
-    fn run_message_loop(&mut self, handler: &mut impl Handler) -> Result<()> {
+    fn run_message_loop(&mut self, handler: &mut impl Handler) -> anyhow::Result<()> {
         trace!("postgres backend to {:?} started", self.peer_addr);
 
         let mut unnamed_query_string = Bytes::new();
@@ -295,7 +303,7 @@ impl PostgresBackend {
             }
             stream => {
                 self.stream = stream;
-                bail!("can't start TLs without bidi stream");
+                anyhow::bail!("can't start TLs without bidi stream");
             }
         }
     }
@@ -305,11 +313,11 @@ impl PostgresBackend {
         handler: &mut impl Handler,
         msg: FeMessage,
         unnamed_query_string: &mut Bytes,
-    ) -> Result<ProcessMsgResult> {
+    ) -> anyhow::Result<ProcessMsgResult> {
         // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
         // TODO: change that to proper top-level match of protocol state with separate message handling for each state
         if self.state < ProtoState::Established {
-            ensure!(
+            anyhow::ensure!(
                 matches!(
                     msg,
                     FeMessage::PasswordMessage(_) | FeMessage::StartupPacket(_)
@@ -340,7 +348,7 @@ impl PostgresBackend {
                     FeStartupPacket::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
                             self.write_message(&BeMessage::ErrorResponse("must connect with TLS"))?;
-                            bail!("client did not connect with TLS");
+                            anyhow::bail!("client did not connect with TLS");
                         }
 
                         // NB: startup() may change self.auth_type -- we are using that in proxy code
@@ -380,7 +388,7 @@ impl PostgresBackend {
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
                             self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
-                            bail!("auth failed: {}", e);
+                            anyhow::bail!("auth failed: {}", e);
                         }
                     }
                 }
@@ -468,7 +476,7 @@ impl PostgresBackend {
             // We prefer explicit pattern matching to wildcards, because
             // this helps us spot the places where new variants are missing
             FeMessage::CopyData(_) | FeMessage::CopyDone | FeMessage::CopyFail => {
-                bail!("unexpected message type: {:?}", msg);
+                anyhow::bail!("unexpected message type: {:?}", msg);
             }
         }
 
