@@ -1,0 +1,55 @@
+name: "Upload cache"
+description: "Custom upload action"
+inputs:
+  name:
+    description: "Artifact name"
+    required: true
+  path:
+    description: "A directory or file to upload"
+    required: true
+  prefix:
+    description: "S3 prefix."
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Prepare artifact
+      shell: bash -euxo pipefail {0}
+      env:
+        SOURCE: ${{ inputs.path }}
+        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+      run: |
+        mkdir -p $(dirname $ARCHIVE)
+
+        if [ -f ${ARCHIVE} ]; then
+          echo 2>&1 "File ${ARCHIVE} already exist. Something went wrong before"
+          exit 1
+        fi
+
+        ZSTD_NBTHREADS=0
+        if [ -d  ${SOURCE} ]; then
+          time tar -C ${SOURCE} -cf ${ARCHIVE} --zstd .
+        elif [ -f ${SOURCE} ]; then
+          time tar -cf ${ARCHIVE} --zstd ${SOURCE}
+        elif ! ls ${SOURCE} > /dev/null 2>&1; then
+          echo 2>&1 "${SOURCE} does not exist"
+          exit 2
+        else
+          echo 2>&1 "${SOURCE} is neither a directory nor a file, do not know how to handle it"
+          exit 3
+        fi
+
+    - name: Upload artifact
+      shell: bash -euxo pipefail {0}
+      env:
+        SOURCE: ${{ inputs.path }}
+        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+        PREFIX: cache
+      run: |
+        BUCKET=neon-github-dev
+        FILENAME=$(basename $ARCHIVE)
+
+        FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
+
+        time aws s3 mv ${ARCHIVE} s3://${BUCKET}/${PREFIX}/${FILENAME}
