@@ -162,27 +162,28 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         self.check_permission(Some(tenant_id))?;
         self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
 
-        match cmd {
-            SafekeeperPostgresCommand::StartWalPush => match ReceiveWalConn::new(pgb).run(self) {
-                Ok(()) => Ok(()),
-                io_error @ Err(PostgresBackendError::Io(_)) => return io_error,
-                Err(PostgresBackendError::Other(e)) => Err(e),
-            },
+        let res = match cmd {
+            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb).run(self),
             SafekeeperPostgresCommand::StartReplication { start_lsn } => {
-                match ReplicationConn::new(pgb).run(self, pgb, start_lsn) {
-                    Ok(()) => Ok(()),
-                    io_error @ Err(PostgresBackendError::Io(_)) => return io_error,
-                    Err(PostgresBackendError::Other(e)) => Err(e),
-                }
+                ReplicationConn::new(pgb).run(self, pgb, start_lsn)
             }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
-        }
-        .context(format!(
-            "Failed to process query for timeline {timeline_id}"
-        ))?;
+        };
 
-        Ok(())
+        match res {
+            Ok(()) => Ok(()),
+            Err(PostgresBackendError::Io(io_error)) => {
+                info!(
+                    "Timeline {}/{} query failed with IO error: {}",
+                    tenant_id, timeline_id, io_error
+                );
+                Err(PostgresBackendError::Io(io_error))
+            }
+            Err(PostgresBackendError::Other(e)) => Err(PostgresBackendError::Other(e.context(
+                format!("Failed to process query for timeline {timeline_id}"),
+            ))),
+        }
     }
 }
 
@@ -218,7 +219,10 @@ impl SafekeeperPostgresHandler {
     ///
     /// Handle IDENTIFY_SYSTEM replication command
     ///
-    fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> anyhow::Result<()> {
+    fn handle_identify_system(
+        &mut self,
+        pgb: &mut PostgresBackend,
+    ) -> Result<(), PostgresBackendError> {
         let tli = GlobalTimelines::get(self.ttid)?;
 
         let lsn = if self.is_walproposer_recovery() {
