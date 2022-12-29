@@ -683,6 +683,8 @@ jobs:
       fail-fast: false
       matrix:
         name: [ neon, compute-node-v14, vm-compute-node-v14, compute-node-v15, vm-compute-node-v15, compute-tools]
+    env:
+      AWS_DEFAULT_REGION: eu-central-1
 
     steps:
       - name: Promote image to latest
