@@ -83,6 +83,11 @@ pub enum ValueReconstructResult {
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
 pub trait Layer: Send + Sync {
+    fn get_tenant_id(&self) -> TenantId;
+
+    /// Identify the timeline this layer belongs to
+    fn get_timeline_id(&self) -> TimelineId;
+
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -147,11 +152,6 @@ pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 /// LSN
 ///
 pub trait PersistentLayer: Layer {
-    fn get_tenant_id(&self) -> TenantId;
-
-    /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId;
-
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
     fn filename(&self) -> LayerFileName;

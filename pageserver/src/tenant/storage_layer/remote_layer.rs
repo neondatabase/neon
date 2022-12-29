@@ -21,8 +21,8 @@ use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
-    tenantid: TenantId,
-    timelineid: TimelineId,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
     key_range: Range<Key>,
     lsn_range: Range<Lsn>,
 
@@ -38,6 +38,14 @@ pub struct RemoteLayer {
 }
 
 impl Layer for RemoteLayer {
+    fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    fn get_timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -66,8 +74,8 @@ impl Layer for RemoteLayer {
     fn dump(&self, _verbose: bool) -> Result<()> {
         println!(
             "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
-            self.tenantid,
-            self.timelineid,
+            self.tenant_id,
+            self.timeline_id,
             self.key_range.start,
             self.key_range.end,
             self.lsn_range.start,
@@ -83,14 +91,6 @@ impl Layer for RemoteLayer {
 }
 
 impl PersistentLayer for RemoteLayer {
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenantid
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timelineid
-    }
-
     fn filename(&self) -> LayerFileName {
         if self.is_delta {
             DeltaFileName {
@@ -144,8 +144,8 @@ impl RemoteLayer {
         layer_metadata: &LayerFileMetadata,
     ) -> RemoteLayer {
         RemoteLayer {
-            tenantid,
-            timelineid,
+            tenant_id: tenantid,
+            timeline_id: timelineid,
             key_range: fname.key_range.clone(),
             lsn_range: fname.lsn..(fname.lsn + 1),
             is_delta: false,
@@ -163,8 +163,8 @@ impl RemoteLayer {
         layer_metadata: &LayerFileMetadata,
     ) -> RemoteLayer {
         RemoteLayer {
-            tenantid,
-            timelineid,
+            tenant_id: tenantid,
+            timeline_id: timelineid,
             key_range: fname.key_range.clone(),
             lsn_range: fname.lsn_range.clone(),
             is_delta: true,
@@ -188,8 +188,8 @@ impl RemoteLayer {
             };
             Arc::new(DeltaLayer::new(
                 conf,
-                self.timelineid,
-                self.tenantid,
+                self.timeline_id,
+                self.tenant_id,
                 &fname,
                 file_size,
             ))
@@ -200,8 +200,8 @@ impl RemoteLayer {
             };
             Arc::new(ImageLayer::new(
                 conf,
-                self.timelineid,
-                self.tenantid,
+                self.timeline_id,
+                self.tenant_id,
                 &fname,
                 file_size,
             ))

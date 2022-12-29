@@ -75,13 +75,15 @@ impl InMemoryLayerInner {
     }
 }
 
-impl InMemoryLayer {
-    pub fn get_timeline_id(&self) -> TimelineId {
+impl Layer for InMemoryLayer {
+    fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
-}
 
-impl Layer for InMemoryLayer {
     fn get_key_range(&self) -> Range<Key> {
         Key::MIN..Key::MAX
     }
