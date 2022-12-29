@@ -14,18 +14,10 @@ use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use crate::tenant::inmemory_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
-use crate::tenant::storage_layer::{range_eq, range_overlaps};
-use amplify_num::i256;
 use anyhow::Result;
-use num_traits::identities::{One, Zero};
-use num_traits::{Bounded, Num, Signed};
-use rstar::{RTree, RTreeObject, AABB};
-use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 use std::sync::Arc;
-use tracing::*;
 use utils::lsn::Lsn;
 
 use super::bst_layer_map::RetroactiveLayerMap;
@@ -214,12 +206,6 @@ impl LayerMap {
         self.index.iter()
     }
 
-    /// Find the last image layer that covers 'key', ignoring any image layers
-    /// newer than 'lsn'.
-    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
-        return self.index.query(key.to_i128(), lsn.0).1;
-    }
-
     ///
     /// Divide the whole given range of keys into sub-ranges based on the latest
     /// image layer that covers each range. (This is used when creating  new
@@ -233,7 +219,7 @@ impl LayerMap {
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
-        let version = match self.index.get_version(lsn.0) {
+        let version = match self.index.get_version(lsn.0 - 1) {
             Some(v) => v,
             None => return Ok(vec![]),
         };
@@ -271,7 +257,11 @@ impl LayerMap {
         // the largest result this function could return, which is in practice between
         // 3 and 10 (since we usually try to create an image when the number gets larger).
 
-        let version = match self.index.get_version(lsn.end.0) {
+        if lsn.is_empty() || key.is_empty() {
+            return Ok(0);
+        }
+
+        let version = match self.index.get_version(lsn.end.0 - 1) {
             Some(v) => v,
             None => return Ok(0),
         };
@@ -346,4 +336,14 @@ impl LayerMap {
     }
 }
 
-// TODO add layer map tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_count_deltas() {
+        // TODO implement (maybe merge from main first?)
+    }
+
+    // TODO add more
+}

@@ -267,6 +267,7 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
                 Some(l) => {
                     let existing = self.layers.insert(rect.clone(), l.clone());
                     if existing.is_some() {
+                        // TODO this happened once. Investigate.
                         panic!("can't overwrite layer");
                     }
                 }
