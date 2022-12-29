@@ -15,7 +15,7 @@ use std::cmp::min;
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{str, thread};
+use std::{io, str, thread};
 use utils::postgres_backend_async::PostgresBackendError;
 
 use pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
@@ -257,8 +257,8 @@ impl ReplicationConn {
                         // to right pageserver.
                         if tli.should_walsender_stop(replica_id) {
                             // Shut down, timeline is suspended.
-                            return Err(PostgresBackendError::Io(std::io::Error::new(
-                                std::io::ErrorKind::ConnectionAborted,
+                            return Err(PostgresBackendError::Io(io::Error::new(
+                                io::ErrorKind::ConnectionAborted,
                                 format!("end streaming to {:?}", spg.appname),
                             )));
                         }

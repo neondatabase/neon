@@ -463,32 +463,12 @@ impl PostgresBackend {
                 // remove null terminator
                 let query_string = cstr_to_str(&body)?;
 
-                trace!("got query {:?}", query_string);
+                trace!("got query {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
+                    log_query_error(query_string, &e);
                     let short_error = match &e {
-                        PostgresBackendError::Io(io) => {
-                            if is_expected_io_error(io) {
-                                info!(
-                                    "query handler for '{query_string}' failed with expected io error: {io}"
-                                );
-                            } else {
-                                error!(
-                                    "query handler for '{query_string}' failed with io error: {io}"
-                                );
-                            }
-                            io.to_string()
-                        }
-                        PostgresBackendError::Other(e) => {
-                            // ":?" uses the alternate formatting style, which makes anyhow display the
-                            // full cause of the error, not just the top-level context + its trace.
-                            // We don't want to send that in the ErrorResponse though,
-                            // because it's not relevant to the compute node logs.
-                            //
-                            // We also don't want to log full stacktrace when the error is primitive,
-                            // such as usual connection closed.
-                            error!("query handler for '{query_string}' failed: {e:?}");
-                            format!("{e:#}")
-                        }
+                        PostgresBackendError::Io(io) => io.to_string(),
+                        PostgresBackendError::Other(e) => format!("{e:#}"),
                     };
                     self.write_message(&BeMessage::ErrorResponse(&short_error))?;
                 }
@@ -515,9 +495,9 @@ impl PostgresBackend {
 
             FeMessage::Execute(_) => {
                 let query_string = cstr_to_str(unnamed_query_string)?;
-                trace!("got execute {:?}", query_string);
+                trace!("got execute {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
-                    error!("query handler for '{}' failed: {:?}", query_string, e);
+                    log_query_error(query_string, &e);
                     self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used
@@ -606,5 +586,27 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
             Poll::Pending => return Poll::Pending,
         }
         this.pgb.poll_flush(cx)
+    }
+}
+
+pub(super) fn log_query_error(query: &str, e: &PostgresBackendError) {
+    match e {
+        PostgresBackendError::Io(io) => {
+            if is_expected_io_error(io) {
+                info!("query handler for '{query}' failed with expected io error: {io}");
+            } else {
+                error!("query handler for '{query}' failed with io error: {io}");
+            }
+        }
+        PostgresBackendError::Other(e) => {
+            // ":?" uses the alternate formatting style, which makes anyhow display the
+            // full cause of the error, not just the top-level context + its trace.
+            // We don't want to send that in the ErrorResponse though,
+            // because it's not relevant to the compute node logs.
+            //
+            // We also don't want to log full stacktrace when the error is primitive,
+            // such as usual connection closed.
+            error!("query handler for '{query}' failed: {e:?}");
+        }
     }
 }
