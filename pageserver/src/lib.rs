@@ -1,7 +1,7 @@
 mod auth;
 pub mod basebackup;
-pub mod billing_metrics;
 pub mod config;
+pub mod consumption_metrics;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;

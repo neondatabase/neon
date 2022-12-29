@@ -338,7 +338,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 "consumption metrics collection",
                 true,
                 async move {
-                    pageserver::billing_metrics::collect_metrics(
+                    pageserver::consumption_metrics::collect_metrics(
                         metric_collection_endpoint,
                         conf.metric_collection_interval,
                         conf.id,
