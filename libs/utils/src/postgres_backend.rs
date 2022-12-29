@@ -3,7 +3,7 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
-use crate::postgres_backend_async::PostgresBackendError;
+use crate::postgres_backend_async::{is_expected_error, PostgresBackendError};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
@@ -416,7 +416,15 @@ impl PostgresBackend {
                 if let Err(e) = handler.process_query(self, query_string) {
                     let short_error = match &e {
                         PostgresBackendError::Io(io) => {
-                            error!("query handler for '{query_string}' failed with io error: {io}");
+                            if is_expected_error(io) {
+                                info!(
+                                    "query handler for '{query_string}' failed with expected io error: {io}"
+                                );
+                            } else {
+                                error!(
+                                    "query handler for '{query_string}' failed with io error: {io}"
+                                );
+                            }
                             io.to_string()
                         }
                         PostgresBackendError::Other(e) => {

@@ -268,8 +268,7 @@ impl ReplicationConn {
                             sent_ptr: end_pos.0,
                             timestamp: get_current_timestamp(),
                             request_reply: true,
-                        }))
-                        .context("Failed to send KeepAlive message")?;
+                        }))?;
                         continue;
                     }
                 }

@@ -12,7 +12,8 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
-use tracing::{debug, error, trace};
+use std::{future::Future, io};
+use tracing::{debug, error, info, trace};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_rustls::TlsAcceptor;
@@ -20,9 +21,14 @@ use tokio_rustls::TlsAcceptor;
 #[derive(thiserror::Error, Debug)]
 pub enum PostgresBackendError {
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+pub(super) fn is_expected_error(e: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(e.kind(), ConnectionRefused | ConnectionAborted)
 }
 
 #[async_trait::async_trait]
@@ -92,7 +98,7 @@ impl AsyncWrite for Stream {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
+    ) -> Poll<Result<usize, io::Error>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
@@ -102,7 +108,7 @@ impl AsyncWrite for Stream {
     fn poll_flush(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
+    ) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_flush(cx),
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
@@ -112,7 +118,7 @@ impl AsyncWrite for Stream {
     fn poll_shutdown(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
+    ) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
@@ -125,7 +131,7 @@ impl AsyncRead for Stream {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
+    ) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -171,7 +177,7 @@ impl PostgresBackend {
         socket: tokio::net::TcpStream,
         auth_type: AuthType,
         tls_config: Option<Arc<rustls::ServerConfig>>,
-    ) -> std::io::Result<Self> {
+    ) -> io::Result<Self> {
         let peer_addr = socket.peer_addr()?;
 
         Ok(Self {
@@ -199,7 +205,7 @@ impl PostgresBackend {
     }
 
     /// Flush output buffer into the socket.
-    pub async fn flush(&mut self) -> std::io::Result<()> {
+    pub async fn flush(&mut self) -> io::Result<()> {
         while self.buf_out.has_remaining() {
             let bytes_written = self.stream.write(self.buf_out.chunk()).await?;
             self.buf_out.advance(bytes_written);
@@ -209,7 +215,7 @@ impl PostgresBackend {
     }
 
     /// Write message into internal output buffer.
-    pub fn write_message(&mut self, message: &BeMessage<'_>) -> Result<&mut Self, std::io::Error> {
+    pub fn write_message(&mut self, message: &BeMessage<'_>) -> Result<&mut Self, io::Error> {
         BeMessage::write(&mut self.buf_out, message)?;
         Ok(self)
     }
@@ -461,7 +467,15 @@ impl PostgresBackend {
                 if let Err(e) = handler.process_query(self, query_string).await {
                     let short_error = match &e {
                         PostgresBackendError::Io(io) => {
-                            error!("query handler for '{query_string}' failed with io error: {io}");
+                            if is_expected_error(io) {
+                                info!(
+                                    "query handler for '{query_string}' failed with expected io error: {io}"
+                                );
+                            } else {
+                                error!(
+                                    "query handler for '{query_string}' failed with io error: {io}"
+                                );
+                            }
                             io.to_string()
                         }
                         PostgresBackendError::Other(e) => {

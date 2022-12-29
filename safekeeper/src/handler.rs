@@ -163,7 +163,11 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
 
         match cmd {
-            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb).run(self),
+            SafekeeperPostgresCommand::StartWalPush => match ReceiveWalConn::new(pgb).run(self) {
+                Ok(()) => Ok(()),
+                io_error @ Err(PostgresBackendError::Io(_)) => return io_error,
+                Err(PostgresBackendError::Other(e)) => Err(e),
+            },
             SafekeeperPostgresCommand::StartReplication { start_lsn } => {
                 match ReplicationConn::new(pgb).run(self, pgb, start_lsn) {
                     Ok(()) => Ok(()),
