@@ -46,25 +46,26 @@
 mod historic_layer_coverage;
 mod layer_coverage;
 
+use std::collections::VecDeque;
+use std::ops::Range;
+use std::sync::Arc;
+
+use anyhow::Result;
+use utils::lsn::Lsn;
+
+use super::storage_layer::{
+    range_eq, DeltaLayer, HistoricLayer, ImageLayer, LayerContent, LayerRange, LocalOrRemote,
+};
 use crate::keyspace::KeyPartitioning;
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
-use crate::tenant::storage_layer::Layer;
-use anyhow::Result;
-use std::collections::VecDeque;
-use std::ops::Range;
-use std::sync::Arc;
-use utils::lsn::Lsn;
-
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
-
-use super::storage_layer::range_eq;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-pub struct LayerMap<L: ?Sized> {
+pub struct LayerMap<D = DeltaLayer, I = ImageLayer> {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
     // records. If it is None, 'next_open_layer_at' will be set instead, indicating
@@ -85,14 +86,14 @@ pub struct LayerMap<L: ?Sized> {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// Index of the historic layers optimized for search
-    historic: BufferedHistoricLayerCoverage<Arc<L>>,
+    historic: BufferedHistoricLayerCoverage<HistoricLayer<D, I>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<Arc<L>>,
+    l0_delta_layers: Vec<LocalOrRemote<D>>,
 }
 
-impl<L: ?Sized> Default for LayerMap<L> {
+impl<D, I> Default for LayerMap<D, I> {
     fn default() -> Self {
         Self {
             open_layer: None,
@@ -109,23 +110,28 @@ impl<L: ?Sized> Default for LayerMap<L> {
 /// Batching historic layer insertions and removals is good for
 /// performance and this struct helps us do that correctly.
 #[must_use]
-pub struct BatchedUpdates<'a, L: ?Sized + Layer> {
+pub struct BatchedUpdates<'a, D, I>
+where
+    D: LayerRange + 'static,
+    I: LayerRange + 'static,
+{
     // While we hold this exclusive reference to the layer map the type checker
     // will prevent us from accidentally reading any unflushed updates.
-    layer_map: &'a mut LayerMap<L>,
+    layer_map: &'a mut LayerMap<D, I>,
 }
 
 /// Provide ability to batch more updates while hiding the read
 /// API so we don't accidentally read without flushing.
-impl<L> BatchedUpdates<'_, L>
+impl<D, I> BatchedUpdates<'_, D, I>
 where
-    L: ?Sized + Layer,
+    D: LayerRange + 'static,
+    I: LayerRange + 'static,
 {
     ///
     /// Insert an on-disk layer.
     ///
-    pub fn insert_historic(&mut self, layer: Arc<L>) {
-        self.layer_map.insert_historic_noflush(layer)
+    pub fn insert_historic(&mut self, layer: impl Into<HistoricLayer<D, I>>) {
+        self.layer_map.insert_historic_noflush(layer.into())
     }
 
     ///
@@ -133,8 +139,8 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<L>) {
-        self.layer_map.remove_historic_noflush(layer)
+    pub fn remove_historic(&mut self, layer: impl Into<HistoricLayer<D, I>>) {
+        self.layer_map.remove_historic_noflush(layer.into())
     }
 
     // We will flush on drop anyway, but this method makes it
@@ -150,9 +156,10 @@ where
 // than panic later or read without flushing.
 //
 // TODO maybe warn if flush hasn't explicitly been called
-impl<L> Drop for BatchedUpdates<'_, L>
+impl<D, I> Drop for BatchedUpdates<'_, D, I>
 where
-    L: ?Sized + Layer,
+    D: LayerRange + 'static,
+    I: LayerRange + 'static,
 {
     fn drop(&mut self) {
         self.layer_map.flush_updates();
@@ -160,14 +167,15 @@ where
 }
 
 /// Return value of LayerMap::search
-pub struct SearchResult<L: ?Sized> {
-    pub layer: Arc<L>,
+pub struct SearchResult<L> {
+    pub layer: L,
     pub lsn_floor: Lsn,
 }
 
-impl<L> LayerMap<L>
+impl<D, I> LayerMap<D, I>
 where
-    L: ?Sized + Layer,
+    D: LayerRange + 'static,
+    I: LayerRange + 'static,
 {
     ///
     /// Find the latest layer (by lsn.end) that covers the given
@@ -200,7 +208,7 @@ where
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<HistoricLayer<D, I>>> {
         let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
         let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
@@ -243,7 +251,7 @@ where
     }
 
     /// Start a batch of updates, applied on drop
-    pub fn batch_update(&mut self) -> BatchedUpdates<'_, L> {
+    pub fn batch_update(&mut self) -> BatchedUpdates<'_, D, I> {
         BatchedUpdates { layer_map: self }
     }
 
@@ -252,21 +260,22 @@ where
     ///
     /// Helper function for BatchedUpdates::insert_historic
     ///
-    pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
+    fn insert_historic_noflush(&mut self, layer: HistoricLayer<D, I>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
+
+        if let HistoricLayer::Delta(delta) = &layer {
+            self.l0_delta_layers.push(delta.clone());
+        }
+
         self.historic.insert(
             historic_layer_coverage::LayerKey {
                 key: kr.start.to_i128()..kr.end.to_i128(),
                 lsn: lr.start.0..lr.end.0,
                 is_image: !layer.is_incremental(),
             },
-            Arc::clone(&layer),
+            layer,
         );
-
-        if Self::is_l0(&layer) {
-            self.l0_delta_layers.push(layer);
-        }
 
         NUM_ONDISK_LAYERS.inc();
     }
@@ -276,7 +285,7 @@ where
     ///
     /// Helper function for BatchedUpdates::remove_historic
     ///
-    pub fn remove_historic_noflush(&mut self, layer: Arc<L>) {
+    pub fn remove_historic_noflush(&mut self, layer: HistoricLayer<D, I>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.historic.remove(historic_layer_coverage::LayerKey {
@@ -285,16 +294,9 @@ where
             is_image: !layer.is_incremental(),
         });
 
-        if Self::is_l0(&layer) {
+        if let HistoricLayer::Delta(delta) = &layer {
             let len_before = self.l0_delta_layers.len();
-
-            // FIXME: ptr_eq might fail to return true for 'dyn'
-            // references.  Clippy complains about this. In practice it
-            // seems to work, the assertion below would be triggered
-            // otherwise but this ought to be fixed.
-            #[allow(clippy::vtable_address_comparisons)]
-            self.l0_delta_layers
-                .retain(|other| !Arc::ptr_eq(other, &layer));
+            self.l0_delta_layers.retain(|other| other != delta);
             assert_eq!(self.l0_delta_layers.len(), len_before - 1);
         }
 
@@ -326,7 +328,7 @@ where
         let start = key.start.to_i128();
         let end = key.end.to_i128();
 
-        let layer_covers = |layer: Option<Arc<L>>| match layer {
+        let layer_covers = |layer: Option<HistoricLayer<D, I>>| match layer {
             Some(layer) => layer.get_lsn_range().start >= lsn.start,
             None => false,
         };
@@ -346,7 +348,7 @@ where
         Ok(true)
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = HistoricLayer<D, I>> {
         self.historic.iter()
     }
 
@@ -362,7 +364,7 @@ where
         &self,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<Vec<(Range<Key>, Option<Arc<L>>)>> {
+    ) -> Result<Vec<(Range<Key>, Option<HistoricLayer<D, I>>)>> {
         let version = match self.historic.get().unwrap().get_version(lsn.0) {
             Some(v) => v,
             None => return Ok(vec![]),
@@ -372,7 +374,7 @@ where
         let end = key_range.end.to_i128();
 
         // Initialize loop variables
-        let mut coverage: Vec<(Range<Key>, Option<Arc<L>>)> = vec![];
+        let mut coverage: Vec<(Range<Key>, Option<HistoricLayer<D, I>>)> = vec![];
         let mut current_key = start;
         let mut current_val = version.image_coverage.query(start);
 
@@ -389,10 +391,6 @@ where
         coverage.push((kr, current_val.take()));
 
         Ok(coverage)
-    }
-
-    pub fn is_l0(layer: &L) -> bool {
-        range_eq(&layer.get_key_range(), &(Key::MIN..Key::MAX))
     }
 
     /// This function determines which layers are counted in `count_deltas`:
@@ -417,9 +415,9 @@ where
     /// TODO The optimal number should probably be slightly higher than 1, but to
     ///      implement that we need to plumb a lot more context into this function
     ///      than just the current partition_range.
-    pub fn is_reimage_worthy(layer: &L, partition_range: &Range<Key>) -> bool {
+    pub fn is_reimage_worthy(layer: &HistoricLayer<D, I>, partition_range: &Range<Key>) -> bool {
         // Case 1
-        if !Self::is_l0(layer) {
+        if !layer.is_l0() {
             return true;
         }
 
@@ -648,13 +646,15 @@ where
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<L>>> {
+    pub fn get_level0_deltas(&self) -> Result<Vec<LocalOrRemote<D>>> {
         Ok(self.l0_delta_layers.clone())
     }
+}
 
+impl LayerMap {
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
-    pub fn dump(&self, verbose: bool) -> Result<()> {
+    pub fn dump(&self, verbose: bool) -> anyhow::Result<()> {
         println!("Begin dump LayerMap");
 
         println!("open_layer:");

@@ -1,4 +1,22 @@
 //! Common traits and structs for layers
+//!
+//! A Layer contains all data in a "rectangle" consisting of a range of keys and
+//! range of LSNs.
+//!
+//! There are two kinds of layers, in-memory and on-disk layers. In-memory
+//! layers are used to ingest incoming WAL, and provide fast access to the
+//! recent page versions. On-disk layers are stored as files on disk, and are
+//! immutable. This trait presents the common functionality of in-memory and
+//! on-disk layers.
+//!
+//! Furthermore, there are two kinds of on-disk layers: delta and image layers.
+//! A delta layer contains all modifications within a range of LSNs and keys.
+//! An image layer is a snapshot of all the data in a key-range, at a single
+//! LSN.
+//! Both on-disk layers are considered as hstoric ones,
+//! since contain history of the database, persisted into the layer files.
+//! The layer files could be present or not on the local disk, might get
+//! downloaded from the remote storage, if needed.
 
 mod delta_layer;
 mod filename;
@@ -8,16 +26,14 @@ mod remote_layer;
 
 use crate::repository::{Key, Value};
 use crate::walrecord::NeonWalRecord;
-use anyhow::Result;
+use anyhow::Context;
 use bytes::Bytes;
-use std::ops::Range;
+use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::Arc;
+use utils::id::TimelineId;
 
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::lsn::Lsn;
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName, PathOrConf};
@@ -54,7 +70,7 @@ where
 /// of the page, or the oldest WAL record in 'records' is a will_init-type
 /// record that initializes the page without requiring a previous image.
 ///
-/// If 'get_page_reconstruct_data' returns Continue, some 'records' may have
+/// If 'get_value_reconstruct_data' returns Continue, some 'records' may have
 /// been collected, but there are more records outside the current layer. Pass
 /// the same ValueReconstructState struct in the next 'get_value_reconstruct_data'
 /// call, to collect more records.
@@ -65,7 +81,7 @@ pub struct ValueReconstructState {
     pub img: Option<(Lsn, Bytes)>,
 }
 
-/// Return value from Layer::get_page_reconstruct_data
+/// Return value from LayerRange::get_value_reconstruct_data
 #[derive(Clone, Copy, Debug)]
 pub enum ValueReconstructResult {
     /// Got all the data needed to reconstruct the requested page
@@ -80,9 +96,8 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
-/// Supertrait of the [`Layer`] trait that captures the bare minimum interface
-/// required by [`LayerMap`].
-pub trait Layer: Send + Sync {
+/// Basic trait of every layer, describing which [`Key`] and [`Lsn`] ranges this layer covers.
+pub trait LayerRange {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -100,7 +115,30 @@ pub trait Layer: Send + Sync {
     /// the previous non-incremental layer.
     fn is_incremental(&self) -> bool;
 
-    ///
+    /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
+    fn short_id(&self) -> String;
+}
+
+/// A trait of a layer that has a corresponding file locally in FS.
+pub trait LayerFile {
+    fn layer_name(&self) -> LayerFileName;
+
+    fn local_path(&self) -> PathBuf;
+
+    fn file_size(&self) -> u64;
+
+    fn delete(&self) -> anyhow::Result<()> {
+        let path_to_delete = self.local_path();
+        std::fs::remove_file(&path_to_delete)
+            .with_context(|| format!("Failed to remove local layer file {path_to_delete:?}"))
+    }
+}
+
+/// A trait of a layer that has its contents available for reading.
+pub trait LayerContent {
+    /// Dump summary of the contents of the layer to stdout
+    fn dump(&self, verbose: bool) -> anyhow::Result<()>;
+
     /// Return data needed to reconstruct given page at LSN.
     ///
     /// It is up to the caller to collect more data from previous layer and
@@ -117,91 +155,287 @@ pub trait Layer: Send + Sync {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult>;
-
-    /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
-    fn short_id(&self) -> String;
-
-    /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool) -> Result<()>;
+    ) -> anyhow::Result<ValueReconstructResult>;
 }
 
 /// Returned by [`Layer::iter`]
-pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i>;
+pub type LayerIter<'i> = Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'i>;
 
 /// Returned by [`Layer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 
-/// A Layer contains all data in a "rectangle" consisting of a range of keys and
-/// range of LSNs.
-///
-/// There are two kinds of layers, in-memory and on-disk layers. In-memory
-/// layers are used to ingest incoming WAL, and provide fast access to the
-/// recent page versions. On-disk layers are stored as files on disk, and are
-/// immutable. This trait presents the common functionality of in-memory and
-/// on-disk layers.
-///
-/// Furthermore, there are two kinds of on-disk layers: delta and image layers.
-/// A delta layer contains all modifications within a range of LSNs and keys.
-/// An image layer is a snapshot of all the data in a key-range, at a single
-/// LSN
-///
-pub trait PersistentLayer: Layer {
-    fn get_tenant_id(&self) -> TenantId;
+/// A layer that once had an FS file reprentation, with historical data.
+/// Could contain remote-only layers, that were once evicted from the local storage.
+pub enum HistoricLayer<D = DeltaLayer, I = ImageLayer> {
+    /// L0 layer, gets created on disk after initial in-memory data gets flushed.
+    Delta(LocalOrRemote<D>),
+    /// L1 layer, gets compacted from L0 layer(s) on disk, replacing them.
+    Image(LocalOrRemote<I>),
+}
 
-    /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId;
+impl<D, I> PartialEq for HistoricLayer<D, I> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Delta(l0), Self::Delta(r0)) => l0 == r0,
+            (Self::Image(l0), Self::Image(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
+}
 
-    /// File name used for this layer, both in the pageserver's local filesystem
-    /// state as well as in the remote storage.
-    fn filename(&self) -> LayerFileName;
+impl<D, I> Clone for HistoricLayer<D, I> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Delta(d) => Self::Delta(d.clone()),
+            Self::Image(i) => Self::Image(i.clone()),
+        }
+    }
+}
 
-    // Path to the layer file in the local filesystem.
-    // `None` for `RemoteLayer`.
-    fn local_path(&self) -> Option<PathBuf>;
+/// A layer, that might need downloading before most of its [meta]data is accesible.
+pub enum LocalOrRemote<L> {
+    Local(Arc<L>),
+    Remote(Arc<RemoteLayer>),
+}
 
+impl<L> LocalOrRemote<L> {
+    fn as_remote(&self) -> Option<&Arc<RemoteLayer>> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(remote_layer) => Some(remote_layer),
+        }
+    }
+}
+
+impl<L> LocalOrRemote<L>
+where
+    L: LayerFile,
+{
+    pub fn layer_name(&self) -> LayerFileName {
+        match self {
+            Self::Local(l) => l.layer_name(),
+            Self::Remote(r) => r.layer_name(),
+        }
+    }
+}
+
+// Currently, we compact only `DeltaLayer`, creating `ImageLayer` out of them, ergo
+// current impl is needed for delta layers only.
+// This might serve as a base for another trait, if the same compaction approach is used for image layers.
+impl LocalOrRemote<DeltaLayer> {
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> Result<LayerIter<'_>>;
+    pub fn iter(&self) -> anyhow::Result<LayerIter<'_>> {
+        match self {
+            Self::Local(local_delta_layer) => local_delta_layer.iter(),
+            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
+        }
+    }
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
-        panic!("Not implemented")
+    pub fn key_iter(&self) -> anyhow::Result<LayerKeyIter<'_>> {
+        match self {
+            Self::Local(local_delta_layer) => local_delta_layer.key_iter(),
+            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
+        }
+    }
+}
+
+impl<L> Clone for LocalOrRemote<L> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Local(l) => Self::Local(Arc::clone(l)),
+            Self::Remote(r) => Self::Remote(Arc::clone(r)),
+        }
+    }
+}
+
+impl From<DeltaLayer> for HistoricLayer {
+    fn from(delta: DeltaLayer) -> Self {
+        Self::Delta(LocalOrRemote::Local(Arc::new(delta)))
+    }
+}
+
+impl From<ImageLayer> for HistoricLayer {
+    fn from(image: ImageLayer) -> Self {
+        Self::Image(LocalOrRemote::Local(Arc::new(image)))
+    }
+}
+
+impl<D, I> From<RemoteLayer> for HistoricLayer<D, I> {
+    fn from(remote: RemoteLayer) -> Self {
+        match remote.layer_name() {
+            LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(Arc::new(remote))),
+            LayerFileName::Delta(_) => Self::Delta(LocalOrRemote::Remote(Arc::new(remote))),
+            #[cfg(test)]
+            LayerFileName::Test(_) => unimplemented!(),
+        }
+    }
+}
+
+impl From<Arc<RemoteLayer>> for HistoricLayer {
+    fn from(remote: Arc<RemoteLayer>) -> Self {
+        match remote.layer_name() {
+            LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(remote)),
+            LayerFileName::Delta(_) => Self::Delta(LocalOrRemote::Remote(remote)),
+            #[cfg(test)]
+            LayerFileName::Test(_) => unimplemented!(),
+        }
+    }
+}
+
+impl<D, I> HistoricLayer<D, I> {
+    pub fn is_l0(&self) -> bool {
+        matches!(self, Self::Delta(_))
+    }
+}
+
+impl<D, I> HistoricLayer<D, I>
+where
+    D: LayerFile,
+    I: LayerFile,
+{
+    /// File name used for this layer, both in the pageserver's local filesystem
+    /// state as well as in the remote storage.
+    pub fn filename(&self) -> LayerFileName {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => delta.layer_name(),
+            Self::Image(Local(image)) => image.layer_name(),
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => remote.layer_name(),
+        }
+    }
+
+    pub fn local_path(&self) -> Option<PathBuf> {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => Some(delta.local_path()),
+            Self::Image(Local(image)) => Some(image.local_path()),
+            Self::Delta(Remote(_)) | Self::Image(Remote(_)) => None,
+        }
     }
 
     /// Permanently remove this layer from disk.
-    fn delete(&self) -> Result<()>;
-
-    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
-        None
-    }
-
-    fn is_remote_layer(&self) -> bool {
-        false
+    pub fn delete(&self) -> anyhow::Result<()> {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => delta.delete(),
+            Self::Image(Local(image)) => image.delete(),
+            Self::Delta(Remote(_)) | Self::Image(Remote(_)) => Ok(()),
+        }
     }
 
     /// Returns None if the layer file size is not known.
     ///
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> Option<u64>;
-}
+    pub fn file_size(&self) -> Option<u64> {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => Some(delta.file_size()),
+            Self::Image(Local(image)) => Some(image.file_size()),
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => {
+                remote.layer_metadata.file_size()
+            }
+        }
+    }
 
-pub fn downcast_remote_layer(
-    layer: &Arc<dyn PersistentLayer>,
-) -> Option<std::sync::Arc<RemoteLayer>> {
-    if layer.is_remote_layer() {
-        Arc::clone(layer).downcast_remote_layer()
-    } else {
-        None
+    pub fn as_remote_layer(&self) -> Option<&Arc<RemoteLayer>> {
+        match self {
+            Self::Delta(d) => d.as_remote(),
+            Self::Image(i) => i.as_remote(),
+        }
     }
 }
 
-impl std::fmt::Debug for dyn Layer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Layer")
-            .field("short_id", &self.short_id())
-            .finish()
+impl<D, I> HistoricLayer<D, I>
+where
+    D: LayerContent,
+    I: LayerContent,
+{
+    pub fn dump(&self, verbose: bool) -> anyhow::Result<()> {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => delta.dump(verbose),
+            Self::Image(Local(image)) => image.dump(verbose),
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => {
+                remote.dump();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValueReconstructState,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => {
+                delta.get_value_reconstruct_data(key, lsn_range, reconstruct_data)
+            }
+            Self::Image(Local(image)) => {
+                image.get_value_reconstruct_data(key, lsn_range, reconstruct_data)
+            }
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => {
+                anyhow::bail!(
+                    "layer {} needs to be downloaded",
+                    remote.layer_name().file_name()
+                );
+            }
+        }
+    }
+}
+
+impl HistoricLayer {
+    pub fn timeline_id(&self) -> TimelineId {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => delta.timeline_id,
+            Self::Image(Local(image)) => image.timeline_id,
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => remote.timeline_id(),
+        }
+    }
+}
+
+impl<L> PartialEq for LocalOrRemote<L> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (LocalOrRemote::Local(l0), LocalOrRemote::Local(l1)) => Arc::ptr_eq(l0, l1),
+            (LocalOrRemote::Remote(r0), LocalOrRemote::Remote(r1)) => Arc::ptr_eq(r0, r1),
+            _ => false,
+        }
+    }
+}
+
+impl<L> Deref for LocalOrRemote<L>
+where
+    L: LayerRange + 'static,
+{
+    type Target = dyn LayerRange;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Local(l) => l.as_ref(),
+            Self::Remote(r) => r.as_ref(),
+        }
+    }
+}
+
+impl<D, I> Deref for HistoricLayer<D, I>
+where
+    D: LayerRange + 'static,
+    I: LayerRange + 'static,
+{
+    type Target = dyn LayerRange;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Delta(d) => d.deref(),
+            Self::Image(i) => i.deref(),
+        }
     }
 }
 
@@ -213,7 +447,7 @@ pub struct LayerDescriptor {
     pub short_id: String,
 }
 
-impl Layer for LayerDescriptor {
+impl LayerRange for LayerDescriptor {
     fn get_key_range(&self) -> Range<Key> {
         self.key.clone()
     }
@@ -226,20 +460,7 @@ impl Layer for LayerDescriptor {
         self.is_incremental
     }
 
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        todo!("This method shouldn't be part of the Layer trait")
-    }
-
     fn short_id(&self) -> String {
         self.short_id.clone()
-    }
-
-    fn dump(&self, _verbose: bool) -> Result<()> {
-        todo!()
     }
 }

@@ -1,8 +1,9 @@
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::Layer;
-use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, LayerDescriptor};
+use pageserver::tenant::storage_layer::{
+    DeltaFileName, HistoricLayer, ImageFileName, LayerDescriptor, LocalOrRemote,
+};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
@@ -16,8 +17,16 @@ use utils::lsn::Lsn;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
-fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
-    let mut layer_map = LayerMap::<LayerDescriptor>::default();
+fn local_delta(descriptor: LayerDescriptor) -> HistoricLayer<LayerDescriptor, LayerDescriptor> {
+    HistoricLayer::Delta(LocalOrRemote::Local(Arc::new(descriptor)))
+}
+
+fn local_image(descriptor: LayerDescriptor) -> HistoricLayer<LayerDescriptor, LayerDescriptor> {
+    HistoricLayer::Image(LocalOrRemote::Local(Arc::new(descriptor)))
+}
+
+fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor, LayerDescriptor> {
+    let mut layer_map = LayerMap::default();
 
     let mut min_lsn = Lsn(u64::MAX);
     let mut max_lsn = Lsn(0);
@@ -34,7 +43,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
                 is_incremental: false,
                 short_id: fname.to_string(),
             };
-            updates.insert_historic(Arc::new(layer));
+            updates.insert_historic(local_image(layer));
             min_lsn = min(min_lsn, imgfilename.lsn);
             max_lsn = max(max_lsn, imgfilename.lsn);
         } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
@@ -44,7 +53,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
                 is_incremental: true,
                 short_id: fname.to_string(),
             };
-            updates.insert_historic(Arc::new(layer));
+            updates.insert_historic(local_delta(layer));
             min_lsn = min(min_lsn, deltafilename.lsn_range.start);
             max_lsn = max(max_lsn, deltafilename.lsn_range.end);
         } else {
@@ -59,7 +68,9 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
 }
 
 /// Construct a layer map query pattern for benchmarks
-fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn)> {
+fn uniform_query_pattern(
+    layer_map: &LayerMap<LayerDescriptor, LayerDescriptor>,
+) -> Vec<(Key, Lsn)> {
     // For each image layer we query one of the pages contained, at LSN right
     // before the image layer was created. This gives us a somewhat uniform
     // coverage of both the lsn and key space because image layers have
@@ -85,7 +96,10 @@ fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn
 
 // Construct a partitioning for testing get_difficulty map when we
 // don't have an exact result of `collect_keyspace` to work with.
-fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, _lsn: Lsn) -> KeyPartitioning {
+fn uniform_key_partitioning(
+    layer_map: &LayerMap<LayerDescriptor, LayerDescriptor>,
+    _lsn: Lsn,
+) -> KeyPartitioning {
     let mut parts = Vec::new();
 
     // We add a partition boundary at the start of each image layer,
@@ -231,7 +245,7 @@ fn bench_sequential(c: &mut Criterion) {
             is_incremental: false,
             short_id: format!("Layer {}", i),
         };
-        updates.insert_historic(Arc::new(layer));
+        updates.insert_historic(local_image(layer));
     }
     updates.flush();
     println!("Finished layer map init in {:?}", now.elapsed());

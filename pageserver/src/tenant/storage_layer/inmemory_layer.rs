@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::RwLock;
 
-use super::{DeltaLayer, DeltaLayerWriter, Layer};
+use super::{DeltaLayer, DeltaLayerWriter, LayerContent, LayerRange};
 
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
@@ -38,7 +38,7 @@ thread_local! {
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-    timeline_id: TimelineId,
+    pub timeline_id: TimelineId,
 
     ///
     /// This layer contains all the changes from 'start_lsn'. The
@@ -75,13 +75,7 @@ impl InMemoryLayerInner {
     }
 }
 
-impl InMemoryLayer {
-    pub fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
-}
-
-impl Layer for InMemoryLayer {
+impl LayerRange for InMemoryLayer {
     fn get_key_range(&self) -> Range<Key> {
         Key::MIN..Key::MAX
     }
@@ -108,7 +102,9 @@ impl Layer for InMemoryLayer {
         let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
         format!("inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
+}
 
+impl LayerContent for InMemoryLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool) -> Result<()> {
         let inner = self.inner.read().unwrap();

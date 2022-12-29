@@ -59,9 +59,7 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
-use crate::tenant::storage_layer::DeltaLayer;
-use crate::tenant::storage_layer::ImageLayer;
-use crate::tenant::storage_layer::Layer;
+use crate::tenant::storage_layer::{DeltaLayer, ImageLayer, LayerContent};
 
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
