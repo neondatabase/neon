@@ -1910,7 +1910,7 @@ class NeonPageserver(PgProtocol):
             ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
             ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*end streaming to Some.*",
+            ".*Replication stream finished: db error: ERROR: end streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
             # and streaming start

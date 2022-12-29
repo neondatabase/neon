@@ -12,7 +12,7 @@ use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
-use postgres::{SimpleQueryMessage, SimpleQueryRow};
+use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::v14::xlog_utils::normalize_lsn;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_protocol::message::backend::ReplicationMessage;
@@ -412,8 +412,15 @@ fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres:
             .map(is_expected_io_error)
             .unwrap_or(false)
     {
-        Ok(pg_error)
-    } else {
-        Err(pg_error).context("connection error")
+        return Ok(pg_error);
+    } else if let Some(db_error) = pg_error.as_db_error() {
+        // TODO this is a hack to avoid `BeMessage::ErrorResponse` generic error
+        // better approach would be to extend BeMessage errors and keep the error info there
+        if db_error.code() == &SqlState::from_code("CXX000")
+            && db_error.message().contains("end streaming")
+        {
+            return Ok(pg_error);
+        }
     }
+    Err(pg_error).context("connection error")
 }
