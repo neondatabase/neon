@@ -24,7 +24,7 @@ env:
 
 jobs:
   tag:
-    runs-on: [ self-hosted, gen3 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -52,7 +52,7 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
-    runs-on: [ self-hosted, gen3 ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cloud:pinned
       options: --init
@@ -87,7 +87,7 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    runs-on: [ self-hosted, gen3 ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -367,7 +367,7 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   merge-allure-report:
-    runs-on: [ self-hosted, gen3 ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -675,7 +675,7 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
-    runs-on: [ self-hosted, gen3 ]
+    runs-on: [ self-hosted, gen3, small ]
     needs: [ tag, test-images, vm-compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
@@ -693,7 +693,7 @@ jobs:
           aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
 
   push-docker-hub:
-    runs-on: [ self-hosted, gen3 ]
+    runs-on: [ self-hosted, gen3, small ]
     needs: [ promote-images, tag ]
     container: golang:1.19-bullseye
 
