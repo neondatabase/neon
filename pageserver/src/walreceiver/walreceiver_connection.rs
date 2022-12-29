@@ -68,10 +68,19 @@ pub async fn handle_walreceiver_connection(
         let mut config = wal_source_connconf.to_tokio_postgres_config();
         config.application_name("pageserver");
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
-        time::timeout(connect_timeout, config.connect(postgres::NoTls))
-            .await
-            .context("Timed out while waiting for walreceiver connection to open")?
-            .context("Failed to open walreceiver connection")?
+        match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
+            Ok(other_res) => match other_res {
+                Ok(client_and_conn) => client_and_conn,
+                Err(other_err) => {
+                    ignore_expected_errors(other_err)?;
+                    info!("DB connection stream got closed");
+                    return Ok(());
+                }
+            },
+            Err(elapsed) => anyhow::bail!(
+                "Timed out while waiting {elapsed} for walreceiver connection to open"
+            ),
+        }
     };
 
     info!("connected!");
@@ -103,10 +112,8 @@ pub async fn handle_walreceiver_connection(
                 connection_result = connection => match connection_result{
                     Ok(()) => info!("Walreceiver db connection closed"),
                     Err(connection_error) => {
-                        if connection_error.is_closed() {
-                            info!("Connection closed regularly: {connection_error}")
-                        } else {
-                            warn!("Connection aborted: {connection_error}")
+                        if let Err(e) = ignore_expected_errors(connection_error) {
+                            warn!("Connection aborted: {e:#}")
                         }
                     }
                 },
@@ -187,14 +194,9 @@ pub async fn handle_walreceiver_connection(
         let replication_message = match replication_message {
             Ok(message) => message,
             Err(replication_error) => {
-                if replication_error.is_closed() {
-                    info!("Replication stream got closed");
-                    return Ok(());
-                } else {
-                    return Err(
-                        anyhow::Error::new(replication_error).context("replication stream error")
-                    );
-                }
+                ignore_expected_errors(replication_error)?;
+                info!("Replication stream got closed");
+                return Ok(());
             }
         };
 
@@ -398,5 +400,14 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
         })
     } else {
         Err(IdentifyError.into())
+    }
+}
+
+fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<()> {
+    if pg_error.is_closed() {
+        info!("Connection closed regularly: {pg_error}");
+        Ok(())
+    } else {
+        Err(pg_error).context("connection error")
     }
 }

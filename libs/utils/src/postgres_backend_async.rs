@@ -299,7 +299,7 @@ impl PostgresBackend {
                         return Ok(());
                     }
                 }
-                Ok::<(), anyhow::Error>(())
+                Ok::<(), PostgresBackendError>(())
             } => {
                 // Handshake complete.
                 result?;
