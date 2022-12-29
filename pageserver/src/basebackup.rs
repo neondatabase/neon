@@ -214,10 +214,11 @@ where
 
             let mut segment_data: Vec<u8> = vec![];
             for blknum in startblk..endblk {
-                let img = self
-                    .timeline
-                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
-                    .no_ondemand_download()?;
+                let img = with_ondemand_download(|| {
+                    self.timeline
+                        .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
+                })
+                .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
@@ -313,10 +314,8 @@ where
             // XLOG_TBLSPC_DROP records. But we probably should just
             // throw an error on CREATE TABLESPACE in the first place.
             if !has_relmap_file
-                && self
-                    .timeline
-                    .list_rels(spcnode, dbnode, self.lsn)
-                    .no_ondemand_download()?
+                && with_ondemand_download(|| self.timeline.list_rels(spcnode, dbnode, self.lsn))
+                    .await?
                     .is_empty()
             {
                 return Ok(());

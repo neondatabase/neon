@@ -99,7 +99,8 @@ pub async fn import_timeline_from_postgres_datadir(
         tline,
         Lsn(pg_control.checkPointCopy.redo),
         pgdata_lsn,
-    )?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -240,7 +241,7 @@ async fn import_slru(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal(
+async fn import_wal(
     walpath: &Path,
     tline: &Timeline,
     startpoint: Lsn,
@@ -253,7 +254,7 @@ fn import_wal(
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(tline, startpoint).no_ondemand_download()?;
+    let mut walingest = WalIngest::new(tline, startpoint).await?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
@@ -291,7 +292,7 @@ fn import_wal(
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded)
-                    .no_ondemand_download()?;
+                    .await?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -375,7 +376,7 @@ pub async fn import_wal_from_tar(
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
-    let mut walingest = WalIngest::new(tline, start_lsn).no_ondemand_download()?;
+    let mut walingest = WalIngest::new(tline, start_lsn).await?;
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
@@ -425,7 +426,7 @@ pub async fn import_wal_from_tar(
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded)
-                    .no_ondemand_download()?;
+                    .await?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);
