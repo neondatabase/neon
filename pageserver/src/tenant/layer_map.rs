@@ -167,7 +167,7 @@ where
             SearchResult {
                 layer: latest_layer,
                 lsn_floor: if is_incremental {
-                    std::cmp::max(image_lsn.unwrap_or(Lsn(0)) + 1, start_lsn)
+                    std::cmp::max(image_lsn.unwrap_or(Lsn(0)), start_lsn)
                 } else {
                     start_lsn
                 },
