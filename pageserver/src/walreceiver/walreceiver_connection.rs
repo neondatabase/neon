@@ -414,11 +414,7 @@ fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres:
     {
         return Ok(pg_error);
     } else if let Some(db_error) = pg_error.as_db_error() {
-        // TODO this is a hack to avoid `BeMessage::ErrorResponse` generic error
-        // better approach would be to extend BeMessage errors and keep the error info there
-        if db_error.code() == &SqlState::from_code("CXX000")
-            && db_error.message().contains("end streaming")
-        {
+        if db_error.code() == &SqlState::IO_ERROR && db_error.message().contains("end streaming") {
             return Ok(pg_error);
         }
     }

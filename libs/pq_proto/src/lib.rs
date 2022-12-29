@@ -5,7 +5,7 @@
 // Tools for calling certain async methods in sync contexts.
 pub mod sync;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_protocol::PG_EPOCH;
 use serde::{Deserialize, Serialize};
@@ -194,6 +194,30 @@ macro_rules! retry_read {
     };
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum MaybeIoError {
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
+}
+
+impl MaybeIoError {
+    pub fn io_kind(&self) -> Option<io::ErrorKind> {
+        match self {
+            Self::Io(io_err) => Some(io_err.kind()),
+            Self::Anyhow(_) => None,
+        }
+    }
+
+    pub fn into_io_error(self) -> io::Error {
+        match self {
+            Self::Io(io_err) => io_err,
+            Self::Anyhow(e) => io::Error::new(io::ErrorKind::Other, e),
+        }
+    }
+}
+
 impl FeMessage {
     /// Read one message from the stream.
     /// This function returns `Ok(None)` in case of EOF.
@@ -216,7 +240,7 @@ impl FeMessage {
     /// }
     /// ```
     #[inline(never)]
-    pub fn read(stream: &mut (impl io::Read + Unpin)) -> anyhow::Result<Option<FeMessage>> {
+    pub fn read(stream: &mut (impl io::Read + Unpin)) -> Result<Option<FeMessage>, MaybeIoError> {
         Self::read_fut(&mut AsyncishRead(stream)).wait()
     }
 
@@ -224,7 +248,7 @@ impl FeMessage {
     /// See documentation for `Self::read`.
     pub fn read_fut<Reader>(
         stream: &mut Reader,
-    ) -> SyncFuture<Reader, impl Future<Output = anyhow::Result<Option<FeMessage>>> + '_>
+    ) -> SyncFuture<Reader, impl Future<Output = Result<Option<FeMessage>, MaybeIoError>> + '_>
     where
         Reader: tokio::io::AsyncRead + Unpin,
     {
@@ -238,7 +262,7 @@ impl FeMessage {
             let tag = match retry_read!(stream.read_u8().await) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(MaybeIoError::Io(e)),
             };
 
             // The message length includes itself, so it better be at least 4.
@@ -254,18 +278,32 @@ impl FeMessage {
 
             match tag {
                 b'Q' => Ok(Some(FeMessage::Query(body))),
-                b'P' => Ok(Some(FeParseMessage::parse(body)?)),
-                b'D' => Ok(Some(FeDescribeMessage::parse(body)?)),
-                b'E' => Ok(Some(FeExecuteMessage::parse(body)?)),
-                b'B' => Ok(Some(FeBindMessage::parse(body)?)),
-                b'C' => Ok(Some(FeCloseMessage::parse(body)?)),
+                b'P' => Ok(Some(
+                    FeParseMessage::parse(body).map_err(MaybeIoError::Anyhow)?,
+                )),
+                b'D' => Ok(Some(
+                    FeDescribeMessage::parse(body).map_err(MaybeIoError::Anyhow)?,
+                )),
+                b'E' => Ok(Some(
+                    FeExecuteMessage::parse(body).map_err(MaybeIoError::Anyhow)?,
+                )),
+                b'B' => Ok(Some(
+                    FeBindMessage::parse(body).map_err(MaybeIoError::Anyhow)?,
+                )),
+                b'C' => Ok(Some(
+                    FeCloseMessage::parse(body).map_err(MaybeIoError::Anyhow)?,
+                )),
                 b'S' => Ok(Some(FeMessage::Sync)),
                 b'X' => Ok(Some(FeMessage::Terminate)),
                 b'd' => Ok(Some(FeMessage::CopyData(body))),
                 b'c' => Ok(Some(FeMessage::CopyDone)),
                 b'f' => Ok(Some(FeMessage::CopyFail)),
                 b'p' => Ok(Some(FeMessage::PasswordMessage(body))),
-                tag => bail!("unknown message tag: {},'{:?}'", tag, body),
+                tag => {
+                    return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
+                        "unknown message tag: {tag},'{body:?}'"
+                    )))
+                }
             }
         })
     }
@@ -275,7 +313,7 @@ impl FeStartupPacket {
     /// Read startup message from the stream.
     // XXX: It's tempting yet undesirable to accept `stream` by value,
     // since such a change will cause user-supplied &mut references to be consumed
-    pub fn read(stream: &mut (impl io::Read + Unpin)) -> anyhow::Result<Option<FeMessage>> {
+    pub fn read(stream: &mut (impl io::Read + Unpin)) -> Result<Option<FeMessage>, MaybeIoError> {
         Self::read_fut(&mut AsyncishRead(stream)).wait()
     }
 
@@ -284,7 +322,7 @@ impl FeStartupPacket {
     // since such a change will cause user-supplied &mut references to be consumed
     pub fn read_fut<Reader>(
         stream: &mut Reader,
-    ) -> SyncFuture<Reader, impl Future<Output = anyhow::Result<Option<FeMessage>>> + '_>
+    ) -> SyncFuture<Reader, impl Future<Output = Result<Option<FeMessage>, MaybeIoError>> + '_>
     where
         Reader: tokio::io::AsyncRead + Unpin,
     {
@@ -302,12 +340,14 @@ impl FeStartupPacket {
             let len = match retry_read!(stream.read_u32().await) {
                 Ok(len) => len as usize,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(MaybeIoError::Io(e)),
             };
 
             #[allow(clippy::manual_range_contains)]
             if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
-                bail!("invalid message length");
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
+                    "invalid message length {len}"
+                )));
             }
 
             let request_code = retry_read!(stream.read_u32().await)?;
@@ -322,7 +362,11 @@ impl FeStartupPacket {
             let req_lo = request_code & ((1 << 16) - 1);
             let message = match (req_hi, req_lo) {
                 (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
-                    ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
+                    if params_len != 8 {
+                        return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
+                            "expected 8 bytes for CancelRequest params"
+                        )));
+                    }
                     let mut cursor = Cursor::new(params_bytes);
                     FeStartupPacket::CancelRequest(CancelKeyData {
                         backend_pid: cursor.read_i32().await?,
@@ -338,7 +382,9 @@ impl FeStartupPacket {
                     FeStartupPacket::GssEncRequest
                 }
                 (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
-                    bail!("Unrecognized request code {}", unrecognized_code)
+                    return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
+                        "Unrecognized request code {unrecognized_code}"
+                    )));
                 }
                 // TODO bail if protocol major_version is not 3?
                 (major_version, minor_version) => {
@@ -458,7 +504,7 @@ pub enum BeMessage<'a> {
     CloseComplete,
     // None means column is NULL
     DataRow(&'a [Option<&'a [u8]>]),
-    ErrorResponse(&'a str),
+    ErrorResponse(&'a str, Option<io::ErrorKind>),
     /// Single byte - used in response to SSLRequest/GSSENCRequest.
     EncryptionResponse(bool),
     NoData,
@@ -767,10 +813,13 @@ impl<'a> BeMessage<'a> {
             // First byte of each field represents type of this field. Set just enough fields
             // to satisfy rust-postgres client: 'S' -- severity, 'C' -- error, 'M' -- error
             // message text.
-            BeMessage::ErrorResponse(error_msg) => {
-                // For all the errors set Severity to Error and error code to
-                // 'internal error'.
-
+            BeMessage::ErrorResponse(error_msg, io_error_kind) => {
+                // TODO kb rework
+                let error_code = if io_error_kind.is_some() {
+                    "58030\0" // io error
+                } else {
+                    "XX000\0" // internal error
+                };
                 // 'E' signalizes ErrorResponse messages
                 buf.put_u8(b'E');
                 write_body(buf, |buf| {

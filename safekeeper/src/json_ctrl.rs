@@ -13,7 +13,6 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::id::TenantTimelineId;
-use utils::postgres_backend_async::PostgresBackendError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
@@ -25,7 +24,7 @@ use crate::timeline::Timeline;
 use crate::GlobalTimelines;
 use postgres_ffi::encode_logical_message;
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
+use pq_proto::{BeMessage, MaybeIoError, RowDescriptor, TEXT_OID};
 use utils::{lsn::Lsn, postgres_backend::PostgresBackend};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -63,7 +62,7 @@ pub fn handle_json_ctrl(
     spg: &SafekeeperPostgresHandler,
     pgb: &mut PostgresBackend,
     append_request: &AppendLogicalMessage,
-) -> Result<(), PostgresBackendError> {
+) -> Result<(), MaybeIoError> {
     info!("JSON_CTRL request: {append_request:?}");
 
     // need to init safekeeper state before AppendRequest

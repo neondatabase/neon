@@ -19,7 +19,7 @@ use pageserver_api::models::{
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
     PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
-use pq_proto::{BeMessage, FeMessage, RowDescriptor};
+use pq_proto::{BeMessage, FeMessage, MaybeIoError, RowDescriptor};
 use std::io;
 use std::net::TcpListener;
 use std::str;
@@ -28,7 +28,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::*;
 use utils::id::ConnectionId;
-use utils::postgres_backend_async::PostgresBackendError;
 use utils::{
     auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
@@ -61,8 +60,8 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 _ = task_mgr::shutdown_watcher() => {
                     // We were requested to shut down.
                     let msg = format!("pageserver is shutting down");
-                    let _ = pgb.write_message(&BeMessage::ErrorResponse(&msg));
-                    Err(anyhow::anyhow!(msg))
+                    let _ = pgb.write_message(&BeMessage::ErrorResponse(&msg, None));
+                    Err(MaybeIoError::Anyhow(anyhow::anyhow!(msg)))
                 }
 
                 msg = pgb.read_message() => { msg }
@@ -76,13 +75,14 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::Sync => continue,
                         FeMessage::Terminate => {
                             let msg = format!("client terminated connection with Terminate message during COPY");
-                            pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
-                            Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                            let io_kind = io::ErrorKind::ConnectionReset;
+                            pgb.write_message(&BeMessage::ErrorResponse(&msg, Some(io_kind)))?;
+                            Err(io::Error::new(io_kind, msg))?;
                             break;
                         }
                         m => {
-                            let msg = format!("unexpected message {:?}", m);
-                            pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
+                            let msg = format!("unexpected message {m:?}");
+                            pgb.write_message(&BeMessage::ErrorResponse(&msg, None))?;
                             Err(io::Error::new(io::ErrorKind::Other, msg))?;
                             break;
                         }
@@ -92,11 +92,15 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 }
                 Ok(None) => {
                     let msg = "client closed connection during COPY";
-                    pgb.write_message(&BeMessage::ErrorResponse(msg))?;
+                    let io_kind = io::ErrorKind::ConnectionReset;
+                    pgb.write_message(&BeMessage::ErrorResponse(msg, Some(io_kind)))?;
                     pgb.flush().await?;
-                    Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                    Err(io::Error::new(io_kind, msg))?;
                 }
-                Err(e) => {
+                Err(MaybeIoError::Io(io_error)) => {
+                    Err(io_error)?;
+                }
+                Err(MaybeIoError::Anyhow(e)) => {
                     Err(io::Error::new(io::ErrorKind::Other, e))?;
                 }
             };
@@ -195,7 +199,7 @@ async fn page_service_conn_main(
             // we've been requested to shut down
             Ok(())
         }
-        Err(PostgresBackendError::Io(io_err)) => {
+        Err(MaybeIoError::Io(io_err)) => {
             // `ConnectionReset` error happens when the Postgres client closes the connection.
             // As this disconnection happens quite often and is expected,
             // we decided to downgrade the logging level to `INFO`.
@@ -207,7 +211,7 @@ async fn page_service_conn_main(
                 Err(io_err).context("Postgres connection error")
             }
         }
-        Err(PostgresBackendError::Other(e)) => Err(e),
+        Err(MaybeIoError::Anyhow(e)) => Err(e),
     }
 }
 
@@ -366,7 +370,7 @@ impl PageServerHandler {
         base_lsn: Lsn,
         _end_lsn: Lsn,
         pg_version: u32,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), MaybeIoError> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
@@ -420,11 +424,16 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         start_lsn: Lsn,
         end_lsn: Lsn,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), MaybeIoError> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
-        anyhow::ensure!(timeline.get_last_record_lsn() == start_lsn);
+        let last_record_lsn = timeline.get_last_record_lsn();
+        if last_record_lsn != start_lsn {
+            return Err(MaybeIoError::Anyhow(
+                anyhow::anyhow!("Cannot import WAL from Lsn {start_lsn} because timeline does not start from the same lsn: {last_record_lsn}"))
+            );
+        }
 
         // TODO leave clean state on error. For now you can use detach to clean
         // up broken state from a failed import.
@@ -448,7 +457,11 @@ impl PageServerHandler {
         }
 
         // TODO Does it make sense to overshoot?
-        anyhow::ensure!(timeline.get_last_record_lsn() >= end_lsn);
+        if timeline.get_last_record_lsn() < end_lsn {
+            return Err(MaybeIoError::Anyhow(
+                anyhow::anyhow!("Cannot import WAL from Lsn {start_lsn} because timeline does not start from the same lsn: {last_record_lsn}"))
+            );
+        }
 
         // Flush data to disk, then upload to s3. No need for a forced checkpoint.
         // We only want to persist the data, and it doesn't matter if it's in the
@@ -675,7 +688,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
         &mut self,
         _pgb: &mut PostgresBackend,
         jwt_response: &[u8],
-    ) -> Result<(), PostgresBackendError> {
+    ) -> Result<(), MaybeIoError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
@@ -685,7 +698,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
-            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+            return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                 "jwt token scope is Tenant, but tenant id is missing"
             )));
         }
@@ -703,14 +716,14 @@ impl postgres_backend_async::Handler for PageServerHandler {
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
-    ) -> Result<(), PostgresBackendError> {
+    ) -> Result<(), MaybeIoError> {
         debug!("process query {query_string:?}");
 
         if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 2 {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                     "invalid param number for pagestream command"
                 )));
             }
@@ -728,7 +741,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
             if params.len() < 2 {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                     "invalid param number for basebackup command"
                 )));
             }
@@ -760,7 +773,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
             if params.len() != 2 {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                     "invalid param number for get_last_record_rlsn command"
                 )));
             }
@@ -791,7 +804,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
             if params.len() < 2 {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                     "invalid param number for fullbackup command"
                 )));
             }
@@ -840,7 +853,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             if params.len() != 5 {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                     "invalid param number for import basebackup command"
                 )));
             }
@@ -871,7 +884,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
                 Err(e) => {
                     error!("error importing base backup between {base_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message(&BeMessage::ErrorResponse(&e.to_string()))?
+                    pgb.write_message(&BeMessage::ErrorResponse(&e.to_string(), e.io_kind()))?
                 }
             };
         } else if query_string.starts_with("import wal ") {
@@ -882,7 +895,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("import wal ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             if params.len() != 4 {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                     "invalid param number for import wal command"
                 )));
             }
@@ -904,7 +917,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
                 Err(e) => {
                     error!("error importing WAL between {start_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message(&BeMessage::ErrorResponse(&e.to_string()))?
+                    pgb.write_message(&BeMessage::ErrorResponse(&e.to_string(), e.io_kind()))?
                 }
             };
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
@@ -916,7 +929,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 1 {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                     "invalid param number for config command"
                 )));
             }
@@ -962,7 +975,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
-            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+            return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                 "unknown command {query_string}"
             )));
         }

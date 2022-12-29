@@ -6,7 +6,7 @@
 use crate::postgres_backend::AuthType;
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
-use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
+use pq_proto::{BeMessage, FeMessage, FeStartupPacket, MaybeIoError};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -17,14 +17,6 @@ use tracing::{debug, error, info, trace};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_rustls::TlsAcceptor;
-
-#[derive(thiserror::Error, Debug)]
-pub enum PostgresBackendError {
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
 
 pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
@@ -41,7 +33,7 @@ pub trait Handler {
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
-    ) -> Result<(), PostgresBackendError>;
+    ) -> Result<(), MaybeIoError>;
 
     /// Called on startup packet receival, allows to process params.
     ///
@@ -52,7 +44,7 @@ pub trait Handler {
         &mut self,
         _pgb: &mut PostgresBackend,
         _sm: &FeStartupPacket,
-    ) -> Result<(), PostgresBackendError> {
+    ) -> Result<(), MaybeIoError> {
         Ok(())
     }
 
@@ -61,10 +53,8 @@ pub trait Handler {
         &mut self,
         _pgb: &mut PostgresBackend,
         _jwt_response: &[u8],
-    ) -> Result<(), PostgresBackendError> {
-        Err(PostgresBackendError::Other(anyhow::anyhow!(
-            "JWT auth failed"
-        )))
+    ) -> Result<(), MaybeIoError> {
+        Err(MaybeIoError::Anyhow(anyhow::anyhow!("JWT auth failed")))
     }
 }
 
@@ -195,13 +185,14 @@ impl PostgresBackend {
     }
 
     /// Read full message or return None if connection is closed.
-    pub async fn read_message(&mut self) -> anyhow::Result<Option<FeMessage>> {
+    pub async fn read_message(&mut self) -> Result<Option<FeMessage>, MaybeIoError> {
         use ProtoState::*;
         match self.state {
             Initialization | Encrypted => FeStartupPacket::read_fut(&mut self.stream).await,
             Authentication | Established => FeMessage::read_fut(&mut self.stream).await,
             Closed => Ok(None),
         }
+        .map_err(MaybeIoError::from)
     }
 
     /// Flush output buffer into the socket.
@@ -255,7 +246,7 @@ impl PostgresBackend {
         mut self,
         handler: &mut impl Handler,
         shutdown_watcher: F,
-    ) -> Result<(), PostgresBackendError>
+    ) -> Result<(), MaybeIoError>
     where
         F: Fn() -> S,
         S: Future,
@@ -269,7 +260,7 @@ impl PostgresBackend {
         &mut self,
         handler: &mut impl Handler,
         shutdown_watcher: F,
-    ) -> Result<(), PostgresBackendError>
+    ) -> Result<(), MaybeIoError>
     where
         F: Fn() -> S,
         S: Future,
@@ -305,7 +296,7 @@ impl PostgresBackend {
                         return Ok(());
                     }
                 }
-                Ok::<(), PostgresBackendError>(())
+                Ok::<(), MaybeIoError>(())
             } => {
                 // Handshake complete.
                 result?;
@@ -357,7 +348,7 @@ impl PostgresBackend {
         &mut self,
         handler: &mut impl Handler,
         msg: FeMessage,
-    ) -> Result<ProcessMsgResult, PostgresBackendError> {
+    ) -> Result<ProcessMsgResult, MaybeIoError> {
         assert!(self.state < ProtoState::Established);
         let have_tls = self.tls_config.is_some();
         match msg {
@@ -380,8 +371,11 @@ impl PostgresBackend {
                     }
                     FeStartupPacket::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
-                            self.write_message(&BeMessage::ErrorResponse("must connect with TLS"))?;
-                            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                            self.write_message(&BeMessage::ErrorResponse(
+                                "must connect with TLS",
+                                None,
+                            ))?;
+                            return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                                 "client did not connect with TLS"
                             )));
                         }
@@ -423,7 +417,10 @@ impl PostgresBackend {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
-                            self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
+                            self.write_message(&BeMessage::ErrorResponse(
+                                &e.to_string(),
+                                e.io_kind(),
+                            ))?;
                             return Err(e);
                         }
                     }
@@ -447,16 +444,14 @@ impl PostgresBackend {
         handler: &mut impl Handler,
         msg: FeMessage,
         unnamed_query_string: &mut Bytes,
-    ) -> Result<ProcessMsgResult, PostgresBackendError> {
+    ) -> Result<ProcessMsgResult, MaybeIoError> {
         // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
         // TODO: change that to proper top-level match of protocol state with separate message handling for each state
         assert!(self.state == ProtoState::Established);
 
         match msg {
             FeMessage::StartupPacket(_) | FeMessage::PasswordMessage(_) => {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
-                    "protocol violation"
-                )));
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!("protocol violation")));
             }
 
             FeMessage::Query(body) => {
@@ -467,10 +462,10 @@ impl PostgresBackend {
                 if let Err(e) = handler.process_query(self, query_string).await {
                     log_query_error(query_string, &e);
                     let short_error = match &e {
-                        PostgresBackendError::Io(io) => io.to_string(),
-                        PostgresBackendError::Other(e) => format!("{e:#}"),
+                        MaybeIoError::Io(io) => io.to_string(),
+                        MaybeIoError::Anyhow(e) => format!("{e:#}"),
                     };
-                    self.write_message(&BeMessage::ErrorResponse(&short_error))?;
+                    self.write_message(&BeMessage::ErrorResponse(&short_error, e.io_kind()))?;
                 }
                 self.write_message(&BeMessage::ReadyForQuery)?;
             }
@@ -498,7 +493,7 @@ impl PostgresBackend {
                 trace!("got execute {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
                     log_query_error(query_string, &e);
-                    self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
+                    self.write_message(&BeMessage::ErrorResponse(&e.to_string(), e.io_kind()))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used
                 // for basebackup and it uses CopyOut which doesn't require
@@ -517,7 +512,7 @@ impl PostgresBackend {
             // We prefer explicit pattern matching to wildcards, because
             // this helps us spot the places where new variants are missing
             FeMessage::CopyData(_) | FeMessage::CopyDone | FeMessage::CopyFail => {
-                return Err(PostgresBackendError::Other(anyhow::anyhow!(
+                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                     "unexpected message type: {:?}",
                     msg
                 )));
@@ -589,16 +584,16 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
     }
 }
 
-pub(super) fn log_query_error(query: &str, e: &PostgresBackendError) {
+pub(super) fn log_query_error(query: &str, e: &MaybeIoError) {
     match e {
-        PostgresBackendError::Io(io) => {
+        MaybeIoError::Io(io) => {
             if is_expected_io_error(io) {
                 info!("query handler for '{query}' failed with expected io error: {io}");
             } else {
                 error!("query handler for '{query}' failed with io error: {io}");
             }
         }
-        PostgresBackendError::Other(e) => {
+        MaybeIoError::Anyhow(e) => {
             // ":?" uses the alternate formatting style, which makes anyhow display the
             // full cause of the error, not just the top-level context + its trace.
             // We don't want to send that in the ErrorResponse though,

@@ -1903,7 +1903,7 @@ class NeonPageserver(PgProtocol):
             ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
             ".*Shutdown task error: walreceiver connection handling failure.*",
             ".*wal_connection_manager.*tcp connect error: Connection refused.*",
-            ".*query handler for .* failed: Connection reset by peer.*",
+            ".*query handler for .* failed: IO error: Connection reset by peer.*",
             ".*serving compute connection task.*exited with error: Postgres connection error.*",
             ".*serving compute connection task.*exited with error: Connection reset by peer.*",
             ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",

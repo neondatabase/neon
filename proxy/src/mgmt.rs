@@ -3,16 +3,13 @@ use crate::{
     console::messages::{DatabaseInfo, KickSession},
 };
 use anyhow::Context;
-use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
+use pq_proto::{BeMessage, MaybeIoError, SINGLE_COL_ROWDESC};
 use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
 use tracing::{error, info, info_span};
-use utils::{
-    postgres_backend::{self, AuthType, PostgresBackend},
-    postgres_backend_async::PostgresBackendError,
-};
+use utils::postgres_backend::{self, AuthType, PostgresBackend};
 
 /// Console management API listener thread.
 /// It spawns console response handlers needed for the link auth.
@@ -50,7 +47,7 @@ pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
     }
 }
 
-fn handle_connection(socket: TcpStream) -> Result<(), PostgresBackendError> {
+fn handle_connection(socket: TcpStream) -> Result<(), MaybeIoError> {
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, true)?;
     pgbackend.run(&mut MgmtHandler)
 }
@@ -65,7 +62,7 @@ impl postgres_backend::Handler for MgmtHandler {
         &mut self,
         pgb: &mut PostgresBackend,
         query: &str,
-    ) -> Result<(), PostgresBackendError> {
+    ) -> Result<(), MaybeIoError> {
         try_process_query(pgb, query).map_err(|e| {
             error!("failed to process response: {e:?}");
             e
@@ -73,7 +70,7 @@ impl postgres_backend::Handler for MgmtHandler {
     }
 }
 
-fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), PostgresBackendError> {
+fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), MaybeIoError> {
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);
@@ -88,7 +85,7 @@ fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), Postg
         }
         Err(e) => {
             error!("failed to deliver response to per-client task");
-            pgb.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
+            pgb.write_message(&BeMessage::ErrorResponse(&e.to_string(), None))?;
         }
     }
 

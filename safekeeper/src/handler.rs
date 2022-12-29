@@ -13,11 +13,10 @@ use anyhow::Context;
 use postgres_ffi::PG_TLI;
 use regex::Regex;
 
-use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
+use pq_proto::{BeMessage, FeStartupPacket, MaybeIoError, RowDescriptor, INT4_OID, TEXT_OID};
 use std::str;
 use tracing::info;
 use utils::auth::{Claims, Scope};
-use utils::postgres_backend_async::PostgresBackendError;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -73,7 +72,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         &mut self,
         _pgb: &mut PostgresBackend,
         sm: &FeStartupPacket,
-    ) -> Result<(), PostgresBackendError> {
+    ) -> Result<(), MaybeIoError> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(options) = params.options_raw() {
                 for opt in options {
@@ -102,7 +101,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
             Ok(())
         } else {
-            Err(PostgresBackendError::Other(anyhow::anyhow!(
+            Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                 "Safekeeper received unexpected initial message: {sm:?}"
             )))
         }
@@ -112,7 +111,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         &mut self,
         _pgb: &mut PostgresBackend,
         jwt_response: &[u8],
-    ) -> Result<(), PostgresBackendError> {
+    ) -> Result<(), MaybeIoError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
@@ -123,7 +122,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
-            return Err(PostgresBackendError::Other(anyhow::anyhow!(
+            return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
                 "jwt token scope is Tenant, but tenant id is missing"
             )));
         }
@@ -141,7 +140,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
-    ) -> Result<(), PostgresBackendError> {
+    ) -> Result<(), MaybeIoError> {
         if query_string
             .to_ascii_lowercase()
             .starts_with("set datestyle to ")
@@ -173,16 +172,16 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
         match res {
             Ok(()) => Ok(()),
-            Err(PostgresBackendError::Io(io_error)) => {
+            Err(MaybeIoError::Io(io_error)) => {
                 info!(
                     "Timeline {}/{} query failed with IO error: {}",
                     tenant_id, timeline_id, io_error
                 );
-                Err(PostgresBackendError::Io(io_error))
+                Err(MaybeIoError::Io(io_error))
             }
-            Err(PostgresBackendError::Other(e)) => Err(PostgresBackendError::Other(e.context(
-                format!("Failed to process query for timeline {timeline_id}"),
-            ))),
+            Err(MaybeIoError::Anyhow(e)) => Err(MaybeIoError::Anyhow(e.context(format!(
+                "Failed to process query for timeline {timeline_id}"
+            )))),
         }
     }
 }
@@ -219,10 +218,7 @@ impl SafekeeperPostgresHandler {
     ///
     /// Handle IDENTIFY_SYSTEM replication command
     ///
-    fn handle_identify_system(
-        &mut self,
-        pgb: &mut PostgresBackend,
-    ) -> Result<(), PostgresBackendError> {
+    fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<(), MaybeIoError> {
         let tli = GlobalTimelines::get(self.ttid)?;
 
         let lsn = if self.is_walproposer_recovery() {
