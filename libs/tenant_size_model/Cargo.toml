@@ -3,6 +3,7 @@ name = "tenant_size_model"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "Apache-2.0"
 
 [dependencies]
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

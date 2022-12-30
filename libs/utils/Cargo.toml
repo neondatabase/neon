@@ -2,6 +2,7 @@
 name = "utils"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 sentry = { version = "0.29.0", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
