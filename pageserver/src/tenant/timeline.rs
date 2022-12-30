@@ -2288,7 +2288,7 @@ impl Timeline {
         // See storage_sync module level comment on consistency.
         // Do it here because we don't want to hold self.layers.write() while waiting.
         if let Some(remote_client) = &self.remote_client {
-            info!("waiting for upload ops to complete");
+            debug!("waiting for upload ops to complete");
             remote_client
                 .wait_completion()
                 .await
@@ -2499,7 +2499,7 @@ impl Timeline {
         // See storage_sync module level comment on consistency.
         // Do it here because we don't want to hold self.layers.write() while waiting.
         if let Some(remote_client) = &self.remote_client {
-            info!("waiting for upload ops to complete");
+            debug!("waiting for upload ops to complete");
             remote_client
                 .wait_completion()
                 .await
