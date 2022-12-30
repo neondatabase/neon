@@ -82,7 +82,7 @@ pub async fn task_main(
     }
 }
 
-async fn handle_client(
+pub async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
@@ -103,7 +103,12 @@ async fn handle_client(
 
     // Extract credentials which we're going to use for auth.
     let creds = {
-        let sni = stream.get_ref().sni_hostname();
+        let sni = if config.use_hostname.is_none() {
+            stream.get_ref().sni_hostname()
+        } else {
+            let hostname = config.use_hostname.as_ref().unwrap();
+            Some(hostname.as_str())
+        };
         let common_name = tls.and_then(|tls| tls.common_name.as_deref());
         let result = config
             .auth_backend

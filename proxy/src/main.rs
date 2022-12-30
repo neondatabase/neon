@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     let proxy_address: SocketAddr = arg_matches.get_one::<String>("proxy").unwrap().parse()?;
     let mgmt_address: SocketAddr = arg_matches.get_one::<String>("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.get_one::<String>("http").unwrap().parse()?;
+    let wss_address: SocketAddr = arg_matches.get_one::<String>("wss").unwrap().parse()?;
 
     let auth_backend = match arg_matches
         .get_one::<String>("auth-backend")
@@ -94,7 +95,8 @@ async fn main() -> anyhow::Result<()> {
 
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
-        auth_backend,
+        auth_backend: auth_backend.clone(),
+        use_hostname: None,
     }));
 
     info!("Version: {GIT_VERSION}");
@@ -104,6 +106,9 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting http on {http_address}");
     let http_listener = TcpListener::bind(http_address).await?.into_std()?;
 
+    info!("Starting ws on {}", wss_address);
+    let wss_listener = TcpListener::bind(wss_address).await?.into_std()?;
+
     info!("Starting mgmt on {mgmt_address}");
     let mgmt_listener = TcpListener::bind(mgmt_address).await?.into_std()?;
 
@@ -112,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
 
     let tasks = [
         tokio::spawn(http::server::task_main(http_listener)),
+        tokio::spawn(http::server::wss_thread_main(wss_listener, config)),
         tokio::spawn(proxy::task_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
     ]
@@ -154,6 +160,12 @@ fn cli() -> clap::Command {
                 .long("http")
                 .help("listen for incoming http connections (metrics, etc) on ip:port")
                 .default_value("127.0.0.1:7001"),
+        )
+        .arg(
+            Arg::new("wss")
+                .long("wss")
+                .help("listen for incoming wss connections on ip:port")
+                .default_value("127.0.0.1:8080"), // TODO: change default to 443
         )
         .arg(
             Arg::new("uri")

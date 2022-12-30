@@ -2,11 +2,15 @@ use crate::auth;
 use anyhow::{ensure, Context};
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, ()>,
+    // TODO: this is a hack for WebSockets
+    pub use_hostname: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
     pub common_name: Option<String>,
