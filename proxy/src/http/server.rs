@@ -1,31 +1,29 @@
 use anyhow::anyhow;
 use bytes::{Buf, Bytes};
-use futures::{SinkExt, StreamExt, Sink, Stream};
-use hyper::server::accept::{Accept, self};
-use hyper::server::conn::{AddrIncoming, AddrStream};
+use futures::{Sink, Stream, StreamExt};
+use hyper::server::accept::{self};
+use hyper::server::conn::AddrIncoming;
 use hyper::upgrade::Upgraded;
 use hyper::{Body, Request, Response, StatusCode};
-use hyper_tungstenite::{WebSocketStream, tungstenite};
-use hyper_tungstenite::{HyperWebsocket, tungstenite::Message};
+use hyper_tungstenite::{tungstenite, WebSocketStream};
+use hyper_tungstenite::{tungstenite::Message, HyperWebsocket};
 use pin_project_lite::pin_project;
-use pq_proto::CancelKeyData;
-use rustls::ServerConfig;
-use tls_listener::TlsListener;
-use tokio_rustls::TlsStream;
+
 use std::future::ready;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::{net::TcpListener, convert::Infallible};
-use tokio::io::{AsyncReadExt, self, AsyncRead, AsyncWrite, ReadBuf, AsyncBufRead};
-use tokio::io::AsyncWriteExt;
-use tracing::{info, warn, error};
+use std::{convert::Infallible, net::TcpListener};
+use tls_listener::TlsListener;
+
+use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
+
+use tracing::{error, info, warn};
 use utils::http::{endpoint, error::ApiError, json::json_response, RouterBuilder, RouterService};
 
 use crate::cancellation::CancelMap;
 use crate::config::ProxyConfig;
 use crate::proxy::handle_client;
-use crate::stream;
 
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, "")
@@ -62,19 +60,10 @@ unsafe impl Sync for WebSocketRW {}
 
 impl WebSocketRW {
     pub fn new(stream: WebSocketStream<Upgraded>) -> Self {
-        Self { stream, chunk: None }
-    }
-
-    pub fn get_ref(&self) -> &WebSocketStream<Upgraded> {
-        &self.stream
-    }
-
-    pub fn get_mut(&mut self) -> &mut WebSocketStream<Upgraded> {
-        &mut self.stream
-    }
-
-    pub fn into_inner(self) -> WebSocketStream<Upgraded> {
-        self.stream
+        Self {
+            stream,
+            chunk: None,
+        }
     }
 
     fn has_chunk(&self) -> bool {
@@ -99,7 +88,11 @@ impl AsyncWrite for WebSocketRW {
         let mut this = self.project();
         match this.stream.as_mut().poll_ready(cx) {
             Poll::Ready(Ok(())) => {
-                if let Err(e) = this.stream.as_mut().start_send(Message::Binary(buf.to_vec())) {
+                if let Err(e) = this
+                    .stream
+                    .as_mut()
+                    .start_send(Message::Binary(buf.to_vec()))
+                {
                     Poll::Ready(Err(ws_err_into(e)))
                 } else {
                     Poll::Ready(Ok(buf.len()))
@@ -184,10 +177,9 @@ impl AsyncBufRead for WebSocketRW {
                         }
                         Message::Frame(_msg) => {
                             unreachable!();
-                        }
-                        // // Go around the loop in case the chunk is empty.
-                        // *self.as_mut().project().chunk = Some(chunk);
-                    }
+                        } // // Go around the loop in case the chunk is empty.
+                          // *self.as_mut().project().chunk = Some(chunk);
+                    },
                     Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(ws_err_into(err))),
                     Poll::Ready(None) => return Poll::Ready(Ok(&[])),
                     Poll::Pending => return Poll::Pending,
@@ -251,7 +243,7 @@ async fn ws_handler(
 
 pub async fn wss_thread_main(
     ws_listener: TcpListener,
-    config: &'static ProxyConfig
+    config: &'static ProxyConfig,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
@@ -269,26 +261,26 @@ pub async fn wss_thread_main(
     let tokio_listener = tokio::net::TcpListener::from_std(ws_listener)?;
 
     let addr_incoming = AddrIncoming::from_listener(tokio_listener)?;
-    let tls_listener =
-        TlsListener::new(tls_acceptor, addr_incoming)
-            .filter(|conn| {
-                if let Err(err) = conn {
-                    error!("Failed to accept TLS connection for websockets: {:?}", err);
-                    ready(false)
-                } else {
-                    ready(true)
-                }
-            });
+    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
+        if let Err(err) = conn {
+            error!("Failed to accept TLS connection for websockets: {:?}", err);
+            ready(false)
+        } else {
+            ready(true)
+        }
+    });
 
     let make_svc = hyper::service::make_service_fn(|_stream| {
         // TODO:
         // let remote_addr = stream.get_ref().0.remote_addr();
         async move {
-            Ok::<_, Infallible>(hyper::service::service_fn(move |req: Request<Body>| async move {
-                let cancel_map = Arc::new(CancelMap::default());
-                let session_id = uuid::Uuid::new_v4();
-                ws_handler(req, config, cancel_map, session_id).await
-            }))
+            Ok::<_, Infallible>(hyper::service::service_fn(
+                move |req: Request<Body>| async move {
+                    let cancel_map = Arc::new(CancelMap::default());
+                    let session_id = uuid::Uuid::new_v4();
+                    ws_handler(req, config, cancel_map, session_id).await
+                },
+            ))
         }
     });
 
