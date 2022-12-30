@@ -111,6 +111,7 @@ jobs:
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
+
       - name: Run cargo clippy
         run: ./run_clippy.sh
 
@@ -125,6 +126,11 @@ jobs:
         run: |
           cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
           cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+
+      # https://github.com/EmbarkStudios/cargo-deny
+      - name: Check rust licenses/bans/advisories/sources
+        if: ${{ !cancelled() }}
+        run: cargo deny check
 
   build-neon:
     runs-on: [ self-hosted, dev, x64 ]
