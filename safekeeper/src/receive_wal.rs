@@ -158,7 +158,7 @@ impl ProposerPollStream {
                         ))),
                         None => Err(MaybeIoError::Io(std::io::Error::new(
                             std::io::ErrorKind::ConnectionAborted,
-                            "WAL receiver closed the connection",
+                            "walproposer closed the connection",
                         ))),
                     }?;
 

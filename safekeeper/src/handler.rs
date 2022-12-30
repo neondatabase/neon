@@ -180,7 +180,8 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
                 Err(MaybeIoError::Io(io_error))
             }
             Err(MaybeIoError::Anyhow(e)) => Err(MaybeIoError::Anyhow(e.context(format!(
-                "Failed to process query for timeline {timeline_id}"
+                "Failed to process query for timeline {}",
+                self.ttid
             )))),
         }
     }

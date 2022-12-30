@@ -8,11 +8,11 @@ use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, MaybeIoError};
 use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
-use std::{future::Future, io};
 use tracing::{debug, error, info, trace};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
