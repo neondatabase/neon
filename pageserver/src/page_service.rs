@@ -26,9 +26,6 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::pin;
-use tokio_util::io::StreamReader;
-use tokio_util::io::SyncIoBridge;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
@@ -395,9 +392,7 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
 
-        let copyin_stream = copyin_stream(pgb);
-        pin!(copyin_stream);
-
+        let mut copyin_stream = Box::pin(copyin_stream(pgb));
         timeline
             .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
             .await?;
@@ -443,8 +438,8 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
-        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-        tokio::task::block_in_place(|| import_wal_from_tar(&timeline, reader, start_lsn, end_lsn))?;
+        let mut reader = tokio_util::io::StreamReader::new(&mut copyin_stream);
+        import_wal_from_tar(&timeline, &mut reader, start_lsn, end_lsn).await?;
         info!("wal import complete");
 
         // Drain the rest of the Copy data
@@ -649,16 +644,15 @@ impl PageServerHandler {
         pgb.flush().await?;
 
         /* Send a tarball of the latest layer on the timeline */
-        let mut writer = CopyDataSink {
-            pgb,
-            rt: tokio::runtime::Handle::current(),
-        };
-        tokio::task::block_in_place(|| {
+        {
+            let mut writer = pgb.copyout_writer();
             let basebackup =
                 basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
-            tracing::Span::current().record("lsn", basebackup.lsn.to_string().as_str());
-            basebackup.send_tarball()
-        })?;
+            // FIXME: instrument
+            //tracing::Span::current().record("lsn", basebackup.lsn.to_string().as_str());
+            basebackup.send_tarball().await?;
+        }
+
         pgb.write_message(&BeMessage::CopyDone)?;
         pgb.flush().await?;
         info!("basebackup complete");
@@ -965,33 +959,4 @@ async fn get_active_timeline_with_timeout(
     get_active_tenant_with_timeout(tenant_id)
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
-}
-
-///
-/// A std::io::Write implementation that wraps all data written to it in CopyData
-/// messages.
-///
-struct CopyDataSink<'a> {
-    pgb: &'a mut PostgresBackend,
-    rt: tokio::runtime::Handle,
-}
-
-impl<'a> io::Write for CopyDataSink<'a> {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        // CopyData
-        // FIXME: if the input is large, we should split it into multiple messages.
-        // Not sure what the threshold should be, but the ultimate hard limit is that
-        // the length cannot exceed u32.
-        // FIXME: flush isn't really required, but makes it easier
-        // to view in wireshark
-        self.pgb.write_message(&BeMessage::CopyData(data))?;
-        self.rt.block_on(self.pgb.flush())?;
-        trace!("CopyData sent for {} bytes!", data.len());
-
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        // no-op
-        Ok(())
-    }
 }

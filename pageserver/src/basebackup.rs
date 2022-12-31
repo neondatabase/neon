@@ -13,17 +13,17 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
-use itertools::Itertools;
 use std::fmt::Write as FmtWrite;
-use std::io;
-use std::io::Write;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::SystemTime;
-use tar::{Builder, EntryType, Header};
+use tokio::io;
+use tokio::io::AsyncWrite;
+use tokio_tar::{Builder, EntryType, Header};
 use tracing::*;
 
-use crate::task_mgr;
-use crate::tenant::{with_ondemand_download, PageReconstructResult, Timeline};
+use crate::tenant::{with_ondemand_download, Timeline};
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
@@ -39,9 +39,9 @@ use utils::lsn::Lsn;
 /// used for constructing tarball.
 pub struct Basebackup<'a, W>
 where
-    W: Write,
+    W: AsyncWrite + Send + Sync + Unpin,
 {
-    ar: Builder<AbortableWrite<W>>,
+    ar: Builder<AbortableWrite<'a, W>>,
     timeline: &'a Arc<Timeline>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
@@ -59,10 +59,10 @@ where
 //    to start the replication.
 impl<'a, W> Basebackup<'a, W>
 where
-    W: Write,
+    W: AsyncWrite + Send + Sync + Unpin,
 {
     pub fn new(
-        write: W,
+        write: &'a mut W,
         timeline: &'a Arc<Timeline>,
         req_lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
@@ -126,13 +126,13 @@ where
         })
     }
 
-    pub fn send_tarball(mut self) -> anyhow::Result<()> {
+    pub async fn send_tarball(mut self) -> anyhow::Result<()> {
         // TODO include checksum
 
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(dir)?;
-            self.ar.append(&header, &mut io::empty())?;
+            self.ar.append(&header, &mut io::empty()).await?;
         }
 
         // Send empty config files.
@@ -140,10 +140,10 @@ where
             if *filepath == "pg_hba.conf" {
                 let data = PG_HBA.as_bytes();
                 let header = new_tar_header(filepath, data.len() as u64)?;
-                self.ar.append(&header, data)?;
+                self.ar.append(&header, data).await?;
             } else {
                 let header = new_tar_header(filepath, 0)?;
-                self.ar.append(&header, &mut io::empty())?;
+                self.ar.append(&header, &mut io::empty()).await?;
             }
         }
 
@@ -154,29 +154,30 @@ where
             SlruKind::MultiXactMembers,
         ] {
             for segno in
-                with_ondemand_download_sync(|| self.timeline.list_slru_segments(kind, self.lsn))?
+                with_ondemand_download(|| self.timeline.list_slru_segments(kind, self.lsn)).await?
             {
-                self.add_slru_segment(kind, segno)?;
+                self.add_slru_segment(kind, segno).await?;
             }
         }
 
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in
-            with_ondemand_download_sync(|| self.timeline.list_dbdirs(self.lsn))?
+            with_ondemand_download(|| self.timeline.list_dbdirs(self.lsn)).await?
         {
-            self.add_dbdir(spcnode, dbnode, has_relmap_file)?;
+            self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
             // Gather and send relational files in each database if full backup is requested.
             if self.full_backup {
-                for rel in with_ondemand_download_sync(|| {
-                    self.timeline.list_rels(spcnode, dbnode, self.lsn)
-                })? {
-                    self.add_rel(rel)?;
+                for rel in
+                    with_ondemand_download(|| self.timeline.list_rels(spcnode, dbnode, self.lsn))
+                        .await?
+                {
+                    self.add_rel(rel).await?;
                 }
             }
         }
-        for xid in with_ondemand_download_sync(|| self.timeline.list_twophase_files(self.lsn))? {
-            self.add_twophase_file(xid)?;
+        for xid in with_ondemand_download(|| self.timeline.list_twophase_files(self.lsn)).await? {
+            self.add_twophase_file(xid).await?;
         }
 
         fail_point!("basebackup-before-control-file", |_| {
@@ -184,36 +185,33 @@ where
         });
 
         // Generate pg_control and bootstrap WAL segment.
-        self.add_pgcontrol_file()?;
-        self.ar.finish()?;
+        self.add_pgcontrol_file().await?;
+        self.ar.finish().await?;
         self.finished = true;
         debug!("all tarred up!");
         Ok(())
     }
 
-    fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
+    async fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
         let nblocks =
-            with_ondemand_download_sync(|| self.timeline.get_rel_size(tag, self.lsn, false))?;
-
-        // Function that adds relation segment data to archive
-        let mut add_file = |segment_index, data: &Vec<u8>| -> anyhow::Result<()> {
-            let file_name = tag.to_segfile_name(segment_index as u32);
-            let header = new_tar_header(&file_name, data.len() as u64)?;
-            self.ar.append(&header, data.as_slice())?;
-            Ok(())
-        };
+            with_ondemand_download(|| self.timeline.get_rel_size(tag, self.lsn, false)).await?;
 
         // If the relation is empty, create an empty file
         if nblocks == 0 {
-            add_file(0, &vec![])?;
+            let file_name = tag.to_segfile_name(0);
+            let header = new_tar_header(&file_name, 0)?;
+            self.ar.append(&header, &mut io::empty()).await?;
             return Ok(());
         }
 
         // Add a file for each chunk of blocks (aka segment)
-        let chunks = (0..nblocks).chunks(RELSEG_SIZE as usize);
-        for (seg, blocks) in chunks.into_iter().enumerate() {
+        let mut startblk = 0;
+        let mut seg = 0;
+        while startblk < nblocks {
+            let endblk = std::cmp::min(startblk + RELSEG_SIZE, nblocks);
+
             let mut segment_data: Vec<u8> = vec![];
-            for blknum in blocks {
+            for blknum in startblk..endblk {
                 let img = self
                     .timeline
                     .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
@@ -221,7 +219,12 @@ where
                 segment_data.extend_from_slice(&img[..]);
             }
 
-            add_file(seg, &segment_data)?;
+            let file_name = tag.to_segfile_name(seg as u32);
+            let header = new_tar_header(&file_name, segment_data.len() as u64)?;
+            self.ar.append(&header, segment_data.as_slice()).await?;
+
+            seg += 1;
+            startblk = endblk;
         }
 
         Ok(())
@@ -230,17 +233,18 @@ where
     //
     // Generate SLRU segment files from repository.
     //
-    fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let nblocks = with_ondemand_download_sync(|| {
-            self.timeline.get_slru_segment_size(slru, segno, self.lsn)
-        })?;
+    async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
+        let nblocks =
+            with_ondemand_download(|| self.timeline.get_slru_segment_size(slru, segno, self.lsn))
+                .await?;
 
         let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
         for blknum in 0..nblocks {
-            let img = with_ondemand_download_sync(|| {
+            let img = with_ondemand_download(|| {
                 self.timeline
                     .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)
-            })?;
+            })
+            .await?;
 
             if slru == SlruKind::Clog {
                 ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
@@ -253,7 +257,7 @@ where
 
         let segname = format!("{}/{:>04X}", slru.to_str(), segno);
         let header = new_tar_header(&segname, slru_buf.len() as u64)?;
-        self.ar.append(&header, slru_buf.as_slice())?;
+        self.ar.append(&header, slru_buf.as_slice()).await?;
 
         trace!("Added to basebackup slru {} relsize {}", segname, nblocks);
         Ok(())
@@ -265,16 +269,16 @@ where
     // Each directory contains a PG_VERSION file, and the default database
     // directories also contain pg_filenode.map files.
     //
-    fn add_dbdir(
+    async fn add_dbdir(
         &mut self,
         spcnode: u32,
         dbnode: u32,
         has_relmap_file: bool,
     ) -> anyhow::Result<()> {
         let relmap_img = if has_relmap_file {
-            let img = with_ondemand_download_sync(|| {
-                self.timeline.get_relmap_file(spcnode, dbnode, self.lsn)
-            })?;
+            let img =
+                with_ondemand_download(|| self.timeline.get_relmap_file(spcnode, dbnode, self.lsn))
+                    .await?;
             ensure!(img.len() == 512);
             Some(img)
         } else {
@@ -284,14 +288,14 @@ where
         if spcnode == GLOBALTABLESPACE_OID {
             let pg_version_str = self.timeline.pg_version.to_string();
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
-            self.ar.append(&header, pg_version_str.as_bytes())?;
+            self.ar.append(&header, pg_version_str.as_bytes()).await?;
 
             info!("timeline.pg_version {}", self.timeline.pg_version);
 
             if let Some(img) = relmap_img {
                 // filenode map for global tablespace
                 let header = new_tar_header("global/pg_filenode.map", img.len() as u64)?;
-                self.ar.append(&header, &img[..])?;
+                self.ar.append(&header, &img[..]).await?;
             } else {
                 warn!("global/pg_filenode.map is missing");
             }
@@ -321,18 +325,18 @@ where
             // Append dir path for each database
             let path = format!("base/{}", dbnode);
             let header = new_tar_header_dir(&path)?;
-            self.ar.append(&header, &mut io::empty())?;
+            self.ar.append(&header, &mut io::empty()).await?;
 
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
 
                 let pg_version_str = self.timeline.pg_version.to_string();
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
-                self.ar.append(&header, pg_version_str.as_bytes())?;
+                self.ar.append(&header, pg_version_str.as_bytes()).await?;
 
                 let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
                 let header = new_tar_header(&relmap_path, img.len() as u64)?;
-                self.ar.append(&header, &img[..])?;
+                self.ar.append(&header, &img[..]).await?;
             }
         };
         Ok(())
@@ -341,8 +345,8 @@ where
     //
     // Extract twophase state files
     //
-    fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
-        let img = with_ondemand_download_sync(|| self.timeline.get_twophase_file(xid, self.lsn))?;
+    async fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
+        let img = with_ondemand_download(|| self.timeline.get_twophase_file(xid, self.lsn)).await?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -350,7 +354,7 @@ where
         buf.put_u32_le(crc);
         let path = format!("pg_twophase/{:>08X}", xid);
         let header = new_tar_header(&path, buf.len() as u64)?;
-        self.ar.append(&header, &buf[..])?;
+        self.ar.append(&header, &buf[..]).await?;
 
         Ok(())
     }
@@ -359,7 +363,7 @@ where
     // Add generated pg_control file and bootstrap WAL segment.
     // Also send zenith.signal file with extra bootstrap data.
     //
-    fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
+    async fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
@@ -371,17 +375,19 @@ where
         } else {
             write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
         }
-        self.ar.append(
-            &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
-            zenith_signal.as_bytes(),
-        )?;
+        self.ar
+            .append(
+                &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
+                zenith_signal.as_bytes(),
+            )
+            .await?;
 
-        let checkpoint_bytes =
-            with_ondemand_download_sync(|| self.timeline.get_checkpoint(self.lsn))
-                .context("failed to get checkpoint bytes")?;
-        let pg_control_bytes =
-            with_ondemand_download_sync(|| self.timeline.get_control_file(self.lsn))
-                .context("failed get control bytes")?;
+        let checkpoint_bytes = with_ondemand_download(|| self.timeline.get_checkpoint(self.lsn))
+            .await
+            .context("failed to get checkpoint bytes")?;
+        let pg_control_bytes = with_ondemand_download(|| self.timeline.get_control_file(self.lsn))
+            .await
+            .context("failed get control bytes")?;
 
         let (pg_control_bytes, system_identifier) = postgres_ffi::generate_pg_control(
             &pg_control_bytes,
@@ -392,7 +398,7 @@ where
 
         //send pg_control
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
-        self.ar.append(&header, &pg_control_bytes[..])?;
+        self.ar.append(&header, &pg_control_bytes[..]).await?;
 
         //send wal segment
         let segno = self.lsn.segment_number(WAL_SEGMENT_SIZE);
@@ -404,14 +410,14 @@ where
             postgres_ffi::generate_wal_segment(segno, system_identifier, self.timeline.pg_version)
                 .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
         ensure!(wal_seg.len() == WAL_SEGMENT_SIZE);
-        self.ar.append(&header, &wal_seg[..])?;
+        self.ar.append(&header, &wal_seg[..]).await?;
         Ok(())
     }
 }
 
 impl<'a, W> Drop for Basebackup<'a, W>
 where
-    W: Write,
+    W: AsyncWrite + Send + Sync + Unpin,
 {
     /// If the basebackup was not finished, prevent the Archive::drop() from
     /// writing the end-of-archive marker.
@@ -461,21 +467,27 @@ fn new_tar_header_dir(path: &str) -> anyhow::Result<Header> {
 /// A wrapper that passes through all data to the underlying Write,
 /// until abort() is called.
 ///
-/// tar::Builder has an annoying habit of finishing the archive with
+/// tokio_tar::Builder has an annoying habit of finishing the archive with
 /// a valid tar end-of-archive marker (two 512-byte sectors of zeros),
 /// even if an error occurs and we don't finish building the archive.
 /// We'd rather abort writing the tarball immediately than construct
 /// a seemingly valid but incomplete archive. This wrapper allows us
 /// to swallow the end-of-archive marker that Builder::drop() emits,
-/// without writing it to the underlying sink.
+/// without writing it to the underlying writer.
 ///
-struct AbortableWrite<W> {
-    w: W,
-    aborted: bool,
+/// FIXME: This isn't needed anymore, now that we use a fork of
+/// tokio-tar that doesn't have that Drop implementation
+use pin_project_lite::pin_project;
+pin_project! {
+    struct AbortableWrite<'a, W> {
+        #[pin]
+        w: &'a mut W,
+        aborted: bool,
+    }
 }
 
-impl<W> AbortableWrite<W> {
-    pub fn new(w: W) -> Self {
+impl<'a, W> AbortableWrite<'a, W> {
+    pub fn new(w: &'a mut W) -> Self {
         AbortableWrite { w, aborted: false }
     }
 
@@ -484,30 +496,36 @@ impl<W> AbortableWrite<W> {
     }
 }
 
-impl<W> Write for AbortableWrite<W>
+impl<'a, W> AsyncWrite for AbortableWrite<'a, W>
 where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
         if self.aborted {
-            Ok(data.len())
+            Poll::Ready(Ok(data.len()))
         } else {
-            self.w.write(data)
+            self.project().w.poll_write(cx, data)
         }
     }
-    fn flush(&mut self) -> io::Result<()> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
         if self.aborted {
-            Ok(())
+            Poll::Ready(Ok(()))
         } else {
-            self.w.flush()
+            self.project().w.poll_flush(cx)
         }
     }
-}
-
-fn with_ondemand_download_sync<F, T>(f: F) -> anyhow::Result<T>
-where
-    F: Send + Fn() -> PageReconstructResult<T>,
-    T: Send,
-{
-    task_mgr::COMPUTE_REQUEST_RUNTIME.block_on(with_ondemand_download(f))
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.aborted {
+            Poll::Ready(Ok(()))
+        } else {
+            self.project().w.poll_shutdown(cx)
+        }
+    }
 }
