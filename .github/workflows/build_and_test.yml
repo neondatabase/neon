@@ -301,6 +301,7 @@ jobs:
         run: |
           pwd
           ls -la
+          ls -la .cargo
 
       - name: Upload rust cache (S3 Cache)
         uses: ./.github/actions/cache-upload

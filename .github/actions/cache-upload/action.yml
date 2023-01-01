@@ -25,6 +25,7 @@ runs:
         SOURCE: ${{ inputs.path }}
         ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar
       run: |
+        ls -la
         mkdir -p $(dirname $ARCHIVE)
         
         for i in ${SOURCE} 
