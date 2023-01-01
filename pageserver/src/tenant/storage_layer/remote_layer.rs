@@ -7,7 +7,6 @@ use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use utils::{
@@ -17,7 +16,7 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
-use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
+use super::{DeltaLayer, PersistentLayer};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
@@ -62,7 +61,7 @@ impl Layer for RemoteLayer {
     ) -> Result<ValueReconstructResult> {
         bail!(
             "layer {} needs to be downloaded",
-            self.filename().file_name()
+            self.layer_name().file_name()
         );
     }
 
@@ -86,53 +85,7 @@ impl Layer for RemoteLayer {
     }
 
     fn short_id(&self) -> String {
-        self.filename().file_name()
-    }
-}
-
-impl PersistentLayer for RemoteLayer {
-    fn filename(&self) -> LayerFileName {
-        if self.is_delta {
-            DeltaFileName {
-                key_range: self.key_range.clone(),
-                lsn_range: self.lsn_range.clone(),
-            }
-            .into()
-        } else {
-            ImageFileName {
-                key_range: self.key_range.clone(),
-                lsn: self.lsn_range.start,
-            }
-            .into()
-        }
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        None
-    }
-
-    fn iter(&self) -> Result<LayerIter<'_>> {
-        bail!("cannot iterate a remote layer");
-    }
-
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
-        bail!("cannot iterate a remote layer");
-    }
-
-    fn delete(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn downcast_remote_layer<'a>(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
-        Some(self)
-    }
-
-    fn is_remote_layer(&self) -> bool {
-        true
-    }
-
-    fn file_size(&self) -> Option<u64> {
-        self.layer_metadata.file_size()
+        self.layer_name().file_name()
     }
 }
 
@@ -180,31 +133,45 @@ impl RemoteLayer {
         &self,
         conf: &'static PageServerConf,
         file_size: u64,
-    ) -> Arc<dyn PersistentLayer> {
+    ) -> PersistentLayer {
         if self.is_delta {
             let fname = DeltaFileName {
                 key_range: self.key_range.clone(),
                 lsn_range: self.lsn_range.clone(),
             };
-            Arc::new(DeltaLayer::new(
+            PersistentLayer::Delta(Arc::new(DeltaLayer::new(
                 conf,
                 self.timeline_id,
                 self.tenant_id,
                 &fname,
                 file_size,
-            ))
+            )))
         } else {
             let fname = ImageFileName {
                 key_range: self.key_range.clone(),
                 lsn: self.lsn_range.start,
             };
-            Arc::new(ImageLayer::new(
+            PersistentLayer::Image(Arc::new(ImageLayer::new(
                 conf,
                 self.timeline_id,
                 self.tenant_id,
                 &fname,
                 file_size,
-            ))
+            )))
+        }
+    }
+
+    pub fn layer_name(&self) -> LayerFileName {
+        if self.is_delta {
+            LayerFileName::from(DeltaFileName {
+                key_range: self.key_range.clone(),
+                lsn_range: self.lsn_range.clone(),
+            })
+        } else {
+            LayerFileName::from(ImageFileName {
+                key_range: self.key_range.clone(),
+                lsn: self.lsn_range.start,
+            })
         }
     }
 }

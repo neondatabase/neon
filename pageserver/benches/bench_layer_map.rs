@@ -10,7 +10,6 @@ use std::io::{BufRead, BufReader};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Instant;
 use utils::id::{TenantId, TimelineId};
 
@@ -106,8 +105,8 @@ impl Layer for DummyImage {
     }
 }
 
-fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
-    let mut layer_map = LayerMap::<dyn Layer>::default();
+fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
+    let mut layer_map = LayerMap::default();
 
     let mut min_lsn = Lsn(u64::MAX);
     let mut max_lsn = Lsn(0);
@@ -121,7 +120,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
                 key_range: imgfilename.key_range,
                 lsn: imgfilename.lsn,
             };
-            layer_map.insert_historic(Arc::new(layer));
+            layer_map.insert_historic(layer);
             min_lsn = min(min_lsn, imgfilename.lsn);
             max_lsn = max(max_lsn, imgfilename.lsn);
         } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
@@ -129,7 +128,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
                 key_range: deltafilename.key_range,
                 lsn_range: deltafilename.lsn_range.clone(),
             };
-            layer_map.insert_historic(Arc::new(layer));
+            layer_map.insert_historic(layer);
             min_lsn = min(min_lsn, deltafilename.lsn_range.start);
             max_lsn = max(max_lsn, deltafilename.lsn_range.end);
         } else {
@@ -143,7 +142,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
 }
 
 /// Construct a layer map query pattern for benchmarks
-fn uniform_query_pattern(layer_map: &LayerMap<dyn Layer>) -> Vec<(Key, Lsn)> {
+fn uniform_query_pattern(layer_map: &LayerMap) -> Vec<(Key, Lsn)> {
     // For each image layer we query one of the pages contained, at LSN right
     // before the image layer was created. This gives us a somewhat uniform
     // coverage of both the lsn and key space because image layers have
@@ -216,7 +215,7 @@ fn bench_from_real_project(c: &mut Criterion) {
 
 // Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
 fn bench_sequential(c: &mut Criterion) {
-    let mut layer_map: LayerMap<dyn Layer> = LayerMap::default();
+    let mut layer_map = LayerMap::default();
 
     // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
     //
@@ -235,7 +234,7 @@ fn bench_sequential(c: &mut Criterion) {
             key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
             lsn: Lsn(10 * i),
         };
-        layer_map.insert_historic(Arc::new(layer));
+        layer_map.insert_historic(layer);
     }
 
     // Manually measure runtime without criterion because criterion

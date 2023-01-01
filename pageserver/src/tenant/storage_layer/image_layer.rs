@@ -25,9 +25,7 @@ use crate::repository::{Key, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::tenant::storage_layer::{
-    PersistentLayer, ValueReconstructResult, ValueReconstructState,
-};
+use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
@@ -35,7 +33,7 @@ use bytes::Bytes;
 use hex;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::Write;
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
@@ -50,8 +48,8 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::{ImageFileName, LayerFileName, PathOrConf};
-use super::{Layer, LayerIter};
+use super::filename::{ImageFileName, PathOrConf};
+use super::Layer;
 
 ///
 /// Header stored in the beginning of the file
@@ -147,7 +145,7 @@ impl Layer for ImageLayer {
     }
 
     fn short_id(&self) -> String {
-        self.filename().file_name()
+        self.layer_name().to_string()
     }
 
     /// debugging function to print out the contents of the layer
@@ -209,30 +207,6 @@ impl Layer for ImageLayer {
         } else {
             Ok(ValueReconstructResult::Missing)
         }
-    }
-}
-
-impl PersistentLayer for ImageLayer {
-    fn filename(&self) -> LayerFileName {
-        self.layer_name().into()
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        Some(self.path())
-    }
-
-    fn iter(&self) -> Result<LayerIter<'_>> {
-        unimplemented!();
-    }
-
-    fn delete(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
-    }
-
-    fn file_size(&self) -> Option<u64> {
-        Some(self.file_size)
     }
 }
 
@@ -326,7 +300,7 @@ impl ImageLayer {
             }
             PathOrConf::Path(path) => {
                 let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.filename().file_name();
+                let expected_filename = self.layer_name().to_string();
 
                 if actual_filename != expected_filename {
                     println!(
@@ -395,7 +369,7 @@ impl ImageLayer {
         })
     }
 
-    fn layer_name(&self) -> ImageFileName {
+    pub fn layer_name(&self) -> ImageFileName {
         ImageFileName {
             key_range: self.key_range.clone(),
             lsn: self.lsn,

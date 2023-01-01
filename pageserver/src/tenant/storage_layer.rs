@@ -10,7 +10,8 @@ use crate::repository::{Key, Value};
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
-use std::ops::Range;
+use std::fs;
+use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -122,13 +123,13 @@ pub trait Layer: Send + Sync {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult>;
+    ) -> anyhow::Result<ValueReconstructResult>;
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
     fn short_id(&self) -> String;
 
     /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool) -> Result<()>;
+    fn dump(&self, verbose: bool) -> anyhow::Result<()>;
 }
 
 /// Returned by [`Layer::iter`]
@@ -136,6 +137,13 @@ pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i
 
 /// Returned by [`Layer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
+
+#[derive(Clone)]
+pub enum PersistentLayer {
+    Delta(Arc<DeltaLayer>),
+    Image(Arc<ImageLayer>),
+    Remote(Arc<RemoteLayer>),
+}
 
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
@@ -151,48 +159,105 @@ pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN
 ///
-pub trait PersistentLayer: Layer {
+
+impl PersistentLayer {
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
-    fn filename(&self) -> LayerFileName;
+    pub fn filename(&self) -> LayerFileName {
+        match self {
+            Self::Delta(delta) => delta.layer_name().into(),
+            Self::Image(image) => image.layer_name().into(),
+            Self::Remote(remote) => remote.layer_name(),
+        }
+    }
 
     // Path to the layer file in the local filesystem.
     // `None` for `RemoteLayer`.
-    fn local_path(&self) -> Option<PathBuf>;
+    pub fn local_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Delta(delta) => Some(delta.path()),
+            Self::Image(image) => Some(image.path()),
+            Self::Remote(_remote) => None, // TODO kb is this method needed?
+        }
+    }
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> Result<LayerIter<'_>>;
+    pub fn iter(&self) -> anyhow::Result<LayerIter<'_>> {
+        match self {
+            Self::Delta(delta) => delta.iter(),
+            Self::Image(_image) => unimplemented!(),
+            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"), // TODO kb is this method needed?
+        }
+    }
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
-        panic!("Not implemented")
+    pub fn key_iter(&self) -> anyhow::Result<LayerKeyIter<'_>> {
+        match self {
+            Self::Delta(delta) => delta.key_iter(),
+            Self::Image(_image) => panic!("Not implemented"),
+            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"), // TODO kb is this method needed?
+        }
     }
 
     /// Permanently remove this layer from disk.
-    fn delete(&self) -> Result<()>;
-
-    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
-        None
+    pub fn delete(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Delta(delta) => {
+                // delete underlying file
+                fs::remove_file(delta.path())?;
+                Ok(())
+            }
+            Self::Image(image) => {
+                // delete underlying file
+                fs::remove_file(image.path())?;
+                Ok(())
+            }
+            Self::Remote(_remote) => Ok(()), // TODO kb is this method needed?
+        }
     }
 
-    fn is_remote_layer(&self) -> bool {
-        false
+    pub fn is_remote_layer(&self) -> bool {
+        matches!(self, Self::Remote(_))
     }
 
     /// Returns None if the layer file size is not known.
     ///
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> Option<u64>;
+    pub fn file_size(&self) -> Option<u64> {
+        match self {
+            Self::Delta(delta) => Some(delta.file_size),
+            Self::Image(image) => Some(image.file_size),
+            Self::Remote(remote) => remote.layer_metadata.file_size(), // TODO kb is this method needed?
+        }
+    }
 }
 
-pub fn downcast_remote_layer(
-    layer: &Arc<dyn PersistentLayer>,
-) -> Option<std::sync::Arc<RemoteLayer>> {
-    if layer.is_remote_layer() {
-        Arc::clone(layer).downcast_remote_layer()
-    } else {
-        None
+impl PartialEq for PersistentLayer {
+    // // FIXME: ptr_eq might fail to return true for 'dyn'
+    // // references.  Clippy complains about this. In practice it
+    // // seems to work, the assertion below would be triggered
+    // // otherwise but this ought to be fixed.
+    // #[allow(clippy::vtable_address_comparisons)]
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Delta(d0), Self::Delta(d1)) => Arc::ptr_eq(d0, d1),
+            (Self::Image(i0), Self::Image(i1)) => Arc::ptr_eq(i0, i1),
+            (Self::Remote(r0), Self::Remote(r1)) => Arc::ptr_eq(r0, r1),
+            _ => false,
+        }
+    }
+}
+
+impl Deref for PersistentLayer {
+    type Target = dyn Layer;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Delta(x) => x.as_ref(),
+            Self::Image(x) => x.as_ref(),
+            Self::Remote(x) => x.as_ref(),
+        }
     }
 }

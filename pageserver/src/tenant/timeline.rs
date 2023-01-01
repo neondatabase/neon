@@ -86,7 +86,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub layers: RwLock<LayerMap<dyn PersistentLayer>>,
+    pub layers: RwLock<LayerMap>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -1002,7 +1002,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                layers.insert_historic(Arc::new(layer));
+                layers.insert_historic(PersistentLayer::Image(Arc::new(layer)));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1033,7 +1033,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                layers.insert_historic(Arc::new(layer));
+                layers.insert_historic(PersistentLayer::Delta(Arc::new(layer)));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1077,9 +1077,9 @@ impl Timeline {
     async fn create_remote_layers(
         &self,
         index_part: &IndexPart,
-        local_layers: HashMap<LayerFileName, Arc<dyn PersistentLayer>>,
+        local_layers: HashMap<LayerFileName, PersistentLayer>,
         up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn PersistentLayer>>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, PersistentLayer>> {
         // Are we missing some files that are present in remote storage?
         // Create RemoteLayer instances for them.
         let mut local_only_layers = local_layers;
@@ -1161,9 +1161,10 @@ impl Timeline {
                         imgfilename,
                         &remote_layer_metadata,
                     );
-                    let remote_layer = Arc::new(remote_layer);
-
-                    self.layers.write().unwrap().insert_historic(remote_layer);
+                    self.layers
+                        .write()
+                        .unwrap()
+                        .insert_historic(PersistentLayer::Remote(Arc::new(remote_layer)));
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1185,8 +1186,10 @@ impl Timeline {
                         deltafilename,
                         &remote_layer_metadata,
                     );
-                    let remote_layer = Arc::new(remote_layer);
-                    self.layers.write().unwrap().insert_historic(remote_layer);
+                    self.layers
+                        .write()
+                        .unwrap()
+                        .insert_historic(PersistentLayer::Remote(Arc::new(remote_layer)));
                 }
                 #[cfg(test)]
                 LayerFileName::Test(_) => unreachable!(),
@@ -1502,7 +1505,7 @@ trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
 }
 
-impl TraversalLayerExt for Arc<dyn PersistentLayer> {
+impl TraversalLayerExt for PersistentLayer {
     fn traversal_id(&self) -> TraversalId {
         match self.local_path() {
             Some(local_path) => {
@@ -1683,12 +1686,10 @@ impl Timeline {
 
                     if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                         // If it's a remote layer, download it and retry.
-                        if let Some(remote_layer) =
-                            super::storage_layer::downcast_remote_layer(&layer)
-                        {
+                        if let PersistentLayer::Remote(remote_layer) = &layer {
                             // TODO: push a breadcrumb to 'traversal_path' to record the fact that
                             // we downloaded / would need to download this layer.
-                            remote_layer // download happens outside the scope of `layers` guard object
+                            Arc::clone(remote_layer) // download happens outside the scope of `layers` guard object
                         } else {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
@@ -1706,7 +1707,7 @@ impl Timeline {
                                 result,
                                 cont_lsn,
                                 Box::new({
-                                    let layer = Arc::clone(&layer);
+                                    let layer = layer.clone();
                                     move || layer.traversal_id()
                                 }),
                             ));
@@ -1730,8 +1731,7 @@ impl Timeline {
                 // the if stmt above is not enough for current rustc: it requires
                 // that the layers lock guard is not in scope across the download
                 // await point.
-                let remote_layer_as_persistent: Arc<dyn PersistentLayer> =
-                    Arc::clone(&remote_layer) as Arc<dyn PersistentLayer>;
+                let remote_layer_as_persistent = PersistentLayer::Remote(Arc::clone(&remote_layer));
                 let id = remote_layer_as_persistent.traversal_id();
                 info!("need remote layer {id}");
 
@@ -2074,7 +2074,7 @@ impl Timeline {
         // Write it out
         let new_delta = frozen_layer.write_to_disk()?;
         let new_delta_path = new_delta.path();
-        let new_delta_filename = new_delta.filename();
+        let new_delta_filename = LayerFileName::Delta(new_delta.layer_name());
 
         // Sync it to disk.
         //
@@ -2092,7 +2092,7 @@ impl Timeline {
         // Add it to the layer map
         {
             let mut layers = self.layers.write().unwrap();
-            layers.insert_historic(Arc::new(new_delta));
+            layers.insert_historic(PersistentLayer::Delta(Arc::new(new_delta)));
         }
 
         // update the timeline's physical size
@@ -2260,7 +2260,7 @@ impl Timeline {
         let mut layers = self.layers.write().unwrap();
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for l in image_layers {
-            let path = l.filename();
+            let path = LayerFileName::Image(l.layer_name());
             let metadata = timeline_path
                 .join(path.file_name())
                 .metadata()
@@ -2271,7 +2271,7 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            layers.insert_historic(Arc::new(l));
+            layers.insert_historic(PersistentLayer::Image(Arc::new(l)));
         }
         drop(layers);
         timer.stop_and_record();
@@ -2282,7 +2282,7 @@ impl Timeline {
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
     new_layers: Vec<DeltaLayer>,
-    deltas_to_compact: Vec<Arc<dyn PersistentLayer>>,
+    deltas_to_compact: Vec<PersistentLayer>,
 }
 
 impl Timeline {
@@ -2317,14 +2317,14 @@ impl Timeline {
 
         let first_level0_delta = level0_deltas_iter.next().unwrap();
         let mut prev_lsn_end = first_level0_delta.get_lsn_range().end;
-        let mut deltas_to_compact = vec![Arc::clone(first_level0_delta)];
+        let mut deltas_to_compact = vec![first_level0_delta.clone()];
         for l in level0_deltas_iter {
             let lsn_range = l.get_lsn_range();
 
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            deltas_to_compact.push(Arc::clone(l));
+            deltas_to_compact.push(l.clone());
             prev_lsn_end = lsn_range.end;
         }
         let lsn_range = Range {
@@ -2576,7 +2576,7 @@ impl Timeline {
 
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
-                    &l.filename(),
+                    &LayerFileName::Delta(l.layer_name()),
                     &LayerFileMetadata::new(metadata.len()),
                 )?;
             }
@@ -2587,8 +2587,7 @@ impl Timeline {
                 .add(metadata.len());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            layers.insert_historic(x);
+            layers.insert_historic(PersistentLayer::Delta(Arc::new(l)));
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -2884,7 +2883,7 @@ impl Timeline {
                 l.filename().file_name(),
                 l.is_incremental(),
             );
-            layers_to_remove.push(Arc::clone(&l));
+            layers_to_remove.push(l.clone());
         }
 
         if !layers_to_remove.is_empty() {
@@ -3072,8 +3071,7 @@ impl Timeline {
                     let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     let mut layers = self_clone.layers.write().unwrap();
                     {
-                        let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        layers.remove_historic(l);
+                        layers.remove_historic(PersistentLayer::Remote(Arc::clone(&remote_layer)));
                     }
                     layers.insert_historic(new_layer);
                     drop(layers);
@@ -3166,8 +3164,14 @@ impl Timeline {
             let layers = self.layers.read().unwrap();
             layers
                 .iter_historic_layers()
-                .filter_map(|l| l.downcast_remote_layer())
-                .map(|l| self.download_remote_layer(l))
+                .filter_map(|l| match l {
+                    PersistentLayer::Delta(_) => None,
+                    PersistentLayer::Image(_) => None,
+                    PersistentLayer::Remote(remote) => {
+                        let self_clone = Arc::clone(self);
+                        Some(self_clone.download_remote_layer(remote))
+                    }
+                })
                 .collect()
         };
 

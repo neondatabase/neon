@@ -26,12 +26,12 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use super::storage_layer::{InMemoryLayer, Layer};
+use super::storage_layer::{InMemoryLayer, Layer, PersistentLayer};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-pub struct LayerMap<L: ?Sized> {
+pub struct LayerMap {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
     // records. If it is None, 'next_open_layer_at' will be set instead, indicating
@@ -52,14 +52,14 @@ pub struct LayerMap<L: ?Sized> {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// All the historic layers are kept here
-    historic_layers: RTree<LayerRTreeObject<L>>,
+    historic_layers: RTree<LayerRTreeObject>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<Arc<L>>,
+    l0_delta_layers: Vec<PersistentLayer>,
 }
 
-impl<L: ?Sized> Default for LayerMap<L> {
+impl Default for LayerMap {
     fn default() -> Self {
         Self {
             open_layer: None,
@@ -71,8 +71,8 @@ impl<L: ?Sized> Default for LayerMap<L> {
     }
 }
 
-struct LayerRTreeObject<L: ?Sized> {
-    layer: Arc<L>,
+struct LayerRTreeObject {
+    layer: PersistentLayer,
 
     envelope: AABB<[IntKey; 2]>,
 }
@@ -196,32 +196,21 @@ impl Num for IntKey {
     }
 }
 
-impl<T: ?Sized> PartialEq for LayerRTreeObject<T> {
+impl PartialEq for LayerRTreeObject {
     fn eq(&self, other: &Self) -> bool {
-        // FIXME: ptr_eq might fail to return true for 'dyn'
-        // references.  Clippy complains about this. In practice it
-        // seems to work, the assertion below would be triggered
-        // otherwise but this ought to be fixed.
-        #[allow(clippy::vtable_address_comparisons)]
-        Arc::ptr_eq(&self.layer, &other.layer)
+        self.layer == other.layer
     }
 }
 
-impl<L> RTreeObject for LayerRTreeObject<L>
-where
-    L: ?Sized,
-{
+impl RTreeObject for LayerRTreeObject {
     type Envelope = AABB<[IntKey; 2]>;
     fn envelope(&self) -> Self::Envelope {
         self.envelope
     }
 }
 
-impl<L> LayerRTreeObject<L>
-where
-    L: ?Sized + Layer,
-{
-    fn new(layer: Arc<L>) -> Self {
+impl LayerRTreeObject {
+    fn new(layer: PersistentLayer) -> Self {
         let key_range = layer.get_key_range();
         let lsn_range = layer.get_lsn_range();
 
@@ -240,15 +229,12 @@ where
 }
 
 /// Return value of LayerMap::search
-pub struct SearchResult<L: ?Sized> {
-    pub layer: Arc<L>,
+pub struct SearchResult {
+    pub layer: PersistentLayer,
     pub lsn_floor: Lsn,
 }
 
-impl<L> LayerMap<L>
-where
-    L: ?Sized + Layer,
-{
+impl LayerMap {
     ///
     /// Find the latest layer that covers the given 'key', with lsn <
     /// 'end_lsn'.
@@ -263,9 +249,9 @@ where
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult> {
         // Find the latest image layer that covers the given key
-        let mut latest_img: Option<Arc<L>> = None;
+        let mut latest_img: Option<PersistentLayer> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
         let envelope = AABB::from_corners(
             [IntKey::from(key.to_i128()), IntKey::from(0i128)],
@@ -288,18 +274,18 @@ where
             if Lsn(img_lsn.0 + 1) == end_lsn {
                 // found exact match
                 return Some(SearchResult {
-                    layer: Arc::clone(l),
+                    layer: l.clone(),
                     lsn_floor: img_lsn,
                 });
             }
             if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
-                latest_img = Some(Arc::clone(l));
+                latest_img = Some(l.clone());
                 latest_img_lsn = Some(img_lsn);
             }
         }
 
         // Search the delta layers
-        let mut latest_delta: Option<Arc<L>> = None;
+        let mut latest_delta: Option<PersistentLayer> = None;
         for e in self
             .historic_layers
             .locate_in_envelope_intersecting(&envelope)
@@ -325,7 +311,7 @@ where
                     "found layer {} for request on {key} at {end_lsn}",
                     l.short_id(),
                 );
-                latest_delta.replace(Arc::clone(l));
+                latest_delta.replace(l.clone());
                 break;
             }
             if l.get_lsn_range().end > latest_img_lsn.unwrap_or(Lsn(0)) {
@@ -333,10 +319,10 @@ where
                 // nothing newer, this is what we need to return. Remember this.
                 if let Some(old_candidate) = &latest_delta {
                     if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
-                        latest_delta.replace(Arc::clone(l));
+                        latest_delta.replace(l.clone());
                     }
                 } else {
-                    latest_delta.replace(Arc::clone(l));
+                    latest_delta.replace(l.clone());
                 }
             }
         }
@@ -368,7 +354,7 @@ where
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<L>) {
+    pub fn insert_historic(&mut self, layer: PersistentLayer) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
         }
@@ -381,8 +367,8 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<L>) {
-        if layer.get_key_range() == (Key::MIN..Key::MAX) {
+    pub fn remove_historic(&mut self, layer_to_remove: PersistentLayer) {
+        if layer_to_remove.get_key_range() == (Key::MIN..Key::MAX) {
             let len_before = self.l0_delta_layers.len();
 
             // FIXME: ptr_eq might fail to return true for 'dyn'
@@ -391,12 +377,12 @@ where
             // otherwise but this ought to be fixed.
             #[allow(clippy::vtable_address_comparisons)]
             self.l0_delta_layers
-                .retain(|other| !Arc::ptr_eq(other, &layer));
+                .retain(|other| other != &layer_to_remove);
             assert_eq!(self.l0_delta_layers.len(), len_before - 1);
         }
         assert!(self
             .historic_layers
-            .remove(&LayerRTreeObject::new(layer))
+            .remove(&LayerRTreeObject::new(layer_to_remove))
             .is_some());
         NUM_ONDISK_LAYERS.dec();
     }
@@ -450,13 +436,13 @@ where
         }
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = PersistentLayer> {
         self.historic_layers.iter().map(|e| e.layer.clone())
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
-    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<L>> {
+    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<PersistentLayer> {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         let envelope = AABB::from_corners(
@@ -480,7 +466,7 @@ where
                 continue;
             }
             candidate_lsn = this_lsn;
-            candidate = Some(Arc::clone(l));
+            candidate = Some(l.clone());
         }
 
         candidate
@@ -498,7 +484,7 @@ where
         &self,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<Vec<(Range<Key>, Option<Arc<L>>)>> {
+    ) -> Result<Vec<(Range<Key>, Option<PersistentLayer>)>> {
         let mut points = vec![key_range.start];
         let envelope = AABB::from_corners(
             [IntKey::from(key_range.start.to_i128()), IntKey::from(0)],
@@ -583,7 +569,7 @@ where
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<L>>> {
+    pub fn get_level0_deltas(&self) -> Result<Vec<PersistentLayer>> {
         Ok(self.l0_delta_layers.clone())
     }
 
