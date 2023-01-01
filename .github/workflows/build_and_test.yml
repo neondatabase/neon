@@ -297,14 +297,19 @@ jobs:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
 
+      - name: Debug - Check folder structure
+        run: |
+          pwd
+          ls -la
+
       - name: Upload rust cache (S3 Cache)
         uses: ./.github/actions/cache-upload
         with:
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            target/
+            .cargo/registry
+            .cargo/git
+            target
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
