@@ -1,55 +1,61 @@
 name: "Upload cache"
 description: "Custom upload action"
 inputs:
-  name:
-    description: "Artifact name"
+  key:
+    description: "Cache key"
     required: true
   path:
     description: "A directory or file to upload"
     required: true
-  prefix:
-    description: "S3 prefix."
+  folder:
+    description: "S3 subfolder"
+    default: cache
+    required: false
+  override:
+    description: "Allow force upload existing cache"
+    default: false
     required: false
 
 runs:
   using: "composite"
   steps:
-    - name: Prepare artifact
+    - name: Prepare cache
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
-        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar
       run: |
         mkdir -p $(dirname $ARCHIVE)
+        
+        for i in ${SOURCE} 
+        do
+          tar --append -f ${ARCHIVE} "$i"
+        done
+        
+        time zstd -z ${ARCHIVE}
 
-        if [ -f ${ARCHIVE} ]; then
-          echo 2>&1 "File ${ARCHIVE} already exist. Something went wrong before"
-          exit 1
-        fi
-
-        ZSTD_NBTHREADS=0
-        if [ -d  ${SOURCE} ]; then
-          time tar -C ${SOURCE} -cf ${ARCHIVE} --zstd .
-        elif [ -f ${SOURCE} ]; then
-          time tar -cf ${ARCHIVE} --zstd ${SOURCE}
-        elif ! ls ${SOURCE} > /dev/null 2>&1; then
-          echo 2>&1 "${SOURCE} does not exist"
-          exit 2
-        else
-          echo 2>&1 "${SOURCE} is neither a directory nor a file, do not know how to handle it"
-          exit 3
-        fi
-
-    - name: Upload artifact
+    - name: Upload cache
       shell: bash -euxo pipefail {0}
       env:
-        SOURCE: ${{ inputs.path }}
-        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
-        PREFIX: cache
+        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst
+        OVERRIDE: ${{ inputs.override }}
+        FOLDER: ${{ inputs.folder }}
+        BUCKET: neon-github-dev
       run: |
-        BUCKET=neon-github-dev
         FILENAME=$(basename $ARCHIVE)
-
         FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
-
-        time aws s3 mv ${ARCHIVE} s3://${BUCKET}/${PREFIX}/${FILENAME}
+        
+        S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep ${FILENAME} | tail -1)
+        if [ -z "${S3_KEY}" ]; then
+          echo "uploading cache"
+          time aws s3 mv ${ARCHIVE} s3://${BUCKET}/${FOLDER}/${FILENAME}
+          else
+            if [ "${OVERRIDE}" = "true" ]; then
+              echo "override existing cache"
+              time aws s3 mv ${ARCHIVE} s3://${BUCKET}/${FOLDER}/${FILENAME}
+            else
+              echo "cache exists, skipping upload"
+          fi
+        fi
+        
+        echo "${FILENAME} - ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}

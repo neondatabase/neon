@@ -1,0 +1,40 @@
+name: "Download cache"
+description: "Custom download action"
+inputs:
+  key:
+    description: "Cache key"
+    required: true
+  path:
+    description: "A directory to put cache into"
+    default: "."
+    required: false
+  folder:
+    description: "S3 subfolder"
+    default: cache
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Download cache
+      id: download-cache
+      shell: bash -uxo pipefail {0}
+      env:
+        BUCKET: neon-github-dev
+        FOLDER: ${{ inputs.folder }}
+        TARGET: ${{ inputs.path }}
+        KEY: ${{ inputs.key }}
+        TEMPDIR: /tmp/downloads
+        EXT: tar.zst
+      run: |
+        for i in ${KEY} 
+        do
+          S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep "$i" | tail -1)  
+          if [ -z "${S3_KEY}" ]; then
+            echo "no hit on provided cache key"
+          else
+            time aws s3 cp s3://${BUCKET}/${FOLDER}/"$i".${EXT} ${TEMPDIR}/"$i".${EXT}
+            time tar -xf ${TEMPDIR}/"$i".${EXT} -C ${TARGET}
+            exit 0
+          fi
+        done

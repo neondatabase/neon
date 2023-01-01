@@ -297,13 +297,12 @@ jobs:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
 
-      - name: Upload rust cache
+      - name: Upload rust cache (S3 Cache)
         uses: ./.github/actions/cache-upload
         with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-cache
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           path: |
             ~/.cargo/registry/
-            !~/.cargo/registry/src
             ~/.cargo/git/
             target/
 
