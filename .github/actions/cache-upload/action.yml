@@ -36,7 +36,7 @@ runs:
         time zstd -z ${ARCHIVE}
 
     - name: Upload cache
-      shell: bash -euxo pipefail {0}
+      shell: bash -uxo pipefail {0}
       env:
         ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst
         OVERRIDE: ${{ inputs.override }}
