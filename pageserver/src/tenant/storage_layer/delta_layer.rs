@@ -29,16 +29,14 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::tenant::storage_layer::{
-    PersistentLayer, ValueReconstructResult, ValueReconstructState,
-};
+use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
@@ -53,7 +51,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{DeltaFileName, Layer, LayerFileName, LayerIter, LayerKeyIter, PathOrConf};
+use super::{DeltaFileName, Layer, LayerIter, LayerKeyIter, PathOrConf};
 
 ///
 /// Header stored in the beginning of the file
@@ -219,7 +217,7 @@ impl Layer for DeltaLayer {
     }
 
     fn short_id(&self) -> String {
-        self.filename().file_name()
+        self.layer_name().to_string()
     }
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool) -> Result<()> {
@@ -382,41 +380,6 @@ impl Layer for DeltaLayer {
     }
 }
 
-impl PersistentLayer for DeltaLayer {
-    fn filename(&self) -> LayerFileName {
-        self.layer_name().into()
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        Some(self.path())
-    }
-
-    fn iter(&self) -> Result<LayerIter<'_>> {
-        let inner = self.load().context("load delta layer")?;
-        Ok(match DeltaValueIter::new(inner) {
-            Ok(iter) => Box::new(iter),
-            Err(err) => Box::new(std::iter::once(Err(err))),
-        })
-    }
-
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
-        let inner = self.load()?;
-        Ok(Box::new(
-            DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
-        ))
-    }
-
-    fn delete(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
-    }
-
-    fn file_size(&self) -> Option<u64> {
-        Some(self.file_size)
-    }
-}
-
 impl DeltaLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
@@ -512,7 +475,7 @@ impl DeltaLayer {
             }
             PathOrConf::Path(path) => {
                 let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.filename().file_name();
+                let expected_filename = self.layer_name().to_string();
 
                 if actual_filename != expected_filename {
                     println!(
@@ -586,7 +549,7 @@ impl DeltaLayer {
         })
     }
 
-    fn layer_name(&self) -> DeltaFileName {
+    pub fn layer_name(&self) -> DeltaFileName {
         DeltaFileName {
             key_range: self.key_range.clone(),
             lsn_range: self.lsn_range.clone(),
@@ -601,6 +564,21 @@ impl DeltaLayer {
             self.tenant_id,
             &self.layer_name(),
         )
+    }
+
+    pub fn iter(&self) -> Result<LayerIter<'_>> {
+        let inner = self.load().context("load delta layer")?;
+        Ok(match DeltaValueIter::new(inner) {
+            Ok(iter) => Box::new(iter),
+            Err(err) => Box::new(std::iter::once(Err(err))),
+        })
+    }
+
+    pub fn key_iter(&self) -> anyhow::Result<LayerKeyIter<'_>> {
+        let inner = self.load()?;
+        Ok(Box::new(
+            DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
+        ))
     }
 }
 
