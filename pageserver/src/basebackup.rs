@@ -117,7 +117,7 @@ where
         );
 
         Ok(Basebackup {
-            ar: Builder::new(AbortableWrite::new(write)),
+            ar: Builder::new_non_terminated(AbortableWrite::new(write)),
             timeline,
             lsn: backup_lsn,
             prev_record_lsn: prev_lsn,
