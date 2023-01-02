@@ -27,7 +27,7 @@ runs:
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
-        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar
+        ARCHIVE: /tmp/uploads/${{ inputs.key }}.zip
       run: |
         pwd
         ls -la
