@@ -27,18 +27,17 @@ runs:
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
-        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar
+        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst
       run: |
-        pwd
-        ls -la
         mkdir -p $(dirname $ARCHIVE)
+        echo "" > manifest.txt
         
         for i in ${SOURCE} 
         do
-          tar --append -f ${ARCHIVE} "$i"
+          echo "$i" >> manifest.txt
         done
         
-        time zstd -T0 ${ARCHIVE}
+        time /bin/tar --posix --use-compress-program zstdmt -cf ${ARCHIVE} --exclude manifest.txt -P -C . --files-from manifest.txt
 
     - name: Upload cache
       shell: bash -euxo pipefail {0}

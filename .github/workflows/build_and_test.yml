@@ -201,6 +201,7 @@ jobs:
         run: |
           pwd
           ls -la
+          du -sh .cargo
 
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
