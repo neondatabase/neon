@@ -301,7 +301,9 @@ jobs:
       - name: Debug - Check folder structure
         run: |
           pwd
+          echo "home/cargo"
           ls -la ~/.cargo
+          echo "nonroot/cargo"
           ls -la /home/nonroot/.cargo
 
       - name: Upload rust cache (S3 Cache)

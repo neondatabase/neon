@@ -27,7 +27,7 @@ runs:
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
-        ARCHIVE: /tmp/uploads/${{ inputs.key }}.zip
+        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar
       run: |
         pwd
         ls -la
@@ -35,7 +35,7 @@ runs:
         
         for i in ${SOURCE} 
         do
-          zip -Z store -ur ${ARCHIVE} "$i"
+          tar --append -f ${ARCHIVE} "$i"
         done
         
         time zstd -T0 ${ARCHIVE}
@@ -43,13 +43,16 @@ runs:
     - name: Upload cache
       shell: bash -euxo pipefail {0}
       env:
-        ARCHIVE: /tmp/uploads/${{ inputs.key }}.zip.zst
+        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst
         OVERRIDE: ${{ inputs.override }}
         FOLDER: ${{ inputs.folder }}
         BUCKET: neon-github-dev
+        WORKDIR: ${{ inputs.workdir }}
       run: |
         FILENAME=$(basename $ARCHIVE)
         FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
+        
+        cd ${WORKDIR}
         
         S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep ${FILENAME} | tail -1 || true)
         if [ -z "${S3_KEY}" ]; then
