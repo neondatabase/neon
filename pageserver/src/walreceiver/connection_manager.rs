@@ -9,11 +9,13 @@
 //! then a [re]connection happens, if necessary.
 //! Only WAL streaming task expects to be finished, other loops (storage broker, connection management) never exit unless cancelled explicitly via the dedicated channel.
 
+use std::sync::Weak;
 use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
 
 use crate::task_mgr::TaskKind;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
 use crate::tenant::Timeline;
+use crate::walreceiver::acquire_timeline_read;
 use crate::{task_mgr, walreceiver::TaskStateUpdate};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
@@ -41,7 +43,8 @@ use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
 
 /// Spawns the loop to take care of the timeline's WAL streaming connection.
 pub fn spawn_connection_manager_task(
-    timeline: Arc<Timeline>,
+    id: TenantTimelineId,
+    timeline: Weak<Timeline>,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
@@ -49,19 +52,17 @@ pub fn spawn_connection_manager_task(
 ) {
     let mut broker_client = get_broker_client().clone();
 
-    let tenant_id = timeline.tenant_id;
-    let timeline_id = timeline.timeline_id;
-
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverManager,
-        Some(tenant_id),
-        Some(timeline_id),
-        &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
+        Some(id.tenant_id),
+        Some(id.timeline_id),
+        &format!("walreceiver for timeline {id}"),
         false,
         async move {
             info!("WAL receiver manager started, connecting to broker");
             let mut walreceiver_state = WalreceiverState::new(
+                id,
                 timeline,
                 wal_connect_timeout,
                 lagging_wal_timeout,
@@ -90,9 +91,21 @@ pub fn spawn_connection_manager_task(
             }
         }
         .instrument(
-            info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id),
+            info_span!(parent: None, "wal_connection_manager", tenant = %id.tenant_id, timeline = %id.timeline_id),
         ),
     );
+}
+
+macro_rules! acquire_timeline_read {
+    ( $walreceiver_state:expr ) => {
+        match $walreceiver_state.acquire_timeline_read() {
+            Ok(timeline) => timeline,
+            Err(e) => {
+                warn!("Cannot acquire timeline read: {e:#}");
+                return ControlFlow::Break(());
+            }
+        }
+    };
 }
 
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
@@ -102,7 +115,8 @@ async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     walreceiver_state: &mut WalreceiverState,
 ) -> ControlFlow<(), ()> {
-    let mut timeline_state_updates = walreceiver_state.timeline.subscribe_for_state_updates();
+    let mut timeline_state_updates =
+        acquire_timeline_read!(walreceiver_state).subscribe_for_state_updates();
 
     match wait_for_active_timeline(&mut timeline_state_updates).await {
         ControlFlow::Continue(()) => {}
@@ -112,18 +126,15 @@ async fn connection_manager_loop_step(
         }
     }
 
-    let id = TenantTimelineId {
-        tenant_id: walreceiver_state.timeline.tenant_id,
-        timeline_id: walreceiver_state.timeline.timeline_id,
-    };
-
     // Subscribe to the broker updates. Stream shares underlying TCP connection
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
-    let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id).await;
+    let mut broker_subscription =
+        subscribe_for_timeline_updates(broker_client, walreceiver_state.id).await;
     info!("Subscribed for broker timeline updates");
 
     loop {
+        let timeline_read = acquire_timeline_read!(walreceiver_state);
         let time_until_next_retry = walreceiver_state.time_until_next_retry();
 
         // These things are happening concurrently:
@@ -185,7 +196,7 @@ async fn connection_manager_loop_step(
                 loop {
                     match timeline_state_updates.changed().await {
                         Ok(()) => {
-                            let new_state = walreceiver_state.timeline.current_state();
+                            let new_state = timeline_read.current_state();
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
@@ -305,7 +316,7 @@ struct WalreceiverState {
     id: TenantTimelineId,
 
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
-    timeline: Arc<Timeline>,
+    timeline: Weak<Timeline>,
     /// The timeout on the connection to safekeeper for WAL streaming.
     wal_connect_timeout: Duration,
     /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
@@ -361,16 +372,13 @@ struct BrokerSkTimeline {
 
 impl WalreceiverState {
     fn new(
-        timeline: Arc<Timeline>,
+        id: TenantTimelineId,
+        timeline: Weak<Timeline>,
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
         auth_token: Option<Arc<String>>,
     ) -> Self {
-        let id = TenantTimelineId {
-            tenant_id: timeline.tenant_id,
-            timeline_id: timeline.timeline_id,
-        };
         Self {
             id,
             timeline,
@@ -394,10 +402,11 @@ impl WalreceiverState {
 
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
-        let timeline = Arc::clone(&self.timeline);
+        let timeline = Weak::clone(&self.timeline);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
+                    id,
                     timeline,
                     new_wal_source_connconf,
                     events_sender,
@@ -584,7 +593,13 @@ impl WalreceiverState {
 
                 let current_lsn = match existing_wal_connection.status.streaming_lsn {
                     Some(lsn) => lsn,
-                    None => self.timeline.get_last_record_lsn(),
+                    None => match self.acquire_timeline_read() {
+                        Ok(timeline) => timeline.get_last_record_lsn(),
+                        Err(e) => {
+                            warn!("Cannot acquire timeline read: {e:#}");
+                            return None;
+                        }
+                    },
                 };
                 let current_commit_lsn = existing_wal_connection
                     .status
@@ -754,6 +769,10 @@ impl WalreceiverState {
                 self.wal_connection_retries.remove(&node_id);
             }
         }
+    }
+
+    fn acquire_timeline_read(&self) -> anyhow::Result<Arc<Timeline>> {
+        acquire_timeline_read(self.id, &self.timeline)
     }
 
     async fn shutdown(mut self) {
@@ -1233,18 +1252,19 @@ mod tests {
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
     async fn dummy_state(harness: &TenantHarness<'_>) -> WalreceiverState {
+        let timeline = harness
+            .load()
+            .await
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
+            .expect("Failed to create an empty timeline for dummy wal connection manager")
+            .initialize()
+            .unwrap();
         WalreceiverState {
             id: TenantTimelineId {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
             },
-            timeline: harness
-                .load()
-                .await
-                .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
-                .expect("Failed to create an empty timeline for dummy wal connection manager")
-                .initialize()
-                .unwrap(),
+            timeline: Arc::downgrade(&timeline),
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),
             max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),
