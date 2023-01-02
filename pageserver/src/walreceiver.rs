@@ -25,6 +25,7 @@ mod walreceiver_connection;
 
 use crate::config::PageServerConf;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
+use crate::tenant::Timeline;
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
@@ -32,6 +33,7 @@ use std::future::Future;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tracing::*;
+use utils::id::TenantTimelineId;
 
 pub use connection_manager::spawn_connection_manager_task;
 
@@ -171,4 +173,14 @@ impl<E: Clone> TaskHandle<E> {
             }
         }
     }
+}
+
+// XXX: do not store this Arc anywhere, rather treat is as a MutexGuard.
+fn acquire_timeline_read(
+    id: TenantTimelineId,
+    timeline: &std::sync::Weak<Timeline>,
+) -> anyhow::Result<std::sync::Arc<Timeline>> {
+    timeline
+        .upgrade()
+        .with_context(|| format!("Timeline {id} is dropped, aborting walreceiver"))
 }

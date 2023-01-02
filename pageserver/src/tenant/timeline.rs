@@ -13,6 +13,7 @@ use pageserver_api::models::{
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
 use std::collections::HashMap;
@@ -1035,9 +1036,12 @@ impl Timeline {
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
-        let self_clone = Arc::clone(self);
         spawn_connection_manager_task(
-            self_clone,
+            TenantTimelineId {
+                tenant_id: self.tenant_id,
+                timeline_id: self.timeline_id,
+            },
+            Weak::clone(&self.myself),
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
