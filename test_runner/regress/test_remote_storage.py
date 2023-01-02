@@ -2,7 +2,6 @@
 # env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import os
-import re
 import shutil
 import threading
 import time
@@ -271,14 +270,14 @@ def test_remote_storage_upload_queue_retries(
         wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
-        metrics = client.get_metrics()
-        matches = re.search(
-            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
-            metrics,
-            re.MULTILINE,
+        val = client.get_remote_timeline_client_metric(
+            "pageserver_remote_timeline_client_calls_unfinished",
+            tenant_id,
+            timeline_id,
+            file_kind,
+            op_kind,
         )
-        assert matches
-        return int(matches[1])
+        return int(val)
 
     # create some layers & wait for uploads to finish
     overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
@@ -401,15 +400,14 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     client = env.pageserver.http_client()
 
     def get_queued_count(file_kind, op_kind):
-        metrics = client.get_metrics()
-        matches = re.search(
-            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
-            metrics,
-            re.MULTILINE,
+        val = client.get_remote_timeline_client_metric(
+            "pageserver_remote_timeline_client_calls_unfinished",
+            tenant_id,
+            timeline_id,
+            file_kind,
+            op_kind,
         )
-        if matches is None:
-            return None
-        return int(matches[1])
+        return int(val)
 
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
 
