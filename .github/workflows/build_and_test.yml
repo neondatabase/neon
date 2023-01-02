@@ -137,7 +137,7 @@ jobs:
   build-neon:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3823723562
       options: --init
     strategy:
       fail-fast: false
