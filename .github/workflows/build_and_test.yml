@@ -201,19 +201,19 @@ jobs:
       # uncompressed versions of the crates in ~/.cargo/registry/cache
       # directory, and it's faster to let 'cargo' to rebuild it from the
       # compressed crates.
-      - name: Cache cargo deps
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
-          key: |
-            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+#      - name: Cache cargo deps
+#        id: cache_cargo
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            ~/.cargo/registry/
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
+#          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+#          key: |
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -310,7 +310,7 @@ jobs:
         with:
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           path: |
-            ~/.cargo
+            /home/nonroot/.cargo
             target
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
