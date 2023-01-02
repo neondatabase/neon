@@ -197,6 +197,14 @@ jobs:
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
 
+      - name: Debug - Check folder structure
+        run: |
+          pwd
+          ls -la .cargo
+          du -sh .cargo
+          ls -la ~/.cargo
+          du -sh ~/.cargo
+
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
       # directory, and it's faster to let 'cargo' to rebuild it from the
@@ -301,19 +309,18 @@ jobs:
       - name: Debug - Check folder structure
         run: |
           pwd
-          echo "home/cargo"
+          ls -la .cargo
+          du -sh .cargo
           ls -la ~/.cargo
-          echo "nonroot/cargo"
-          ls -la /home/nonroot/.cargo
+          du -sh ~/.cargo
 
       - name: Upload rust cache (S3 Cache)
         uses: ./.github/actions/cache-upload
         with:
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           path: |
-            .cargo
+            ~/.cargo
             target
-          workdir: /home/nonroot
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
