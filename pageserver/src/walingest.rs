@@ -30,8 +30,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
-use crate::tenant::PageReconstructError;
-use crate::tenant::Timeline;
+use crate::tenant::{PageReconstructError, TimelineRef};
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -44,23 +43,31 @@ use postgres_ffi::TransactionId;
 use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
 
-pub struct WalIngest<'a> {
-    timeline: &'a Timeline,
+pub struct WalIngest {
+    timeline_ref: TimelineRef,
+    pg_version: u32,
 
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
 }
 
-impl<'a> WalIngest<'a> {
-    pub async fn new(timeline: &Timeline, startpoint: Lsn) -> anyhow::Result<WalIngest> {
+impl WalIngest {
+    pub async fn new(
+        pg_version: u32,
+        timeline_ref: TimelineRef,
+        startpoint: Lsn,
+    ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
+        let timeline = timeline_ref.timeline()?;
         let checkpoint_bytes = timeline.get_checkpoint(startpoint).await?;
+        drop(timeline);
         let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
         Ok(WalIngest {
-            timeline,
+            timeline_ref,
+            pg_version,
             checkpoint,
             checkpoint_modified: false,
         })
@@ -82,7 +89,7 @@ impl<'a> WalIngest<'a> {
         decoded: &mut DecodedWALRecord,
     ) -> anyhow::Result<()> {
         modification.lsn = lsn;
-        decode_wal_record(recdata, decoded, self.timeline.pg_version)?;
+        decode_wal_record(recdata, decoded, self.pg_version)?;
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -117,9 +124,9 @@ impl<'a> WalIngest<'a> {
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
             debug!(
                 "handle RM_DBASE_ID for Postgres version {:?}",
-                self.timeline.pg_version
+                self.pg_version
             );
-            if self.timeline.pg_version == 14 {
+            if self.pg_version == 14 {
                 if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                     == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE
                 {
@@ -137,7 +144,7 @@ impl<'a> WalIngest<'a> {
                         modification.drop_dbdir(tablespace_id, dropdb.db_id).await?;
                     }
                 }
-            } else if self.timeline.pg_version == 15 {
+            } else if self.pg_version == 15 {
                 if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                     == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG
                 {
@@ -337,7 +344,7 @@ impl<'a> WalIngest<'a> {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
         // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, self.timeline.pg_version)?
+            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, self.pg_version)?
         {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;
@@ -742,7 +749,8 @@ impl<'a> WalIngest<'a> {
                     dbnode: xnode.dbnode,
                     relnode: xnode.relnode,
                 };
-                let last_lsn = self.timeline.get_last_record_lsn();
+                let timeline_read = self.timeline_ref.timeline()?;
+                let last_lsn = timeline_read.get_last_record_lsn();
                 if modification
                     .tline
                     .get_rel_exists(rel, last_lsn, true)
@@ -1003,11 +1011,12 @@ impl<'a> WalIngest<'a> {
     }
 
     async fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> anyhow::Result<BlockNumber> {
-        let exists = self.timeline.get_rel_exists(rel, lsn, true).await?;
+        let timeline = self.timeline_ref.timeline()?;
+        let exists = timeline.get_rel_exists(rel, lsn, true).await?;
         let nblocks = if !exists {
             0
         } else {
-            self.timeline.get_rel_size(rel, lsn, true).await?
+            timeline.get_rel_size(rel, lsn, true).await?
         };
         Ok(nblocks)
     }
@@ -1023,12 +1032,13 @@ impl<'a> WalIngest<'a> {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let old_nblocks = if !self.timeline.get_rel_exists(rel, last_lsn, true).await? {
+        let timeline = self.timeline_ref.timeline()?;
+        let old_nblocks = if !timeline.get_rel_exists(rel, last_lsn, true).await? {
             // create it with 0 size initially, the logic below will extend it
             modification.put_rel_creation(rel, 0).await?;
             0
         } else {
-            self.timeline.get_rel_size(rel, last_lsn, true).await?
+            timeline.get_rel_size(rel, last_lsn, true).await?
         };
 
         if new_nblocks > old_nblocks {
@@ -1072,9 +1082,9 @@ impl<'a> WalIngest<'a> {
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
-        let last_lsn = self.timeline.get_last_record_lsn();
-        let old_nblocks = if !self
-            .timeline
+        let timeline = self.timeline_ref.timeline()?;
+        let last_lsn = timeline.get_last_record_lsn();
+        let old_nblocks = if !timeline
             .get_slru_segment_exists(kind, segno, last_lsn)
             .await?
         {
@@ -1084,7 +1094,7 @@ impl<'a> WalIngest<'a> {
                 .await?;
             0
         } else {
-            self.timeline
+            timeline
                 .get_slru_segment_size(kind, segno, last_lsn)
                 .await?
         };
@@ -1112,7 +1122,7 @@ impl<'a> WalIngest<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pgdatadir_mapping::create_test_timeline;
+    use crate::pgdatadir_mapping::create_test_timeline_ref;
     use crate::tenant::harness::*;
     use crate::tenant::Timeline;
     use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
@@ -1139,7 +1149,7 @@ mod tests {
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from("")).await?; // dummy relmapper file
         m.commit()?;
-        let walingest = WalIngest::new(tline, Lsn(0x10)).await?;
+        let walingest = WalIngest::new(tline.pg_version, tline.weak_ref(), Lsn(0x10)).await?;
 
         Ok(walingest)
     }
@@ -1147,7 +1157,8 @@ mod tests {
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
         let tenant = TenantHarness::create("test_relsize")?.load().await;
-        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
+        let tline_ref = create_test_timeline_ref(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
+        let tline = tline_ref.active_timeline()?;
         let mut walingest = init_walingest_test(&tline).await?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1324,7 +1335,8 @@ mod tests {
     #[tokio::test]
     async fn test_drop_extend() -> Result<()> {
         let tenant = TenantHarness::create("test_drop_extend")?.load().await;
-        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
+        let tline_ref = create_test_timeline_ref(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
+        let tline = tline_ref.active_timeline()?;
         let mut walingest = init_walingest_test(&tline).await?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1377,7 +1389,8 @@ mod tests {
     #[tokio::test]
     async fn test_truncate_extend() -> Result<()> {
         let tenant = TenantHarness::create("test_truncate_extend")?.load().await;
-        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
+        let tline_ref = create_test_timeline_ref(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
+        let tline = tline_ref.active_timeline()?;
         let mut walingest = init_walingest_test(&tline).await?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1498,7 +1511,8 @@ mod tests {
     #[tokio::test]
     async fn test_large_rel() -> Result<()> {
         let tenant = TenantHarness::create("test_large_rel")?.load().await;
-        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
+        let tline_ref = create_test_timeline_ref(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
+        let tline = tline_ref.active_timeline()?;
         let mut walingest = init_walingest_test(&tline).await?;
 
         let mut lsn = 0x10;

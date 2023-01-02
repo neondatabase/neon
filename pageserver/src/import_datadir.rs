@@ -260,7 +260,7 @@ async fn import_wal(
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(tline, startpoint).await?;
+    let mut walingest = WalIngest::new(tline.pg_version, tline.weak_ref(), startpoint).await?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
@@ -382,7 +382,7 @@ pub async fn import_wal_from_tar(
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
-    let mut walingest = WalIngest::new(tline, start_lsn).await?;
+    let mut walingest = WalIngest::new(tline.pg_version, tline.weak_ref(), start_lsn).await?;
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);

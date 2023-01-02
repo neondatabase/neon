@@ -1,5 +1,7 @@
 //!
 
+pub(super) mod timeline_wrappers;
+
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
 use fail::fail_point;
@@ -64,6 +66,8 @@ use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 
+use self::timeline_wrappers::TimelineRef;
+
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
@@ -125,7 +129,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<Arc<Timeline>>,
+    ancestor_ref: Option<TimelineRef>,
     ancestor_lsn: Lsn,
 
     // Metrics
@@ -400,9 +404,9 @@ impl Timeline {
 
     /// Get the ancestor's timeline id
     pub fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
-        self.ancestor_timeline
+        self.ancestor_ref
             .as_ref()
-            .map(|ancestor| ancestor.timeline_id)
+            .map(|ancestor| ancestor.id.timeline_id)
     }
 
     /// Lock and get timeline's GC cuttof
@@ -673,7 +677,7 @@ impl Timeline {
     /// the initial size calculation has not been run (gets triggered on the first size access).
     ///
     /// return size and boolean flag that shows if the size is exact
-    pub fn get_current_logical_size(self: &Arc<Self>) -> anyhow::Result<(u64, bool)> {
+    pub fn get_current_logical_size(&self) -> anyhow::Result<(u64, bool)> {
         let current_size = self.current_logical_size.current_size()?;
         debug!("Current size: {current_size:?}");
 
@@ -694,7 +698,7 @@ impl Timeline {
     ///
     /// Also flush after a period of time without new data -- it helps
     /// safekeepers to regard pageserver as caught up and suspend activity.
-    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
+    pub fn check_checkpoint_distance(&self) -> anyhow::Result<()> {
         let last_lsn = self.get_last_record_lsn();
         let layers = self.layers.read().unwrap();
         if let Some(open_layer) = &layers.open_layer {
@@ -757,6 +761,10 @@ impl Timeline {
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
         self.state.subscribe()
     }
+
+    pub fn weak_ref(&self) -> TimelineRef {
+        TimelineRef::new(self)
+    }
 }
 
 // Private functions
@@ -804,7 +812,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
-        ancestor: Option<Arc<Timeline>>,
+        ancestor_ref: Option<TimelineRef>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -841,7 +849,7 @@ impl Timeline {
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
 
-                ancestor_timeline: ancestor,
+                ancestor_ref,
                 ancestor_lsn: metadata.ancestor_lsn(),
 
                 metrics: TimelineMetrics::new(&tenant_id, &timeline_id),
@@ -954,9 +962,8 @@ impl Timeline {
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
-        let self_clone = Arc::clone(self);
         spawn_connection_manager_task(
-            self_clone,
+            self.weak_ref(),
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
@@ -1280,7 +1287,7 @@ impl Timeline {
         Ok(())
     }
 
-    fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn) {
+    fn try_spawn_size_init_task(&self, init_lsn: Lsn) {
         let permit = match Arc::clone(&self.current_logical_size.initial_size_computation)
             .try_acquire_owned()
         {
@@ -1297,7 +1304,7 @@ impl Timeline {
             .get()
             .is_none());
         // We need to start the computation task.
-        let self_clone = Arc::clone(self);
+        let self_ref = self.weak_ref();
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
@@ -1307,8 +1314,8 @@ impl Timeline {
             false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
-                let calculated_size = match self_clone.logical_size_calculation_task(init_lsn).await
-                {
+                let timeline = self_ref.timeline()?;
+                let calculated_size = match timeline.logical_size_calculation_task(init_lsn).await {
                     Ok(s) => s,
                     Err(CalculateLogicalSizeError::Cancelled) => {
                         // Don't make noise, this is a common task.
@@ -1319,7 +1326,7 @@ impl Timeline {
                     }
                     x @ Err(_) => x.context("Failed to calculate logical size")?,
                 };
-                match self_clone
+                match timeline
                     .current_logical_size
                     .initial_logical_size
                     .set(calculated_size)
@@ -1340,11 +1347,11 @@ impl Timeline {
     }
 
     pub fn spawn_ondemand_logical_size_calculation(
-        self: &Arc<Self>,
+        &self,
         lsn: Lsn,
     ) -> oneshot::Receiver<Result<u64, CalculateLogicalSizeError>> {
         let (sender, receiver) = oneshot::channel();
-        let self_clone = Arc::clone(self);
+        let self_ref = self.weak_ref();
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
@@ -1353,7 +1360,10 @@ impl Timeline {
             "ondemand logical size calculation",
             false,
             async move {
-                let res = self_clone.logical_size_calculation_task(lsn).await;
+                let res = self_ref
+                    .timeline()?
+                    .logical_size_calculation_task(lsn)
+                    .await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
             },
@@ -1363,13 +1373,13 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
     async fn logical_size_calculation_task(
-        self: &Arc<Self>,
+        &self,
         init_lsn: Lsn,
     ) -> Result<u64, CalculateLogicalSizeError> {
         let mut timeline_state_updates = self.subscribe_for_state_updates();
-        let self_calculation = Arc::clone(self);
         let cancel = CancellationToken::new();
 
+        let self_ref = self.weak_ref();
         let calculation = async {
             let cancel = cancel.child_token();
             tokio::task::spawn_blocking(move || {
@@ -1377,7 +1387,8 @@ impl Timeline {
                 // synchronous file IO without .await inbetween
                 // if there are no RemoteLayers that would require downloading.
                 let h = tokio::runtime::Handle::current();
-                h.block_on(self_calculation.calculate_logical_size(init_lsn, cancel))
+                let timeline = self_ref.timeline()?;
+                h.block_on(timeline.calculate_logical_size(init_lsn, cancel))
             })
             .await
             .context("Failed to spawn calculation result task")?
@@ -1557,8 +1568,7 @@ impl Timeline {
         reconstruct_state: &mut ValueReconstructState,
     ) -> Result<(), PageReconstructError> {
         // Start from the current timeline.
-        let mut timeline_owned;
-        let mut timeline = self;
+        let mut timeline_ref = self.weak_ref();
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
@@ -1580,7 +1590,7 @@ impl Timeline {
 
         'outer: loop {
             // The function should have updated 'state'
-            //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
+            let timeline = timeline_ref.timeline()?;
             match result {
                 ValueReconstructResult::Complete => return Ok(()),
                 ValueReconstructResult::Continue => {
@@ -1620,12 +1630,10 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                let ancestor = match timeline.get_ancestor_timeline() {
+                timeline_ref = match timeline.get_ancestor_timeline_ref() {
                     Ok(timeline) => timeline,
                     Err(e) => return Err(PageReconstructError::from(e)),
                 };
-                timeline_owned = ancestor;
-                timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
                 continue 'outer;
             }
@@ -1721,7 +1729,7 @@ impl Timeline {
                             ));
                             continue 'outer;
                         }
-                    } else if timeline.ancestor_timeline.is_some() {
+                    } else if timeline.ancestor_ref.is_some() {
                         // Nothing on this timeline. Traverse to parent
                         result = ValueReconstructResult::Continue;
                         cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
@@ -1765,15 +1773,15 @@ impl Timeline {
         Some((lsn, img))
     }
 
-    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
-        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
+    fn get_ancestor_timeline_ref(&self) -> anyhow::Result<TimelineRef> {
+        let ancestor_ref = self.ancestor_ref.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
                 self.timeline_id,
                 self.get_ancestor_timeline_id(),
             )
         })?;
-        Ok(Arc::clone(ancestor))
+        Ok(ancestor_ref.clone())
     }
 
     ///
@@ -2037,9 +2045,9 @@ impl Timeline {
         };
 
         let ancestor_timeline_id = self
-            .ancestor_timeline
+            .ancestor_ref
             .as_ref()
-            .map(|ancestor| ancestor.timeline_id);
+            .map(|ancestor| ancestor.id.timeline_id);
 
         let metadata = TimelineMetadata::new(
             disk_consistent_lsn,
@@ -3054,8 +3062,8 @@ impl Timeline {
         };
 
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let self_ref = self.weak_ref();
         // Spawn a task so that download does not outlive timeline when we detach tenant / delete timeline.
-        let self_clone = self.myself.upgrade().expect("timeline is gone");
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::RemoteDownloadTask,
@@ -3064,7 +3072,8 @@ impl Timeline {
             &format!("download layer {}", remote_layer.short_id()),
             false,
             async move {
-                let remote_client = self_clone.remote_client.as_ref().unwrap();
+                let timeline = self_ref.timeline()?;
+                let remote_client = timeline.remote_client.as_ref().unwrap();
 
                 // Does retries + exponential back-off internally.
                 // When this fails, don't layer further retry attempts here.
@@ -3075,12 +3084,12 @@ impl Timeline {
                 if let Ok(size) = &result {
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
-                    self_clone.metrics.resident_physical_size_gauge.add(*size);
+                    timeline.metrics.resident_physical_size_gauge.add(*size);
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
-                    let mut layers = self_clone.layers.write().unwrap();
+                    let new_layer = remote_layer.create_downloaded_layer(timeline.conf, *size);
+                    let mut layers = timeline.layers.write().unwrap();
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
                         layers.remove_historic(l);
@@ -3115,7 +3124,7 @@ impl Timeline {
     }
 
     pub async fn spawn_download_all_remote_layers(
-        self: Arc<Self>,
+        &self,
     ) -> Result<DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskInfo> {
         let mut status_guard = self.download_all_remote_layers_task_info.write().unwrap();
         if let Some(st) = &*status_guard {
@@ -3130,7 +3139,7 @@ impl Timeline {
             }
         }
 
-        let self_clone = Arc::clone(&self);
+        let self_ref = self.weak_ref();
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
@@ -3139,8 +3148,9 @@ impl Timeline {
             "download all remote layers task",
             false,
             async move {
-                self_clone.download_all_remote_layers().await;
-                let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
+                let timeline = self_ref.timeline()?;
+                timeline.download_all_remote_layers().await;
+                let mut status_guard = timeline.download_all_remote_layers_task_info.write().unwrap();
                  match &mut *status_guard {
                     None => {
                         warn!("tasks status is supposed to be Some(), since we are running");
@@ -3171,7 +3181,7 @@ impl Timeline {
         Ok(initial_info)
     }
 
-    async fn download_all_remote_layers(self: &Arc<Self>) {
+    async fn download_all_remote_layers(&self) {
         let mut downloads: FuturesUnordered<_> = {
             let layers = self.layers.read().unwrap();
             layers

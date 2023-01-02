@@ -8,7 +8,7 @@ use tokio::sync::Semaphore;
 
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 
-use super::Tenant;
+use super::{Tenant, TimelineRef};
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 
@@ -178,12 +178,12 @@ pub(super) async fn gather_inputs(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    let timelines = tenant
+    let timeline_refs = tenant
         .refresh_gc_info()
         .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
-    if timelines.is_empty() {
+    if timeline_refs.is_empty() {
         // All timelines are below tenant's gc_horizon; alternative would be to use
         // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
         // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
@@ -202,12 +202,20 @@ pub(super) async fn gather_inputs(
     let mut updates = Vec::new();
 
     // record the per timline values used to determine `retention_period`
-    let mut timeline_inputs = HashMap::with_capacity(timelines.len());
+    let mut timeline_inputs = HashMap::with_capacity(timeline_refs.len());
 
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
-    for timeline in timelines {
+    for timeline_ref in timeline_refs {
+        let timeline = match timeline_ref.timeline() {
+            Ok(tl) => tl,
+            Err(e) => {
+                info!("skipping timeline {}: {:#}", timeline_ref.id.timeline_id, e);
+                continue; // TODO review: OK to do this here?
+            }
+        };
+
         let last_record_lsn = timeline.get_last_record_lsn();
 
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
@@ -289,9 +297,12 @@ pub(super) async fn gather_inputs(
 
                 needed_cache.insert((timeline.timeline_id, *lsn));
             } else {
-                let timeline = Arc::clone(&timeline);
                 let parallel_size_calcs = Arc::clone(limit);
-                joinset.spawn(calculate_logical_size(parallel_size_calcs, timeline, *lsn));
+                joinset.spawn(calculate_logical_size(
+                    parallel_size_calcs,
+                    timeline.weak_ref(),
+                    *lsn,
+                ));
             }
         }
 
@@ -335,27 +346,31 @@ pub(super) async fn gather_inputs(
                 error!("task that calls spawn_ondemand_logical_size_calculation panicked: {join_error:#}");
                 have_any_error = true;
             }
-            Ok(Err(recv_result_error)) => {
+            Ok(Err(CalculationError::Recv(recv_result_error))) => {
                 // cannot really do anything, as this panic is likely a bug
                 error!("failed to receive logical size query result: {recv_result_error:#}");
                 have_any_error = true;
             }
-            Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error)))) => {
+            Ok(Err(CalculationError::Other(e))) => {
+                error!("failed to calculate logical size: {e:#}");
+                have_any_error = true;
+            }
+            Ok(Ok(TimelineAtLsnSizeResult(timeline_ref, lsn, Err(error)))) => {
                 warn!(
-                    timeline_id=%timeline.timeline_id,
+                    timeline_id=%timeline_ref.id.timeline_id,
                     "failed to calculate logical size at {lsn}: {error:#}"
                 );
                 have_any_error = true;
             }
-            Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size)))) => {
-                debug!(timeline_id=%timeline.timeline_id, %lsn, size, "size calculated");
+            Ok(Ok(TimelineAtLsnSizeResult(timeline_ref, lsn, Ok(size)))) => {
+                debug!(timeline_id=%timeline_ref.id.timeline_id, %lsn, size, "size calculated");
 
-                logical_size_cache.insert((timeline.timeline_id, lsn), size);
-                needed_cache.insert((timeline.timeline_id, lsn));
+                logical_size_cache.insert((timeline_ref.id.timeline_id, lsn), size);
+                needed_cache.insert((timeline_ref.id.timeline_id, lsn));
 
                 updates.push(Update {
                     lsn,
-                    timeline_id: timeline.timeline_id,
+                    timeline_id: timeline_ref.id.timeline_id,
                     command: Command::Update(size),
                 });
             }
@@ -471,26 +486,34 @@ enum LsnKind {
 
 /// Newtype around the tuple that carries the timeline at lsn logical size calculation.
 struct TimelineAtLsnSizeResult(
-    Arc<crate::tenant::Timeline>,
+    TimelineRef,
     utils::lsn::Lsn,
     Result<u64, CalculateLogicalSizeError>,
 );
 
-#[instrument(skip_all, fields(timeline_id=%timeline.timeline_id, lsn=%lsn))]
+enum CalculationError {
+    Recv(RecvError),
+    Other(anyhow::Error),
+}
+
+#[instrument(skip_all, fields(timeline_id=%timeline_ref.id.timeline_id, lsn=%lsn))]
 async fn calculate_logical_size(
     limit: Arc<tokio::sync::Semaphore>,
-    timeline: Arc<crate::tenant::Timeline>,
+    timeline_ref: TimelineRef,
     lsn: utils::lsn::Lsn,
-) -> Result<TimelineAtLsnSizeResult, RecvError> {
+) -> Result<TimelineAtLsnSizeResult, CalculationError> {
     let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
         .expect("global semaphore should not had been closed");
 
-    let size_res = timeline
-        .spawn_ondemand_logical_size_calculation(lsn)
+    let size_res = timeline_ref
+        .timeline()
+        .map(|timeline| timeline.spawn_ondemand_logical_size_calculation(lsn))
+        .map_err(CalculationError::Other)?
         .instrument(info_span!("spawn_ondemand_logical_size_calculation"))
-        .await?;
-    Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
+        .await
+        .map_err(CalculationError::Recv)?;
+    Ok(TimelineAtLsnSizeResult(timeline_ref, lsn, size_res))
 }
 
 #[test]

@@ -3,7 +3,6 @@
 use std::{
     error::Error,
     str::FromStr,
-    sync::Arc,
     time::{Duration, SystemTime},
 };
 
@@ -22,14 +21,10 @@ use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
+use crate::{metrics::LIVE_CONNECTIONS_COUNT, tenant::TimelineRef, walreceiver::TaskStateUpdate};
 use crate::{
-    task_mgr,
-    task_mgr::TaskKind,
-    task_mgr::WALRECEIVER_RUNTIME,
-    tenant::{Timeline, WalReceiverInfo},
-    walingest::WalIngest,
-    walrecord::DecodedWALRecord,
+    task_mgr, task_mgr::TaskKind, task_mgr::WALRECEIVER_RUNTIME, tenant::WalReceiverInfo,
+    walingest::WalIngest, walrecord::DecodedWALRecord,
 };
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
@@ -57,7 +52,7 @@ pub struct WalConnectionStatus {
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
-    timeline: Arc<Timeline>,
+    timeline_ref: TimelineRef,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     cancellation: CancellationToken,
@@ -65,6 +60,7 @@ pub async fn handle_walreceiver_connection(
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
+    let id = timeline_ref.id;
 
     let (mut replication_client, connection) = {
         let mut config = wal_source_connconf.to_tokio_postgres_config();
@@ -103,8 +99,8 @@ pub async fn handle_walreceiver_connection(
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverConnection,
-        Some(timeline.tenant_id),
-        Some(timeline.timeline_id),
+        Some(id.tenant_id),
+        Some(id.timeline_id),
         "walreceiver connection",
         false,
         async move {
@@ -147,12 +143,16 @@ pub async fn handle_walreceiver_connection(
         return Ok(());
     }
 
+    let timeline_read = timeline_ref.timeline()?;
+
     //
     // Start streaming the WAL, from where we left off previously.
     //
     // If we had previously received WAL up to some point in the middle of a WAL record, we
     // better start from the end of last full WAL record, not in the middle of one.
-    let mut last_rec_lsn = timeline.get_last_record_lsn();
+    let mut last_rec_lsn = timeline_read.get_last_record_lsn();
+    let pg_version = timeline_read.pg_version;
+    drop(timeline_read);
     let mut startpoint = last_rec_lsn;
 
     if startpoint == Lsn(0) {
@@ -178,10 +178,8 @@ pub async fn handle_walreceiver_connection(
     let physical_stream = ReplicationStream::new(copy_stream);
     pin!(physical_stream);
 
-    let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
-
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint).await?;
-
+    let mut waldecoder = WalStreamDecoder::new(startpoint, pg_version);
+    let mut walingest = WalIngest::new(pg_version, timeline_ref.clone(), startpoint).await?;
     while let Some(replication_message) = {
         select! {
             _ = cancellation.cancelled() => {
@@ -191,6 +189,10 @@ pub async fn handle_walreceiver_connection(
             replication_message = physical_stream.next() => replication_message,
         }
     } {
+        // We use this timeline for the entire replication message processing, since
+        // `cancellation` for the loop is also tracked here above and unconditionally
+        // interrupting byte streams could be bad
+        let walingest_timeline = timeline_ref.timeline()?;
         let replication_message = match replication_message {
             Ok(message) => message,
             Err(replication_error) => {
@@ -241,7 +243,7 @@ pub async fn handle_walreceiver_connection(
 
                 {
                     let mut decoded = DecodedWALRecord::default();
-                    let mut modification = timeline.begin_modification(endlsn);
+                    let mut modification = walingest_timeline.begin_modification(endlsn);
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         // let _enter = info_span!("processing record", lsn = %lsn).entered();
 
@@ -295,21 +297,24 @@ pub async fn handle_walreceiver_connection(
             }
         }
 
-        timeline.check_checkpoint_distance().with_context(|| {
-            format!(
-                "Failed to check checkpoint distance for timeline {}",
-                timeline.timeline_id
-            )
-        })?;
+        walingest_timeline
+            .check_checkpoint_distance()
+            .with_context(|| {
+                format!(
+                    "Failed to check checkpoint distance for timeline {}",
+                    id.timeline_id
+                )
+            })?;
 
         if let Some(last_lsn) = status_update {
-            let timeline_remote_consistent_lsn =
-                timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn = walingest_timeline
+                .get_remote_consistent_lsn()
+                .unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(walingest_timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
@@ -324,11 +329,11 @@ pub async fn handle_walreceiver_connection(
                     .expect("Received message time should be before UNIX EPOCH!")
                     .as_micros(),
             };
-            *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
+            *walingest_timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let (timeline_logical_size, _) = timeline
+            let (timeline_logical_size, _) = walingest_timeline
                 .get_current_logical_size()
                 .context("Status update creation failed to get current logical size")?;
             let status_update = ReplicationFeedback {

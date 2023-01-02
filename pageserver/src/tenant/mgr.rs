@@ -506,8 +506,8 @@ pub async fn immediate_compact(
         .with_context(|| format!("Tenant {tenant_id} not found"))
         .map_err(ApiError::NotFound)?;
 
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
+    let timeline_ref = tenant
+        .get_timeline_ref(timeline_id)
         .map_err(ApiError::NotFound)?;
 
     // Run in task_mgr to avoid race with detach operation
@@ -522,7 +522,8 @@ pub async fn immediate_compact(
         ),
         false,
         async move {
-            let result = timeline
+            let result = timeline_ref
+                .active_timeline()?
                 .compact()
                 .instrument(
                     info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id),

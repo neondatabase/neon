@@ -1538,18 +1538,19 @@ fn is_slru_block_key(key: Key) -> bool {
 }
 
 #[cfg(test)]
-pub fn create_test_timeline(
+pub fn create_test_timeline_ref(
     tenant: &crate::tenant::Tenant,
     timeline_id: utils::id::TimelineId,
     pg_version: u32,
-) -> anyhow::Result<std::sync::Arc<Timeline>> {
-    let tline = tenant
-        .create_empty_timeline(timeline_id, Lsn(8), pg_version)?
+) -> anyhow::Result<crate::tenant::TimelineRef> {
+    let tline_ref = tenant
+        .create_empty_timeline_ref(timeline_id, Lsn(8), pg_version)?
         .initialize()?;
+    let tline = tline_ref.timeline()?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;
-    Ok(tline)
+    Ok(tline_ref)
 }
 
 #[allow(clippy::bool_assert_comparison)]

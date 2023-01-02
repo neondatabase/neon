@@ -290,7 +290,7 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = tenant.get_timeline(timeline_id, true)?;
+        let timeline_ref = tenant.get_timeline_ref(timeline_id)?;
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -329,6 +329,7 @@ impl PageServerHandler {
 
             let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
+            let timeline = timeline_ref.active_timeline()?;
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
@@ -347,6 +348,7 @@ impl PageServerHandler {
                     self.handle_db_size_request(&timeline, &req).await
                 }
             };
+            drop(timeline);
 
             let response = response.unwrap_or_else(|e| {
                 // print the all details to the log with {:#}, but for the client the
@@ -377,7 +379,7 @@ impl PageServerHandler {
         // Create empty timeline
         info!("creating new timeline");
         let tenant = get_active_tenant_with_timeout(tenant_id).await?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
+        let timeline_ref = tenant.create_empty_timeline_ref(timeline_id, base_lsn, pg_version)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -395,7 +397,7 @@ impl PageServerHandler {
         pgb.flush().await?;
 
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
-        timeline
+        timeline_ref
             .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
             .await?;
 
@@ -429,7 +431,10 @@ impl PageServerHandler {
     ) -> Result<(), QueryError> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+        let timeline_ref = get_active_tenant_with_timeout(tenant_id)
+            .await?
+            .get_timeline_ref(timeline_id)?;
+        let timeline = timeline_ref.get_active_timeline_with_timeout().await?;
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
             return Err(QueryError::Other(
@@ -627,7 +632,10 @@ impl PageServerHandler {
         full_backup: bool,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+        let timeline_ref = get_active_tenant_with_timeout(tenant_id)
+            .await?
+            .get_timeline_ref(timeline_id)?;
+        let timeline = timeline_ref.get_active_timeline_with_timeout().await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
@@ -784,7 +792,10 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
-            let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+            let timeline_ref = get_active_tenant_with_timeout(tenant_id)
+                .await?
+                .get_timeline_ref(timeline_id)?;
+            let timeline = timeline_ref.get_active_timeline_with_timeout().await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
@@ -1003,14 +1014,4 @@ async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> anyhow::Result<A
             .map(move |()| tenant),
         Err(_) => anyhow::bail!("Timeout waiting for tenant {tenant_id} to become Active"),
     }
-}
-
-/// Shorthand for getting a reference to a Timeline of an Active tenant.
-async fn get_active_timeline_with_timeout(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-) -> anyhow::Result<Arc<Timeline>> {
-    get_active_tenant_with_timeout(tenant_id)
-        .await
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
 }
