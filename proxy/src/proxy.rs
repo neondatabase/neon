@@ -105,7 +105,8 @@ pub async fn handle_client(
         }
     });
 
-    let do_handshake = handshake(stream, tls_for_handshake, cancel_map).instrument(info_span!("handshake"));
+    let do_handshake =
+        handshake(stream, tls_for_handshake, cancel_map).instrument(info_span!("handshake"));
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request

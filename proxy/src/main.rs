@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
 
     let tasks = [
         tokio::spawn(http::server::task_main(http_listener)),
-        tokio::spawn(http::server::wss_thread_main(wss_listener, config)),
+        tokio::spawn(http::websocket::task_main(wss_listener, config)),
         tokio::spawn(proxy::task_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
     ]

@@ -6,9 +6,10 @@ use std::sync::Arc;
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, ()>,
-    // TODO: this is a hack for WebSockets
-    // If this is set, connection is already considered secure and we won't try
-    // to upgrade it to TLS. Also, we'll use this hostname instead of SNI.
+    /// If this is set, connection is already considered secure and we won't try
+    /// to upgrade it to TLS. Also, we'll use this hostname instead of SNI.
+    ///
+    /// This is used for WebSocket connections, which are already secured by TLS.
     pub secure_override_hostname: Option<String>,
 }
 
