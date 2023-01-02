@@ -31,7 +31,8 @@ libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
-  libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler
+  libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
+  protobuf-devel
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
