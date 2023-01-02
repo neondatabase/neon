@@ -3329,12 +3329,14 @@ version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17ad137b9df78294b98cab1a650bef237cc6c950e82e5ce164655e674d07c5cc"
 dependencies = [
+ "httpdate",
  "reqwest",
  "rustls",
  "sentry-backtrace",
  "sentry-contexts",
  "sentry-core",
  "sentry-panic",
+ "tokio",
  "ureq",
  "webpki-roots",
 ]
@@ -4666,7 +4668,6 @@ dependencies = [
  "rand",
  "regex",
  "regex-syntax",
- "reqwest",
  "scopeguard",
  "serde",
  "serde_json",
