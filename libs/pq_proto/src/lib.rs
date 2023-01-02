@@ -626,6 +626,8 @@ fn read_cstr(buf: &mut Bytes) -> anyhow::Result<Bytes> {
     Ok(result)
 }
 
+const SQLSTATE_INTERNAL_ERROR: &str = "XX000\0";
+
 impl<'a> BeMessage<'a> {
     /// Write message to the given buf.
     // Unlike the reading side, we use BytesMut
@@ -776,7 +778,7 @@ impl<'a> BeMessage<'a> {
                     buf.put_slice(b"ERROR\0");
 
                     buf.put_u8(b'C'); // SQLSTATE error code
-                    buf.put_slice(b"CXX000\0");
+                    buf.put_slice(SQLSTATE_INTERNAL_ERROR.as_bytes());
 
                     buf.put_u8(b'M'); // the message
                     write_cstr(error_msg, buf)?;
@@ -799,7 +801,7 @@ impl<'a> BeMessage<'a> {
                     buf.put_slice(b"NOTICE\0");
 
                     buf.put_u8(b'C'); // SQLSTATE error code
-                    buf.put_slice(b"CXX000\0");
+                    buf.put_slice(SQLSTATE_INTERNAL_ERROR.as_bytes());
 
                     buf.put_u8(b'M'); // the message
                     write_cstr(error_msg.as_bytes(), buf)?;
