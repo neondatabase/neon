@@ -142,7 +142,7 @@ pub async fn handle_walreceiver_connection(
         return Ok(());
     }
 
-    let timeline_read = timeline_guard.acquire_timeline_read()?;
+    let timeline_read = timeline_guard.try_upgrade_timeline_arc()?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -189,9 +189,9 @@ pub async fn handle_walreceiver_connection(
         }
     } {
         // We use this timeline for the entire replication message processing, since
-        // `cancellation` above is also tracked on this level and unconditionally
+        // `cancellation` for the loop is also tracked here above and unconditionally
         // interrupting byte streams could be bad
-        let walingest_timeline = timeline_guard.acquire_timeline_read()?;
+        let walingest_timeline = timeline_guard.try_upgrade_timeline_arc()?;
         let replication_message = match replication_message {
             Ok(message) => message,
             Err(replication_error) => {
@@ -296,23 +296,24 @@ pub async fn handle_walreceiver_connection(
             }
         }
 
-        let timeline_read = timeline_guard.acquire_timeline_read()?;
-
-        timeline_read.check_checkpoint_distance().with_context(|| {
-            format!(
-                "Failed to check checkpoint distance for timeline {}",
-                id.timeline_id
-            )
-        })?;
+        walingest_timeline
+            .check_checkpoint_distance()
+            .with_context(|| {
+                format!(
+                    "Failed to check checkpoint distance for timeline {}",
+                    id.timeline_id
+                )
+            })?;
 
         if let Some(last_lsn) = status_update {
-            let timeline_remote_consistent_lsn =
-                timeline_read.get_remote_consistent_lsn().unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn = walingest_timeline
+                .get_remote_consistent_lsn()
+                .unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline_read.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(walingest_timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
@@ -327,11 +328,11 @@ pub async fn handle_walreceiver_connection(
                     .expect("Received message time should be before UNIX EPOCH!")
                     .as_micros(),
             };
-            *timeline_read.last_received_wal.lock().unwrap() = Some(last_received_wal);
+            *walingest_timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let (timeline_logical_size, _) = timeline_read
+            let (timeline_logical_size, _) = walingest_timeline
                 .get_current_logical_size()
                 .context("Status update creation failed to get current logical size")?;
             let status_update = ReplicationFeedback {
