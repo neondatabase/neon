@@ -25,6 +25,7 @@ use crate::config::ProxyConfig;
 use crate::proxy::handle_client;
 
 pin_project! {
+    /// This is a wrapper around a WebSocketStream that implements AsyncRead and AsyncWrite.
     pub struct WebSocketRW {
         #[pin]
         stream: WebSocketStream<Upgraded>,
@@ -118,43 +119,26 @@ impl AsyncBufRead for WebSocketRW {
     fn poll_fill_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         loop {
             if self.as_mut().has_chunk() {
-                // This unwrap is very sad, but it can't be avoided.
                 let buf = self.project().chunk.as_ref().unwrap().chunk();
                 return Poll::Ready(Ok(buf));
             } else {
                 match self.as_mut().project().stream.poll_next(cx) {
                     Poll::Ready(Some(Ok(message))) => match message {
-                        Message::Text(msg) => {
-                            info!("Received text message: {}", msg);
-                        }
+                        Message::Text(_) => {}
                         Message::Binary(chunk) => {
-                            info!("Received binary message: {:02X?}", chunk);
                             *self.as_mut().project().chunk = Some(Bytes::from(chunk));
-                            info!("saved that binary msg");
                         }
-                        Message::Ping(msg) => {
+                        Message::Ping(_) => {
                             // No need to send a reply: tungstenite takes care of this for you.
-                            info!("Received ping message: {:02X?}", msg);
                         }
-                        Message::Pong(msg) => {
-                            info!("Received pong message: {:02X?}", msg);
-                        }
-                        Message::Close(msg) => {
+                        Message::Pong(_) => {}
+                        Message::Close(_) => {
                             // No need to send a reply: tungstenite takes care of this for you.
-                            if let Some(msg) = &msg {
-                                info!(
-                                    "Received close message with code {} and message: {}",
-                                    msg.code, msg.reason
-                                );
-                            } else {
-                                info!("Received close message");
-                            }
                             return Poll::Ready(Ok(&[]));
                         }
-                        Message::Frame(_msg) => {
+                        Message::Frame(_) => {
                             unreachable!();
-                        } // // Go around the loop in case the chunk is empty.
-                          // *self.as_mut().project().chunk = Some(chunk);
+                        }
                     },
                     Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(ws_err_into(err))),
                     Poll::Ready(None) => return Poll::Ready(Ok(&[])),
@@ -163,6 +147,7 @@ impl AsyncBufRead for WebSocketRW {
             }
         }
     }
+
     fn consume(self: Pin<&mut Self>, amt: usize) {
         if amt > 0 {
             self.project()
@@ -181,9 +166,6 @@ async fn serve_websocket(
     session_id: uuid::Uuid,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-
-    info!("serving ws");
-
     handle_client(&config, cancel_map, session_id, WebSocketRW::new(websocket)).await?;
     Ok(())
 }
@@ -194,9 +176,7 @@ async fn ws_handler(
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
 ) -> Result<Response<Body>, ApiError> {
-    let host = request.headers().get("Host").and_then(|h| h.to_str().ok());
-
-    info!("headers: {:#?}", request.headers());
+    let host = request.headers().get("host").and_then(|h| h.to_str().ok());
 
     // Create a new proxy config with the hostname from the request.
     let config = ProxyConfig {
@@ -217,14 +197,14 @@ async fn ws_handler(
 
         tokio::spawn(async move {
             if let Err(e) = serve_websocket(websocket, &config, &cancel_map, session_id).await {
-                error!("Error in websocket connection: {:?}", e);
+                error!("error in websocket connection: {:?}", e);
             }
         });
 
         // Return the response so the spawned future can continue.
         return Ok(response);
     } else {
-        json_response(StatusCode::OK, "we")
+        json_response(StatusCode::OK, "Connect with a websocket client")
     }
 }
 
@@ -246,31 +226,25 @@ pub async fn task_main(
     };
 
     let tokio_listener = tokio::net::TcpListener::from_std(ws_listener)?;
-
     let addr_incoming = AddrIncoming::from_listener(tokio_listener)?;
+
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
-        info!("got a connection, checking if it's TLS");
         if let Err(err) = conn {
-            error!("Failed to accept TLS connection for websockets: {:?}", err);
+            error!("failed to accept TLS connection for websockets: {:?}", err);
             ready(false)
         } else {
             ready(true)
         }
     });
 
-    let make_svc = hyper::service::make_service_fn(|_stream| {
-        // TODO:
-        // let remote_addr = stream.get_ref().0.remote_addr();
-        info!("got a connection, trying to call a handler");
-        async move {
-            Ok::<_, Infallible>(hyper::service::service_fn(
-                move |req: Request<Body>| async move {
-                    let cancel_map = Arc::new(CancelMap::default());
-                    let session_id = uuid::Uuid::new_v4();
-                    ws_handler(req, config, cancel_map, session_id).await
-                },
-            ))
-        }
+    let make_svc = hyper::service::make_service_fn(|_stream| async move {
+        Ok::<_, Infallible>(hyper::service::service_fn(
+            move |req: Request<Body>| async move {
+                let cancel_map = Arc::new(CancelMap::default());
+                let session_id = uuid::Uuid::new_v4();
+                ws_handler(req, config, cancel_map, session_id).await
+            },
+        ))
     });
 
     hyper::Server::builder(accept::from_stream(tls_listener))

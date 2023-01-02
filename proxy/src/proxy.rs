@@ -121,7 +121,6 @@ pub async fn handle_client(
             Some(hostname.as_str())
         };
         let common_name = tls.and_then(|tls| tls.common_name.as_deref());
-        info!("client connected, sni={sni:?}, common_name={common_name:?}");
         let result = config
             .auth_backend
             .as_ref()
@@ -130,8 +129,6 @@ pub async fn handle_client(
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
-
-    info!("client connected, creds={creds:?}");
 
     let client = Client::new(stream, creds, &params, session_id);
     cancel_map
