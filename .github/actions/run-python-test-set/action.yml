@@ -123,8 +123,8 @@ runs:
           exit 1
         fi
         if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
-          # -n4 uses four processes to run tests via pytest-xdist
-          EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
+          # -n8 uses eight processes to run tests via pytest-xdist
+          EXTRA_PARAMS="-n8 $EXTRA_PARAMS"
 
           # --dist=loadgroup points tests marked with @pytest.mark.xdist_group
           # to the same worker to make @pytest.mark.order work with xdist
