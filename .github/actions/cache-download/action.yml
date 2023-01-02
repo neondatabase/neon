@@ -18,7 +18,7 @@ runs:
   steps:
     - name: Download cache
       id: download-cache
-      shell: bash -uxo pipefail {0}
+      shell: bash -euxo pipefail {0}
       env:
         BUCKET: neon-github-dev
         FOLDER: ${{ inputs.folder }}
@@ -29,7 +29,7 @@ runs:
       run: |
         for i in ${KEY} 
         do
-          S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep "$i" | tail -1)  
+          S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep "$i" | tail -1 || true)  
           if [ -z "${S3_KEY}" ]; then
             echo "no hit on provided cache key"
           else

@@ -300,14 +300,14 @@ jobs:
       - name: Debug - Check folder structure
         run: |
           pwd
-          ls -la .cargo
+          ls -la ~/.cargo
 
       - name: Upload rust cache (S3 Cache)
         uses: ./.github/actions/cache-upload
         with:
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           path: |
-            .cargo
+            ~/.cargo
             target
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later

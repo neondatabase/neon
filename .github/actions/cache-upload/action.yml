@@ -33,10 +33,10 @@ runs:
           tar --append -f ${ARCHIVE} "$i"
         done
         
-        time zstd -z ${ARCHIVE}
+        time zstd -T0 ${ARCHIVE}
 
     - name: Upload cache
-      shell: bash -uxo pipefail {0}
+      shell: bash -euxo pipefail {0}
       env:
         ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst
         OVERRIDE: ${{ inputs.override }}
@@ -46,7 +46,7 @@ runs:
         FILENAME=$(basename $ARCHIVE)
         FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
         
-        S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep ${FILENAME} | tail -1)
+        S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep ${FILENAME} | tail -1 || true)
         if [ -z "${S3_KEY}" ]; then
           echo "uploading cache"
           time aws s3 mv ${ARCHIVE} s3://${BUCKET}/${FOLDER}/${FILENAME}
