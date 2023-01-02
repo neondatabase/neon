@@ -107,6 +107,9 @@ def test_metric_collection(
 
     # spin up neon,  after http server is ready
     env = neon_env_builder.init_start()
+    # Order of fixtures shutdown is not specified, and if http server gets down
+    # before pageserver, pageserver log might contain such errors in the end.
+    env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     env.neon_cli.create_branch("test_metric_collection")
     pg = env.postgres.create_start("test_metric_collection")
 
