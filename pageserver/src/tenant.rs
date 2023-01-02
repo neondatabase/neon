@@ -1874,7 +1874,12 @@ impl Tenant {
 
         utils::failpoint_sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
 
-        info!("starting on {} timelines", gc_timelines.len());
+        // If there is nothing to GC, we don't want any messages in the INFO log.
+        if !gc_timelines.is_empty() {
+            info!("{} timelines need GC", gc_timelines.len());
+        } else {
+            debug!("{} timelines need GC", gc_timelines.len());
+        }
 
         // Perform GC for each timeline.
         //
