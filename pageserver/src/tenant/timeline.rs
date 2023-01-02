@@ -205,7 +205,7 @@ impl TimelineGuard {
     /// Use this as a `MutexGuard` and do not try to store the object.
     /// While the object is held, the timeline is not dropped fully, which might cause
     /// various jobs to continue working.
-    pub fn acquire_timeline_read(&self) -> anyhow::Result<Arc<Timeline>> {
+    pub fn try_upgrade_timeline_arc(&self) -> anyhow::Result<Arc<Timeline>> {
         self.timeline
             .upgrade()
             .with_context(|| format!("Timeline {} is dropped", self.id))
@@ -795,7 +795,7 @@ impl Timeline {
     ///
     /// Also flush after a period of time without new data -- it helps
     /// safekeepers to regard pageserver as caught up and suspend activity.
-    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
+    pub fn check_checkpoint_distance(&self) -> anyhow::Result<()> {
         let last_lsn = self.get_last_record_lsn();
         let layers = self.layers.read().unwrap();
         if let Some(open_layer) = &layers.open_layer {

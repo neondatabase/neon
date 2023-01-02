@@ -93,9 +93,9 @@ pub fn spawn_connection_manager_task(
     );
 }
 
-macro_rules! acquire_timeline_read {
+macro_rules! try_upgrade_timeline_arc {
     ( $walreceiver_state:expr ) => {
-        match $walreceiver_state.timeline_guard.acquire_timeline_read() {
+        match $walreceiver_state.timeline_guard.try_upgrade_timeline_arc() {
             Ok(timeline) => timeline,
             Err(e) => {
                 warn!("Cannot acquire timeline read: {e:#}");
@@ -113,7 +113,7 @@ async fn connection_manager_loop_step(
     walreceiver_state: &mut WalreceiverState,
 ) -> ControlFlow<(), ()> {
     let mut timeline_state_updates =
-        acquire_timeline_read!(walreceiver_state).subscribe_for_state_updates();
+        try_upgrade_timeline_arc!(walreceiver_state).subscribe_for_state_updates();
 
     match wait_for_active_timeline(&mut timeline_state_updates).await {
         ControlFlow::Continue(()) => {}
@@ -131,7 +131,6 @@ async fn connection_manager_loop_step(
     info!("Subscribed for broker timeline updates");
 
     loop {
-        let timeline_read = acquire_timeline_read!(walreceiver_state);
         let time_until_next_retry = walreceiver_state.time_until_next_retry();
 
         // These things are happening concurrently:
@@ -193,7 +192,7 @@ async fn connection_manager_loop_step(
                 loop {
                     match timeline_state_updates.changed().await {
                         Ok(()) => {
-                            let new_state = timeline_read.current_state();
+                            let new_state = try_upgrade_timeline_arc!(walreceiver_state).current_state();
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
@@ -585,7 +584,7 @@ impl WalreceiverState {
 
                 let current_lsn = match existing_wal_connection.status.streaming_lsn {
                     Some(lsn) => lsn,
-                    None => match self.timeline_guard.acquire_timeline_read() {
+                    None => match self.timeline_guard.try_upgrade_timeline_arc() {
                         Ok(timeline) => timeline.get_last_record_lsn(),
                         Err(e) => {
                             warn!("Cannot acquire timeline read: {e:#}");
