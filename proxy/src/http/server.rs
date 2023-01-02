@@ -207,11 +207,6 @@ async fn serve_websocket(
     let websocket = websocket.await?;
 
     info!("serving ws");
-    let config = ProxyConfig {
-        tls_config: None,
-        auth_backend: config.auth_backend.clone(),
-        use_hostname: None, // TODO: take a Host header
-    };
 
     handle_client(&config, cancel_map, session_id, WebSocketRW::new(websocket)).await?;
     Ok(())
@@ -223,13 +218,32 @@ async fn ws_handler(
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
 ) -> Result<Response<Body>, ApiError> {
+    let host = request
+        .headers()
+        .get("Host")
+        .and_then(|h| h.to_str().ok());
+
+    info!("headers: {:#?}", request.headers());
+
+    // Create a new proxy config with the hostname from the request.
+    let config = ProxyConfig {
+        tls_config: config.tls_config.clone(),
+        auth_backend: config.auth_backend.clone(),
+        secure_override_hostname: host
+            .and_then(|h| {
+                // Remove the port from the hostname, if present.
+                h.split(':').next()
+            })
+            .map(|h| h.to_string()),
+    };
+
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         tokio::spawn(async move {
-            if let Err(e) = serve_websocket(websocket, config, &cancel_map, session_id).await {
+            if let Err(e) = serve_websocket(websocket, &config, &cancel_map, session_id).await {
                 error!("Error in websocket connection: {:?}", e);
             }
         });
@@ -262,6 +276,7 @@ pub async fn wss_thread_main(
 
     let addr_incoming = AddrIncoming::from_listener(tokio_listener)?;
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
+        info!("got a connection, checking if it's TLS");
         if let Err(err) = conn {
             error!("Failed to accept TLS connection for websockets: {:?}", err);
             ready(false)
@@ -273,6 +288,7 @@ pub async fn wss_thread_main(
     let make_svc = hyper::service::make_service_fn(|_stream| {
         // TODO:
         // let remote_addr = stream.get_ref().0.remote_addr();
+        info!("got a connection, trying to call a handler");
         async move {
             Ok::<_, Infallible>(hyper::service::service_fn(
                 move |req: Request<Body>| async move {

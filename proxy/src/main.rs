@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend: auth_backend.clone(),
-        use_hostname: None,
+        secure_override_hostname: None,
     }));
 
     info!("Version: {GIT_VERSION}");
@@ -165,7 +165,7 @@ fn cli() -> clap::Command {
             Arg::new("wss")
                 .long("wss")
                 .help("listen for incoming wss connections on ip:port")
-                .default_value("127.0.0.1:8080"), // TODO: change default to 443
+                .default_value("0.0.0.0:8443"),
         )
         .arg(
             Arg::new("uri")

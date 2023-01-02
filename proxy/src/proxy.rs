@@ -95,7 +95,17 @@ pub async fn handle_client(
     }
 
     let tls = config.tls_config.as_ref();
-    let do_handshake = handshake(stream, tls, cancel_map).instrument(info_span!("handshake"));
+
+    // Don't upgrade to TLS if `secure_override_hostname` is set.
+    let tls_for_handshake = tls.and_then(|tls| {
+        if config.secure_override_hostname.is_none() {
+            Some(tls)
+        } else {
+            None
+        }
+    });
+
+    let do_handshake = handshake(stream, tls_for_handshake, cancel_map).instrument(info_span!("handshake"));
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -103,13 +113,14 @@ pub async fn handle_client(
 
     // Extract credentials which we're going to use for auth.
     let creds = {
-        let sni = if config.use_hostname.is_none() {
+        let sni = if config.secure_override_hostname.is_none() {
             stream.get_ref().sni_hostname()
         } else {
-            let hostname = config.use_hostname.as_ref().unwrap();
+            let hostname = config.secure_override_hostname.as_ref().unwrap();
             Some(hostname.as_str())
         };
         let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        info!("client connected, sni={sni:?}, common_name={common_name:?}");
         let result = config
             .auth_backend
             .as_ref()
@@ -118,6 +129,8 @@ pub async fn handle_client(
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
+
+    info!("client connected, creds={creds:?}");
 
     let client = Client::new(stream, creds, &params, session_id);
     cancel_map
