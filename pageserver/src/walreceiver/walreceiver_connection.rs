@@ -155,6 +155,8 @@ pub async fn handle_walreceiver_connection(
     // If we had previously received WAL up to some point in the middle of a WAL record, we
     // better start from the end of last full WAL record, not in the middle of one.
     let mut last_rec_lsn = timeline_read.get_last_record_lsn();
+    let pg_version = timeline_read.pg_version;
+    drop(timeline_read);
     let mut startpoint = last_rec_lsn;
 
     if startpoint == Lsn(0) {
@@ -180,9 +182,8 @@ pub async fn handle_walreceiver_connection(
     let physical_stream = ReplicationStream::new(copy_stream);
     pin!(physical_stream);
 
-    let mut waldecoder = WalStreamDecoder::new(startpoint, timeline_read.pg_version);
-
-    drop(timeline_read);
+    let mut waldecoder = WalStreamDecoder::new(startpoint, pg_version);
+    let mut walingest = WalIngest::new(id, pg_version, Weak::clone(&timeline), startpoint).await?;
     while let Some(replication_message) = {
         select! {
             _ = cancellation.changed() => {
@@ -254,9 +255,6 @@ pub async fn handle_walreceiver_connection(
                         // aligned and can be several bytes bigger. Without this alignment we are
                         // at risk of hitting a deadlock.
                         ensure!(lsn.is_aligned());
-
-                        let mut walingest =
-                            WalIngest::new(walingest_timeline.as_ref(), startpoint).await?;
 
                         walingest
                             .ingest_record(recdata.clone(), lsn, &mut modification, &mut decoded)

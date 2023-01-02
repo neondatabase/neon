@@ -175,8 +175,9 @@ impl<E: Clone> TaskHandle<E> {
     }
 }
 
+// TODO kb share better, replace XXX with ///
 // XXX: do not store this Arc anywhere, rather treat is as a MutexGuard.
-fn acquire_timeline_read(
+pub fn acquire_timeline_read(
     id: TenantTimelineId,
     timeline: &std::sync::Weak<Timeline>,
 ) -> anyhow::Result<std::sync::Arc<Timeline>> {
