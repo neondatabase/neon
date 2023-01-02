@@ -297,10 +297,12 @@ jobs:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
 
+      # HOME is overridden for containers - https://github.com/actions/runner/issues/863
       - name: Debug - Check folder structure
         run: |
           pwd
           ls -la ~/.cargo
+          ls -la /home/nonroot/.cargo
 
       - name: Upload rust cache (S3 Cache)
         uses: ./.github/actions/cache-upload
