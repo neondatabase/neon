@@ -80,7 +80,7 @@ pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    pub myself: Weak<Self>,
+    myself: Weak<Self>,
 
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
@@ -191,6 +191,25 @@ pub struct Timeline {
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
     state: watch::Sender<TimelineState>,
+}
+
+/// A timeline wrapper, that ensures we can drop timeline and cause
+/// next operations that access the timeline to cancel.
+#[derive(Clone)]
+pub struct TimelineGuard {
+    timeline: Weak<Timeline>,
+    pub id: TenantTimelineId,
+}
+
+impl TimelineGuard {
+    /// Use this as a `MutexGuard` and do not try to store the object.
+    /// While the object is held, the timeline is not dropped fully, which might cause
+    /// various jobs to continue working.
+    pub fn acquire_timeline_read(&self) -> anyhow::Result<Arc<Timeline>> {
+        self.timeline
+            .upgrade()
+            .with_context(|| format!("Timeline {} is dropped", self.id))
+    }
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -839,6 +858,13 @@ impl Timeline {
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
         self.state.subscribe()
     }
+
+    pub fn guard(&self) -> TimelineGuard {
+        TimelineGuard {
+            timeline: Weak::clone(&self.myself),
+            id: TenantTimelineId::new(self.tenant_id, self.timeline_id),
+        }
+    }
 }
 
 // Private functions
@@ -1037,11 +1063,7 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
         spawn_connection_manager_task(
-            TenantTimelineId {
-                tenant_id: self.tenant_id,
-                timeline_id: self.timeline_id,
-            },
-            Weak::clone(&self.myself),
+            self.guard(),
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,

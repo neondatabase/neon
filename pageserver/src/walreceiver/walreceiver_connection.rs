@@ -3,7 +3,6 @@
 use std::{
     error::Error,
     str::FromStr,
-    sync::Weak,
     time::{Duration, SystemTime},
 };
 
@@ -23,12 +22,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
 use crate::{
-    task_mgr,
-    task_mgr::TaskKind,
-    task_mgr::WALRECEIVER_RUNTIME,
-    tenant::{Timeline, WalReceiverInfo},
-    walingest::WalIngest,
-    walrecord::DecodedWALRecord,
+    task_mgr, task_mgr::TaskKind, task_mgr::WALRECEIVER_RUNTIME, tenant::WalReceiverInfo,
+    walingest::WalIngest, walrecord::DecodedWALRecord,
 };
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
@@ -56,8 +51,7 @@ pub struct WalConnectionStatus {
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
-    id: TenantTimelineId,
-    timeline: Weak<Timeline>,
+    timeline_guard: TimelineGuard,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
@@ -65,6 +59,7 @@ pub async fn handle_walreceiver_connection(
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
+    let id = timeline_guard.id;
 
     let (mut replication_client, connection) = {
         let mut config = wal_source_connconf.to_tokio_postgres_config();
@@ -147,7 +142,7 @@ pub async fn handle_walreceiver_connection(
         return Ok(());
     }
 
-    let timeline_read = acquire_timeline_read(id, &timeline)?;
+    let timeline_read = timeline_guard.acquire_timeline_read()?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -183,7 +178,7 @@ pub async fn handle_walreceiver_connection(
     pin!(physical_stream);
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, pg_version);
-    let mut walingest = WalIngest::new(id, pg_version, Weak::clone(&timeline), startpoint).await?;
+    let mut walingest = WalIngest::new(pg_version, timeline_guard.clone(), startpoint).await?;
     while let Some(replication_message) = {
         select! {
             _ = cancellation.changed() => {
@@ -196,7 +191,7 @@ pub async fn handle_walreceiver_connection(
         // We use this timeline for the entire replication message processing, since
         // `cancellation` above is also tracked on this level and unconditionally
         // interrupting byte streams could be bad
-        let walingest_timeline = acquire_timeline_read(id, &timeline)?;
+        let walingest_timeline = timeline_guard.acquire_timeline_read()?;
         let replication_message = match replication_message {
             Ok(message) => message,
             Err(replication_error) => {
@@ -301,7 +296,7 @@ pub async fn handle_walreceiver_connection(
             }
         }
 
-        let timeline_read = acquire_timeline_read(id, &timeline)?;
+        let timeline_read = timeline_guard.acquire_timeline_read()?;
 
         timeline_read.check_checkpoint_distance().with_context(|| {
             format!(

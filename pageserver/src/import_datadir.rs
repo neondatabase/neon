@@ -3,7 +3,6 @@
 //! a neon Timeline.
 //!
 use std::path::{Path, PathBuf};
-use std::sync::Weak;
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
@@ -11,7 +10,6 @@ use futures::StreamExt;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
 use tracing::*;
-use utils::id::TenantTimelineId;
 use walkdir::WalkDir;
 
 use crate::pgdatadir_mapping::*;
@@ -256,13 +254,7 @@ async fn import_wal(
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(
-        TenantTimelineId::new(tline.tenant_id, tline.timeline_id),
-        tline.pg_version,
-        Weak::clone(&tline.myself),
-        startpoint,
-    )
-    .await?;
+    let mut walingest = WalIngest::new(tline.pg_version, tline.guard(), startpoint).await?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
@@ -384,13 +376,7 @@ pub async fn import_wal_from_tar(
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
-    let mut walingest = WalIngest::new(
-        TenantTimelineId::new(tline.tenant_id, tline.timeline_id),
-        tline.pg_version,
-        Weak::clone(&tline.myself),
-        start_lsn,
-    )
-    .await?;
+    let mut walingest = WalIngest::new(tline.pg_version, tline.guard(), start_lsn).await?;
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);

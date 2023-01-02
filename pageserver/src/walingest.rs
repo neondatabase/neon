@@ -21,9 +21,6 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
-use std::sync::Arc;
-use std::sync::Weak;
-
 use anyhow::Context;
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
@@ -32,7 +29,6 @@ use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
-use utils::id::TenantTimelineId;
 
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
@@ -51,8 +47,7 @@ use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
 
 pub struct WalIngest {
-    id: TenantTimelineId,
-    timeline: Weak<Timeline>,
+    timeline_guard: TimelineGuard,
     pg_version: u32,
 
     checkpoint: CheckPoint,
@@ -61,14 +56,13 @@ pub struct WalIngest {
 
 impl WalIngest {
     pub async fn new(
-        id: TenantTimelineId,
         pg_version: u32,
-        timeline: Weak<Timeline>,
+        timeline_guard: TimelineGuard,
         startpoint: Lsn,
     ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let timeline_read = try_page_reconstruct_result!(acquire_timeline_read(id, &timeline));
+        let timeline_read = try_page_reconstruct_result!(timeline_guard.acquire_timeline_read());
         let checkpoint_bytes =
             with_ondemand_download(|| timeline_read.get_checkpoint(startpoint)).await?;
         drop(timeline_read);
@@ -78,9 +72,8 @@ impl WalIngest {
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
         Ok(WalIngest {
-            id,
+            timeline_guard,
             pg_version,
-            timeline,
             checkpoint,
             checkpoint_modified: false,
         })
@@ -102,8 +95,7 @@ impl WalIngest {
         decoded: &mut DecodedWALRecord,
     ) -> anyhow::Result<()> {
         modification.lsn = lsn;
-        decode_wal_record(recdata, decoded, self.pg_version)
-            ?;
+        decode_wal_record(recdata, decoded, self.pg_version)?;
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -751,7 +743,7 @@ impl WalIngest {
             },
         )?;
 
-        let timeline_read = self.acquire_timeline_read()?;
+        let timeline_read = self.timeline_guard.acquire_timeline_read()?;
         for xnode in &parsed.xnodes {
             for forknum in MAIN_FORKNUM..=VISIBILITYMAP_FORKNUM {
                 let rel = RelTag {
@@ -1011,7 +1003,7 @@ impl WalIngest {
     }
 
     async fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> anyhow::Result<BlockNumber> {
-        let timeline_read = self.acquire_timeline_read()?;
+        let timeline_read = self.timeline_guard.acquire_timeline_read()?;
         let exists =
             with_ondemand_download(|| timeline_read.get_rel_exists(rel, lsn, true)).await?;
         let nblocks = if !exists {
@@ -1033,7 +1025,7 @@ impl WalIngest {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let timeline_read = try_prr!(self.acquire_timeline_read());
+        let timeline_read = try_prr!(self.timeline_guard.acquire_timeline_read());
         let old_nblocks =
             if !with_ondemand_download(|| timeline_read.get_rel_exists(rel, last_lsn, true)).await?
             {
@@ -1085,7 +1077,7 @@ impl WalIngest {
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
-        let timeline_read = self.acquire_timeline_read()?;
+        let timeline_read = self.timeline_guard.acquire_timeline_read()?;
         let last_lsn = timeline_read.get_last_record_lsn();
         let old_nblocks = if !with_ondemand_download(|| {
             timeline_read.get_slru_segment_exists(kind, segno, last_lsn)
@@ -1117,10 +1109,6 @@ impl WalIngest {
         }
         Ok(())
     }
-
-    fn acquire_timeline_read(&self) -> anyhow::Result<Arc<Timeline>> {
-        acquire_timeline_read(self.id, &self.timeline)
-    }
 }
 
 #[allow(clippy::bool_assert_comparison)]
@@ -1132,7 +1120,6 @@ mod tests {
     use crate::tenant::Timeline;
     use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
-    use utils::id::TenantTimelineId;
 
     use crate::DEFAULT_PG_VERSION;
 
@@ -1155,13 +1142,7 @@ mod tests {
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""))?; // dummy relmapper file
         m.commit()?;
-        let walingest = WalIngest::new(
-            TenantTimelineId::new(tline.tenant_id, tline.timeline_id),
-            tline.pg_version,
-            Weak::clone(&tline.myself),
-            Lsn(0x10),
-        )
-        .await?;
+        let walingest = WalIngest::new(tline.pg_version, tline.guard(), Lsn(0x10)).await?;
 
         Ok(walingest)
     }
