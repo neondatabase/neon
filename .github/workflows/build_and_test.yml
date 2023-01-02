@@ -137,12 +137,12 @@ jobs:
   build-neon:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [ release ]
 
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
@@ -201,19 +201,19 @@ jobs:
       # uncompressed versions of the crates in ~/.cargo/registry/cache
       # directory, and it's faster to let 'cargo' to rebuild it from the
       # compressed crates.
-#      - name: Cache cargo deps
-#        id: cache_cargo
-#        uses: actions/cache@v3
-#        with:
-#          path: |
-#            ~/.cargo/registry/
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
-#          key: |
-#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Cache cargo deps
+        id: cache_cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry/
+            !~/.cargo/registry/src
+            ~/.cargo/git/
+            target/
+          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+          key: |
+            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -303,14 +303,13 @@ jobs:
           pwd
           ls -la ~/.cargo
           ls -la /home/nonroot/.cargo
-          echo "HOME=/home/nonroot" >> $GITHUB_ENV
 
       - name: Upload rust cache (S3 Cache)
         uses: ./.github/actions/cache-upload
         with:
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           path: |
-            /home/nonroot/.cargo
+            .cargo
             target
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
@@ -542,7 +541,7 @@ jobs:
   neon-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.1-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -558,12 +557,12 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build neon
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --snapshot-mode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.1-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -576,11 +575,11 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build compute tools
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --snapshot-mode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.1-debug
     needs: [ tag ]
     strategy:
       fail-fast: false

@@ -49,11 +49,11 @@ runs:
         S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep ${FILENAME} | tail -1 || true)
         if [ -z "${S3_KEY}" ]; then
           echo "uploading cache"
-          time aws s3 mv ${ARCHIVE} s3://${BUCKET}/${FOLDER}/${FILENAME}
+          time aws s3 mv --only-show-errors ${ARCHIVE} s3://${BUCKET}/${FOLDER}/${FILENAME}
           else
             if [ "${OVERRIDE}" = "true" ]; then
               echo "override existing cache"
-              time aws s3 mv ${ARCHIVE} s3://${BUCKET}/${FOLDER}/${FILENAME}
+              time aws s3 mv --only-show-errors ${ARCHIVE} s3://${BUCKET}/${FOLDER}/${FILENAME}
             else
               echo "cache exists, skipping upload"
           fi
