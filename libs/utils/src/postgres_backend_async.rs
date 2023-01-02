@@ -594,13 +594,6 @@ pub(super) fn log_query_error(query: &str, e: &MaybeIoError) {
             }
         }
         MaybeIoError::Anyhow(e) => {
-            // ":?" uses the alternate formatting style, which makes anyhow display the
-            // full cause of the error, not just the top-level context + its trace.
-            // We don't want to send that in the ErrorResponse though,
-            // because it's not relevant to the compute node logs.
-            //
-            // We also don't want to log full stacktrace when the error is primitive,
-            // such as usual connection closed.
             error!("query handler for '{query}' failed: {e:?}");
         }
     }

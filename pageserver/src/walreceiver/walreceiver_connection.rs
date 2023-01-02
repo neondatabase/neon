@@ -70,14 +70,12 @@ pub async fn handle_walreceiver_connection(
         config.application_name("pageserver");
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
         match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
-            Ok(other_res) => match other_res {
-                Ok(client_and_conn) => client_and_conn,
-                Err(other_err) => {
-                    let expected_error = ignore_expected_errors(other_err)?;
-                    info!("DB connection stream finished: {expected_error}");
-                    return Ok(());
-                }
-            },
+            Ok(Ok(client_and_conn)) => client_and_conn,
+            Ok(Err(conn_err)) => {
+                let expected_error = ignore_expected_errors(conn_err)?;
+                info!("DB connection stream finished: {expected_error}");
+                return Ok(());
+            }
             Err(elapsed) => anyhow::bail!(
                 "Timed out while waiting {elapsed} for walreceiver connection to open"
             ),
@@ -414,7 +412,9 @@ fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres:
     {
         return Ok(pg_error);
     } else if let Some(db_error) = pg_error.as_db_error() {
-        if db_error.code() == &SqlState::IO_ERROR && db_error.message().contains("end streaming") {
+        if db_error.code() == &SqlState::CONNECTION_FAILURE
+            && db_error.message().contains("end streaming")
+        {
             return Ok(pg_error);
         }
     }

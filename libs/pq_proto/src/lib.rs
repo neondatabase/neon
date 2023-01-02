@@ -816,7 +816,7 @@ impl<'a> BeMessage<'a> {
             BeMessage::ErrorResponse(error_msg, io_error_kind) => {
                 // TODO kb rework
                 let error_code = if io_error_kind.is_some() {
-                    "58030\0" // io error
+                    "08006\0" // connection failure
                 } else {
                     "XX000\0" // internal error
                 };
