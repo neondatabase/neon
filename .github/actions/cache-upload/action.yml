@@ -37,7 +37,7 @@ runs:
           echo "$i" >> manifest.txt
         done
         
-        time /bin/tar --posix --use-compress-program zstdmt -cf ${ARCHIVE} --exclude manifest.txt -P -C . --files-from manifest.txt
+        time /bin/tar --posix --use-compress-program zstdmt -cf ${ARCHIVE} --exclude manifest.txt -P -C ${GITHUB_WORKSPACE} --files-from manifest.txt
 
     - name: Upload cache
       shell: bash -euxo pipefail {0}
