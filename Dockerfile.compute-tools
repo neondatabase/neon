@@ -2,7 +2,7 @@
 # NB: keep in sync with rust image version in .github/workflows/build_and_test.yml
 ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
 ARG IMAGE=rust
-ARG TAG=pinned
+ARG TAG=3822299953
 
 FROM $REPOSITORY/$IMAGE:$TAG AS rust-build
 WORKDIR /home/nonroot

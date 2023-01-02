@@ -3,7 +3,7 @@
 # except for the version of Postgres that is built.
 #
 
-ARG TAG=pinned
+ARG TAG=3822299953
 
 #########################################################################################
 #

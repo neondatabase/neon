@@ -87,7 +87,7 @@ jobs:
   check-codestyle-rust:
     runs-on: [ self-hosted, dev, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3822299953
       options: --init
 
     steps:
@@ -129,7 +129,7 @@ jobs:
   build-neon:
     runs-on: [ self-hosted, dev, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3822299953
       options: --init
     strategy:
       fail-fast: false
@@ -298,7 +298,7 @@ jobs:
   regress-tests:
     runs-on: [ self-hosted, dev, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3822299953
       options: --init
     needs: [ build-neon ]
     strategy:
@@ -331,7 +331,7 @@ jobs:
   benchmarks:
     runs-on: [ self-hosted, dev, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3822299953
       options: --init
     needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -362,7 +362,7 @@ jobs:
   merge-allure-report:
     runs-on: [ self-hosted, dev, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3822299953
       options: --init
     needs: [ regress-tests, benchmarks ]
     if: ${{ !cancelled() }}
@@ -399,7 +399,7 @@ jobs:
   coverage-report:
     runs-on: [ self-hosted, dev, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3822299953
       options: --init
     needs: [ regress-tests ]
     strategy:
@@ -703,7 +703,7 @@ jobs:
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
 
       - name: Pull rust image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3822299953 rust
 
       - name: Push images to production ECR
         if: |
@@ -742,7 +742,7 @@ jobs:
         run: crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
 
       - name: Push rust image to Docker Hub
-        run: crane push rust neondatabase/rust:pinned
+        run: crane push rust neondatabase/rust:3822299953
 
       - name: Add latest tag to images in Docker Hub
         if: |
@@ -1179,7 +1179,7 @@ jobs:
   promote-compatibility-data:
     runs-on: [ self-hosted, dev, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3822299953
       options: --init
     needs: [ deploy, deploy-proxy ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
