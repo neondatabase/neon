@@ -29,12 +29,13 @@ runs:
         SOURCE: ${{ inputs.path }}
         ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar
       run: |
+        pwd
         ls -la
         mkdir -p $(dirname $ARCHIVE)
         
         for i in ${SOURCE} 
         do
-          tar --append -f ${ARCHIVE} "$i"
+          tar --append -C -f ${ARCHIVE} "$i"
         done
         
         time zstd -T0 ${ARCHIVE}
