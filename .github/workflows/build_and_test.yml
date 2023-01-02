@@ -303,6 +303,7 @@ jobs:
           pwd
           ls -la ~/.cargo
           ls -la /home/nonroot/.cargo
+          echo "HOME=/home/nonroot" >> $GITHUB_ENV
 
       - name: Upload rust cache (S3 Cache)
         uses: ./.github/actions/cache-upload
