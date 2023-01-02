@@ -15,6 +15,10 @@ inputs:
     description: "Allow force upload existing cache"
     default: false
     required: false
+  workdir:
+    description: "Specify working directory for the action"
+    default: "."
+    required: false
 
 runs:
   using: "composite"
@@ -60,3 +64,4 @@ runs:
         fi
         
         echo "${FILENAME} - ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}
+      working-directory: ${{ inputs.workdir }}

@@ -137,7 +137,7 @@ jobs:
   build-neon:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     strategy:
       fail-fast: false
@@ -311,6 +311,7 @@ jobs:
           path: |
             .cargo
             target
+          workdir: /home/nonroot
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
