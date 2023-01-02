@@ -35,7 +35,7 @@ runs:
         
         for i in ${SOURCE} 
         do
-          tar --append -C -f ${ARCHIVE} "$i"
+          zip -Z store -ur ${ARCHIVE} "$i"
         done
         
         time zstd -T0 ${ARCHIVE}
@@ -43,7 +43,7 @@ runs:
     - name: Upload cache
       shell: bash -euxo pipefail {0}
       env:
-        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst
+        ARCHIVE: /tmp/uploads/${{ inputs.key }}.zip.zst
         OVERRIDE: ${{ inputs.override }}
         FOLDER: ${{ inputs.folder }}
         BUCKET: neon-github-dev
