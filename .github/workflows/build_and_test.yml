@@ -200,10 +200,7 @@ jobs:
       - name: Debug - Check folder structure
         run: |
           pwd
-          ls -la .cargo
-          du -sh .cargo
-          ls -la ~/.cargo
-          du -sh ~/.cargo
+          ls -la
 
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
