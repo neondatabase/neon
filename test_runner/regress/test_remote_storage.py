@@ -277,6 +277,7 @@ def test_remote_storage_upload_queue_retries(
             file_kind,
             op_kind,
         )
+        assert val is not None, "expecting metric to be present"
         return int(val)
 
     # create some layers & wait for uploads to finish
@@ -407,7 +408,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             file_kind,
             op_kind,
         )
-        return int(val)
+        return int(val) if val is not None else val
 
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
 

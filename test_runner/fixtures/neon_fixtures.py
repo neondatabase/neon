@@ -1417,7 +1417,7 @@ class PageserverHttpClient(requests.Session):
         timeline_id: TimelineId,
         file_kind: str,
         op_kind: str,
-    ) -> float:
+    ) -> Optional[float]:
         metrics = parse_metrics(self.get_metrics(), "pageserver")
         matches = metrics.query_all(
             name=metric_name,
@@ -1428,8 +1428,14 @@ class PageserverHttpClient(requests.Session):
                 "op_kind": str(op_kind),
             },
         )
-        assert len(matches) == 1, "above filter should uniquely identify metric"
-        return matches[0].value
+        if len(matches) == 0:
+            value = None
+        elif len(matches) == 1:
+            value = matches[0].value
+            assert value is not None
+        else:
+            assert len(matches) < 2, "above filter should uniquely identify metric"
+        return value
 
     def get_metric_value(self, name: str) -> Optional[str]:
         metrics = self.get_metrics()
