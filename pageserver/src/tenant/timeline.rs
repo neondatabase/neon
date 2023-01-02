@@ -80,7 +80,7 @@ pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    myself: Weak<Self>,
+    pub myself: Weak<Self>,
 
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
