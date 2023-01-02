@@ -64,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
     let proxy_address: SocketAddr = arg_matches.get_one::<String>("proxy").unwrap().parse()?;
     let mgmt_address: SocketAddr = arg_matches.get_one::<String>("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.get_one::<String>("http").unwrap().parse()?;
-    let wss_address: SocketAddr = arg_matches.get_one::<String>("wss").unwrap().parse()?;
 
     let auth_backend = match arg_matches
         .get_one::<String>("auth-backend")
@@ -106,22 +105,29 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting http on {http_address}");
     let http_listener = TcpListener::bind(http_address).await?.into_std()?;
 
-    info!("Starting ws on {}", wss_address);
-    let wss_listener = TcpListener::bind(wss_address).await?.into_std()?;
-
     info!("Starting mgmt on {mgmt_address}");
     let mgmt_listener = TcpListener::bind(mgmt_address).await?.into_std()?;
 
     info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
-    let tasks = [
+    let mut tasks = vec![
         tokio::spawn(http::server::task_main(http_listener)),
-        tokio::spawn(http::websocket::task_main(wss_listener, config)),
         tokio::spawn(proxy::task_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
-    ]
-    .map(flatten_err);
+    ];
+
+    if let Some(wss_address) = arg_matches.get_one::<String>("wss") {
+        let wss_address: SocketAddr = wss_address.parse()?;
+        info!("Starting wss on {}", wss_address);
+        let wss_listener = TcpListener::bind(wss_address).await?.into_std()?;
+        tasks.push(tokio::spawn(http::websocket::task_main(
+            wss_listener,
+            config,
+        )));
+    }
+
+    let tasks = tasks.into_iter().map(flatten_err);
 
     set_build_info_metric(GIT_VERSION);
     // This will block until all tasks have completed.
@@ -164,8 +170,7 @@ fn cli() -> clap::Command {
         .arg(
             Arg::new("wss")
                 .long("wss")
-                .help("listen for incoming wss connections on ip:port")
-                .default_value("0.0.0.0:8443"),
+                .help("listen for incoming wss connections on ip:port"),
         )
         .arg(
             Arg::new("uri")
