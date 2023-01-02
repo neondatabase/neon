@@ -6,7 +6,7 @@
 use crate::postgres_backend::AuthType;
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
-use pq_proto::{BeMessage, FeMessage, FeStartupPacket, MaybeIoError};
+use pq_proto::{BeMessage, ConnectionError, FeMessage, FeStartupPacket, SQLSTATE_INTERNAL_ERROR};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -23,6 +23,33 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
     matches!(e.kind(), ConnectionRefused | ConnectionAborted)
 }
 
+/// An error, occurred during query processing:
+/// either during the connection ([`ConnectionError`]) or before/after it.
+#[derive(thiserror::Error, Debug)]
+pub enum QueryError {
+    /// The connection was lost while processing the query.
+    #[error(transparent)]
+    Disconnected(#[from] ConnectionError),
+    /// Some other error
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<io::Error> for QueryError {
+    fn from(e: io::Error) -> Self {
+        Self::Disconnected(ConnectionError::Io(e))
+    }
+}
+
+impl QueryError {
+    pub fn pg_error_code(&self) -> &'static [u8; 5] {
+        match self {
+            Self::Disconnected(_) => b"08006",         // connection failure
+            Self::Other(_) => SQLSTATE_INTERNAL_ERROR, // internal error
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Handler {
     /// Handle single query.
@@ -33,7 +60,7 @@ pub trait Handler {
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
-    ) -> Result<(), MaybeIoError>;
+    ) -> Result<(), QueryError>;
 
     /// Called on startup packet receival, allows to process params.
     ///
@@ -44,7 +71,7 @@ pub trait Handler {
         &mut self,
         _pgb: &mut PostgresBackend,
         _sm: &FeStartupPacket,
-    ) -> Result<(), MaybeIoError> {
+    ) -> Result<(), QueryError> {
         Ok(())
     }
 
@@ -53,8 +80,8 @@ pub trait Handler {
         &mut self,
         _pgb: &mut PostgresBackend,
         _jwt_response: &[u8],
-    ) -> Result<(), MaybeIoError> {
-        Err(MaybeIoError::Anyhow(anyhow::anyhow!("JWT auth failed")))
+    ) -> Result<(), QueryError> {
+        Err(QueryError::Other(anyhow::anyhow!("JWT auth failed")))
     }
 }
 
@@ -88,17 +115,14 @@ impl AsyncWrite for Stream {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, io::Error>> {
+    ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Broken => unreachable!(),
         }
     }
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_flush(cx),
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
@@ -108,7 +132,7 @@ impl AsyncWrite for Stream {
     fn poll_shutdown(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
@@ -121,7 +145,7 @@ impl AsyncRead for Stream {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -185,14 +209,14 @@ impl PostgresBackend {
     }
 
     /// Read full message or return None if connection is closed.
-    pub async fn read_message(&mut self) -> Result<Option<FeMessage>, MaybeIoError> {
+    pub async fn read_message(&mut self) -> Result<Option<FeMessage>, QueryError> {
         use ProtoState::*;
         match self.state {
             Initialization | Encrypted => FeStartupPacket::read_fut(&mut self.stream).await,
             Authentication | Established => FeMessage::read_fut(&mut self.stream).await,
             Closed => Ok(None),
         }
-        .map_err(MaybeIoError::from)
+        .map_err(QueryError::from)
     }
 
     /// Flush output buffer into the socket.
@@ -206,7 +230,7 @@ impl PostgresBackend {
     }
 
     /// Write message into internal output buffer.
-    pub fn write_message(&mut self, message: &BeMessage<'_>) -> Result<&mut Self, io::Error> {
+    pub fn write_message(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self> {
         BeMessage::write(&mut self.buf_out, message)?;
         Ok(self)
     }
@@ -246,7 +270,7 @@ impl PostgresBackend {
         mut self,
         handler: &mut impl Handler,
         shutdown_watcher: F,
-    ) -> Result<(), MaybeIoError>
+    ) -> Result<(), QueryError>
     where
         F: Fn() -> S,
         S: Future,
@@ -260,7 +284,7 @@ impl PostgresBackend {
         &mut self,
         handler: &mut impl Handler,
         shutdown_watcher: F,
-    ) -> Result<(), MaybeIoError>
+    ) -> Result<(), QueryError>
     where
         F: Fn() -> S,
         S: Future,
@@ -296,7 +320,7 @@ impl PostgresBackend {
                         return Ok(());
                     }
                 }
-                Ok::<(), MaybeIoError>(())
+                Ok::<(), QueryError>(())
             } => {
                 // Handshake complete.
                 result?;
@@ -348,7 +372,7 @@ impl PostgresBackend {
         &mut self,
         handler: &mut impl Handler,
         msg: FeMessage,
-    ) -> Result<ProcessMsgResult, MaybeIoError> {
+    ) -> Result<ProcessMsgResult, QueryError> {
         assert!(self.state < ProtoState::Established);
         let have_tls = self.tls_config.is_some();
         match msg {
@@ -375,7 +399,7 @@ impl PostgresBackend {
                                 "must connect with TLS",
                                 None,
                             ))?;
-                            return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
+                            return Err(QueryError::Other(anyhow::anyhow!(
                                 "client did not connect with TLS"
                             )));
                         }
@@ -419,7 +443,7 @@ impl PostgresBackend {
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
                             self.write_message(&BeMessage::ErrorResponse(
                                 &e.to_string(),
-                                e.io_kind(),
+                                Some(e.pg_error_code()),
                             ))?;
                             return Err(e);
                         }
@@ -444,14 +468,14 @@ impl PostgresBackend {
         handler: &mut impl Handler,
         msg: FeMessage,
         unnamed_query_string: &mut Bytes,
-    ) -> Result<ProcessMsgResult, MaybeIoError> {
+    ) -> Result<ProcessMsgResult, QueryError> {
         // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
         // TODO: change that to proper top-level match of protocol state with separate message handling for each state
         assert!(self.state == ProtoState::Established);
 
         match msg {
             FeMessage::StartupPacket(_) | FeMessage::PasswordMessage(_) => {
-                return Err(MaybeIoError::Anyhow(anyhow::anyhow!("protocol violation")));
+                return Err(QueryError::Other(anyhow::anyhow!("protocol violation")));
             }
 
             FeMessage::Query(body) => {
@@ -461,11 +485,11 @@ impl PostgresBackend {
                 trace!("got query {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
                     log_query_error(query_string, &e);
-                    let short_error = match &e {
-                        MaybeIoError::Io(io) => io.to_string(),
-                        MaybeIoError::Anyhow(e) => format!("{e:#}"),
-                    };
-                    self.write_message(&BeMessage::ErrorResponse(&short_error, e.io_kind()))?;
+                    let short_error = short_error(&e);
+                    self.write_message(&BeMessage::ErrorResponse(
+                        &short_error,
+                        Some(e.pg_error_code()),
+                    ))?;
                 }
                 self.write_message(&BeMessage::ReadyForQuery)?;
             }
@@ -493,7 +517,10 @@ impl PostgresBackend {
                 trace!("got execute {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
                     log_query_error(query_string, &e);
-                    self.write_message(&BeMessage::ErrorResponse(&e.to_string(), e.io_kind()))?;
+                    self.write_message(&BeMessage::ErrorResponse(
+                        &e.to_string(),
+                        Some(e.pg_error_code()),
+                    ))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used
                 // for basebackup and it uses CopyOut which doesn't require
@@ -512,7 +539,7 @@ impl PostgresBackend {
             // We prefer explicit pattern matching to wildcards, because
             // this helps us spot the places where new variants are missing
             FeMessage::CopyData(_) | FeMessage::CopyDone | FeMessage::CopyFail => {
-                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
+                return Err(QueryError::Other(anyhow::anyhow!(
                     "unexpected message type: {:?}",
                     msg
                 )));
@@ -584,16 +611,26 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
     }
 }
 
-pub(super) fn log_query_error(query: &str, e: &MaybeIoError) {
+pub fn short_error(e: &QueryError) -> String {
     match e {
-        MaybeIoError::Io(io) => {
-            if is_expected_io_error(io) {
-                info!("query handler for '{query}' failed with expected io error: {io}");
+        QueryError::Disconnected(connection_error) => connection_error.to_string(),
+        QueryError::Other(e) => format!("{e:#}"),
+    }
+}
+
+pub(super) fn log_query_error(query: &str, e: &QueryError) {
+    match e {
+        QueryError::Disconnected(ConnectionError::Io(io_error)) => {
+            if is_expected_io_error(io_error) {
+                info!("query handler for '{query}' failed with expected io error: {io_error}");
             } else {
-                error!("query handler for '{query}' failed with io error: {io}");
+                error!("query handler for '{query}' failed with io error: {io_error}");
             }
         }
-        MaybeIoError::Anyhow(e) => {
+        QueryError::Disconnected(other_connection_error) => {
+            error!("query handler for '{query}' failed with connection error: {other_connection_error:?}")
+        }
+        QueryError::Other(e) => {
             error!("query handler for '{query}' failed: {e:?}");
         }
     }

@@ -6,9 +6,9 @@ use anyhow::anyhow;
 use anyhow::Context;
 
 use bytes::BytesMut;
-use pq_proto::MaybeIoError;
 use tracing::*;
 use utils::lsn::Lsn;
+use utils::postgres_backend_async::QueryError;
 
 use crate::safekeeper::ServerInfo;
 use crate::timeline::Timeline;
@@ -53,7 +53,7 @@ impl<'pg> ReceiveWalConn<'pg> {
     }
 
     /// Receive WAL from wal_proposer
-    pub fn run(&mut self, spg: &mut SafekeeperPostgresHandler) -> Result<(), MaybeIoError> {
+    pub fn run(&mut self, spg: &mut SafekeeperPostgresHandler) -> Result<(), QueryError> {
         let _enter = info_span!("WAL acceptor", ttid = %spg.ttid).entered();
 
         // Notify the libpq client that it's allowed to send `CopyData` messages
@@ -82,7 +82,7 @@ impl<'pg> ReceiveWalConn<'pg> {
                 GlobalTimelines::create(spg.ttid, server_info, Lsn::INVALID, Lsn::INVALID)?
             }
             _ => {
-                return Err(MaybeIoError::Anyhow(anyhow::anyhow!(
+                return Err(QueryError::Other(anyhow::anyhow!(
                     "unexpected message {next_msg:?} instead of greeting"
                 )))
             }
@@ -140,7 +140,7 @@ impl<'pg> ReceiveWalConn<'pg> {
 
 struct ProposerPollStream {
     msg_rx: Receiver<ProposerAcceptorMessage>,
-    read_thread: Option<thread::JoinHandle<Result<(), MaybeIoError>>>,
+    read_thread: Option<thread::JoinHandle<Result<(), QueryError>>>,
 }
 
 impl ProposerPollStream {
@@ -149,14 +149,14 @@ impl ProposerPollStream {
 
         let read_thread = thread::Builder::new()
             .name("Read WAL thread".into())
-            .spawn(move || -> Result<(), MaybeIoError> {
+            .spawn(move || -> Result<(), QueryError> {
                 loop {
                     let copy_data = match FeMessage::read(&mut r)? {
                         Some(FeMessage::CopyData(bytes)) => Ok(bytes),
-                        Some(msg) => Err(MaybeIoError::Anyhow(anyhow::anyhow!(
+                        Some(msg) => Err(QueryError::Other(anyhow::anyhow!(
                             "expected `CopyData` message, found {msg:?}"
                         ))),
-                        None => Err(MaybeIoError::Io(std::io::Error::new(
+                        None => Err(QueryError::from(std::io::Error::new(
                             std::io::ErrorKind::ConnectionAborted,
                             "walproposer closed the connection",
                         ))),
@@ -176,19 +176,19 @@ impl ProposerPollStream {
         })
     }
 
-    fn recv_msg(&mut self) -> Result<ProposerAcceptorMessage, MaybeIoError> {
+    fn recv_msg(&mut self) -> Result<ProposerAcceptorMessage, QueryError> {
         self.msg_rx.recv().map_err(|_| {
             // return error from the read thread
             let res = match self.read_thread.take() {
                 Some(thread) => thread.join(),
-                None => return MaybeIoError::Anyhow(anyhow::anyhow!("read thread is gone")),
+                None => return QueryError::Other(anyhow::anyhow!("read thread is gone")),
             };
 
             match res {
                 Ok(Ok(())) => {
-                    MaybeIoError::Anyhow(anyhow::anyhow!("unexpected result from read thread"))
+                    QueryError::Other(anyhow::anyhow!("unexpected result from read thread"))
                 }
-                Err(err) => MaybeIoError::Anyhow(anyhow::anyhow!("read thread panicked: {err:?}")),
+                Err(err) => QueryError::Other(anyhow::anyhow!("read thread panicked: {err:?}")),
                 Ok(Err(err)) => err,
             }
         })

@@ -3,13 +3,16 @@ use crate::{
     console::messages::{DatabaseInfo, KickSession},
 };
 use anyhow::Context;
-use pq_proto::{BeMessage, MaybeIoError, SINGLE_COL_ROWDESC};
+use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
 use tracing::{error, info, info_span};
-use utils::postgres_backend::{self, AuthType, PostgresBackend};
+use utils::{
+    postgres_backend::{self, AuthType, PostgresBackend},
+    postgres_backend_async::QueryError,
+};
 
 /// Console management API listener thread.
 /// It spawns console response handlers needed for the link auth.
@@ -47,7 +50,7 @@ pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
     }
 }
 
-fn handle_connection(socket: TcpStream) -> Result<(), MaybeIoError> {
+fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, true)?;
     pgbackend.run(&mut MgmtHandler)
 }
@@ -58,11 +61,7 @@ pub type ComputeReady = Result<DatabaseInfo, String>;
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
 impl postgres_backend::Handler for MgmtHandler {
-    fn process_query(
-        &mut self,
-        pgb: &mut PostgresBackend,
-        query: &str,
-    ) -> Result<(), MaybeIoError> {
+    fn process_query(&mut self, pgb: &mut PostgresBackend, query: &str) -> Result<(), QueryError> {
         try_process_query(pgb, query).map_err(|e| {
             error!("failed to process response: {e:?}");
             e
@@ -70,7 +69,7 @@ impl postgres_backend::Handler for MgmtHandler {
     }
 }
 
-fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), MaybeIoError> {
+fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), QueryError> {
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);

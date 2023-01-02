@@ -16,10 +16,9 @@ use std::net::Shutdown;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{io, str, thread};
+use utils::postgres_backend_async::QueryError;
 
-use pq_proto::{
-    BeMessage, FeMessage, MaybeIoError, ReplicationFeedback, WalSndKeepAlive, XLogDataBody,
-};
+use pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
 use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
 use tracing::*;
@@ -162,7 +161,7 @@ impl ReplicationConn {
         spg: &mut SafekeeperPostgresHandler,
         pgb: &mut PostgresBackend,
         mut start_pos: Lsn,
-    ) -> Result<(), MaybeIoError> {
+    ) -> Result<(), QueryError> {
         let _enter = info_span!("WAL sender", ttid = %spg.ttid).entered();
 
         let tli = GlobalTimelines::get(spg.ttid)?;
@@ -258,7 +257,7 @@ impl ReplicationConn {
                         // to right pageserver.
                         if tli.should_walsender_stop(replica_id) {
                             // Shut down, timeline is suspended.
-                            return Err(MaybeIoError::Io(io::Error::new(
+                            return Err(QueryError::from(io::Error::new(
                                 io::ErrorKind::ConnectionAborted,
                                 format!("end streaming to {:?}", spg.appname),
                             )));

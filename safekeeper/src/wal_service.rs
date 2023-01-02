@@ -2,11 +2,11 @@
 //!   WAL service listens for client connections and
 //!   receive WAL from wal_proposer and send it to WAL receivers
 //!
-use pq_proto::MaybeIoError;
 use regex::Regex;
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use tracing::*;
+use utils::postgres_backend_async::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;
@@ -44,7 +44,7 @@ fn get_tid() -> u64 {
 
 /// This is run by `thread_main` above, inside a background thread.
 ///
-fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), MaybeIoError> {
+fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryError> {
     let _enter = info_span!("", tid = ?get_tid()).entered();
 
     socket.set_nodelay(true)?;

@@ -9,8 +9,10 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use once_cell::sync::Lazy;
 
-use pq_proto::MaybeIoError;
-use utils::postgres_backend::{AuthType, Handler, PostgresBackend};
+use utils::{
+    postgres_backend::{AuthType, Handler, PostgresBackend},
+    postgres_backend_async::QueryError,
+};
 
 fn make_tcp_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -106,7 +108,7 @@ fn ssl() {
             &mut self,
             _pgb: &mut PostgresBackend,
             query_string: &str,
-        ) -> Result<(), MaybeIoError> {
+        ) -> Result<(), QueryError> {
             self.got_query = query_string == QUERY;
             Ok(())
         }
@@ -153,7 +155,7 @@ fn no_ssl() {
             &mut self,
             _pgb: &mut PostgresBackend,
             _query_string: &str,
-        ) -> Result<(), MaybeIoError> {
+        ) -> Result<(), QueryError> {
             panic!()
         }
     }
@@ -213,7 +215,7 @@ fn server_forces_ssl() {
             &mut self,
             _pgb: &mut PostgresBackend,
             _query_string: &str,
-        ) -> Result<(), MaybeIoError> {
+        ) -> Result<(), QueryError> {
             panic!()
         }
     }

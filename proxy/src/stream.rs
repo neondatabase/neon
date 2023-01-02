@@ -2,7 +2,7 @@ use crate::error::UserFacingError;
 use anyhow::bail;
 use bytes::BytesMut;
 use pin_project_lite::pin_project;
-use pq_proto::{BeMessage, FeMessage, FeStartupPacket, MaybeIoError};
+use pq_proto::{BeMessage, ConnectionError, FeMessage, FeStartupPacket};
 use rustls::ServerConfig;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -53,7 +53,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
         // TODO: `FeStartupPacket::read_fut` should return `FeStartupPacket`
         let msg = FeStartupPacket::read_fut(&mut self.stream)
             .await
-            .map_err(MaybeIoError::into_io_error)?
+            .map_err(ConnectionError::into_io_error)?
             .ok_or_else(err_connection)?;
 
         match msg {
@@ -75,7 +75,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     async fn read_message(&mut self) -> io::Result<FeMessage> {
         FeMessage::read_fut(&mut self.stream)
             .await
-            .map_err(MaybeIoError::into_io_error)?
+            .map_err(ConnectionError::into_io_error)?
             .ok_or_else(err_connection)
     }
 }
