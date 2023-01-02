@@ -166,7 +166,7 @@ async fn serve_websocket(
     session_id: uuid::Uuid,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    handle_client(&config, cancel_map, session_id, WebSocketRW::new(websocket)).await?;
+    handle_client(config, cancel_map, session_id, WebSocketRW::new(websocket)).await?;
     Ok(())
 }
 
@@ -202,7 +202,7 @@ async fn ws_handler(
         });
 
         // Return the response so the spawned future can continue.
-        return Ok(response);
+        Ok(response)
     } else {
         json_response(StatusCode::OK, "Connect with a websocket client")
     }
