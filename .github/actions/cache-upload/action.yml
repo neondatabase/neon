@@ -50,8 +50,6 @@ runs:
         FILENAME=$(basename $ARCHIVE)
         FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
         
-        cd ${WORKDIR}
-        
         S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep ${FILENAME} | tail -1 || true)
         if [ -z "${S3_KEY}" ]; then
           echo "uploading cache"
