@@ -14,14 +14,19 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
 use std::fmt::Write as FmtWrite;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::SystemTime;
 use tokio::io;
 use tokio::io::AsyncWrite;
-use tokio_tar::{Builder, EntryType, Header};
 use tracing::*;
+
+/// NB: This relies on a modified version of tokio_tar that does *not* write the
+/// end-of-archive marker (1024 zero bytes), when the Builder struct is dropped
+/// without explicitly calling 'finish' or 'into_inner'!
+///
+/// See https://github.com/neondatabase/tokio-tar/pull/1
+///
+use tokio_tar::{Builder, EntryType, Header};
 
 use crate::tenant::{with_ondemand_download, Timeline};
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -41,12 +46,11 @@ pub struct Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
-    ar: Builder<AbortableWrite<'a, W>>,
+    ar: Builder<&'a mut W>,
     timeline: &'a Arc<Timeline>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
-    finished: bool,
 }
 
 // Create basebackup with non-rel data in it.
@@ -117,12 +121,11 @@ where
         );
 
         Ok(Basebackup {
-            ar: Builder::new_non_terminated(AbortableWrite::new(write)),
+            ar: Builder::new_non_terminated(write),
             timeline,
             lsn: backup_lsn,
             prev_record_lsn: prev_lsn,
             full_backup,
-            finished: false,
         })
     }
 
@@ -187,7 +190,6 @@ where
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file().await?;
         self.ar.finish().await?;
-        self.finished = true;
         debug!("all tarred up!");
         Ok(())
     }
@@ -415,19 +417,6 @@ where
     }
 }
 
-impl<'a, W> Drop for Basebackup<'a, W>
-where
-    W: AsyncWrite + Send + Sync + Unpin,
-{
-    /// If the basebackup was not finished, prevent the Archive::drop() from
-    /// writing the end-of-archive marker.
-    fn drop(&mut self) {
-        if !self.finished {
-            self.ar.get_mut().abort();
-        }
-    }
-}
-
 //
 // Create new tarball entry header
 //
@@ -462,70 +451,4 @@ fn new_tar_header_dir(path: &str) -> anyhow::Result<Header> {
     );
     header.set_cksum();
     Ok(header)
-}
-
-/// A wrapper that passes through all data to the underlying Write,
-/// until abort() is called.
-///
-/// tokio_tar::Builder has an annoying habit of finishing the archive with
-/// a valid tar end-of-archive marker (two 512-byte sectors of zeros),
-/// even if an error occurs and we don't finish building the archive.
-/// We'd rather abort writing the tarball immediately than construct
-/// a seemingly valid but incomplete archive. This wrapper allows us
-/// to swallow the end-of-archive marker that Builder::drop() emits,
-/// without writing it to the underlying writer.
-///
-/// FIXME: This isn't needed anymore, now that we use a fork of
-/// tokio-tar that doesn't have that Drop implementation
-use pin_project_lite::pin_project;
-pin_project! {
-    struct AbortableWrite<'a, W> {
-        #[pin]
-        w: &'a mut W,
-        aborted: bool,
-    }
-}
-
-impl<'a, W> AbortableWrite<'a, W> {
-    pub fn new(w: &'a mut W) -> Self {
-        AbortableWrite { w, aborted: false }
-    }
-
-    pub fn abort(&mut self) {
-        self.aborted = true;
-    }
-}
-
-impl<'a, W> AsyncWrite for AbortableWrite<'a, W>
-where
-    W: AsyncWrite + Unpin,
-{
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        data: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if self.aborted {
-            Poll::Ready(Ok(data.len()))
-        } else {
-            self.project().w.poll_write(cx, data)
-        }
-    }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
-        if self.aborted {
-            Poll::Ready(Ok(()))
-        } else {
-            self.project().w.poll_flush(cx)
-        }
-    }
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<io::Result<()>> {
-        if self.aborted {
-            Poll::Ready(Ok(()))
-        } else {
-            self.project().w.poll_shutdown(cx)
-        }
-    }
 }
