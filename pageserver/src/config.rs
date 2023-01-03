@@ -5,12 +5,14 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use remote_storage::RemoteStorageConfig;
+use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
+use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
 
 use once_cell::sync::OnceCell;
+use reqwest::Url;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -18,25 +20,29 @@ use std::sync::Arc;
 use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
-use url::Url;
+
 use utils::{
     id::{NodeId, TenantId, TimelineId},
     logging::LogFormat,
     postgres_backend::AuthType,
 };
 
+use crate::tenant::config::TenantConf;
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
-use crate::tenant_config::{TenantConf, TenantConfOpt};
-use crate::{METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX};
+use crate::{
+    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX,
+};
 
 pub mod defaults {
-    use crate::tenant_config::defaults::*;
+    use crate::tenant::config::defaults::*;
     use const_format::formatcp;
 
     pub use pageserver_api::{
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_PG_LISTEN_PORT,
     };
+    pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -51,13 +57,14 @@ pub mod defaults {
     pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize =
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
+    pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
+    pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     ///
     /// Default built-in configuration file.
     ///
     pub const DEFAULT_CONFIG_FILE: &str = formatcp!(
         r###"
 # Initial configuration file created by 'pageserver --init'
-
 #listen_pg_addr = '{DEFAULT_PG_LISTEN_ADDR}'
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
 
@@ -69,9 +76,13 @@ pub mod defaults {
 # initial superuser role name to use when creating a new tenant
 #initial_superuser_name = '{DEFAULT_SUPERUSER}'
 
+#broker_endpoint = '{BROKER_DEFAULT_ENDPOINT}'
+
 #log_format = '{DEFAULT_LOG_FORMAT}'
 
 #concurrent_tenant_size_logical_size_queries = '{DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES}'
+
+#metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
 
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -130,24 +141,26 @@ pub struct PageServerConf {
     pub profiling: ProfilingConfig,
     pub default_tenant_conf: TenantConf,
 
-    /// A prefix to add in etcd brokers before every key.
-    /// Can be used for isolating different pageserver groups within the same etcd cluster.
-    pub broker_etcd_prefix: String,
-
-    /// Etcd broker endpoints to connect to.
-    pub broker_endpoints: Vec<Url>,
+    /// Storage broker endpoints to connect to.
+    pub broker_endpoint: Uri,
+    pub broker_keepalive_interval: Duration,
 
     pub log_format: LogFormat,
 
     /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
+
+    // How often to collect metrics and send them to the metrics endpoint.
+    pub metric_collection_interval: Duration,
+    pub metric_collection_endpoint: Option<Url>,
+
+    pub test_remote_failures: u64,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
 /// and/or serialized at a whim, while the token is secret. Currently this token is the
 /// same for accessing all tenants/timelines, but may become per-tenant/per-timeline in
-/// the future, more tokens and auth may arrive for etcd and/or its rewrite (see
-/// https://github.com/neondatabase/neon/issues/2394), completely changing the logic.
+/// the future, more tokens and auth may arrive for storage broker, completely changing the logic.
 /// Hence, we resort to a global variable for now instead of passing the token from the
 /// startup code to the connection code through a dozen layers.
 pub static SAFEKEEPER_AUTH_TOKEN: OnceCell<Arc<String>> = OnceCell::new();
@@ -214,12 +227,17 @@ struct PageServerConfigBuilder {
     id: BuilderValue<NodeId>,
 
     profiling: BuilderValue<ProfilingConfig>,
-    broker_etcd_prefix: BuilderValue<String>,
-    broker_endpoints: BuilderValue<Vec<Url>>,
+    broker_endpoint: BuilderValue<Uri>,
+    broker_keepalive_interval: BuilderValue<Duration>,
 
     log_format: BuilderValue<LogFormat>,
 
     concurrent_tenant_size_logical_size_queries: BuilderValue<ConfigurableSemaphore>,
+
+    metric_collection_interval: BuilderValue<Duration>,
+    metric_collection_endpoint: BuilderValue<Option<Url>>,
+
+    test_remote_failures: BuilderValue<u64>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -245,11 +263,23 @@ impl Default for PageServerConfigBuilder {
             remote_storage_config: Set(None),
             id: NotSet,
             profiling: Set(ProfilingConfig::Disabled),
-            broker_etcd_prefix: Set(etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string()),
-            broker_endpoints: Set(Vec::new()),
+            broker_endpoint: Set(storage_broker::DEFAULT_ENDPOINT
+                .parse()
+                .expect("failed to parse default broker endpoint")),
+            broker_keepalive_interval: Set(humantime::parse_duration(
+                storage_broker::DEFAULT_KEEPALIVE_INTERVAL,
+            )
+            .expect("cannot parse default keepalive interval")),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
             concurrent_tenant_size_logical_size_queries: Set(ConfigurableSemaphore::default()),
+            metric_collection_interval: Set(humantime::parse_duration(
+                DEFAULT_METRIC_COLLECTION_INTERVAL,
+            )
+            .expect("cannot parse default metric collection interval")),
+            metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
+
+            test_remote_failures: Set(0),
         }
     }
 }
@@ -306,12 +336,12 @@ impl PageServerConfigBuilder {
         self.remote_storage_config = BuilderValue::Set(remote_storage_config)
     }
 
-    pub fn broker_endpoints(&mut self, broker_endpoints: Vec<Url>) {
-        self.broker_endpoints = BuilderValue::Set(broker_endpoints)
+    pub fn broker_endpoint(&mut self, broker_endpoint: Uri) {
+        self.broker_endpoint = BuilderValue::Set(broker_endpoint)
     }
 
-    pub fn broker_etcd_prefix(&mut self, broker_etcd_prefix: String) {
-        self.broker_etcd_prefix = BuilderValue::Set(broker_etcd_prefix)
+    pub fn broker_keepalive_interval(&mut self, broker_keepalive_interval: Duration) {
+        self.broker_keepalive_interval = BuilderValue::Set(broker_keepalive_interval)
     }
 
     pub fn id(&mut self, node_id: NodeId) {
@@ -330,11 +360,19 @@ impl PageServerConfigBuilder {
         self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
     }
 
-    pub fn build(self) -> anyhow::Result<PageServerConf> {
-        let broker_endpoints = self
-            .broker_endpoints
-            .ok_or(anyhow!("No broker endpoints provided"))?;
+    pub fn metric_collection_interval(&mut self, metric_collection_interval: Duration) {
+        self.metric_collection_interval = BuilderValue::Set(metric_collection_interval)
+    }
 
+    pub fn metric_collection_endpoint(&mut self, metric_collection_endpoint: Option<Url>) {
+        self.metric_collection_endpoint = BuilderValue::Set(metric_collection_endpoint)
+    }
+
+    pub fn test_remote_failures(&mut self, fail_first: u64) {
+        self.test_remote_failures = BuilderValue::Set(fail_first);
+    }
+
+    pub fn build(self) -> anyhow::Result<PageServerConf> {
         Ok(PageServerConf {
             listen_pg_addr: self
                 .listen_pg_addr
@@ -370,16 +408,27 @@ impl PageServerConfigBuilder {
             profiling: self.profiling.ok_or(anyhow!("missing profiling"))?,
             // TenantConf is handled separately
             default_tenant_conf: TenantConf::default(),
-            broker_endpoints,
-            broker_etcd_prefix: self
-                .broker_etcd_prefix
-                .ok_or(anyhow!("missing broker_etcd_prefix"))?,
+            broker_endpoint: self
+                .broker_endpoint
+                .ok_or(anyhow!("No broker endpoints provided"))?,
+            broker_keepalive_interval: self
+                .broker_keepalive_interval
+                .ok_or(anyhow!("No broker keepalive interval provided"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
             concurrent_tenant_size_logical_size_queries: self
                 .concurrent_tenant_size_logical_size_queries
                 .ok_or(anyhow!(
                     "missing concurrent_tenant_size_logical_size_queries"
                 ))?,
+            metric_collection_interval: self
+                .metric_collection_interval
+                .ok_or(anyhow!("missing metric_collection_interval"))?,
+            metric_collection_endpoint: self
+                .metric_collection_endpoint
+                .ok_or(anyhow!("missing metric_collection_endpoint"))?,
+            test_remote_failures: self
+                .test_remote_failures
+                .ok_or(anyhow!("missing test_remote_failuers"))?,
         })
     }
 }
@@ -400,6 +449,10 @@ impl PageServerConf {
     pub fn tenant_attaching_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenant_path(tenant_id)
             .join(TENANT_ATTACHING_MARKER_FILENAME)
+    }
+
+    pub fn tenant_ignore_mark_file_path(&self, tenant_id: TenantId) -> PathBuf {
+        self.tenant_path(&tenant_id).join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,
@@ -450,6 +503,28 @@ impl PageServerConf {
             .join(METADATA_FILE_NAME)
     }
 
+    /// Files on the remote storage are stored with paths, relative to the workdir.
+    /// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
+    ///
+    /// Errors if the path provided does not start from pageserver's workdir.
+    pub fn remote_path(&self, local_path: &Path) -> anyhow::Result<RemotePath> {
+        local_path
+            .strip_prefix(&self.workdir)
+            .context("Failed to strip workdir prefix")
+            .and_then(RemotePath::new)
+            .with_context(|| {
+                format!(
+                    "Failed to resolve remote part of path {:?} for base {:?}",
+                    local_path, self.workdir
+                )
+            })
+    }
+
+    /// Turns storage remote path of a file into its local path.
+    pub fn local_path(&self, remote_path: &RemotePath) -> PathBuf {
+        remote_path.with_base(&self.workdir)
+    }
+
     //
     // Postgres distribution paths
     //
@@ -486,7 +561,7 @@ impl PageServerConf {
         let mut builder = PageServerConfigBuilder::default();
         builder.workdir(workdir.to_owned());
 
-        let mut t_conf: TenantConfOpt = Default::default();
+        let mut t_conf = TenantConfOpt::default();
 
         for (key, item) in toml.iter() {
             match key {
@@ -507,24 +582,15 @@ impl PageServerConf {
                 )),
                 "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
-                    builder.remote_storage_config(Some(RemoteStorageConfig::from_toml(item)?))
+                    builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
                 "tenant_config" => {
                     t_conf = Self::parse_toml_tenant_conf(item)?;
                 }
                 "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
-                "broker_etcd_prefix" => builder.broker_etcd_prefix(parse_toml_string(key, item)?),
-                "broker_endpoints" => builder.broker_endpoints(
-                    parse_toml_array(key, item)?
-                        .into_iter()
-                        .map(|endpoint_str| {
-                            endpoint_str.parse::<Url>().with_context(|| {
-                                format!("Array item {endpoint_str} for key {key} is not a valid url endpoint")
-                            })
-                        })
-                        .collect::<anyhow::Result<_>>()?,
-                ),
+                "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
+                "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
                     LogFormat::from_config(&parse_toml_string(key, item)?)?
                 ),
@@ -534,6 +600,13 @@ impl PageServerConf {
                     let permits = NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
                     ConfigurableSemaphore::new(permits)
                 }),
+                "metric_collection_interval" => builder.metric_collection_interval(parse_toml_duration(key, item)?),
+                "metric_collection_endpoint" => {
+                    let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
+                    builder.metric_collection_endpoint(Some(endpoint));
+                },
+
+                "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -617,6 +690,12 @@ impl PageServerConf {
         if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
             t_conf.max_lsn_wal_lag = Some(parse_toml_from_str("max_lsn_wal_lag", max_lsn_wal_lag)?);
         }
+        if let Some(trace_read_requests) = item.get("trace_read_requests") {
+            t_conf.trace_read_requests =
+                Some(trace_read_requests.as_bool().with_context(|| {
+                    "configure option trace_read_requests is not a bool".to_string()
+                })?);
+        }
 
         Ok(t_conf)
     }
@@ -644,11 +723,14 @@ impl PageServerConf {
             auth_validation_public_key_path: None,
             remote_storage_config: None,
             profiling: ProfilingConfig::Disabled,
-            default_tenant_conf: TenantConf::dummy_conf(),
-            broker_endpoints: Vec::new(),
-            broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
+            default_tenant_conf: TenantConf::default(),
+            broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+            broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+            metric_collection_interval: Duration::from_secs(60),
+            metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+            test_remote_failures: 0,
         }
     }
 }
@@ -696,22 +778,6 @@ where
             parse_type = stringify!(T)
         )
     })
-}
-
-fn parse_toml_array(name: &str, item: &Item) -> anyhow::Result<Vec<String>> {
-    let array = item
-        .as_array()
-        .with_context(|| format!("configure option {name} is not an array"))?;
-
-    array
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_string)
-                .with_context(|| format!("Array item {value:?} for key {name} is not a string"))
-        })
-        .collect()
 }
 
 /// Configurable semaphore permits setting.
@@ -795,6 +861,8 @@ max_file_descriptors = 333
 initial_superuser_name = 'zzzz'
 id = 10
 
+metric_collection_interval = '222 s'
+metric_collection_endpoint = 'http://localhost:80/metrics'
 log_format = 'json'
 
 "#;
@@ -803,10 +871,10 @@ log_format = 'json'
     fn parse_defaults() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-        let broker_endpoint = "http://127.0.0.1:7777";
+        let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
         // we have to create dummy values to overcome the validation errors
         let config_string = format!(
-            "pg_distrib_dir='{}'\nid=10\nbroker_endpoints = ['{broker_endpoint}']",
+            "pg_distrib_dir='{}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
             pg_distrib_dir.display()
         );
         let toml = config_string.parse()?;
@@ -832,12 +900,17 @@ log_format = 'json'
                 remote_storage_config: None,
                 profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
-                broker_endpoints: vec![broker_endpoint
-                    .parse()
-                    .expect("Failed to parse a valid broker endpoint URL")],
-                broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
+                broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+                broker_keepalive_interval: humantime::parse_duration(
+                    storage_broker::DEFAULT_KEEPALIVE_INTERVAL
+                )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                metric_collection_interval: humantime::parse_duration(
+                    defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
+                )?,
+                metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+                test_remote_failures: 0,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -849,10 +922,10 @@ log_format = 'json'
     fn parse_basic_config() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-        let broker_endpoint = "http://127.0.0.1:7777";
+        let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
 
         let config_string = format!(
-            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{}'\nbroker_endpoints = ['{broker_endpoint}']",
+            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{}'\nbroker_endpoint = '{broker_endpoint}'",
             pg_distrib_dir.display()
         );
         let toml = config_string.parse()?;
@@ -878,12 +951,13 @@ log_format = 'json'
                 remote_storage_config: None,
                 profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
-                broker_endpoints: vec![broker_endpoint
-                    .parse()
-                    .expect("Failed to parse a valid broker endpoint URL")],
-                broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
+                broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+                broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                metric_collection_interval: Duration::from_secs(222),
+                metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
+                test_remote_failures: 0,
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -915,7 +989,7 @@ local_path = '{}'"#,
             let config_string = format!(
                 r#"{ALL_BASE_VALUES_TOML}
 pg_distrib_dir='{}'
-broker_endpoints = ['{broker_endpoint}']
+broker_endpoint = '{broker_endpoint}'
 
 {remote_storage_config_str}"#,
                 pg_distrib_dir.display(),
@@ -982,7 +1056,7 @@ concurrency_limit = {s3_concurrency_limit}"#
             let config_string = format!(
                 r#"{ALL_BASE_VALUES_TOML}
 pg_distrib_dir='{}'
-broker_endpoints = ['{broker_endpoint}']
+broker_endpoint = '{broker_endpoint}'
 
 {remote_storage_config_str}"#,
                 pg_distrib_dir.display(),
@@ -1013,6 +1087,35 @@ broker_endpoints = ['{broker_endpoint}']
                 "Remote storage config should correctly parse the S3 config"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_tenant_config() -> anyhow::Result<()> {
+        let tempdir = tempdir()?;
+        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
+
+        let broker_endpoint = "http://127.0.0.1:7777";
+        let trace_read_requests = true;
+
+        let config_string = format!(
+            r#"{ALL_BASE_VALUES_TOML}
+pg_distrib_dir='{}'
+broker_endpoint = '{broker_endpoint}'
+
+[tenant_config]
+trace_read_requests = {trace_read_requests}"#,
+            pg_distrib_dir.display(),
+        );
+
+        let toml = config_string.parse()?;
+
+        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        assert_eq!(
+            conf.default_tenant_conf.trace_read_requests, trace_read_requests,
+            "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
+        );
+
         Ok(())
     }
 

@@ -14,8 +14,8 @@ pub fn transaction_id_set_status(xid: u32, status: u8, page: &mut BytesMut) {
         status
     );
 
-    let byteno: usize = ((xid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
-        / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
+    let byteno: usize =
+        ((xid % pg_constants::CLOG_XACTS_PER_PAGE) / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
 
     let bshift: u8 =
         ((xid % pg_constants::CLOG_XACTS_PER_BYTE) * pg_constants::CLOG_BITS_PER_XACT as u32) as u8;
@@ -25,13 +25,13 @@ pub fn transaction_id_set_status(xid: u32, status: u8, page: &mut BytesMut) {
 }
 
 pub fn transaction_id_get_status(xid: u32, page: &[u8]) -> u8 {
-    let byteno: usize = ((xid as u32 % pg_constants::CLOG_XACTS_PER_PAGE as u32)
-        / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
+    let byteno: usize =
+        ((xid % pg_constants::CLOG_XACTS_PER_PAGE) / pg_constants::CLOG_XACTS_PER_BYTE) as usize;
 
     let bshift: u8 =
         ((xid % pg_constants::CLOG_XACTS_PER_BYTE) * pg_constants::CLOG_BITS_PER_XACT as u32) as u8;
 
-    ((page[byteno] >> bshift) & pg_constants::CLOG_XACT_BITMASK) as u8
+    (page[byteno] >> bshift) & pg_constants::CLOG_XACT_BITMASK
 }
 
 // See CLOGPagePrecedes in clog.c

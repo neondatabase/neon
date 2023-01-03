@@ -161,7 +161,7 @@ impl ReplicationConn {
         pgb: &mut PostgresBackend,
         mut start_pos: Lsn,
     ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.timeline_id.unwrap()).entered();
+        let _enter = info_span!("WAL sender", ttid = %spg.ttid).entered();
 
         let tli = GlobalTimelines::get(spg.ttid)?;
 
@@ -226,6 +226,7 @@ impl ReplicationConn {
             let mut end_pos = stop_pos.unwrap_or(inmem_state.commit_lsn);
 
             let mut wal_reader = WalReader::new(
+                spg.conf.workdir.clone(),
                 spg.conf.timeline_dir(&tli.ttid),
                 &persisted_state,
                 start_pos,

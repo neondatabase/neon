@@ -133,3 +133,28 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "pitr_interval": 2592000,
                 }.items()
             )
+
+    # update the config with very short config and make sure no trailing chars are left from previous config
+    env.neon_cli.config_tenant(
+        tenant_id=tenant,
+        conf={
+            "pitr_interval": "1 min",
+        },
+    )
+
+    # restart the pageserver and ensure that the config is still correct
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    with closing(env.pageserver.connect()) as psconn:
+        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
+            pscur.execute(f"show {tenant}")
+            res = pscur.fetchone()
+            log.info(f"after restart res: {res}")
+            assert all(
+                i in res.items()
+                for i in {
+                    "compaction_period": 20,
+                    "pitr_interval": 60,
+                }.items()
+            )

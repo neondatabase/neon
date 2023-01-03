@@ -74,10 +74,8 @@ fn watch_compute_activity(compute: &ComputeNode) {
                         }
                     }
 
-                    // Sort idle backend `state_change` timestamps. The last one corresponds
-                    // to the last activity.
-                    idle_backs.sort();
-                    if let Some(last) = idle_backs.last() {
+                    // Get idle backend `state_change` with the max timestamp.
+                    if let Some(last) = idle_backs.iter().max() {
                         last_active = *last;
                     }
                 }

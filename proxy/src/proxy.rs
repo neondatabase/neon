@@ -11,7 +11,7 @@ use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
-use pq_proto::{BeMessage as Be, *};
+use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, info_span, Instrument};
@@ -39,26 +39,10 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes_per_client",
         "Number of bytes sent/received between client and backend.",
-        &[
-            // Received (rx) / sent (tx).
-            "direction",
-            // Proxy can keep calling it `project` internally.
-            "endpoint_id"
-        ]
+        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
     )
     .unwrap()
 });
-
-/// A small combinator for pluggable error logging.
-async fn log_error<R, F>(future: F) -> F::Output
-where
-    F: std::future::Future<Output = anyhow::Result<R>>,
-{
-    future.await.map_err(|err| {
-        error!("{err}");
-        err
-    })
-}
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -80,7 +64,7 @@ pub async fn task_main(
         let session_id = uuid::Uuid::new_v4();
         let cancel_map = Arc::clone(&cancel_map);
         tokio::spawn(
-            log_error(async move {
+            async move {
                 info!("spawned a task for {peer_addr}");
 
                 socket
@@ -88,6 +72,10 @@ pub async fn task_main(
                     .context("failed to set socket option")?;
 
                 handle_client(config, &cancel_map, session_id, socket).await
+            }
+            .unwrap_or_else(|e| {
+                // Acknowledge that the task has finished with an error.
+                error!("per-client task finished with an error: {e:#}");
             })
             .instrument(info_span!("client", session = format_args!("{session_id}"))),
         );
@@ -262,29 +250,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         // Note that we do this only (for the most part) after we've connected
         // to a compute (see above) which performs its own authentication.
         if !auth_result.reported_auth_ok {
-            stream
-                .write_message_noflush(&Be::AuthenticationOk)?
-                .write_message_noflush(&BeParameterStatusMessage::encoding())?;
+            stream.write_message_noflush(&Be::AuthenticationOk)?;
+        }
+
+        // Forward all postgres connection params to the client.
+        // Right now the implementation is very hacky and inefficent (ideally,
+        // we don't need an intermediate hashmap), but at least it should be correct.
+        for (name, value) in &db.params {
+            // TODO: Theoretically, this could result in a big pile of params...
+            stream.write_message_noflush(&Be::ParameterStatus {
+                name: name.as_bytes(),
+                value: value.as_bytes(),
+            })?;
         }
 
         stream
-            .write_message_noflush(&BeMessage::ParameterStatus(
-                BeParameterStatusMessage::ServerVersion(&db.version),
-            ))?
             .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-            .write_message(&BeMessage::ReadyForQuery)
+            .write_message(&Be::ReadyForQuery)
             .await?;
 
-        // TODO: add more identifiers.
-        let metric_id = node.project;
-
-        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx", &metric_id]);
+        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("tx"));
         let mut client = MeasuredStream::new(stream.into_inner(), |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
         });
 
-        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx", &metric_id]);
+        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("rx"));
         let mut db = MeasuredStream::new(db.stream, |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             m_recv.inc_by(cnt as u64);

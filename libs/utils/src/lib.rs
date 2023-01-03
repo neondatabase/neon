@@ -34,6 +34,7 @@ pub mod sock_split;
 pub mod logging;
 
 pub mod lock_file;
+pub mod pid_file;
 
 // Misc
 pub mod accum;
@@ -46,6 +47,7 @@ pub mod tcp_listener;
 pub mod nonblock;
 
 // Default signal handling
+pub mod sentry_init;
 pub mod signals;
 
 pub mod fs_ext;

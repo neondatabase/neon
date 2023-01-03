@@ -8,6 +8,7 @@ mod auth;
 mod cancellation;
 mod compute;
 mod config;
+mod console;
 mod error;
 mod http;
 mod mgmt;
@@ -28,6 +29,7 @@ use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use tracing::info;
 use utils::project_git_version;
+use utils::sentry_init::{init_sentry, release_name};
 
 project_git_version!(GIT_VERSION);
 
@@ -44,6 +46,9 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(atty::is(atty::Stream::Stdout))
         .with_target(false)
         .init();
+
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(release_name!(), &[]);
 
     let arg_matches = cli().get_matches();
 

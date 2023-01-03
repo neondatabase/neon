@@ -420,7 +420,7 @@ pg_init_libpagestore(void)
 							   NULL, NULL, NULL);
 
     DefineCustomStringVariable("neon.safekeeper_token_env",
-                               "the environment variable containing JWT token for authentication with Safekeepers, the convention is to either unset or set to $ZENITH_AUTH_TOKEN",
+                               "the environment variable containing JWT token for authentication with Safekeepers, the convention is to either unset or set to $NEON_AUTH_TOKEN",
                                NULL,
                                &safekeeper_token_env,
                                NULL,
@@ -464,12 +464,12 @@ pg_init_libpagestore(void)
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.readahead_buffer_size",
 							"number of prefetches to buffer",
-							"This buffer is used to store prefetched data; so "
-							"it is important that this buffer is at least as "
-							"large as the configured value of all tablespaces' "
-							"effective_io_concurrency and maintenance_io_concurrency, "
-							"your sessions' values of these, and the value for "
-							"seqscan_prefetch_buffers.",
+							"This buffer is used to hold and manage prefetched "
+							"data; so it is important that this buffer is at "
+							"least as large as the configured value of all "
+							"tablespaces' effective_io_concurrency and "
+							"maintenance_io_concurrency, and your sessions' "
+							"values for these settings.",
 							&readahead_buffer_size,
 							128, 16, 1024,
 							PGC_USERSET,
@@ -516,4 +516,5 @@ pg_init_libpagestore(void)
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
 	}
+	lfc_init();
 }

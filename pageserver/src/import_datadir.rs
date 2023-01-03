@@ -187,13 +187,13 @@ fn import_slru<Reader: Read>(
     path: &Path,
     mut reader: Reader,
     len: usize,
-) -> Result<()> {
-    trace!("importing slru file {}", path.display());
+) -> anyhow::Result<()> {
+    info!("importing slru file {path:?}");
 
     let mut buf: [u8; 8192] = [0u8; 8192];
     let filename = &path
         .file_name()
-        .expect("missing slru filename")
+        .with_context(|| format!("missing slru filename for path {path:?}"))?
         .to_string_lossy();
     let segno = u32::from_str_radix(filename, 16)?;
 
@@ -237,14 +237,19 @@ fn import_slru<Reader: Read>(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) -> Result<()> {
+fn import_wal(
+    walpath: &Path,
+    tline: &Timeline,
+    startpoint: Lsn,
+    endpoint: Lsn,
+) -> anyhow::Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint, tline.pg_version);
 
     let mut segno = startpoint.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(tline, startpoint)?;
+    let mut walingest = WalIngest::new(tline, startpoint).no_ondemand_download()?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
@@ -267,7 +272,7 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
         }
 
         let nread = file.read_to_end(&mut buf)?;
-        if nread != WAL_SEGMENT_SIZE - offset as usize {
+        if nread != WAL_SEGMENT_SIZE - offset {
             // Maybe allow this for .partial files?
             error!("read only {} bytes from WAL file", nread);
         }
@@ -279,7 +284,9 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                    .no_ondemand_download()?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -360,7 +367,7 @@ pub fn import_wal_from_tar<Reader: Read>(
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
-    let mut walingest = WalIngest::new(tline, start_lsn)?;
+    let mut walingest = WalIngest::new(tline, start_lsn).no_ondemand_download()?;
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
@@ -405,7 +412,9 @@ pub fn import_wal_from_tar<Reader: Read>(
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                    .no_ondemand_download()?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);
@@ -440,16 +449,22 @@ fn import_file<Reader: Read>(
     reader: Reader,
     len: usize,
 ) -> Result<Option<ControlFileData>> {
+    let file_name = match file_path.file_name() {
+        Some(name) => name.to_string_lossy(),
+        None => return Ok(None),
+    };
+
+    if file_name.starts_with('.') {
+        // tar archives on macOs, created without COPYFILE_DISABLE=1 env var
+        // will contain "fork files", skip them.
+        return Ok(None);
+    }
+
     if file_path.starts_with("global") {
         let spcnode = postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
-        match file_path
-            .file_name()
-            .expect("missing filename")
-            .to_string_lossy()
-            .as_ref()
-        {
+        match file_name.as_ref() {
             "pg_control" => {
                 let bytes = read_all_bytes(reader)?;
 
@@ -485,12 +500,7 @@ fn import_file<Reader: Read>(
             .to_string_lossy()
             .parse()?;
 
-        match file_path
-            .file_name()
-            .expect("missing base filename")
-            .to_string_lossy()
-            .as_ref()
-        {
+        match file_name.as_ref() {
             "pg_filenode.map" => {
                 let bytes = read_all_bytes(reader)?;
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
@@ -520,11 +530,7 @@ fn import_file<Reader: Read>(
         import_slru(modification, slru, file_path, reader, len)?;
         debug!("imported multixact members slru");
     } else if file_path.starts_with("pg_twophase") {
-        let file_name = &file_path
-            .file_name()
-            .expect("missing twophase filename")
-            .to_string_lossy();
-        let xid = u32::from_str_radix(file_name, 16)?;
+        let xid = u32::from_str_radix(file_name.as_ref(), 16)?;
 
         let bytes = read_all_bytes(reader)?;
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))?;

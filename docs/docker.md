@@ -23,9 +23,9 @@ We build all images after a successful `release` tests run and push automaticall
 
 You can see a [docker compose](https://docs.docker.com/compose/) example to create a neon cluster in [/docker-compose/docker-compose.yml](/docker-compose/docker-compose.yml). It creates the following conatainers.
 
-- etcd x 1
 - pageserver x 1
 - safekeeper x 3
+- storage_broker x 1
 - compute x 1
 - MinIO x 1        # This is Amazon S3 compatible object storage
 
@@ -41,7 +41,7 @@ $ cd docker-compose/docker-compose.yml
 $ docker-compose down   # remove the conainers if exists
 $ PG_VERSION=15 TAG=2221 docker-compose up --build -d  # You can specify the postgres and image version
 Creating network "dockercompose_default" with the default driver
-Creating dockercompose_etcd3_1 ...
+Creating docker-compose_storage_broker_1       ... done
 (...omit...)
 ```
 

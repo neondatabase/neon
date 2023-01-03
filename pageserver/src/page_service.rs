@@ -48,10 +48,9 @@ use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::profiling::profpoint_start;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::mgr;
 use crate::tenant::{Tenant, Timeline};
-use crate::tenant_mgr;
 use crate::trace::Tracer;
-use crate::CheckpointConfig;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
@@ -445,9 +444,7 @@ impl PageServerHandler {
         pgb.flush().await?;
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
         let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-        tokio::task::block_in_place(|| {
-            import_wal_from_tar(&*timeline, reader, start_lsn, end_lsn)
-        })?;
+        tokio::task::block_in_place(|| import_wal_from_tar(&timeline, reader, start_lsn, end_lsn))?;
         info!("wal import complete");
 
         // Drain the rest of the Copy data
@@ -466,7 +463,7 @@ impl PageServerHandler {
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.checkpoint(CheckpointConfig::Flush).await?;
+        timeline.freeze_and_flush().await?;
 
         info!("done");
         Ok(())
@@ -542,7 +539,10 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest)?;
+        let exists = crate::tenant::with_ondemand_download(|| {
+            timeline.get_rel_exists(req.rel, lsn, req.latest)
+        })
+        .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
@@ -559,7 +559,10 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest)?;
+        let n_blocks = crate::tenant::with_ondemand_download(|| {
+            timeline.get_rel_size(req.rel, lsn, req.latest)
+        })
+        .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
@@ -576,9 +579,10 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let total_blocks =
-            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)?;
-
+        let total_blocks = crate::tenant::with_ondemand_download(|| {
+            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)
+        })
+        .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
@@ -604,11 +608,14 @@ impl PageServerHandler {
         }
         */
 
-        // FIXME: this profiling now happens at different place than it used to. The
-        // current profiling is based on a thread-local variable, so it doesn't work
-        // across awaits
-        let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
-        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
+        let page = crate::tenant::with_ondemand_download(|| {
+            // FIXME: this profiling now happens at different place than it used to. The
+            // current profiling is based on a thread-local variable, so it doesn't work
+            // across awaits
+            let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
+            timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)
+        })
+        .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
@@ -649,7 +656,7 @@ impl PageServerHandler {
         tokio::task::block_in_place(|| {
             let basebackup =
                 basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
-            tracing::Span::current().record("lsn", &basebackup.lsn.to_string().as_str());
+            tracing::Span::current().record("lsn", basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()
         })?;
         pgb.write_message(&BeMessage::CopyDone)?;
@@ -941,7 +948,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 /// ensures that queries don't fail immediately after pageserver startup, because
 /// all tenants are still loading.
 async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> Result<Arc<Tenant>> {
-    let tenant = tenant_mgr::get_tenant(tenant_id, false)?;
+    let tenant = mgr::get_tenant(tenant_id, false).await?;
     match tokio::time::timeout(Duration::from_secs(30), tenant.wait_to_become_active()).await {
         Ok(wait_result) => wait_result
             // no .context(), the error message is good enough and some tests depend on it

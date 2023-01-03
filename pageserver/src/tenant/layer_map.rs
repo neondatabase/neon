@@ -12,7 +12,7 @@
 
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
-use crate::tenant::inmemory_layer::InMemoryLayer;
+use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use anyhow::Result;
 use std::collections::VecDeque;
@@ -25,8 +25,7 @@ use super::bst_layer_map::RetroactiveLayerMap;
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-#[derive(Default)]
-pub struct LayerMap {
+pub struct LayerMap<L: ?Sized> {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
     // records. If it is None, 'next_open_layer_at' will be set instead, indicating
@@ -47,20 +46,35 @@ pub struct LayerMap {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// Index of the historic layers optimized for search
-    index: RetroactiveLayerMap<Arc<dyn Layer>>,
+    index: RetroactiveLayerMap<Arc<L>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<Arc<dyn Layer>>,
+    l0_delta_layers: Vec<Arc<L>>,
+}
+
+impl<L: ?Sized> Default for LayerMap<L> {
+    fn default() -> Self {
+        Self {
+            open_layer: None,
+            next_open_layer_at: None,
+            frozen_layers: VecDeque::default(),
+            l0_delta_layers: Vec::default(),
+            index: RetroactiveLayerMap::default(),
+        }
+    }
 }
 
 /// Return value of LayerMap::search
-pub struct SearchResult {
-    pub layer: Arc<dyn Layer>,
+pub struct SearchResult<L: ?Sized> {
+    pub layer: Arc<L>,
     pub lsn_floor: Lsn,
 }
 
-impl LayerMap {
+impl<L> LayerMap<L>
+where
+    L: ?Sized + Layer,
+{
     ///
     /// Find the latest layer that covers the given 'key', with lsn <
     /// 'end_lsn'.
@@ -72,39 +86,39 @@ impl LayerMap {
     /// contain the version, even if it's missing from the returned
     /// layer.
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
         match self.index.query(key.to_i128(), end_lsn.0 - 1) {
-            (None, None) => Ok(None),
+            (None, None) => None,
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
-                Ok(Some(SearchResult {
+                Some(SearchResult {
                     layer: image,
                     lsn_floor,
-                }))
+                })
             }
             (Some(delta), None) => {
                 let lsn_floor = delta.get_lsn_range().start;
-                Ok(Some(SearchResult {
+                Some(SearchResult {
                     layer: delta,
                     lsn_floor,
-                }))
+                })
             }
             (Some(delta), Some(image)) => {
                 let img_lsn = image.get_lsn_range().start;
                 let image_is_newer = image.get_lsn_range().end > delta.get_lsn_range().end;
                 let image_exact_match = Lsn(img_lsn.0 + 1) == end_lsn;
                 if image_is_newer || image_exact_match {
-                    Ok(Some(SearchResult {
+                    Some(SearchResult {
                         layer: image,
                         lsn_floor: img_lsn,
-                    }))
+                    })
                 } else {
                     let lsn_floor =
                         std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
-                    Ok(Some(SearchResult {
+                    Some(SearchResult {
                         layer: delta,
                         lsn_floor,
-                    }))
+                    })
                 }
             }
         }
@@ -113,7 +127,7 @@ impl LayerMap {
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
+    pub fn insert_historic(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.index.insert(
@@ -140,7 +154,7 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
+    pub fn remove_historic(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.index.remove(
@@ -182,7 +196,7 @@ impl LayerMap {
         let start = key.start.to_i128();
         let end = key.end.to_i128();
 
-        let layer_covers = |layer: Option<Arc<dyn Layer>>| match layer {
+        let layer_covers = |layer: Option<Arc<L>>| match layer {
             Some(layer) => layer.get_lsn_range().start >= lsn.start,
             None => false,
         };
@@ -202,7 +216,7 @@ impl LayerMap {
         return Ok(true);
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<dyn Layer>> {
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
         self.index.iter()
     }
 
@@ -218,7 +232,7 @@ impl LayerMap {
         &self,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
+    ) -> Result<Vec<(Range<Key>, Option<Arc<L>>)>> {
         let version = match self.index.get_version(lsn.0 - 1) {
             Some(v) => v,
             None => return Ok(vec![]),
@@ -228,7 +242,7 @@ impl LayerMap {
         let end = key_range.end.to_i128();
 
         // Initialize loop variables
-        let mut coverage: Vec<(Range<Key>, Option<Arc<dyn Layer>>)> = vec![];
+        let mut coverage: Vec<(Range<Key>, Option<Arc<L>>)> = vec![];
         let mut current_key = start.clone();
         let mut current_val = version.query(start).1;
 
@@ -308,7 +322,7 @@ impl LayerMap {
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {
+    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<L>>> {
         Ok(self.l0_delta_layers.clone())
     }
 

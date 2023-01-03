@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
+use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
+
+use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 
 use super::Tenant;
 use utils::id::TimelineId;
@@ -67,6 +70,7 @@ pub(super) async fn gather_inputs(
 
     let timelines = tenant
         .refresh_gc_info()
+        .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
     if timelines.is_empty() {
@@ -93,8 +97,6 @@ pub(super) async fn gather_inputs(
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
-    // this will probably conflict with on-demand downloaded layers, or at least force them all
-    // to be downloaded
     for timeline in timelines {
         let last_record_lsn = timeline.get_last_record_lsn();
 
@@ -212,11 +214,30 @@ pub(super) async fn gather_inputs(
     let mut have_any_error = false;
 
     while let Some(res) = joinset.join_next().await {
-        // each of these come with Result<Result<_, JoinError>, JoinError>
+        // each of these come with Result<anyhow::Result<_>, JoinError>
         // because of spawn + spawn_blocking
-        let res = res.and_then(|inner| inner);
         match res {
-            Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size))) => {
+            Err(join_error) if join_error.is_cancelled() => {
+                unreachable!("we are not cancelling any of the futures, nor should be");
+            }
+            Err(join_error) => {
+                // cannot really do anything, as this panic is likely a bug
+                error!("task that calls spawn_ondemand_logical_size_calculation panicked: {join_error:#}");
+                have_any_error = true;
+            }
+            Ok(Err(recv_result_error)) => {
+                // cannot really do anything, as this panic is likely a bug
+                error!("failed to receive logical size query result: {recv_result_error:#}");
+                have_any_error = true;
+            }
+            Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error)))) => {
+                warn!(
+                    timeline_id=%timeline.timeline_id,
+                    "failed to calculate logical size at {lsn}: {error:#}"
+                );
+                have_any_error = true;
+            }
+            Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size)))) => {
                 debug!(timeline_id=%timeline.timeline_id, %lsn, size, "size calculated");
 
                 logical_size_cache.insert((timeline.timeline_id, lsn), size);
@@ -227,21 +248,6 @@ pub(super) async fn gather_inputs(
                     timeline_id: timeline.timeline_id,
                     command: Command::Update(size),
                 });
-            }
-            Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error))) => {
-                warn!(
-                    timeline_id=%timeline.timeline_id,
-                    "failed to calculate logical size at {lsn}: {error:#}"
-                );
-                have_any_error = true;
-            }
-            Err(join_error) if join_error.is_cancelled() => {
-                unreachable!("we are not cancelling any of the futures, nor should be");
-            }
-            Err(join_error) => {
-                // cannot really do anything, as this panic is likely a bug
-                error!("logical size query panicked: {join_error:#}");
-                have_any_error = true;
             }
         }
     }
@@ -351,7 +357,7 @@ enum LsnKind {
 struct TimelineAtLsnSizeResult(
     Arc<crate::tenant::Timeline>,
     utils::lsn::Lsn,
-    anyhow::Result<u64>,
+    Result<u64, CalculateLogicalSizeError>,
 );
 
 #[instrument(skip_all, fields(timeline_id=%timeline.timeline_id, lsn=%lsn))]
@@ -359,17 +365,15 @@ async fn calculate_logical_size(
     limit: Arc<tokio::sync::Semaphore>,
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
-) -> Result<TimelineAtLsnSizeResult, tokio::task::JoinError> {
-    let permit = tokio::sync::Semaphore::acquire_owned(limit)
+) -> Result<TimelineAtLsnSizeResult, RecvError> {
+    let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
         .expect("global semaphore should not had been closed");
 
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let size_res = timeline.calculate_logical_size(lsn);
-        TimelineAtLsnSizeResult(timeline, lsn, size_res)
-    })
-    .await
+    let size_res = timeline
+        .spawn_ondemand_logical_size_calculation(lsn)
+        .await?;
+    Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
 }
 
 #[test]

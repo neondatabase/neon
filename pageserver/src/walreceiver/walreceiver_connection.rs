@@ -20,7 +20,9 @@ use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
+use crate::{
+    metrics::LIVE_CONNECTIONS_COUNT, tenant::with_ondemand_download, walreceiver::TaskStateUpdate,
+};
 use crate::{
     task_mgr,
     task_mgr::TaskKind,
@@ -35,7 +37,7 @@ use pq_proto::ReplicationFeedback;
 use utils::lsn::Lsn;
 
 /// Status of the connection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct WalConnectionStatus {
     /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
     pub is_connected: bool,
@@ -83,7 +85,7 @@ pub async fn handle_walreceiver_connection(
         streaming_lsn: None,
         commit_lsn: None,
     };
-    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
         return Ok(());
     }
@@ -135,7 +137,7 @@ pub async fn handle_walreceiver_connection(
     connection_status.latest_connection_update = Utc::now().naive_utc();
     connection_status.latest_wal_update = Utc::now().naive_utc();
     connection_status.commit_lsn = Some(end_of_wal);
-    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
         return Ok(());
     }
@@ -173,7 +175,8 @@ pub async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint)?;
+    let mut walingest =
+        with_ondemand_download(|| WalIngest::new(timeline.as_ref(), startpoint)).await?;
 
     while let Some(replication_message) = {
         select! {
@@ -184,7 +187,20 @@ pub async fn handle_walreceiver_connection(
             replication_message = physical_stream.next() => replication_message,
         }
     } {
-        let replication_message = replication_message?;
+        let replication_message = match replication_message {
+            Ok(message) => message,
+            Err(replication_error) => {
+                if replication_error.is_closed() {
+                    info!("Replication stream got closed");
+                    return Ok(());
+                } else {
+                    return Err(
+                        anyhow::Error::new(replication_error).context("replication stream error")
+                    );
+                }
+            }
+        };
+
         let now = Utc::now().naive_utc();
         let last_rec_lsn_before_msg = last_rec_lsn;
 
@@ -207,7 +223,7 @@ pub async fn handle_walreceiver_connection(
             }
             &_ => {}
         };
-        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
             warn!("Wal connection event listener dropped, aborting the connection: {e}");
             return Ok(());
         }
@@ -235,9 +251,16 @@ pub async fn handle_walreceiver_connection(
                         // at risk of hitting a deadlock.
                         ensure!(lsn.is_aligned());
 
-                        walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded)
-                            .context("could not ingest record at {lsn}")?;
+                        with_ondemand_download(|| {
+                            walingest.ingest_record(
+                                recdata.clone(),
+                                lsn,
+                                &mut modification,
+                                &mut decoded,
+                            )
+                        })
+                        .await
+                        .with_context(|| format!("could not ingest record at {lsn}"))?;
 
                         fail_point!("walreceiver-after-ingest");
 
@@ -273,8 +296,7 @@ pub async fn handle_walreceiver_connection(
         if !connection_status.has_processed_wal && last_rec_lsn > last_rec_lsn_before_msg {
             // We have successfully processed at least one WAL record.
             connection_status.has_processed_wal = true;
-            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone()))
-            {
+            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
                 warn!("Wal connection event listener dropped, aborting the connection: {e}");
                 return Ok(());
             }
@@ -313,10 +335,11 @@ pub async fn handle_walreceiver_connection(
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
+            let (timeline_logical_size, _) = timeline
+                .get_current_logical_size()
+                .context("Status update creation failed to get current logical size")?;
             let status_update = ReplicationFeedback {
-                current_timeline_size: timeline
-                    .get_current_logical_size()
-                    .context("Status update creation failed to get current logical size")?,
+                current_timeline_size: timeline_logical_size,
                 ps_writelsn: write_lsn,
                 ps_flushlsn: flush_lsn,
                 ps_applylsn: apply_lsn,

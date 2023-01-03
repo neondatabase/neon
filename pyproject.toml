@@ -32,10 +32,11 @@ toml = "^0.10.2"
 psutil = "^5.9.4"
 types-psutil = "^5.9.5.4"
 types-toml = "^0.10.8"
+pytest-httpserver = "^1.0.6"
 
 [tool.poetry.dev-dependencies]
 flake8 = "^5.0.4"
-mypy = "==0.971"
+mypy = "==0.991"
 black = "^22.6.0"
 isort = "^5.10.1"
 
@@ -60,10 +61,8 @@ skip = [
 ]
 
 [tool.mypy]
-# mypy uses regex
 exclude = "^vendor/"
-# some tests don't typecheck when this flag is set
-check_untyped_defs = false
+check_untyped_defs = true
 # Help mypy find imports when running against list of individual files.
 # Without this line it would behave differently when executed on the entire project.
 mypy_path = "$MYPY_CONFIG_FILE_DIR:$MYPY_CONFIG_FILE_DIR/test_runner"

@@ -15,7 +15,7 @@ from fixtures.utils import get_scale_for_db
 @enum.unique
 class PgBenchLoadType(enum.Enum):
     INIT = "init"
-    SIMPLE_UPDATE = "simple_update"
+    SIMPLE_UPDATE = "simple-update"
     SELECT_ONLY = "select-only"
 
 
@@ -94,7 +94,9 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
 
     if workload_type == PgBenchLoadType.INIT:
         # Run initialize
-        init_pgbench(env, ["pgbench", f"-s{scale}", "-i", connstr], password=password)
+        init_pgbench(
+            env, ["pgbench", f"-s{scale}", "-i", "-I", "dtGvp", connstr], password=password
+        )
 
     if workload_type == PgBenchLoadType.SIMPLE_UPDATE:
         # Run simple-update workload

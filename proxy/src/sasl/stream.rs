@@ -48,28 +48,41 @@ impl<S: AsyncWrite + Unpin> SaslStream<'_, S> {
     }
 }
 
+/// SASL authentication outcome.
+/// It's much easier to match on those two variants
+/// than to peek into a noisy protocol error type.
+#[must_use = "caller must explicitly check for success"]
+pub enum Outcome<R> {
+    /// Authentication succeeded and produced some value.
+    Success(R),
+    /// Authentication failed (reason attached).
+    Failure(&'static str),
+}
+
 impl<S: AsyncRead + AsyncWrite + Unpin> SaslStream<'_, S> {
     /// Perform SASL message exchange according to the underlying algorithm
     /// until user is either authenticated or denied access.
     pub async fn authenticate<M: Mechanism>(
         mut self,
         mut mechanism: M,
-    ) -> super::Result<M::Output> {
+    ) -> super::Result<Outcome<M::Output>> {
         loop {
             let input = self.recv().await?;
-            let (moved, reply) = mechanism.exchange(input)?;
+            let step = mechanism.exchange(input)?;
 
-            use super::Step::*;
-            match moved {
-                Continue(moved) => {
+            use super::Step;
+            return Ok(match step {
+                Step::Continue(moved_mechanism, reply) => {
                     self.send(&ServerMessage::Continue(&reply)).await?;
-                    mechanism = moved;
+                    mechanism = moved_mechanism;
+                    continue;
                 }
-                Authenticated(result) => {
+                Step::Success(result, reply) => {
                     self.send(&ServerMessage::Final(&reply)).await?;
-                    return Ok(result);
+                    Outcome::Success(result)
                 }
-            }
+                Step::Failure(reason) => Outcome::Failure(reason),
+            });
         }
     }
 }

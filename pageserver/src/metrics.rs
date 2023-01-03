@@ -84,13 +84,20 @@ static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-// Metrics for determining timeline's physical size.
-// A layered timeline's physical is defined as the total size of
-// (delta/image) layer files on disk.
-static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
-        "pageserver_current_physical_size",
-        "Current physical size grouped by timeline",
+        "pageserver_resident_physical_size",
+        "The size of the layer files present in the pageserver's filesystem.",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_remote_physical_size",
+        "The size of the layer files present in the remote storage that are listed in the the remote index_part.json.",
+        // Corollary: If any files are missing from the index part, they won't be included here.
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
@@ -136,8 +143,9 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     1.0,      // 1 sec
 ];
 
-const STORAGE_IO_TIME_OPERATIONS: &[&str] =
-    &["open", "close", "read", "write", "seek", "fsync", "gc"];
+const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
+    "open", "close", "read", "write", "seek", "fsync", "gc", "metadata",
+];
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
@@ -201,7 +209,7 @@ pub static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
 
 // remote storage metrics
 
-pub static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|| {
+static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_remote_upload_queue_unfinished_tasks",
         "Number of tasks in the upload queue that are not finished yet.",
@@ -210,14 +218,14 @@ pub static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
     Download,
     Delete,
 }
 impl RemoteOpKind {
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Upload => "upload",
             Self::Download => "download",
@@ -226,13 +234,13 @@ impl RemoteOpKind {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum RemoteOpFileKind {
     Layer,
     Index,
 }
 impl RemoteOpFileKind {
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Layer => "layer",
             Self::Index => "index",
@@ -365,7 +373,7 @@ pub struct TimelineMetrics {
     pub load_layer_map_histo: Histogram,
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
-    pub current_physical_size_gauge: UIntGauge,
+    pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
@@ -406,7 +414,7 @@ impl TimelineMetrics {
         let wait_lsn_time_histo = WAIT_LSN_TIME
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let current_physical_size_gauge = CURRENT_PHYSICAL_SIZE
+        let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
@@ -432,7 +440,7 @@ impl TimelineMetrics {
             load_layer_map_histo,
             last_record_gauge,
             wait_lsn_time_histo,
-            current_physical_size_gauge,
+            resident_physical_size_gauge,
             current_logical_size_gauge,
             num_persistent_files_created,
             persistent_bytes_written,
@@ -448,7 +456,7 @@ impl Drop for TimelineMetrics {
         let _ = MATERIALIZED_PAGE_CACHE_HIT.remove_label_values(&[tenant_id, timeline_id]);
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = CURRENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
@@ -491,9 +499,113 @@ pub fn remove_tenant_metrics(tenant_id: &TenantId) {
 
 use futures::Future;
 use pin_project_lite::pin_project;
+use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
+
+pub struct RemoteTimelineClientMetrics {
+    tenant_id: String,
+    timeline_id: String,
+    remote_physical_size_gauge: Mutex<Option<UIntGauge>>,
+    remote_operation_time: Mutex<HashMap<(&'static str, &'static str, &'static str), Histogram>>,
+    unfinished_tasks: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
+}
+
+impl RemoteTimelineClientMetrics {
+    pub fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+        RemoteTimelineClientMetrics {
+            tenant_id: tenant_id.to_string(),
+            timeline_id: timeline_id.to_string(),
+            remote_operation_time: Mutex::new(HashMap::default()),
+            unfinished_tasks: Mutex::new(HashMap::default()),
+            remote_physical_size_gauge: Mutex::new(None),
+        }
+    }
+    pub fn remote_physical_size_gauge(&self) -> UIntGauge {
+        let mut guard = self.remote_physical_size_gauge.lock().unwrap();
+        guard
+            .get_or_insert_with(|| {
+                REMOTE_PHYSICAL_SIZE
+                    .get_metric_with_label_values(&[
+                        &self.tenant_id.to_string(),
+                        &self.timeline_id.to_string(),
+                    ])
+                    .unwrap()
+            })
+            .clone()
+    }
+    pub fn remote_operation_time(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+        status: &'static str,
+    ) -> Histogram {
+        // XXX would be nice to have an upgradable RwLock
+        let mut guard = self.remote_operation_time.lock().unwrap();
+        let key = (file_kind.as_str(), op_kind.as_str(), status);
+        let metric = guard.entry(key).or_insert_with(move || {
+            REMOTE_OPERATION_TIME
+                .get_metric_with_label_values(&[
+                    &self.tenant_id.to_string(),
+                    &self.timeline_id.to_string(),
+                    key.0,
+                    key.1,
+                    key.2,
+                ])
+                .unwrap()
+        });
+        metric.clone()
+    }
+    pub fn unfinished_tasks(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+    ) -> IntGauge {
+        // XXX would be nice to have an upgradable RwLock
+        let mut guard = self.unfinished_tasks.lock().unwrap();
+        let key = (file_kind.as_str(), op_kind.as_str());
+        let metric = guard.entry(key).or_insert_with(move || {
+            REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS
+                .get_metric_with_label_values(&[
+                    &self.tenant_id.to_string(),
+                    &self.timeline_id.to_string(),
+                    key.0,
+                    key.1,
+                ])
+                .unwrap()
+        });
+        metric.clone()
+    }
+}
+
+impl Drop for RemoteTimelineClientMetrics {
+    fn drop(&mut self) {
+        let RemoteTimelineClientMetrics {
+            tenant_id,
+            timeline_id,
+            remote_physical_size_gauge,
+            remote_operation_time,
+            unfinished_tasks,
+        } = self;
+        for ((a, b, c), _) in remote_operation_time.get_mut().unwrap().drain() {
+            let _ = REMOTE_OPERATION_TIME.remove_label_values(&[tenant_id, timeline_id, a, b, c]);
+        }
+        for ((a, b), _) in unfinished_tasks.get_mut().unwrap().drain() {
+            let _ = REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS.remove_label_values(&[
+                tenant_id,
+                timeline_id,
+                a,
+                b,
+            ]);
+        }
+        {
+            let _ = remote_physical_size_gauge; // use to avoid 'unused' warning in desctructuring above
+            let _ = REMOTE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        }
+    }
+}
 
 /// Wrapper future that measures the time spent by a remote storage operation,
 /// and records the time and success/failure as a prometheus metric.
@@ -504,6 +616,7 @@ pub trait MeasureRemoteOp: Sized {
         timeline_id: TimelineId,
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
+        metrics: Arc<RemoteTimelineClientMetrics>,
     ) -> MeasuredRemoteOp<Self> {
         let start = Instant::now();
         MeasuredRemoteOp {
@@ -513,6 +626,7 @@ pub trait MeasureRemoteOp: Sized {
             file_kind,
             op,
             start,
+            metrics,
         }
     }
 }
@@ -529,6 +643,7 @@ pin_project! {
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
         start: Instant,
+        metrics: Arc<RemoteTimelineClientMetrics>,
     }
 }
 
@@ -541,15 +656,8 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
         if let Poll::Ready(ref res) = poll_result {
             let duration = this.start.elapsed();
             let status = if res.is_ok() { &"success" } else { &"failure" };
-            REMOTE_OPERATION_TIME
-                .get_metric_with_label_values(&[
-                    &this.tenant_id.to_string(),
-                    &this.timeline_id.to_string(),
-                    this.file_kind.as_str(),
-                    this.op.as_str(),
-                    status,
-                ])
-                .unwrap()
+            this.metrics
+                .remote_operation_time(this.file_kind, this.op, status)
                 .observe(duration.as_secs_f64());
         }
         poll_result

@@ -14,11 +14,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PageserverApiException,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_flush_lsn,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_until_tenant_state,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import print_gc_result, query_scalar, wait_until
@@ -55,10 +55,15 @@ def test_remote_storage_backup_and_restore(
         test_name="test_remote_storage_backup_and_restore",
     )
 
-    data_id = 1
-    data_secret = "very secret secret"
+    # Exercise retry code path by making all uploads and downloads fail for the
+    # first time. The retries print INFO-messages to the log; we will check
+    # that they are present after the test.
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    ##### First start, insert secret data and upload it to the remote storage
+    data_id = 1
+    data = "just some data"
+
+    ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
     # FIXME: Is this expected?
@@ -71,8 +76,11 @@ def test_remote_storage_backup_and_restore(
     # FIXME retry downloads without throwing errors
     env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
     # we have a bunch of pytest.raises for these below
-    env.pageserver.allowed_errors.append(".*tenant already exists.*")
-    env.pageserver.allowed_errors.append(".*attach is already in progress.*")
+    env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
+    env.pageserver.allowed_errors.append(
+        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
+    )
+    env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
     pg = env.postgres.create_start("main")
@@ -84,22 +92,12 @@ def test_remote_storage_backup_and_restore(
 
     checkpoint_numbers = range(1, 3)
 
-    # On the first iteration, exercise retry code path by making the uploads
-    # fail for the first 3 times
-    action = "3*return->off"
-    pageserver_http.configure_failpoints(
-        [
-            ("before-upload-layer", action),
-            ("before-upload-index", action),
-        ]
-    )
-
     for checkpoint_number in checkpoint_numbers:
         with pg.cursor() as cur:
             cur.execute(
                 f"""
-                CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
-                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
+                CREATE TABLE t{checkpoint_number}(id int primary key, data text);
+                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data}|{checkpoint_number}');
             """
             )
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -115,6 +113,14 @@ def test_remote_storage_backup_and_restore(
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
+    # Check that we had to retry the uploads
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    )
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    )
+
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()
     env.pageserver.stop()
@@ -126,38 +132,53 @@ def test_remote_storage_backup_and_restore(
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    # Introduce failpoint in download
-    pageserver_http.configure_failpoints(("remote-storage-download-pre-rename", "return"))
-
+    # Introduce failpoint in list remote timelines code path to make tenant_attach fail.
+    # This is before the failures injected by test_remote_failures, so it's a permanent error.
+    pageserver_http.configure_failpoints(("storage-sync-list-remote-timelines", "return"))
+    env.pageserver.allowed_errors.append(
+        ".*error attaching tenant: storage-sync-list-remote-timelines",
+    )
+    # Attach it. This HTTP request will succeed and launch a
+    # background task to load the tenant. In that background task,
+    # listing the remote timelines will fail because of the failpoint,
+    # and the tenant will be marked as Broken.
     client.tenant_attach(tenant_id)
+    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
 
-    # is there a better way to assert that failpoint triggered?
-    time.sleep(10)
-
-    # assert cannot attach timeline that is scheduled for download
-    # FIXME implement layer download retries
-    with pytest.raises(Exception, match="tenant already exists, current state: Broken"):
+    # Ensure that even though the tenant is broken, we can't attach it again.
+    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
         client.tenant_attach(tenant_id)
 
-    tenant_status = client.tenant_status(tenant_id)
-    log.info("Tenant status with active failpoint: %s", tenant_status)
-    # FIXME implement layer download retries
-    # assert tenant_status["has_in_progress_downloads"] is True
-
-    # trigger temporary download files removal
+    # Restart again, this implicitly clears the failpoint.
+    # test_remote_failures=1 remains active, though, as it's in the pageserver config.
+    # This means that any of the remote client operations after restart will exercise the
+    # retry code path.
+    #
+    # The initiated attach operation should survive the restart, and continue from where it was.
     env.pageserver.stop()
+    layer_download_failed_regex = (
+        r"download.*[0-9A-F]+-[0-9A-F]+.*open a download stream for layer.*simulated failure"
+    )
+    assert not env.pageserver.log_contains(
+        layer_download_failed_regex
+    ), "we shouldn't have tried any layer downloads yet since list remote timelines has a failpoint"
     env.pageserver.start()
 
-    # ensure that an initiated attach operation survives pageserver restart
-    with pytest.raises(
-        Exception, match=r".*(tenant already exists|attach is already in progress).*"
-    ):
+    # Ensure that the pageserver remembers that the tenant was attaching, by
+    # trying to attach it again. It should fail.
+    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
         client.tenant_attach(tenant_id)
-    log.info("waiting for timeline redownload")
+    log.info("waiting for tenant to become active. this should be quick with on-demand download")
+
+    def tenant_active():
+        all_states = client.tenant_list()
+        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
+        assert tenant["state"] == "Active"
+
     wait_until(
-        number_of_iterations=20,
+        number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=tenant_active,
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
@@ -165,15 +186,18 @@ def test_remote_storage_backup_and_restore(
     assert (
         Lsn(detail["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
-    assert not detail["awaits_download"]
 
+    log.info("select some data, this will cause layers to be downloaded")
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
             assert (
-                query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
-                == f"{data_secret}|{checkpoint_number}"
+                query_scalar(cur, f"SELECT data FROM t{checkpoint_number} WHERE id = {data_id};")
+                == f"{data}|{checkpoint_number}"
             )
+
+    log.info("ensure that we neede to retry downloads due to test_remote_failures=1")
+    assert env.pageserver.log_contains(layer_download_failed_regex)
 
 
 # Exercises the upload queue retry code paths.
@@ -191,7 +215,7 @@ def test_remote_storage_upload_queue_retries(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
+        test_name="test_remote_storage_upload_queue_retries",
     )
 
     env = neon_env_builder.init_start()
@@ -334,7 +358,6 @@ def test_remote_storage_upload_queue_retries(
     def tenant_active():
         all_states = client.tenant_list()
         [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["has_in_progress_downloads"] is False
         assert tenant["state"] == "Active"
 
     wait_until(30, 1, tenant_active)
@@ -353,7 +376,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
+        test_name="test_timeline_deletion_with_files_stuck_in_upload_queue",
     )
 
     env = neon_env_builder.init_start()
@@ -384,7 +407,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             metrics,
             re.MULTILINE,
         )
-        assert matches
+        if matches is None:
+            return None
         return int(matches[1])
 
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
@@ -436,8 +460,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 
     assert not timeline_path.exists()
 
-    # timeline deletion should kill ongoing uploads
-    assert get_queued_count(file_kind="index", op_kind="upload") == 0
+    # timeline deletion should kill ongoing uploads, so, the metric will be gone
+    assert get_queued_count(file_kind="index", op_kind="upload") is None
 
     # timeline deletion should be unblocking checkpoint ops
     checkpoint_thread.join(2.0)

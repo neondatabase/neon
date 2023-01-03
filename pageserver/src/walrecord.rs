@@ -1,6 +1,7 @@
 //!
 //! Functions for parsing WAL records.
 //!
+
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use postgres_ffi::pg_constants;
