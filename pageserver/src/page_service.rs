@@ -648,8 +648,7 @@ impl PageServerHandler {
             let mut writer = pgb.copyout_writer();
             let basebackup =
                 basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
-            // FIXME: instrument
-            //tracing::Span::current().record("lsn", basebackup.lsn.to_string().as_str());
+            tracing::Span::current().record("lsn", basebackup.lsn.to_string().as_str());
             basebackup.send_tarball().await?;
         }
 
