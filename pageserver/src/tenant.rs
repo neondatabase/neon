@@ -18,8 +18,6 @@ use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::sync::watch;
-use tokio_util::io::StreamReader;
-use tokio_util::io::SyncIoBridge;
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 
@@ -36,7 +34,6 @@ use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -236,21 +233,15 @@ impl UninitializedTimeline<'_> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub async fn import_basebackup_from_tar(
         self,
-        mut copyin_stream: &mut Pin<&mut impl Stream<Item = io::Result<Bytes>>>,
+        copyin_stream: &mut (impl Stream<Item = io::Result<Bytes>> + Sync + Send + Unpin),
         base_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
 
-        // import_basebackup_from_tar() is not async, mainly because the Tar crate
-        // it uses is not async. So we need to jump through some hoops:
-        // - convert the input from client connection to a synchronous Read
-        // - use block_in_place()
-        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-
-        tokio::task::block_in_place(|| {
-            import_datadir::import_basebackup_from_tar(raw_timeline, reader, base_lsn)
-                .context("Failed to import basebackup")
-        })?;
+        let mut reader = tokio_util::io::StreamReader::new(copyin_stream);
+        import_datadir::import_basebackup_from_tar(raw_timeline, &mut reader, base_lsn)
+            .await
+            .context("Failed to import basebackup")?;
 
         // Flush loop needs to be spawned in order to be able to flush.
         // We want to run proper checkpoint before we mark timeline as available to outside world
@@ -2139,13 +2130,12 @@ impl Tenant {
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
 
-        tokio::task::block_in_place(|| {
-            import_datadir::import_timeline_from_postgres_datadir(
-                unfinished_timeline,
-                pgdata_path,
-                pgdata_lsn,
-            )
-        })
+        import_datadir::import_timeline_from_postgres_datadir(
+            unfinished_timeline,
+            pgdata_path,
+            pgdata_lsn,
+        )
+        .await
         .with_context(|| {
             format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
         })?;

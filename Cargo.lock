@@ -2339,12 +2339,12 @@ dependencies = [
  "signal-hook",
  "storage_broker",
  "svg_fmt",
- "tar",
  "tempfile",
  "tenant_size_model",
  "thiserror",
  "tokio",
  "tokio-postgres",
+ "tokio-tar",
  "tokio-util",
  "toml_edit",
  "tracing",
@@ -3968,6 +3968,20 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokio-tar"
+version = "0.3.0"
+source = "git+https://github.com/neondatabase/tokio-tar.git?rev=404df61437de0feef49ba2ccdbdd94eb8ad6e142#404df61437de0feef49ba2ccdbdd94eb8ad6e142"
+dependencies = [
+ "filetime",
+ "futures-core",
+ "libc",
+ "redox_syscall",
+ "tokio",
+ "tokio-stream",
+ "xattr",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@
 
 use crate::postgres_backend::AuthType;
 use anyhow::{bail, Context, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
 use std::future::Future;
 use std::net::SocketAddr;
@@ -114,7 +114,10 @@ impl AsyncRead for Stream {
 
 pub struct PostgresBackend {
     stream: Stream,
+
     // Output buffer. c.f. BeMessage::write why we are using BytesMut here.
+    // The data between 0 and "current position" as tracked by the bytes::Buf
+    // implementation of BytesMut, have already been written.
     buf_out: BytesMut,
 
     pub state: ProtoState,
@@ -174,16 +177,49 @@ impl PostgresBackend {
     }
 
     /// Flush output buffer into the socket.
-    pub async fn flush(&mut self) -> std::io::Result<&mut Self> {
-        self.stream.write_all(&self.buf_out).await?;
+    pub async fn flush(&mut self) -> std::io::Result<()> {
+        while self.buf_out.has_remaining() {
+            let bytes_written = self.stream.write(self.buf_out.chunk()).await?;
+            self.buf_out.advance(bytes_written);
+        }
         self.buf_out.clear();
-        Ok(self)
+        Ok(())
     }
 
     /// Write message into internal output buffer.
     pub fn write_message(&mut self, message: &BeMessage<'_>) -> Result<&mut Self, std::io::Error> {
         BeMessage::write(&mut self.buf_out, message)?;
         Ok(self)
+    }
+
+    /// Returns an AsyncWrite implementation that wraps all the data written
+    /// to it in CopyData messages, and writes them to the connection
+    ///
+    /// The caller is responsible for sending CopyOutResponse and CopyDone messages.
+    pub fn copyout_writer(&mut self) -> CopyDataWriter {
+        CopyDataWriter { pgb: self }
+    }
+
+    /// A polling function that tries to write all the data from 'buf_out' to the
+    /// underlying stream.
+    fn poll_write_buf(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        while self.buf_out.has_remaining() {
+            match Pin::new(&mut self.stream).poll_write(cx, self.buf_out.chunk()) {
+                Poll::Ready(Ok(bytes_written)) => {
+                    self.buf_out.advance(bytes_written);
+                }
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_flush(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
     }
 
     // Wrapper for run_message_loop() that shuts down socket when we are done
@@ -456,5 +492,66 @@ impl PostgresBackend {
         }
 
         Ok(ProcessMsgResult::Continue)
+    }
+}
+
+///
+/// A futures::AsyncWrite implementation that wraps all data written to it in CopyData
+/// messages.
+///
+
+pub struct CopyDataWriter<'a> {
+    pgb: &'a mut PostgresBackend,
+}
+
+impl<'a> AsyncWrite for CopyDataWriter<'a> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let this = self.get_mut();
+
+        // It's not strictly required to flush between each message, but makes it easier
+        // to view in wireshark, and usually the messages that the callers write are
+        // decently-sized anyway.
+        match this.pgb.poll_write_buf(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Pending => return Poll::Pending,
+        }
+
+        // CopyData
+        // XXX: if the input is large, we should split it into multiple messages.
+        // Not sure what the threshold should be, but the ultimate hard limit is that
+        // the length cannot exceed u32.
+        this.pgb.write_message(&BeMessage::CopyData(buf))?;
+
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let this = self.get_mut();
+        match this.pgb.poll_write_buf(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Pending => return Poll::Pending,
+        }
+        this.pgb.poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let this = self.get_mut();
+        match this.pgb.poll_write_buf(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Pending => return Poll::Pending,
+        }
+        this.pgb.poll_flush(cx)
     }
 }
