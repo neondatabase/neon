@@ -512,6 +512,9 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
     ) -> Poll<Result<usize, std::io::Error>> {
         let this = self.get_mut();
 
+        // It's not strictly required to flush between each message, but makes it easier
+        // to view in wireshark, and usually the messages that the callers write are
+        // decently-sized anyway.
         match this.pgb.poll_write_buf(cx) {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -519,11 +522,9 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         }
 
         // CopyData
-        // FIXME: if the input is large, we should split it into multiple messages.
+        // XXX: if the input is large, we should split it into multiple messages.
         // Not sure what the threshold should be, but the ultimate hard limit is that
         // the length cannot exceed u32.
-        // FIXME: flush isn't really required, but makes it easier
-        // to view in wireshark
         this.pgb.write_message(&BeMessage::CopyData(buf))?;
 
         Poll::Ready(Ok(buf.len()))
