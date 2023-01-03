@@ -20,9 +20,7 @@ use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{
-    metrics::LIVE_CONNECTIONS_COUNT, tenant::with_ondemand_download, walreceiver::TaskStateUpdate,
-};
+use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
 use crate::{
     task_mgr,
     task_mgr::TaskKind,
@@ -175,8 +173,7 @@ pub async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest =
-        with_ondemand_download(|| WalIngest::new(timeline.as_ref(), startpoint)).await?;
+    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint).await?;
 
     while let Some(replication_message) = {
         select! {
@@ -251,16 +248,10 @@ pub async fn handle_walreceiver_connection(
                         // at risk of hitting a deadlock.
                         ensure!(lsn.is_aligned());
 
-                        with_ondemand_download(|| {
-                            walingest.ingest_record(
-                                recdata.clone(),
-                                lsn,
-                                &mut modification,
-                                &mut decoded,
-                            )
-                        })
-                        .await
-                        .with_context(|| format!("could not ingest record at {lsn}"))?;
+                        walingest
+                            .ingest_record(recdata.clone(), lsn, &mut modification, &mut decoded)
+                            .await
+                            .with_context(|| format!("could not ingest record at {lsn}"))?;
 
                         fail_point!("walreceiver-after-ingest");
 
