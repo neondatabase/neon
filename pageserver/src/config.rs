@@ -138,7 +138,6 @@ pub struct PageServerConf {
     pub auth_validation_public_key_path: Option<PathBuf>,
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
-    pub profiling: ProfilingConfig,
     pub default_tenant_conf: TenantConf,
 
     /// Storage broker endpoints to connect to.
@@ -164,25 +163,6 @@ pub struct PageServerConf {
 /// Hence, we resort to a global variable for now instead of passing the token from the
 /// startup code to the connection code through a dozen layers.
 pub static SAFEKEEPER_AUTH_TOKEN: OnceCell<Arc<String>> = OnceCell::new();
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProfilingConfig {
-    Disabled,
-    PageRequests,
-}
-
-impl FromStr for ProfilingConfig {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<ProfilingConfig, Self::Err> {
-        let result = match s {
-            "disabled"  => ProfilingConfig::Disabled,
-            "page_requests"  => ProfilingConfig::PageRequests,
-            _ => bail!("invalid value \"{s}\" for profiling option, valid values are \"disabled\" and \"page_requests\""),
-        };
-        Ok(result)
-    }
-}
 
 // use dedicated enum for builder to better indicate the intention
 // and avoid possible confusion with nested options
@@ -226,7 +206,6 @@ struct PageServerConfigBuilder {
 
     id: BuilderValue<NodeId>,
 
-    profiling: BuilderValue<ProfilingConfig>,
     broker_endpoint: BuilderValue<Uri>,
     broker_keepalive_interval: BuilderValue<Duration>,
 
@@ -262,7 +241,6 @@ impl Default for PageServerConfigBuilder {
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
             id: NotSet,
-            profiling: Set(ProfilingConfig::Disabled),
             broker_endpoint: Set(storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint")),
@@ -348,10 +326,6 @@ impl PageServerConfigBuilder {
         self.id = BuilderValue::Set(node_id)
     }
 
-    pub fn profiling(&mut self, profiling: ProfilingConfig) {
-        self.profiling = BuilderValue::Set(profiling)
-    }
-
     pub fn log_format(&mut self, log_format: LogFormat) {
         self.log_format = BuilderValue::Set(log_format)
     }
@@ -405,7 +379,6 @@ impl PageServerConfigBuilder {
                 .remote_storage_config
                 .ok_or(anyhow!("missing remote_storage_config"))?,
             id: self.id.ok_or(anyhow!("missing id"))?,
-            profiling: self.profiling.ok_or(anyhow!("missing profiling"))?,
             // TenantConf is handled separately
             default_tenant_conf: TenantConf::default(),
             broker_endpoint: self
@@ -588,7 +561,6 @@ impl PageServerConf {
                     t_conf = Self::parse_toml_tenant_conf(item)?;
                 }
                 "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
-                "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
                 "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
@@ -722,7 +694,6 @@ impl PageServerConf {
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
-            profiling: ProfilingConfig::Disabled,
             default_tenant_conf: TenantConf::default(),
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
             broker_keepalive_interval: Duration::from_secs(5000),
@@ -898,7 +869,6 @@ log_format = 'json'
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
-                profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
                 broker_keepalive_interval: humantime::parse_duration(
@@ -949,7 +919,6 @@ log_format = 'json'
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
-                profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
                 broker_keepalive_interval: Duration::from_secs(5),

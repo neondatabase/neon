@@ -9,8 +9,8 @@
 # In vscode, this setting is Rust-analyzer>Check On Save:Command
 
 
-# Not every feature is supported in macOS builds, e.g. `profiling`,
-# avoid running regular linting script that checks every feature.
+# Not every feature is supported in macOS builds. Avoid running regular linting
+# script that checks every feature.
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # no extra features to test currently, add more here when needed
     cargo clippy --locked --all --all-targets --features testing -- -A unknown_lints -D warnings

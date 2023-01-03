@@ -13,7 +13,7 @@ use tracing::*;
 use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, profiling, task_mgr,
+    http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
@@ -40,8 +40,6 @@ const FEATURES: &[&str] = &[
     "testing",
     #[cfg(feature = "fail/failpoints")]
     "fail/failpoints",
-    #[cfg(feature = "profiling")]
-    "profiling",
 ];
 
 fn version() -> String {
@@ -247,9 +245,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     // Install signal handlers
     let signals = signals::install_shutdown_handlers()?;
 
-    // Start profiler (if enabled)
-    let profiler_guard = profiling::init_profiler(conf);
-
     // Launch broker client
     WALRECEIVER_RUNTIME.block_on(pageserver::walreceiver::init_broker_client(conf))?;
 
@@ -372,7 +367,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 "Got {}. Terminating in immediate shutdown mode",
                 signal.name()
             );
-            profiling::exit_profiler(conf, &profiler_guard);
             std::process::exit(111);
         }
 
@@ -381,7 +375,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-            profiling::exit_profiler(conf, &profiler_guard);
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
             unreachable!()
         }

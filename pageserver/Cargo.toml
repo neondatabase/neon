@@ -10,8 +10,6 @@ default = []
 # which adds some runtime cost to run tests on outage conditions
 testing = ["fail/failpoints"]
 
-profiling = ["pprof"]
-
 [dependencies]
 amplify_num = { git = "https://github.com/hlinnaka/rust-amplify.git", branch = "unsigned-int-perf" }
 anyhow = { version = "1.0", features = ["backtrace"] }
@@ -40,7 +38,6 @@ pin-project-lite = "0.2.7"
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
-pprof = { git = "https://github.com/neondatabase/pprof-rs.git", branch = "wallclock-profiling", features = ["flamegraph"], optional = true }
 rand = "0.8.3"
 regex = "1.4.5"
 rstar = "0.9.3"
