@@ -1912,7 +1912,6 @@ class NeonPageserver(PgProtocol):
             ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
             ".*kill_and_wait_impl.*: wait successful.*",
             ".*Replication stream finished: db error: ERROR: Socket IO error: end streaming to Some.*",
-            ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
             # and streaming start
             ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
@@ -1939,6 +1938,8 @@ class NeonPageserver(PgProtocol):
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
+            ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
+            ".*query handler for 'pagestream.*failed: Connection reset by peer (os error 104).*",  # pageserver notices compute shut down
         ]
 
     def start(
