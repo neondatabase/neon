@@ -66,7 +66,7 @@ use crate::{is_temporary, task_mgr};
 
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
+use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LocalOrRemote};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -1002,7 +1002,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                layers.insert_historic(PersistentLayer::Image(Arc::new(layer)));
+                layers.insert_historic(layer);
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1033,7 +1033,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                layers.insert_historic(PersistentLayer::Delta(Arc::new(layer)));
+                layers.insert_historic(layer);
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1077,9 +1077,9 @@ impl Timeline {
     async fn create_remote_layers(
         &self,
         index_part: &IndexPart,
-        local_layers: HashMap<LayerFileName, PersistentLayer>,
+        local_layers: HashMap<LayerFileName, PersistentLayer<DeltaLayer, ImageLayer>>,
         up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashMap<LayerFileName, PersistentLayer>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, PersistentLayer<DeltaLayer, ImageLayer>>> {
         // Are we missing some files that are present in remote storage?
         // Create RemoteLayer instances for them.
         let mut local_only_layers = local_layers;
@@ -1161,10 +1161,7 @@ impl Timeline {
                         imgfilename,
                         &remote_layer_metadata,
                     );
-                    self.layers
-                        .write()
-                        .unwrap()
-                        .insert_historic(PersistentLayer::Remote(Arc::new(remote_layer)));
+                    self.layers.write().unwrap().insert_historic(remote_layer);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1186,10 +1183,7 @@ impl Timeline {
                         deltafilename,
                         &remote_layer_metadata,
                     );
-                    self.layers
-                        .write()
-                        .unwrap()
-                        .insert_historic(PersistentLayer::Remote(Arc::new(remote_layer)));
+                    self.layers.write().unwrap().insert_historic(remote_layer);
                 }
                 #[cfg(test)]
                 LayerFileName::Test(_) => unreachable!(),
@@ -1505,7 +1499,7 @@ trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
 }
 
-impl TraversalLayerExt for PersistentLayer {
+impl TraversalLayerExt for PersistentLayer<DeltaLayer, ImageLayer> {
     fn traversal_id(&self) -> TraversalId {
         match self.local_path() {
             Some(local_path) => {
@@ -1686,7 +1680,7 @@ impl Timeline {
 
                     if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                         // If it's a remote layer, download it and retry.
-                        if let PersistentLayer::Remote(remote_layer) = &layer {
+                        if let Some(remote_layer) = layer.as_remote_layer() {
                             // TODO: push a breadcrumb to 'traversal_path' to record the fact that
                             // we downloaded / would need to download this layer.
                             Arc::clone(remote_layer) // download happens outside the scope of `layers` guard object
@@ -2092,7 +2086,7 @@ impl Timeline {
         // Add it to the layer map
         {
             let mut layers = self.layers.write().unwrap();
-            layers.insert_historic(PersistentLayer::Delta(Arc::new(new_delta)));
+            layers.insert_historic(new_delta);
         }
 
         // update the timeline's physical size
@@ -2271,7 +2265,7 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            layers.insert_historic(PersistentLayer::Image(Arc::new(l)));
+            layers.insert_historic(l);
         }
         drop(layers);
         timer.stop_and_record();
@@ -2279,17 +2273,32 @@ impl Timeline {
         Ok(layer_paths_to_upload)
     }
 }
-#[derive(Default)]
-struct CompactLevel0Phase1Result {
+
+struct CompactLevel0Phase1Result<D>
+where
+    D: Layer,
+{
     new_layers: Vec<DeltaLayer>,
-    deltas_to_compact: Vec<PersistentLayer>,
+    deltas_to_compact: Vec<LocalOrRemote<D>>,
+}
+
+impl<D> Default for CompactLevel0Phase1Result<D>
+where
+    D: Layer,
+{
+    fn default() -> Self {
+        Self {
+            new_layers: Vec::default(),
+            deltas_to_compact: Vec::default(),
+        }
+    }
 }
 
 impl Timeline {
     async fn compact_level0_phase1(
         &self,
         target_file_size: u64,
-    ) -> anyhow::Result<CompactLevel0Phase1Result> {
+    ) -> anyhow::Result<CompactLevel0Phase1Result<DeltaLayer>> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
@@ -2587,7 +2596,7 @@ impl Timeline {
                 .add(metadata.len());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            layers.insert_historic(PersistentLayer::Delta(Arc::new(l)));
+            layers.insert_historic(l);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -2601,7 +2610,7 @@ impl Timeline {
             }
             layer_names_to_delete.push(l.filename());
             l.delete()?;
-            layers.remove_historic(l);
+            layers.remove_historic(PersistentLayer::Delta(l));
         }
         drop(layers);
 
@@ -3071,7 +3080,7 @@ impl Timeline {
                     let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     let mut layers = self_clone.layers.write().unwrap();
                     {
-                        layers.remove_historic(PersistentLayer::Remote(Arc::clone(&remote_layer)));
+                        layers.remove_historic(PersistentLayer::from(Arc::clone(&remote_layer)));
                     }
                     layers.insert_historic(new_layer);
                     drop(layers);
@@ -3164,13 +3173,10 @@ impl Timeline {
             let layers = self.layers.read().unwrap();
             layers
                 .iter_historic_layers()
-                .filter_map(|l| match l {
-                    PersistentLayer::Delta(_) => None,
-                    PersistentLayer::Image(_) => None,
-                    PersistentLayer::Remote(remote) => {
-                        let self_clone = Arc::clone(self);
-                        Some(self_clone.download_remote_layer(remote))
-                    }
+                .filter_map(|l| {
+                    let remote = Arc::clone(l.as_remote_layer()?);
+                    let self_clone = Arc::clone(self);
+                    Some(self_clone.download_remote_layer(remote))
                 })
                 .collect()
         };

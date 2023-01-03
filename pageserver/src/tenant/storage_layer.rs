@@ -8,7 +8,7 @@ mod remote_layer;
 
 use crate::repository::{Key, Value};
 use crate::walrecord::NeonWalRecord;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use std::fs;
 use std::ops::{Deref, Range};
@@ -83,7 +83,7 @@ pub enum ValueReconstructResult {
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
-pub trait Layer: Send + Sync {
+pub trait Layer: Send + Sync + 'static {
     fn get_tenant_id(&self) -> TenantId;
 
     /// Identify the timeline this layer belongs to
@@ -138,11 +138,178 @@ pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i
 /// Returned by [`Layer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 
-#[derive(Clone)]
-pub enum PersistentLayer {
-    Delta(Arc<DeltaLayer>),
-    Image(Arc<ImageLayer>),
+pub enum PersistentLayer<D, I> {
+    Delta(LocalOrRemote<D>),
+    Image(LocalOrRemote<I>),
+}
+
+impl<D, I> PartialEq for PersistentLayer<D, I>
+where
+    D: Layer,
+    I: Layer,
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Delta(l0), Self::Delta(r0)) => l0 == r0,
+            (Self::Image(l0), Self::Image(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
+}
+
+impl<D: Layer, I: Layer> Clone for PersistentLayer<D, I> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Delta(d) => Self::Delta(d.clone()),
+            Self::Image(i) => Self::Image(i.clone()),
+        }
+    }
+}
+
+pub enum LocalOrRemote<L> {
+    Local(Arc<L>),
     Remote(Arc<RemoteLayer>),
+}
+
+impl<L: Layer> LocalOrRemote<L> {
+    pub fn as_remote(&self) -> Option<&Arc<RemoteLayer>> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(remote_layer) => Some(remote_layer),
+        }
+    }
+}
+
+impl LocalOrRemote<DeltaLayer> {
+    pub fn filename(&self) -> LayerFileName {
+        match self {
+            Self::Local(local_delta_layer) => LayerFileName::Delta(local_delta_layer.layer_name()),
+            Self::Remote(remote_layer) => remote_layer.layer_name(),
+        }
+    }
+
+    pub fn local_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Local(local_delta_layer) => Some(local_delta_layer.path()),
+            Self::Remote(_) => None,
+        }
+    }
+
+    pub fn delete(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Local(local_delta_layer) => {
+                let path_to_delete = local_delta_layer.path();
+                fs::remove_file(&path_to_delete).with_context(|| {
+                    format!("Failed to remove delta layer file {path_to_delete:?}")
+                })?;
+                Ok(())
+            }
+            Self::Remote(_) => Ok(()),
+        }
+    }
+
+    pub fn file_size(&self) -> Option<u64> {
+        match self {
+            Self::Local(local_delta_layer) => Some(local_delta_layer.file_size),
+            Self::Remote(remote) => remote.layer_metadata.file_size(),
+        }
+    }
+
+    /// Iterate through all keys and values stored in the layer
+    pub fn iter(&self) -> anyhow::Result<LayerIter<'_>> {
+        match self {
+            Self::Local(local_delta_layer) => local_delta_layer.iter(),
+            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
+        }
+    }
+
+    /// Iterate through all keys stored in the layer. Returns key, lsn and value size
+    /// It is used only for compaction and so is currently implemented only for DeltaLayer
+    pub fn key_iter(&self) -> anyhow::Result<LayerKeyIter<'_>> {
+        match self {
+            Self::Local(local_delta_layer) => local_delta_layer.key_iter(),
+            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
+        }
+    }
+}
+
+impl LocalOrRemote<ImageLayer> {
+    pub fn filename(&self) -> LayerFileName {
+        match self {
+            Self::Local(local_image_layer) => LayerFileName::Image(local_image_layer.layer_name()),
+            Self::Remote(remote_layer) => remote_layer.layer_name(),
+        }
+    }
+
+    pub fn local_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Local(local_image_layer) => Some(local_image_layer.path()),
+            Self::Remote(_) => None,
+        }
+    }
+
+    pub fn delete(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Local(local_image_layer) => {
+                let path_to_delete = local_image_layer.path();
+                fs::remove_file(&path_to_delete).with_context(|| {
+                    format!("Failed to remove image layer file {path_to_delete:?}")
+                })?;
+                Ok(())
+            }
+            Self::Remote(_) => Ok(()),
+        }
+    }
+
+    pub fn file_size(&self) -> Option<u64> {
+        match self {
+            Self::Local(local_image_layer) => Some(local_image_layer.file_size),
+            Self::Remote(remote) => remote.layer_metadata.file_size(),
+        }
+    }
+}
+
+impl<L: Layer> Clone for LocalOrRemote<L> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Local(l) => Self::Local(Arc::clone(l)),
+            Self::Remote(r) => Self::Remote(Arc::clone(r)),
+        }
+    }
+}
+
+impl From<DeltaLayer> for PersistentLayer<DeltaLayer, ImageLayer> {
+    fn from(delta: DeltaLayer) -> Self {
+        Self::Delta(LocalOrRemote::Local(Arc::new(delta)))
+    }
+}
+
+impl From<ImageLayer> for PersistentLayer<DeltaLayer, ImageLayer> {
+    fn from(image: ImageLayer) -> Self {
+        Self::Image(LocalOrRemote::Local(Arc::new(image)))
+    }
+}
+
+impl From<RemoteLayer> for PersistentLayer<DeltaLayer, ImageLayer> {
+    fn from(remote: RemoteLayer) -> Self {
+        match remote.layer_name() {
+            LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(Arc::new(remote))),
+            LayerFileName::Delta(_) => Self::Image(LocalOrRemote::Remote(Arc::new(remote))),
+            #[cfg(test)]
+            LayerFileName::Test(_) => unimplemented!(),
+        }
+    }
+}
+
+impl From<Arc<RemoteLayer>> for PersistentLayer<DeltaLayer, ImageLayer> {
+    fn from(remote: Arc<RemoteLayer>) -> Self {
+        match remote.layer_name() {
+            LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(remote)),
+            LayerFileName::Delta(_) => Self::Image(LocalOrRemote::Remote(remote)),
+            #[cfg(test)]
+            LayerFileName::Test(_) => unimplemented!(),
+        }
+    }
 }
 
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
@@ -160,65 +327,29 @@ pub enum PersistentLayer {
 /// LSN
 ///
 
-impl PersistentLayer {
+impl PersistentLayer<DeltaLayer, ImageLayer> {
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
     pub fn filename(&self) -> LayerFileName {
         match self {
-            Self::Delta(delta) => delta.layer_name().into(),
-            Self::Image(image) => image.layer_name().into(),
-            Self::Remote(remote) => remote.layer_name(),
+            Self::Delta(delta) => delta.filename(),
+            Self::Image(image) => image.filename(),
         }
     }
 
-    // Path to the layer file in the local filesystem.
-    // `None` for `RemoteLayer`.
     pub fn local_path(&self) -> Option<PathBuf> {
         match self {
-            Self::Delta(delta) => Some(delta.path()),
-            Self::Image(image) => Some(image.path()),
-            Self::Remote(_remote) => None,
-        }
-    }
-
-    /// Iterate through all keys and values stored in the layer
-    pub fn iter(&self) -> anyhow::Result<LayerIter<'_>> {
-        match self {
-            Self::Delta(delta) => delta.iter(),
-            Self::Image(_image) => unimplemented!(),
-            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
-        }
-    }
-
-    /// Iterate through all keys stored in the layer. Returns key, lsn and value size
-    /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    pub fn key_iter(&self) -> anyhow::Result<LayerKeyIter<'_>> {
-        match self {
-            Self::Delta(delta) => delta.key_iter(),
-            Self::Image(_image) => panic!("Not implemented"),
-            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
+            Self::Delta(delta) => delta.local_path(),
+            Self::Image(image) => image.local_path(),
         }
     }
 
     /// Permanently remove this layer from disk.
     pub fn delete(&self) -> anyhow::Result<()> {
         match self {
-            Self::Delta(delta) => {
-                // delete underlying file
-                fs::remove_file(delta.path())?;
-                Ok(())
-            }
-            Self::Image(image) => {
-                // delete underlying file
-                fs::remove_file(image.path())?;
-                Ok(())
-            }
-            Self::Remote(_remote) => Ok(()),
+            Self::Delta(delta) => delta.delete(),
+            Self::Image(image) => image.delete(),
         }
-    }
-
-    pub fn is_remote_layer(&self) -> bool {
-        matches!(self, Self::Remote(_))
     }
 
     /// Returns None if the layer file size is not known.
@@ -227,32 +358,57 @@ impl PersistentLayer {
     /// current_physical_size is computed as the som of this value.
     pub fn file_size(&self) -> Option<u64> {
         match self {
-            Self::Delta(delta) => Some(delta.file_size),
-            Self::Image(image) => Some(image.file_size),
-            Self::Remote(remote) => remote.layer_metadata.file_size(),
+            Self::Delta(delta) => delta.file_size(),
+            Self::Image(image) => image.file_size(),
+        }
+    }
+
+    pub fn as_remote_layer(&self) -> Option<&Arc<RemoteLayer>> {
+        match self {
+            PersistentLayer::Delta(d) => d.as_remote(),
+            PersistentLayer::Image(i) => i.as_remote(),
         }
     }
 }
 
-impl PartialEq for PersistentLayer {
+impl<L> PartialEq for LocalOrRemote<L>
+where
+    L: Layer,
+{
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Delta(d0), Self::Delta(d1)) => Arc::ptr_eq(d0, d1),
-            (Self::Image(i0), Self::Image(i1)) => Arc::ptr_eq(i0, i1),
-            (Self::Remote(r0), Self::Remote(r1)) => Arc::ptr_eq(r0, r1),
+            (LocalOrRemote::Local(l0), LocalOrRemote::Local(l1)) => Arc::ptr_eq(l0, l1),
+            (LocalOrRemote::Remote(r0), LocalOrRemote::Remote(r1)) => Arc::ptr_eq(r0, r1),
             _ => false,
         }
     }
 }
 
-impl Deref for PersistentLayer {
+impl<L> Deref for LocalOrRemote<L>
+where
+    L: Layer,
+{
     type Target = dyn Layer;
 
     fn deref(&self) -> &Self::Target {
         match self {
-            Self::Delta(x) => x.as_ref(),
-            Self::Image(x) => x.as_ref(),
-            Self::Remote(x) => x.as_ref(),
+            Self::Local(l) => l.as_ref(),
+            Self::Remote(r) => r.as_ref(),
+        }
+    }
+}
+
+impl<D, I> Deref for PersistentLayer<D, I>
+where
+    D: Layer,
+    I: Layer,
+{
+    type Target = dyn Layer;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Delta(d) => d.deref(),
+            Self::Image(i) => i.deref(),
         }
     }
 }

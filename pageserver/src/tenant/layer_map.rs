@@ -26,12 +26,14 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use super::storage_layer::{InMemoryLayer, Layer, PersistentLayer};
+use super::storage_layer::{
+    DeltaLayer, ImageLayer, InMemoryLayer, Layer, LocalOrRemote, PersistentLayer,
+};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-pub struct LayerMap<L = PersistentLayer> {
+pub struct LayerMap<D = DeltaLayer, I = ImageLayer> {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
     // records. If it is None, 'next_open_layer_at' will be set instead, indicating
@@ -52,14 +54,14 @@ pub struct LayerMap<L = PersistentLayer> {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// All the historic layers are kept here
-    historic_layers: RTree<LayerRTreeObject<L>>,
+    historic_layers: RTree<LayerRTreeObject<PersistentLayer<D, I>>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<L>,
+    l0_delta_layers: Vec<LocalOrRemote<D>>,
 }
 
-impl<L> Default for LayerMap<L> {
+impl<D, I> Default for LayerMap<D, I> {
     fn default() -> Self {
         Self {
             open_layer: None,
@@ -75,6 +77,16 @@ struct LayerRTreeObject<L> {
     layer: L,
 
     envelope: AABB<[IntKey; 2]>,
+}
+
+impl<D, I> PartialEq for LayerRTreeObject<PersistentLayer<D, I>>
+where
+    D: Layer,
+    I: Layer,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.layer == other.layer
+    }
 }
 
 // Representation of Key as numeric type.
@@ -196,12 +208,6 @@ impl Num for IntKey {
     }
 }
 
-impl<L: PartialEq> PartialEq for LayerRTreeObject<L> {
-    fn eq(&self, other: &Self) -> bool {
-        self.layer == other.layer
-    }
-}
-
 impl<L> RTreeObject for LayerRTreeObject<L> {
     type Envelope = AABB<[IntKey; 2]>;
     fn envelope(&self) -> Self::Envelope {
@@ -237,9 +243,10 @@ pub struct SearchResult<L> {
     pub lsn_floor: Lsn,
 }
 
-impl<L> LayerMap<L>
+impl<D, I> LayerMap<D, I>
 where
-    L: Deref<Target = dyn Layer> + Clone + PartialEq,
+    D: Layer,
+    I: Layer,
 {
     ///
     /// Find the latest layer that covers the given 'key', with lsn <
@@ -255,9 +262,9 @@ where
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<PersistentLayer<D, I>>> {
         // Find the latest image layer that covers the given key
-        let mut latest_img: Option<L> = None;
+        let mut latest_img: Option<LocalOrRemote<I>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
         let envelope = AABB::from_corners(
             [IntKey::from(key.to_i128()), IntKey::from(0i128)],
@@ -274,24 +281,28 @@ where
             if l.is_incremental() {
                 continue;
             }
-            assert!(l.get_key_range().contains(&key));
-            let img_lsn = l.get_lsn_range().start;
-            assert!(img_lsn < end_lsn);
-            if Lsn(img_lsn.0 + 1) == end_lsn {
-                // found exact match
-                return Some(SearchResult {
-                    layer: l.clone(),
-                    lsn_floor: img_lsn,
-                });
-            }
-            if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
-                latest_img = Some(l.clone());
-                latest_img_lsn = Some(img_lsn);
+            if let PersistentLayer::Image(image_layer) = l {
+                assert!(image_layer.get_key_range().contains(&key));
+                let img_lsn = image_layer.get_lsn_range().start;
+                assert!(img_lsn < end_lsn);
+                if Lsn(img_lsn.0 + 1) == end_lsn {
+                    // found exact match
+                    return Some(SearchResult {
+                        layer: l.clone(),
+                        lsn_floor: img_lsn,
+                    });
+                }
+                if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
+                    latest_img = Some(image_layer.clone());
+                    latest_img_lsn = Some(img_lsn);
+                }
+            } else {
+                continue;
             }
         }
 
         // Search the delta layers
-        let mut latest_delta: Option<L> = None;
+        let mut latest_delta: Option<LocalOrRemote<D>> = None;
         for e in self
             .historic_layers
             .locate_in_envelope_intersecting(&envelope)
@@ -300,36 +311,40 @@ where
             if !l.is_incremental() {
                 continue;
             }
-            assert!(l.get_key_range().contains(&key));
-            if l.get_lsn_range().start >= end_lsn {
-                info!(
-                    "Candidate delta layer {}..{} is too new for lsn {}",
-                    l.get_lsn_range().start,
-                    l.get_lsn_range().end,
-                    end_lsn
-                );
-            }
-            assert!(l.get_lsn_range().start < end_lsn);
-            if l.get_lsn_range().end >= end_lsn {
-                // this layer contains the requested point in the key/lsn space.
-                // No need to search any further
-                trace!(
-                    "found layer {} for request on {key} at {end_lsn}",
-                    l.short_id(),
-                );
-                latest_delta.replace(l.clone());
-                break;
-            }
-            if l.get_lsn_range().end > latest_img_lsn.unwrap_or(Lsn(0)) {
-                // this layer's end LSN is smaller than the requested point. If there's
-                // nothing newer, this is what we need to return. Remember this.
-                if let Some(old_candidate) = &latest_delta {
-                    if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
-                        latest_delta.replace(l.clone());
-                    }
-                } else {
-                    latest_delta.replace(l.clone());
+            if let PersistentLayer::Delta(delta_layer) = l {
+                assert!(delta_layer.get_key_range().contains(&key));
+                if delta_layer.get_lsn_range().start >= end_lsn {
+                    info!(
+                        "Candidate delta layer {}..{} is too new for lsn {}",
+                        delta_layer.get_lsn_range().start,
+                        delta_layer.get_lsn_range().end,
+                        end_lsn
+                    );
                 }
+                assert!(delta_layer.get_lsn_range().start < end_lsn);
+                if delta_layer.get_lsn_range().end >= end_lsn {
+                    // this layer contains the requested point in the key/lsn space.
+                    // No need to search any further
+                    trace!(
+                        "found layer {} for request on {key} at {end_lsn}",
+                        delta_layer.short_id(),
+                    );
+                    latest_delta.replace(delta_layer.clone());
+                    break;
+                }
+                if delta_layer.get_lsn_range().end > latest_img_lsn.unwrap_or(Lsn(0)) {
+                    // this layer's end LSN is smaller than the requested point. If there's
+                    // nothing newer, this is what we need to return. Remember this.
+                    if let Some(old_candidate) = &latest_delta {
+                        if delta_layer.get_lsn_range().end > old_candidate.get_lsn_range().end {
+                            latest_delta.replace(delta_layer.clone());
+                        }
+                    } else {
+                        latest_delta.replace(delta_layer.clone());
+                    }
+                }
+            } else {
+                continue;
             }
         }
         if let Some(l) = latest_delta {
@@ -343,13 +358,13 @@ where
             );
             Some(SearchResult {
                 lsn_floor,
-                layer: l,
+                layer: PersistentLayer::Delta(l),
             })
         } else if let Some(l) = latest_img {
             trace!("found img layer and no deltas for request on {key} at {end_lsn}");
             Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
-                layer: l,
+                layer: PersistentLayer::Image(l),
             })
         } else {
             trace!("no layer found for request on {key} at {end_lsn}");
@@ -360,10 +375,14 @@ where
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: L) {
-        if layer.get_key_range() == (Key::MIN..Key::MAX) {
-            self.l0_delta_layers.push(layer.clone());
+    pub fn insert_historic(&mut self, layer: impl Into<PersistentLayer<D, I>>) {
+        let layer = layer.into();
+        if let PersistentLayer::Delta(delta_layer) = &layer {
+            if layer.get_key_range() == (Key::MIN..Key::MAX) {
+                self.l0_delta_layers.push(delta_layer.clone());
+            }
         }
+
         self.historic_layers.insert(LayerRTreeObject::new(layer));
         NUM_ONDISK_LAYERS.inc();
     }
@@ -373,13 +392,15 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer_to_remove: L) {
-        if layer_to_remove.get_key_range() == (Key::MIN..Key::MAX) {
-            let len_before = self.l0_delta_layers.len();
+    pub fn remove_historic(&mut self, layer_to_remove: PersistentLayer<D, I>) {
+        if let PersistentLayer::Delta(delta_image_to_remove) = &layer_to_remove {
+            if layer_to_remove.get_key_range() == (Key::MIN..Key::MAX) {
+                let len_before = self.l0_delta_layers.len();
 
-            self.l0_delta_layers
-                .retain(|other| other != &layer_to_remove);
-            assert_eq!(self.l0_delta_layers.len(), len_before - 1);
+                self.l0_delta_layers
+                    .retain(|other| other != delta_image_to_remove);
+                assert_eq!(self.l0_delta_layers.len(), len_before - 1);
+            }
         }
         assert!(self
             .historic_layers
@@ -437,13 +458,13 @@ where
         }
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = L> {
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = PersistentLayer<D, I>> {
         self.historic_layers.iter().map(|e| e.layer.clone())
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
-    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<L> {
+    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<LocalOrRemote<I>> {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         let envelope = AABB::from_corners(
@@ -458,16 +479,19 @@ where
             if l.is_incremental() {
                 continue;
             }
-
-            assert!(l.get_key_range().contains(&key));
-            let this_lsn = l.get_lsn_range().start;
-            assert!(this_lsn <= lsn);
-            if this_lsn < candidate_lsn {
-                // our previous candidate was better
+            if let PersistentLayer::Image(image_layer) = l {
+                assert!(image_layer.get_key_range().contains(&key));
+                let this_lsn = image_layer.get_lsn_range().start;
+                assert!(this_lsn <= lsn);
+                if this_lsn < candidate_lsn {
+                    // our previous candidate was better
+                    continue;
+                }
+                candidate_lsn = this_lsn;
+                candidate = Some(image_layer.clone());
+            } else {
                 continue;
             }
-            candidate_lsn = this_lsn;
-            candidate = Some(l.clone());
         }
 
         candidate
@@ -485,7 +509,7 @@ where
         &self,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<Vec<(Range<Key>, Option<L>)>> {
+    ) -> Result<Vec<(Range<Key>, Option<LocalOrRemote<I>>)>> {
         let mut points = vec![key_range.start];
         let envelope = AABB::from_corners(
             [IntKey::from(key_range.start.to_i128()), IntKey::from(0)],
@@ -570,7 +594,7 @@ where
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<L>> {
+    pub fn get_level0_deltas(&self) -> Result<Vec<LocalOrRemote<D>>> {
         Ok(self.l0_delta_layers.clone())
     }
 
