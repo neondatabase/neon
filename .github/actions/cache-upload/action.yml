@@ -15,10 +15,6 @@ inputs:
     description: "Allow force upload existing cache"
     default: false
     required: false
-  workdir:
-    description: "Specify working directory for the action"
-    default: "."
-    required: false
 
 runs:
   using: "composite"
