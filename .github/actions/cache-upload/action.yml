@@ -13,7 +13,7 @@ inputs:
     required: false
   override:
     description: "Allow force upload existing cache"
-    default: false
+    default: true
     required: false
 
 runs:
