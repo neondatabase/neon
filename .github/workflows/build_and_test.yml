@@ -142,7 +142,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ release ]
+        build_type: [ debug, release ]
 
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
