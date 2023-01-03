@@ -298,8 +298,8 @@ impl RemoteTimelineClient {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> anyhow::Result<RemoteTimelineClient> {
-        Ok(RemoteTimelineClient {
+    ) -> RemoteTimelineClient {
+        RemoteTimelineClient {
             conf,
             runtime: &BACKGROUND_RUNTIME,
             tenant_id,
@@ -307,7 +307,7 @@ impl RemoteTimelineClient {
             storage_impl: remote_storage,
             upload_queue: Mutex::new(UploadQueue::Uninitialized),
             metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
-        })
+        }
     }
 
     /// Initialize the upload queue for a remote storage that already received

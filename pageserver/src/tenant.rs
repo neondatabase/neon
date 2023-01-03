@@ -13,11 +13,13 @@
 
 use anyhow::{bail, Context};
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::Stream;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 
@@ -639,26 +641,62 @@ impl Tenant {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
-        let remote_timelines = remote_timeline_client::list_remote_timelines(
+        let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
             remote_storage,
             self.conf,
             self.tenant_id,
         )
         .await?;
 
-        info!("found {} timelines", remote_timelines.len());
+        info!("found {} timelines", remote_timeline_ids.len());
 
-        let mut timeline_ancestors: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-        let mut index_parts: HashMap<TimelineId, IndexPart> = HashMap::new();
-        for (timeline_id, index_part) in remote_timelines {
-            let remote_metadata = index_part.parse_metadata().with_context(|| {
-                format!(
-                    "Failed to parse metadata file from remote storage for tenant {} timeline {}",
-                    self.tenant_id, timeline_id
-                )
-            })?;
+        // Download & parse index parts
+        let mut part_downloads = JoinSet::new();
+        for timeline_id in remote_timeline_ids {
+            let client = RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            );
+            part_downloads.spawn(
+                async move {
+                    debug!("starting index part download");
+
+                    let index_part = client
+                        .download_index_file()
+                        .await
+                        .context("download index file")?;
+
+                    let remote_metadata = index_part.parse_metadata().context("parse metadata")?;
+
+                    debug!("finished index part download");
+
+                    Result::<_, anyhow::Error>::Ok((
+                        timeline_id,
+                        client,
+                        index_part,
+                        remote_metadata,
+                    ))
+                }
+                .map(move |res| {
+                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
+                })
+                .instrument(info_span!("download_index_part", timeline=%timeline_id)),
+            );
+        }
+        // Wait for all the download tasks to complete & collect results.
+        let mut remote_clients = HashMap::new();
+        let mut index_parts = HashMap::new();
+        let mut timeline_ancestors = HashMap::new();
+        while let Some(result) = part_downloads.join_next().await {
+            // NB: we already added timeline_id as context to the error
+            let result: Result<_, anyhow::Error> = result.context("joinset task join")?;
+            let (timeline_id, client, index_part, remote_metadata) = result?;
+            debug!("successfully downloaded index part for timeline {timeline_id}");
             timeline_ancestors.insert(timeline_id, remote_metadata);
             index_parts.insert(timeline_id, index_part);
+            remote_clients.insert(timeline_id, client);
         }
 
         // For every timeline, download the metadata file, scan the local directory,
@@ -671,7 +709,7 @@ impl Tenant {
                 timeline_id,
                 index_parts.remove(&timeline_id).unwrap(),
                 remote_metadata,
-                remote_storage.clone(),
+                remote_clients.remove(&timeline_id).unwrap(),
             )
             .await
             .with_context(|| {
@@ -714,21 +752,18 @@ impl Tenant {
         Ok(size)
     }
 
-    #[instrument(skip(self, index_part, remote_metadata, remote_storage), fields(timeline_id=%timeline_id))]
+    #[instrument(skip_all, fields(timeline_id=%timeline_id))]
     async fn load_remote_timeline(
         &self,
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
-        remote_storage: GenericRemoteStorage,
+        remote_client: RemoteTimelineClient,
     ) -> anyhow::Result<()> {
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
             .context("Failed to create new timeline directory")?;
-
-        let remote_client =
-            RemoteTimelineClient::new(remote_storage, self.conf, self.tenant_id, timeline_id)?;
 
         let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
             let timelines = self.timelines.lock().unwrap();
@@ -986,18 +1021,14 @@ impl Tenant {
             None
         };
 
-        let remote_client = self
-            .remote_storage
-            .as_ref()
-            .map(|remote_storage| {
-                RemoteTimelineClient::new(
-                    remote_storage.clone(),
-                    self.conf,
-                    self.tenant_id,
-                    timeline_id,
-                )
-            })
-            .transpose()?;
+        let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
+            RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            )
+        });
 
         let remote_startup_data = match &remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
@@ -2191,7 +2222,7 @@ impl Tenant {
                 self.conf,
                 tenant_id,
                 new_timeline_id,
-            )?;
+            );
             remote_client.init_upload_queue_for_empty_remote(&new_metadata)?;
             Some(remote_client)
         } else {
