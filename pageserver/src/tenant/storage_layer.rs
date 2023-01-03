@@ -177,7 +177,7 @@ impl PersistentLayer {
         match self {
             Self::Delta(delta) => Some(delta.path()),
             Self::Image(image) => Some(image.path()),
-            Self::Remote(_remote) => None, // TODO kb is this method needed?
+            Self::Remote(_remote) => None,
         }
     }
 
@@ -186,7 +186,7 @@ impl PersistentLayer {
         match self {
             Self::Delta(delta) => delta.iter(),
             Self::Image(_image) => unimplemented!(),
-            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"), // TODO kb is this method needed?
+            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
         }
     }
 
@@ -196,7 +196,7 @@ impl PersistentLayer {
         match self {
             Self::Delta(delta) => delta.key_iter(),
             Self::Image(_image) => panic!("Not implemented"),
-            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"), // TODO kb is this method needed?
+            Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
         }
     }
 
@@ -213,7 +213,7 @@ impl PersistentLayer {
                 fs::remove_file(image.path())?;
                 Ok(())
             }
-            Self::Remote(_remote) => Ok(()), // TODO kb is this method needed?
+            Self::Remote(_remote) => Ok(()),
         }
     }
 
@@ -229,7 +229,7 @@ impl PersistentLayer {
         match self {
             Self::Delta(delta) => Some(delta.file_size),
             Self::Image(image) => Some(image.file_size),
-            Self::Remote(remote) => remote.layer_metadata.file_size(), // TODO kb is this method needed?
+            Self::Remote(remote) => remote.layer_metadata.file_size(),
         }
     }
 }
