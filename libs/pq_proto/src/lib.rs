@@ -199,7 +199,7 @@ macro_rules! retry_read {
 pub enum ConnectionError {
     /// IO error during writing to or reading from the connection socket.
     #[error("Socket IO error: {0}")]
-    Io(std::io::Error),
+    Socket(std::io::Error),
     /// Invalid packet was received from client
     #[error("Protocol error: {0}")]
     Protocol(String),
@@ -217,7 +217,7 @@ impl From<anyhow::Error> for ConnectionError {
 impl ConnectionError {
     pub fn into_io_error(self) -> io::Error {
         match self {
-            ConnectionError::Io(io) => io,
+            ConnectionError::Socket(io) => io,
             other => io::Error::new(io::ErrorKind::Other, other.to_string()),
         }
     }
@@ -269,12 +269,12 @@ impl FeMessage {
             let tag = match retry_read!(stream.read_u8().await) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(ConnectionError::Io(e)),
+                Err(e) => return Err(ConnectionError::Socket(e)),
             };
 
             // The message length includes itself, so it better be at least 4.
             let len = retry_read!(stream.read_u32().await)
-                .map_err(ConnectionError::Io)?
+                .map_err(ConnectionError::Socket)?
                 .checked_sub(4)
                 .ok_or_else(|| ConnectionError::Protocol("invalid message length".to_string()))?;
 
@@ -283,7 +283,7 @@ impl FeMessage {
                 stream
                     .read_exact(&mut buffer)
                     .await
-                    .map_err(ConnectionError::Io)?;
+                    .map_err(ConnectionError::Socket)?;
                 Bytes::from(buffer)
             };
 
@@ -343,7 +343,7 @@ impl FeStartupPacket {
             let len = match retry_read!(stream.read_u32().await) {
                 Ok(len) => len as usize,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(ConnectionError::Io(e)),
+                Err(e) => return Err(ConnectionError::Socket(e)),
             };
 
             #[allow(clippy::manual_range_contains)]
@@ -353,7 +353,8 @@ impl FeStartupPacket {
                 )));
             }
 
-            let request_code = retry_read!(stream.read_u32().await).map_err(ConnectionError::Io)?;
+            let request_code =
+                retry_read!(stream.read_u32().await).map_err(ConnectionError::Socket)?;
 
             // the rest of startup packet are params
             let params_len = len - 8;
@@ -361,7 +362,7 @@ impl FeStartupPacket {
             stream
                 .read_exact(params_bytes.as_mut())
                 .await
-                .map_err(ConnectionError::Io)?;
+                .map_err(ConnectionError::Socket)?;
 
             // Parse params depending on request code
             let req_hi = request_code >> 16;
@@ -375,8 +376,8 @@ impl FeStartupPacket {
                     }
                     let mut cursor = Cursor::new(params_bytes);
                     FeStartupPacket::CancelRequest(CancelKeyData {
-                        backend_pid: cursor.read_i32().await.map_err(ConnectionError::Io)?,
-                        cancel_key: cursor.read_i32().await.map_err(ConnectionError::Io)?,
+                        backend_pid: cursor.read_i32().await.map_err(ConnectionError::Socket)?,
+                        cancel_key: cursor.read_i32().await.map_err(ConnectionError::Socket)?,
                     })
                 }
                 (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => {

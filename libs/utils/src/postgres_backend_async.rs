@@ -37,7 +37,7 @@ pub enum QueryError {
 
 impl From<io::Error> for QueryError {
     fn from(e: io::Error) -> Self {
-        Self::Disconnected(ConnectionError::Io(e))
+        Self::Disconnected(ConnectionError::Socket(e))
     }
 }
 
@@ -620,7 +620,7 @@ pub fn short_error(e: &QueryError) -> String {
 
 pub(super) fn log_query_error(query: &str, e: &QueryError) {
     match e {
-        QueryError::Disconnected(ConnectionError::Io(io_error)) => {
+        QueryError::Disconnected(ConnectionError::Socket(io_error)) => {
             if is_expected_io_error(io_error) {
                 info!("query handler for '{query}' failed with expected io error: {io_error}");
             } else {

@@ -402,6 +402,16 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
     }
 }
 
+/// We don't want to report connectivity problems as real errors towards connection manager because
+/// 1. they happen frequently enough to make server logs hard to read and
+/// 2. the connection manager can retry other safekeeper.
+///
+/// If this function returns `Ok(pg_error)`, it's such an error.
+/// The caller should log it at info level and then report to connection manager that we're done handling this connection.
+/// Connection manager will then handle reconnections.
+///
+/// If this function returns an `Err()`, the caller can bubble it up using `?`.
+/// The connection manager will log the error at ERROR level.
 fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres::Error> {
     if pg_error.is_closed()
         || pg_error

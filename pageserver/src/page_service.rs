@@ -78,7 +78,7 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::Sync => continue,
                         FeMessage::Terminate => {
                             let msg = "client terminated connection with Terminate message during COPY";
-                            let query_error_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                            let query_error_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
                             pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error_error.pg_error_code())))?;
                             Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                             break;
@@ -95,12 +95,12 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 }
                 Ok(None) => {
                     let msg = "client closed connection during COPY";
-                    let query_error_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                    let query_error_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
                     pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error_error.pg_error_code())))?;
                     pgb.flush().await?;
                     Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                 }
-                Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
+                Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
                     Err(io_error)?;
                 }
                 Err(other) => {
@@ -202,7 +202,7 @@ async fn page_service_conn_main(
             // we've been requested to shut down
             Ok(())
         }
-        Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
+        Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
             // `ConnectionReset` error happens when the Postgres client closes the connection.
             // As this disconnection happens quite often and is expected,
             // we decided to downgrade the logging level to `INFO`.
