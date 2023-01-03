@@ -13,5 +13,6 @@ rand = "0.8.3"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.17", features = ["macros"] }
 tracing = "0.1"
+thiserror = "1.0"
 
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

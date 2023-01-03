@@ -1,6 +1,7 @@
 //! Actual Postgres connection handler to stream WAL to the server.
 
 use std::{
+    error::Error,
     str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -11,7 +12,7 @@ use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
-use postgres::{SimpleQueryMessage, SimpleQueryRow};
+use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::v14::xlog_utils::normalize_lsn;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_protocol::message::backend::ReplicationMessage;
@@ -32,7 +33,7 @@ use crate::{
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
-use utils::lsn::Lsn;
+use utils::{lsn::Lsn, postgres_backend_async::is_expected_io_error};
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
@@ -68,10 +69,17 @@ pub async fn handle_walreceiver_connection(
         let mut config = wal_source_connconf.to_tokio_postgres_config();
         config.application_name("pageserver");
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
-        time::timeout(connect_timeout, config.connect(postgres::NoTls))
-            .await
-            .context("Timed out while waiting for walreceiver connection to open")?
-            .context("Failed to open walreceiver connection")?
+        match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
+            Ok(Ok(client_and_conn)) => client_and_conn,
+            Ok(Err(conn_err)) => {
+                let expected_error = ignore_expected_errors(conn_err)?;
+                info!("DB connection stream finished: {expected_error}");
+                return Ok(());
+            }
+            Err(elapsed) => anyhow::bail!(
+                "Timed out while waiting {elapsed} for walreceiver connection to open"
+            ),
+        }
     };
 
     info!("connected!");
@@ -103,10 +111,8 @@ pub async fn handle_walreceiver_connection(
                 connection_result = connection => match connection_result{
                     Ok(()) => info!("Walreceiver db connection closed"),
                     Err(connection_error) => {
-                        if connection_error.is_closed() {
-                            info!("Connection closed regularly: {connection_error}")
-                        } else {
-                            warn!("Connection aborted: {connection_error}")
+                        if let Err(e) = ignore_expected_errors(connection_error) {
+                            warn!("Connection aborted: {e:#}")
                         }
                     }
                 },
@@ -187,14 +193,9 @@ pub async fn handle_walreceiver_connection(
         let replication_message = match replication_message {
             Ok(message) => message,
             Err(replication_error) => {
-                if replication_error.is_closed() {
-                    info!("Replication stream got closed");
-                    return Ok(());
-                } else {
-                    return Err(
-                        anyhow::Error::new(replication_error).context("replication stream error")
-                    );
-                }
+                let expected_error = ignore_expected_errors(replication_error)?;
+                info!("Replication stream finished: {expected_error}");
+                return Ok(());
             }
         };
 
@@ -399,4 +400,33 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
     } else {
         Err(IdentifyError.into())
     }
+}
+
+/// We don't want to report connectivity problems as real errors towards connection manager because
+/// 1. they happen frequently enough to make server logs hard to read and
+/// 2. the connection manager can retry other safekeeper.
+///
+/// If this function returns `Ok(pg_error)`, it's such an error.
+/// The caller should log it at info level and then report to connection manager that we're done handling this connection.
+/// Connection manager will then handle reconnections.
+///
+/// If this function returns an `Err()`, the caller can bubble it up using `?`.
+/// The connection manager will log the error at ERROR level.
+fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres::Error> {
+    if pg_error.is_closed()
+        || pg_error
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .map(is_expected_io_error)
+            .unwrap_or(false)
+    {
+        return Ok(pg_error);
+    } else if let Some(db_error) = pg_error.as_db_error() {
+        if db_error.code() == &SqlState::CONNECTION_FAILURE
+            && db_error.message().contains("end streaming")
+        {
+            return Ok(pg_error);
+        }
+    }
+    Err(pg_error).context("connection error")
 }

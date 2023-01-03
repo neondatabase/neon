@@ -1903,13 +1903,15 @@ class NeonPageserver(PgProtocol):
             ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
             ".*Shutdown task error: walreceiver connection handling failure.*",
             ".*wal_connection_manager.*tcp connect error: Connection refused.*",
-            ".*query handler for .* failed: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Broken pipe.*",
-            ".*Connection aborted: error communicating with the server: Broken pipe.*",
-            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
-            ".*Connection aborted: error communicating with the server: Connection reset by peer.*",
+            ".*query handler for .* failed: Socket IO error: Connection reset by peer.*",
+            ".*serving compute connection task.*exited with error: Postgres connection error.*",
+            ".*serving compute connection task.*exited with error: Connection reset by peer.*",
+            ".*serving compute connection task.*exited with error: Postgres query error.*",
+            ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",
+            ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
+            ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*end streaming to Some.*",
+            ".*Replication stream finished: db error: ERROR: Socket IO error: end streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
             # and streaming start

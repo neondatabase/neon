@@ -2502,6 +2502,7 @@ dependencies = [
  "postgres-protocol",
  "rand",
  "serde",
+ "thiserror",
  "tokio",
  "tracing",
  "workspace_hack",

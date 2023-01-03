@@ -3,8 +3,9 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
+use crate::postgres_backend_async::{log_query_error, short_error, QueryError};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
 use serde::{Deserialize, Serialize};
@@ -21,20 +22,32 @@ pub trait Handler {
     /// postgres_backend will issue ReadyForQuery after calling this (this
     /// might be not what we want after CopyData streaming, but currently we don't
     /// care).
-    fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()>;
+    fn process_query(
+        &mut self,
+        pgb: &mut PostgresBackend,
+        query_string: &str,
+    ) -> Result<(), QueryError>;
 
     /// Called on startup packet receival, allows to process params.
     ///
     /// If Ok(false) is returned postgres_backend will skip auth -- that is needed for new users
     /// creation is the proxy code. That is quite hacky and ad-hoc solution, may be we could allow
     /// to override whole init logic in implementations.
-    fn startup(&mut self, _pgb: &mut PostgresBackend, _sm: &FeStartupPacket) -> Result<()> {
+    fn startup(
+        &mut self,
+        _pgb: &mut PostgresBackend,
+        _sm: &FeStartupPacket,
+    ) -> Result<(), QueryError> {
         Ok(())
     }
 
     /// Check auth jwt
-    fn check_auth_jwt(&mut self, _pgb: &mut PostgresBackend, _jwt_response: &[u8]) -> Result<()> {
-        bail!("JWT auth failed")
+    fn check_auth_jwt(
+        &mut self,
+        _pgb: &mut PostgresBackend,
+        _jwt_response: &[u8],
+    ) -> Result<(), QueryError> {
+        Err(QueryError::Other(anyhow::anyhow!("JWT auth failed")))
     }
 
     fn is_shutdown_requested(&self) -> bool {
@@ -66,7 +79,7 @@ impl FromStr for AuthType {
         match s {
             "Trust" => Ok(Self::Trust),
             "NeonJWT" => Ok(Self::NeonJWT),
-            _ => bail!("invalid value \"{s}\" for auth type"),
+            _ => anyhow::bail!("invalid value \"{s}\" for auth type"),
         }
     }
 }
@@ -154,7 +167,7 @@ pub fn is_socket_read_timed_out(error: &anyhow::Error) -> bool {
 }
 
 // Cast a byte slice to a string slice, dropping null terminator if there's one.
-fn cstr_to_str(bytes: &[u8]) -> Result<&str> {
+fn cstr_to_str(bytes: &[u8]) -> anyhow::Result<&str> {
     let without_null = bytes.strip_suffix(&[0]).unwrap_or(bytes);
     std::str::from_utf8(without_null).map_err(|e| e.into())
 }
@@ -188,10 +201,10 @@ impl PostgresBackend {
     }
 
     /// Get direct reference (into the Option) to the read stream.
-    fn get_stream_in(&mut self) -> Result<&mut BidiStream> {
+    fn get_stream_in(&mut self) -> anyhow::Result<&mut BidiStream> {
         match &mut self.stream {
             Some(Stream::Bidirectional(stream)) => Ok(stream),
-            _ => bail!("reader taken"),
+            _ => anyhow::bail!("reader taken"),
         }
     }
 
@@ -215,7 +228,7 @@ impl PostgresBackend {
     }
 
     /// Read full message or return None if connection is closed.
-    pub fn read_message(&mut self) -> Result<Option<FeMessage>> {
+    pub fn read_message(&mut self) -> Result<Option<FeMessage>, QueryError> {
         let (state, stream) = (self.state, self.get_stream_in()?);
 
         use ProtoState::*;
@@ -223,6 +236,7 @@ impl PostgresBackend {
             Initialization | Encrypted => FeStartupPacket::read(stream),
             Authentication | Established => FeMessage::read(stream),
         }
+        .map_err(QueryError::from)
     }
 
     /// Write message into internal output buffer.
@@ -246,7 +260,7 @@ impl PostgresBackend {
     }
 
     // Wrapper for run_message_loop() that shuts down socket when we are done
-    pub fn run(mut self, handler: &mut impl Handler) -> Result<()> {
+    pub fn run(mut self, handler: &mut impl Handler) -> Result<(), QueryError> {
         let ret = self.run_message_loop(handler);
         if let Some(stream) = self.stream.as_mut() {
             let _ = stream.shutdown(Shutdown::Both);
@@ -254,7 +268,7 @@ impl PostgresBackend {
         ret
     }
 
-    fn run_message_loop(&mut self, handler: &mut impl Handler) -> Result<()> {
+    fn run_message_loop(&mut self, handler: &mut impl Handler) -> Result<(), QueryError> {
         trace!("postgres backend to {:?} started", self.peer_addr);
 
         let mut unnamed_query_string = Bytes::new();
@@ -263,7 +277,7 @@ impl PostgresBackend {
             match self.read_message() {
                 Ok(message) => {
                     if let Some(msg) = message {
-                        trace!("got message {:?}", msg);
+                        trace!("got message {msg:?}");
 
                         match self.process_message(handler, msg, &mut unnamed_query_string)? {
                             ProcessMsgResult::Continue => continue,
@@ -274,10 +288,12 @@ impl PostgresBackend {
                     }
                 }
                 Err(e) => {
-                    // If it is a timeout error, continue the loop
-                    if !is_socket_read_timed_out(&e) {
-                        return Err(e);
+                    if let QueryError::Other(e) = &e {
+                        if is_socket_read_timed_out(e) {
+                            continue;
+                        }
                     }
+                    return Err(e);
                 }
             }
         }
@@ -295,7 +311,7 @@ impl PostgresBackend {
             }
             stream => {
                 self.stream = stream;
-                bail!("can't start TLs without bidi stream");
+                anyhow::bail!("can't start TLs without bidi stream");
             }
         }
     }
@@ -305,17 +321,16 @@ impl PostgresBackend {
         handler: &mut impl Handler,
         msg: FeMessage,
         unnamed_query_string: &mut Bytes,
-    ) -> Result<ProcessMsgResult> {
+    ) -> Result<ProcessMsgResult, QueryError> {
         // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
         // TODO: change that to proper top-level match of protocol state with separate message handling for each state
-        if self.state < ProtoState::Established {
-            ensure!(
-                matches!(
-                    msg,
-                    FeMessage::PasswordMessage(_) | FeMessage::StartupPacket(_)
-                ),
-                "protocol violation"
-            );
+        if self.state < ProtoState::Established
+            && !matches!(
+                msg,
+                FeMessage::PasswordMessage(_) | FeMessage::StartupPacket(_)
+            )
+        {
+            return Err(QueryError::Other(anyhow::anyhow!("protocol violation")));
         }
 
         let have_tls = self.tls_config.is_some();
@@ -339,8 +354,13 @@ impl PostgresBackend {
                     }
                     FeStartupPacket::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
-                            self.write_message(&BeMessage::ErrorResponse("must connect with TLS"))?;
-                            bail!("client did not connect with TLS");
+                            self.write_message(&BeMessage::ErrorResponse(
+                                "must connect with TLS",
+                                None,
+                            ))?;
+                            return Err(QueryError::Other(anyhow::anyhow!(
+                                "client did not connect with TLS"
+                            )));
                         }
 
                         // NB: startup() may change self.auth_type -- we are using that in proxy code
@@ -379,8 +399,11 @@ impl PostgresBackend {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
-                            self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
-                            bail!("auth failed: {}", e);
+                            self.write_message(&BeMessage::ErrorResponse(
+                                &e.to_string(),
+                                Some(e.pg_error_code()),
+                            ))?;
+                            return Err(e);
                         }
                     }
                 }
@@ -394,33 +417,14 @@ impl PostgresBackend {
                 // remove null terminator
                 let query_string = cstr_to_str(&body)?;
 
-                trace!("got query {:?}", query_string);
-                // xxx distinguish fatal and recoverable errors?
+                trace!("got query {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string) {
-                    // ":?" uses the alternate formatting style, which makes anyhow display the
-                    // full cause of the error, not just the top-level context + its trace.
-                    // We don't want to send that in the ErrorResponse though,
-                    // because it's not relevant to the compute node logs.
-                    //
-                    // We also don't want to log full stacktrace when the error is primitive,
-                    // such as usual connection closed.
-                    let short_error = format!("{:#}", e);
-                    let root_cause = e.root_cause().to_string();
-                    if root_cause.contains("connection closed unexpectedly")
-                        || root_cause.contains("Broken pipe (os error 32)")
-                    {
-                        error!(
-                            "query handler for '{}' failed: {}",
-                            query_string, short_error
-                        );
-                    } else {
-                        error!("query handler for '{}' failed: {:?}", query_string, e);
-                    }
-                    self.write_message_noflush(&BeMessage::ErrorResponse(&short_error))?;
-                    // TODO: untangle convoluted control flow
-                    if e.to_string().contains("failed to run") {
-                        return Ok(ProcessMsgResult::Break);
-                    }
+                    log_query_error(query_string, &e);
+                    let short_error = short_error(&e);
+                    self.write_message_noflush(&BeMessage::ErrorResponse(
+                        &short_error,
+                        Some(e.pg_error_code()),
+                    ))?;
                 }
                 self.write_message(&BeMessage::ReadyForQuery)?;
             }
@@ -445,11 +449,13 @@ impl PostgresBackend {
 
             FeMessage::Execute(_) => {
                 let query_string = cstr_to_str(unnamed_query_string)?;
-                trace!("got execute {:?}", query_string);
-                // xxx distinguish fatal and recoverable errors?
+                trace!("got execute {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string) {
-                    error!("query handler for '{}' failed: {:?}", query_string, e);
-                    self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
+                    log_query_error(query_string, &e);
+                    self.write_message(&BeMessage::ErrorResponse(
+                        &e.to_string(),
+                        Some(e.pg_error_code()),
+                    ))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used
                 // for basebackup and it uses CopyOut which doesn't require
@@ -468,7 +474,9 @@ impl PostgresBackend {
             // We prefer explicit pattern matching to wildcards, because
             // this helps us spot the places where new variants are missing
             FeMessage::CopyData(_) | FeMessage::CopyDone | FeMessage::CopyFail => {
-                bail!("unexpected message type: {:?}", msg);
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "unexpected message type: {msg:?}"
+                )));
             }
         }
 

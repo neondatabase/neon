@@ -2,18 +2,18 @@
 //!   WAL service listens for client connections and
 //!   receive WAL from wal_proposer and send it to WAL receivers
 //!
-use anyhow::Result;
 use regex::Regex;
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use tracing::*;
+use utils::postgres_backend_async::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;
 use utils::postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
-pub fn thread_main(conf: SafeKeeperConf, listener: TcpListener) -> Result<()> {
+pub fn thread_main(conf: SafeKeeperConf, listener: TcpListener) -> ! {
     loop {
         match listener.accept() {
             Ok((socket, peer_addr)) => {
@@ -44,7 +44,7 @@ fn get_tid() -> u64 {
 
 /// This is run by `thread_main` above, inside a background thread.
 ///
-fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<()> {
+fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryError> {
     let _enter = info_span!("", tid = ?get_tid()).entered();
 
     socket.set_nodelay(true)?;
