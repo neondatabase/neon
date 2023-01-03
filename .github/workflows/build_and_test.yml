@@ -196,6 +196,7 @@ jobs:
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
+          echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
 
       - name: Debug - Check folder structure
         run: |
@@ -317,7 +318,7 @@ jobs:
         with:
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           path: |
-            ~/.cargo
+            .cargo
             target
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
