@@ -367,11 +367,11 @@ impl RemoteTimelineClient {
 
     /// Download index file
     pub async fn download_index_file(&self) -> Result<IndexPart, DownloadError> {
-        let unfinished_gauge_guard = self
+        let _unfinished_gauge_guard = self
             .metrics
             .call_begin(&RemoteOpFileKind::Index, &RemoteOpKind::Download);
 
-        let res = download::download_index_part(
+        download::download_index_part(
             self.conf,
             &self.storage_impl,
             self.tenant_id,
@@ -384,11 +384,7 @@ impl RemoteTimelineClient {
             RemoteOpKind::Download,
             Arc::clone(&self.metrics),
         )
-        .await;
-
-        drop(unfinished_gauge_guard);
-
-        res
+        .await
     }
 
     /// Download a (layer) file from `path`, into local filesystem.
@@ -401,28 +397,27 @@ impl RemoteTimelineClient {
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
-        let unfinished_gauge_guard = self
-            .metrics
-            .call_begin(&RemoteOpFileKind::Layer, &RemoteOpKind::Download);
-
-        let downloaded_size = download::download_layer_file(
-            self.conf,
-            &self.storage_impl,
-            self.tenant_id,
-            self.timeline_id,
-            layer_file_name,
-            layer_metadata,
-        )
-        .measure_remote_op(
-            self.tenant_id,
-            self.timeline_id,
-            RemoteOpFileKind::Layer,
-            RemoteOpKind::Download,
-            Arc::clone(&self.metrics),
-        )
-        .await?;
-
-        drop(unfinished_gauge_guard);
+        let downloaded_size = {
+            let _unfinished_gauge_guard = self
+                .metrics
+                .call_begin(&RemoteOpFileKind::Layer, &RemoteOpKind::Download);
+            download::download_layer_file(
+                self.conf,
+                &self.storage_impl,
+                self.tenant_id,
+                self.timeline_id,
+                layer_file_name,
+                layer_metadata,
+            )
+            .measure_remote_op(
+                self.tenant_id,
+                self.timeline_id,
+                RemoteOpFileKind::Layer,
+                RemoteOpKind::Download,
+                Arc::clone(&self.metrics),
+            )
+            .await?
+        };
 
         // Update the metadata for given layer file. The remote index file
         // might be missing some information for the file; this allows us
