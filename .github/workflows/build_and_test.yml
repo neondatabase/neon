@@ -204,23 +204,36 @@ jobs:
           ls -la
           du -sh .cargo
 
-      # Don't include the ~/.cargo/registry/src directory. It contains just
-      # uncompressed versions of the crates in ~/.cargo/registry/cache
-      # directory, and it's faster to let 'cargo' to rebuild it from the
-      # compressed crates.
-      - name: Cache cargo deps
-        id: cache_cargo
-        uses: actions/cache@v3
+#      # Don't include the ~/.cargo/registry/src directory. It contains just
+#      # uncompressed versions of the crates in ~/.cargo/registry/cache
+#      # directory, and it's faster to let 'cargo' to rebuild it from the
+#      # compressed crates.
+#      - name: Cache cargo deps
+#        id: cache_cargo
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            ~/.cargo/registry/
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
+#          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+#          key: |
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: Download rust cache (s3 cache)
+        uses: ./.github/actions/cache-download
         with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
             v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-cache-main
+
+      - name: Debug - Check folder structure
+        run: |
+          pwd
+          ls -la
+          du -sh .cargo
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -311,7 +324,7 @@ jobs:
           ls -la .cargo
           du -sh .cargo
 
-      - name: Upload rust cache (S3 Cache)
+      - name: Upload rust cache (s3 cache)
         uses: ./.github/actions/cache-upload
         with:
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}

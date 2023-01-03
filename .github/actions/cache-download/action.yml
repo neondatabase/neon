@@ -34,7 +34,7 @@ runs:
             echo "no hit on provided cache key"
           else
             time aws s3 cp s3://${BUCKET}/${FOLDER}/"$i".${EXT} ${TEMPDIR}/"$i".${EXT}
-            time tar -xf ${TEMPDIR}/"$i".${EXT} -C ${TARGET}
+            time /bin/tar --use-compress-program unzstd -xf ${TEMPDIR}/"$i".${EXT} -P -C ${GITHUB_WORKSPACE}
             exit 0
           fi
         done

@@ -46,7 +46,6 @@ runs:
         OVERRIDE: ${{ inputs.override }}
         FOLDER: ${{ inputs.folder }}
         BUCKET: neon-github-dev
-        WORKDIR: ${{ inputs.workdir }}
       run: |
         FILENAME=$(basename $ARCHIVE)
         FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
@@ -67,4 +66,3 @@ runs:
         fi
         
         echo "${FILENAME} - ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}
-      working-directory: ${{ inputs.workdir }}
