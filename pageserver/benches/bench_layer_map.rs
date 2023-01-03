@@ -7,7 +7,7 @@ use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::ops::Range;
+use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Instant;
@@ -17,6 +17,7 @@ use utils::lsn::Lsn;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
+#[derive(PartialEq, Clone)]
 struct DummyDelta {
     key_range: Range<Key>,
     lsn_range: Range<Lsn>,
@@ -60,6 +61,7 @@ impl Layer for DummyDelta {
     }
 }
 
+#[derive(PartialEq, Clone)]
 struct DummyImage {
     key_range: Range<Key>,
     lsn: Lsn,
@@ -105,8 +107,25 @@ impl Layer for DummyImage {
     }
 }
 
-fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
-    let mut layer_map = LayerMap::default();
+#[derive(PartialEq, Clone)]
+enum DummyMapLayer {
+    Delta(DummyDelta),
+    Image(DummyImage),
+}
+
+impl Deref for DummyMapLayer {
+    type Target = dyn Layer;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            DummyMapLayer::Delta(d) => d,
+            DummyMapLayer::Image(l) => l,
+        }
+    }
+}
+
+fn build_layer_map(filename_dump: PathBuf) -> LayerMap<DummyMapLayer> {
+    let mut layer_map = LayerMap::<DummyMapLayer>::default();
 
     let mut min_lsn = Lsn(u64::MAX);
     let mut max_lsn = Lsn(0);
@@ -120,7 +139,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
                 key_range: imgfilename.key_range,
                 lsn: imgfilename.lsn,
             };
-            layer_map.insert_historic(layer);
+            layer_map.insert_historic(DummyMapLayer::Image(layer));
             min_lsn = min(min_lsn, imgfilename.lsn);
             max_lsn = max(max_lsn, imgfilename.lsn);
         } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
@@ -128,7 +147,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
                 key_range: deltafilename.key_range,
                 lsn_range: deltafilename.lsn_range.clone(),
             };
-            layer_map.insert_historic(layer);
+            layer_map.insert_historic(DummyMapLayer::Delta(layer));
             min_lsn = min(min_lsn, deltafilename.lsn_range.start);
             max_lsn = max(max_lsn, deltafilename.lsn_range.end);
         } else {
@@ -142,7 +161,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
 }
 
 /// Construct a layer map query pattern for benchmarks
-fn uniform_query_pattern(layer_map: &LayerMap) -> Vec<(Key, Lsn)> {
+fn uniform_query_pattern(layer_map: &LayerMap<DummyMapLayer>) -> Vec<(Key, Lsn)> {
     // For each image layer we query one of the pages contained, at LSN right
     // before the image layer was created. This gives us a somewhat uniform
     // coverage of both the lsn and key space because image layers have
@@ -234,7 +253,7 @@ fn bench_sequential(c: &mut Criterion) {
             key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
             lsn: Lsn(10 * i),
         };
-        layer_map.insert_historic(layer);
+        layer_map.insert_historic(DummyMapLayer::Image(layer));
     }
 
     // Manually measure runtime without criterion because criterion
