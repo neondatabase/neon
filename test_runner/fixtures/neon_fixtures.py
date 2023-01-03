@@ -1980,10 +1980,6 @@ class NeonPageserver(PgProtocol):
         if '"testing"' not in self.version:
             pytest.skip("pageserver was built without 'testing' feature")
 
-    def is_profiling_enabled_or_skip(self):
-        if '"profiling"' not in self.version:
-            pytest.skip("pageserver was built without 'profiling' feature")
-
     def http_client(self, auth_token: Optional[str] = None) -> PageserverHttpClient:
         return PageserverHttpClient(
             port=self.service_port.http,

@@ -39,10 +39,9 @@ use utils::{
 
 use crate::auth::check_permission;
 use crate::basebackup;
-use crate::config::{PageServerConf, ProfilingConfig};
+use crate::config::PageServerConf;
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
-use crate::profiling::profpoint_start;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::mgr;
@@ -250,7 +249,7 @@ impl PageRequestMetrics {
 
 #[derive(Debug)]
 struct PageServerHandler {
-    conf: &'static PageServerConf,
+    _conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 }
@@ -258,7 +257,7 @@ struct PageServerHandler {
 impl PageServerHandler {
     pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
         PageServerHandler {
-            conf,
+            _conf: conf,
             auth,
             claims: None,
         }
@@ -604,10 +603,6 @@ impl PageServerHandler {
         */
 
         let page = crate::tenant::with_ondemand_download(|| {
-            // FIXME: this profiling now happens at different place than it used to. The
-            // current profiling is based on a thread-local variable, so it doesn't work
-            // across awaits
-            let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
             timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)
         })
         .await?;
