@@ -46,6 +46,8 @@ runs:
         FILENAME=$(basename $ARCHIVE)
         FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
         
+        echo "${FILENAME} - ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}
+        
         S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep ${FILENAME} | tail -1 || true)
         if [ -z "${S3_KEY}" ]; then
           echo "uploading cache"
@@ -58,5 +60,3 @@ runs:
               echo "cache exists, skipping upload"
           fi
         fi
-        
-        echo "${FILENAME} - ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}

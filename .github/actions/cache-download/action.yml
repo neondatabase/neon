@@ -33,7 +33,7 @@ runs:
           if [ -z "${S3_KEY}" ]; then
             echo "no hit on provided cache key"
           else
-            time aws s3 cp s3://${BUCKET}/${FOLDER}/"$i".${EXT} ${TEMPDIR}/"$i".${EXT}
+            time aws s3 cp --only-show-errors s3://${BUCKET}/${FOLDER}/"$i".${EXT} ${TEMPDIR}/"$i".${EXT}
             time /bin/tar --use-compress-program unzstd -xf ${TEMPDIR}/"$i".${EXT} -P -C ${GITHUB_WORKSPACE}
             exit 0
           fi
