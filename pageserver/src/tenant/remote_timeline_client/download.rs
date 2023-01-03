@@ -8,10 +8,9 @@ use std::future::Future;
 use std::path::Path;
 
 use anyhow::{anyhow, Context};
-use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{error, info, warn};
 
 use crate::config::PageServerConf;
 use crate::tenant::storage_layer::LayerFileName;
@@ -175,7 +174,7 @@ pub async fn list_remote_timelines<'a>(
     storage: &'a GenericRemoteStorage,
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<Vec<(TimelineId, IndexPart)>> {
+) -> anyhow::Result<HashSet<TimelineId>> {
     let tenant_path = conf.timelines_path(&tenant_id);
     let tenant_storage_path = conf.remote_path(&tenant_path)?;
 
@@ -194,7 +193,6 @@ pub async fn list_remote_timelines<'a>(
     }
 
     let mut timeline_ids = HashSet::new();
-    let mut part_downloads = FuturesUnordered::new();
 
     for timeline_remote_storage_key in timelines {
         let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
@@ -205,35 +203,22 @@ pub async fn list_remote_timelines<'a>(
             format!("failed to parse object name into timeline id '{object_name}'")
         })?;
 
-        // list_prefixes returns all files with the prefix. If we haven't seen this timeline ID
-        // yet, launch a download task for it.
-        if !timeline_ids.contains(&timeline_id) {
-            timeline_ids.insert(timeline_id);
-            let storage_clone = storage.clone();
-            part_downloads.push(async move {
-                (
-                    timeline_id,
-                    download_index_part(conf, &storage_clone, tenant_id, timeline_id)
-                        .instrument(info_span!("download_index_part", timeline=%timeline_id))
-                        .await,
-                )
-            });
-        }
+        // list_prefixes is assumed to return unique names. Ensure this here.
+        // NB: it's safer to bail out than warn-log this because the pageserver
+        //     needs to absolutely know about _all_ timelines that exist, so that
+        //     GC knows all the branchpoints. If we skipped over a timeline instead,
+        //     GC could delete a layer that's still needed by that timeline.
+        anyhow::ensure!(
+            !timeline_ids.contains(&timeline_id),
+            "list_prefixes contains duplicate timeline id {timeline_id}"
+        );
+        timeline_ids.insert(timeline_id);
     }
 
-    // Wait for all the download tasks to complete.
-    let mut timeline_parts = Vec::new();
-    while let Some((timeline_id, part_upload_result)) = part_downloads.next().await {
-        let index_part = part_upload_result
-            .with_context(|| format!("Failed to fetch index part for timeline {timeline_id}"))?;
-
-        debug!("Successfully fetched index part for timeline {timeline_id}");
-        timeline_parts.push((timeline_id, index_part));
-    }
-    Ok(timeline_parts)
+    Ok(timeline_ids)
 }
 
-pub async fn download_index_part(
+pub(super) async fn download_index_part(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
     tenant_id: TenantId,
