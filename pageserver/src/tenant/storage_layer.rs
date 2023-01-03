@@ -235,11 +235,6 @@ impl PersistentLayer {
 }
 
 impl PartialEq for PersistentLayer {
-    // // FIXME: ptr_eq might fail to return true for 'dyn'
-    // // references.  Clippy complains about this. In practice it
-    // // seems to work, the assertion below would be triggered
-    // // otherwise but this ought to be fixed.
-    // #[allow(clippy::vtable_address_comparisons)]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Delta(d0), Self::Delta(d1)) => Arc::ptr_eq(d0, d1),
