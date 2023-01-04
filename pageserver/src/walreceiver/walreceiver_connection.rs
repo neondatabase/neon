@@ -20,7 +20,7 @@ use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{metrics::LIVE_CONNECTIONS_COUNT, tenant::TimelineGuard, walreceiver::TaskStateUpdate};
+use crate::{metrics::LIVE_CONNECTIONS_COUNT, tenant::TimelineRef, walreceiver::TaskStateUpdate};
 use crate::{
     task_mgr, task_mgr::TaskKind, task_mgr::WALRECEIVER_RUNTIME, tenant::WalReceiverInfo,
     walingest::WalIngest, walrecord::DecodedWALRecord,
@@ -51,7 +51,7 @@ pub struct WalConnectionStatus {
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
-    timeline_guard: TimelineGuard,
+    timeline_guard: TimelineRef,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,

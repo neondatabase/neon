@@ -30,7 +30,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
-use crate::tenant::TimelineGuard;
+use crate::tenant::TimelineRef;
 use crate::tenant::{with_ondemand_download, PageReconstructError};
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
@@ -45,7 +45,7 @@ use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
 
 pub struct WalIngest {
-    timeline_guard: TimelineGuard,
+    timeline_guard: TimelineRef,
     pg_version: u32,
 
     checkpoint: CheckPoint,
@@ -55,7 +55,7 @@ pub struct WalIngest {
 impl WalIngest {
     pub async fn new(
         pg_version: u32,
-        timeline_guard: TimelineGuard,
+        timeline_guard: TimelineRef,
         startpoint: Lsn,
     ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
@@ -1139,7 +1139,7 @@ mod tests {
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""))?; // dummy relmapper file
         m.commit()?;
-        let walingest = WalIngest::new(tline.pg_version, tline.guard(), Lsn(0x10)).await?;
+        let walingest = WalIngest::new(tline.pg_version, tline.weak_ref(), Lsn(0x10)).await?;
 
         Ok(walingest)
     }

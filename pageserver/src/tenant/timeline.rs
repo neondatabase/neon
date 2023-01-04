@@ -126,7 +126,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<Arc<Timeline>>,
+    ancestor_timeline: Option<TimelineRef>,
     ancestor_lsn: Lsn,
 
     // Metrics
@@ -196,12 +196,13 @@ pub struct Timeline {
 /// A timeline wrapper, that ensures we can drop timeline and cause
 /// next operations that access the timeline to cancel.
 #[derive(Clone)]
-pub struct TimelineGuard {
+pub struct TimelineRef {
     timeline: Weak<Timeline>,
+    state: watch::Receiver<TimelineState>,
     pub id: TenantTimelineId,
 }
 
-impl TimelineGuard {
+impl TimelineRef {
     /// Use this as a `MutexGuard` and do not try to store the object.
     /// While the object is held, the timeline is not dropped fully, which might cause
     /// various jobs to continue working.
@@ -407,7 +408,7 @@ pub enum PageReconstructResult<T> {
     /// The given RemoteLayer needs to be downloaded and replaced in the timeline's layer map
     /// for the operation to succeed. Use [`Timeline::download_remote_layer`] to do it, then
     /// retry the operation that returned this error.
-    NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
+    NeedsDownload(TimelineRef, Weak<RemoteLayer>),
     Error(PageReconstructError),
 }
 
@@ -484,7 +485,7 @@ impl Timeline {
     pub fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
         self.ancestor_timeline
             .as_ref()
-            .map(|ancestor| ancestor.timeline_id)
+            .map(|ancestor| ancestor.id.timeline_id)
     }
 
     /// Lock and get timeline's GC cuttof
@@ -840,10 +841,11 @@ impl Timeline {
         self.state.subscribe()
     }
 
-    pub fn guard(&self) -> TimelineGuard {
-        TimelineGuard {
+    pub fn weak_ref(&self) -> TimelineRef {
+        TimelineRef {
             timeline: Weak::clone(&self.myself),
             id: TenantTimelineId::new(self.tenant_id, self.timeline_id),
+            state: self.state.subscribe(),
         }
     }
 }
@@ -893,7 +895,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
-        ancestor: Option<Arc<Timeline>>,
+        ancestor: Option<TimelineRef>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -1044,7 +1046,7 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
         spawn_connection_manager_task(
-            self.guard(),
+            self.weak_ref(),
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
@@ -1644,8 +1646,7 @@ impl Timeline {
         reconstruct_state: &mut ValueReconstructState,
     ) -> PageReconstructResult<()> {
         // Start from the current timeline.
-        let mut timeline_owned;
-        let mut timeline = self;
+        let mut timeline_ref = self.weak_ref();
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
@@ -1667,7 +1668,10 @@ impl Timeline {
 
         'outer: loop {
             // The function should have updated 'state'
-            //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
+            let timeline = match timeline_ref.try_upgrade_timeline_arc() {
+                Ok(tli) => tli,
+                Err(e) => return PageReconstructResult::from(e),
+            };
             match result {
                 ValueReconstructResult::Complete => return PageReconstructResult::Success(()),
                 ValueReconstructResult::Continue => {
@@ -1707,12 +1711,10 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                let ancestor = match timeline.get_ancestor_timeline() {
+                timeline_ref = match timeline.get_ancestor_timeline() {
                     Ok(timeline) => timeline,
                     Err(e) => return PageReconstructResult::from(e),
                 };
-                timeline_owned = ancestor;
-                timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
                 continue 'outer;
             }
@@ -1855,7 +1857,7 @@ impl Timeline {
         Some((lsn, img))
     }
 
-    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
+    fn get_ancestor_timeline(&self) -> anyhow::Result<TimelineRef> {
         let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
@@ -1863,7 +1865,7 @@ impl Timeline {
                 self.get_ancestor_timeline_id(),
             )
         })?;
-        Ok(Arc::clone(ancestor))
+        Ok(ancestor.clone())
     }
 
     ///
@@ -2129,7 +2131,7 @@ impl Timeline {
         let ancestor_timeline_id = self
             .ancestor_timeline
             .as_ref()
-            .map(|ancestor| ancestor.timeline_id);
+            .map(|ancestor| ancestor.id.timeline_id);
 
         let metadata = TimelineMetadata::new(
             disk_consistent_lsn,
@@ -3390,9 +3392,9 @@ where
     loop {
         let closure_result = f();
         match closure_result {
-            PageReconstructResult::NeedsDownload(weak_timeline, weak_remote_layer) => {
+            PageReconstructResult::NeedsDownload(timeline_ref, weak_remote_layer) => {
                 // if the timeline is gone, it has likely been deleted / tenant detached
-                let tl = weak_timeline.upgrade().context("timeline is gone")?;
+                let tl = timeline_ref.try_upgrade_timeline_arc()?;
                 // if the remote layer got removed, retry the function, it might succeed now
                 let remote_layer = match weak_remote_layer.upgrade() {
                     None => {
