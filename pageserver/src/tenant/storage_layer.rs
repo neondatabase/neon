@@ -204,3 +204,42 @@ impl std::fmt::Debug for dyn Layer {
             .finish()
     }
 }
+
+/// Holds metadata about a layer without any content. Used mostly for testing.
+pub struct LayerDescriptor {
+    pub key: Range<Key>,
+    pub lsn: Range<Lsn>,
+    pub is_incremental: bool,
+    pub short_id: String,
+}
+
+impl Layer for LayerDescriptor {
+    fn get_key_range(&self) -> Range<Key> {
+        self.key.clone()
+    }
+
+    fn get_lsn_range(&self) -> Range<Lsn> {
+        self.lsn.clone()
+    }
+
+    fn is_incremental(&self) -> bool {
+        self.is_incremental
+    }
+
+    fn get_value_reconstruct_data(
+        &self,
+        _key: Key,
+        _lsn_range: Range<Lsn>,
+        _reconstruct_data: &mut ValueReconstructState,
+    ) -> Result<ValueReconstructResult> {
+        todo!("This method shouldn't be part of the Layer trait")
+    }
+
+    fn short_id(&self) -> String {
+        self.short_id.clone()
+    }
+
+    fn dump(&self, _verbose: bool) -> Result<()> {
+        todo!()
+    }
+}

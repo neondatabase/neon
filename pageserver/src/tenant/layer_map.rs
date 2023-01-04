@@ -352,11 +352,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::tenant::storage_layer::LayerDescriptor;
+
     use super::*;
 
     #[test]
     fn test_count_deltas() {
-        // TODO implement (maybe merge from main first?)
+        let map = LayerMap::<LayerDescriptor>::default();
+
+        // TODO implement
     }
 
     // TODO add more

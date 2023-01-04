@@ -1,16 +1,12 @@
-use anyhow::Result;
-use num_traits::ToPrimitive;
-use pageserver::repository::{Key, Value};
+use pageserver::repository::Key;
 use pageserver::tenant::bst_layer_map::RetroactiveLayerMap;
-use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, ValueReconstructState};
-use pageserver::tenant::storage_layer::{Layer, ValueReconstructResult};
+use pageserver::tenant::storage_layer::Layer;
+use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, LayerDescriptor};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -20,80 +16,8 @@ use utils::lsn::Lsn;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
-struct DummyDelta {
-    key_range: Range<Key>,
-    lsn_range: Range<Lsn>,
-}
-
-impl Layer for DummyDelta {
-    fn get_key_range(&self) -> Range<Key> {
-        self.key_range.clone()
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.lsn_range.clone()
-    }
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        panic!()
-    }
-
-    fn is_incremental(&self) -> bool {
-        true
-    }
-
-    fn dump(&self, _verbose: bool) -> Result<()> {
-        unimplemented!()
-    }
-
-    fn short_id(&self) -> String {
-        unimplemented!()
-    }
-}
-
-struct DummyImage {
-    key_range: Range<Key>,
-    lsn: Lsn,
-}
-
-impl Layer for DummyImage {
-    fn get_key_range(&self) -> Range<Key> {
-        self.key_range.clone()
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        // End-bound is exclusive
-        self.lsn..(self.lsn + 1)
-    }
-
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        panic!()
-    }
-
-    fn is_incremental(&self) -> bool {
-        false
-    }
-
-    fn dump(&self, _verbose: bool) -> Result<()> {
-        unimplemented!()
-    }
-
-    fn short_id(&self) -> String {
-        unimplemented!()
-    }
-}
-
-fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
-    let mut layer_map = LayerMap::<dyn Layer>::default();
+fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
+    let mut layer_map = LayerMap::<LayerDescriptor>::default();
 
     let mut min_lsn = Lsn(u64::MAX);
     let mut max_lsn = Lsn(0);
@@ -103,17 +27,21 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
     for fname in filenames {
         let fname = &fname.unwrap();
         if let Some(imgfilename) = ImageFileName::parse_str(fname) {
-            let layer = DummyImage {
-                key_range: imgfilename.key_range,
-                lsn: imgfilename.lsn,
+            let layer = LayerDescriptor {
+                key: imgfilename.key_range,
+                lsn: imgfilename.lsn..(imgfilename.lsn + 1),
+                is_incremental: false,
+                short_id: fname.to_string(),
             };
             layer_map.insert_historic(Arc::new(layer));
             min_lsn = min(min_lsn, imgfilename.lsn);
             max_lsn = max(max_lsn, imgfilename.lsn);
         } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
-            let layer = DummyDelta {
-                key_range: deltafilename.key_range,
-                lsn_range: deltafilename.lsn_range.clone(),
+            let layer = LayerDescriptor {
+                key: deltafilename.key_range.clone(),
+                lsn: deltafilename.lsn_range.clone(),
+                is_incremental: true,
+                short_id: fname.to_string(),
             };
             layer_map.insert_historic(Arc::new(layer));
             min_lsn = min(min_lsn, deltafilename.lsn_range.start);
@@ -130,7 +58,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
 }
 
 /// Construct a layer map query pattern for benchmarks
-fn uniform_query_pattern(layer_map: &LayerMap<dyn Layer>) -> Vec<(Key, Lsn)> {
+fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn)> {
     // For each image layer we query one of the pages contained, at LSN right
     // before the image layer was created. This gives us a somewhat uniform
     // coverage of both the lsn and key space because image layers have
@@ -246,9 +174,11 @@ fn bench_sequential(c: &mut Criterion) {
     for i in 0..100_000 {
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
-        let layer = DummyImage {
-            key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
-            lsn: Lsn(i),
+        let layer = LayerDescriptor {
+            key: zero.add(10 * i32)..zero.add(10 * i32 + 1),
+            lsn: Lsn(i)..Lsn(i + 1),
+            is_incremental: false,
+            short_id: format!("Layer {}", i),
         };
         layer_map.insert_historic(Arc::new(layer));
     }
