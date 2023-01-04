@@ -2,7 +2,7 @@ use anyhow::Result;
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::{
-    DeltaFileName, ImageFileName, LocalOrRemote, PersistentLayer, ValueReconstructState,
+    DeltaFileName, HistoricLayer, ImageFileName, LocalOrRemote, ValueReconstructState,
 };
 use pageserver::tenant::storage_layer::{Layer, ValueReconstructResult};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
@@ -110,20 +110,22 @@ impl Layer for DummyImage {
     }
 }
 
-impl From<DummyDelta> for PersistentLayer<DummyDelta, DummyImage> {
+impl From<DummyDelta> for HistoricLayer<DummyDelta, DummyImage> {
     fn from(delta: DummyDelta) -> Self {
         Self::Delta(LocalOrRemote::Local(Arc::new(delta)))
     }
 }
 
-impl From<DummyImage> for PersistentLayer<DummyDelta, DummyImage> {
+impl From<DummyImage> for HistoricLayer<DummyDelta, DummyImage> {
     fn from(image: DummyImage) -> Self {
         Self::Image(LocalOrRemote::Local(Arc::new(image)))
     }
 }
 
-fn build_layer_map(filename_dump: PathBuf) -> LayerMap<DummyDelta, DummyImage> {
-    let mut layer_map = LayerMap::<DummyDelta, DummyImage>::default();
+type DummyLayerMap = LayerMap<DummyDelta, DummyImage>;
+
+fn build_layer_map(filename_dump: PathBuf) -> DummyLayerMap {
+    let mut layer_map = DummyLayerMap::default();
 
     let mut min_lsn = Lsn(u64::MAX);
     let mut max_lsn = Lsn(0);
@@ -137,7 +139,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<DummyDelta, DummyImage> {
                 key_range: imgfilename.key_range,
                 lsn: imgfilename.lsn,
             };
-            layer_map.insert_historic(PersistentLayer::from(layer));
+            layer_map.insert_historic(layer);
             min_lsn = min(min_lsn, imgfilename.lsn);
             max_lsn = max(max_lsn, imgfilename.lsn);
         } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
@@ -145,7 +147,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<DummyDelta, DummyImage> {
                 key_range: deltafilename.key_range,
                 lsn_range: deltafilename.lsn_range.clone(),
             };
-            layer_map.insert_historic(PersistentLayer::from(layer));
+            layer_map.insert_historic(layer);
             min_lsn = min(min_lsn, deltafilename.lsn_range.start);
             max_lsn = max(max_lsn, deltafilename.lsn_range.end);
         } else {
@@ -159,7 +161,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<DummyDelta, DummyImage> {
 }
 
 /// Construct a layer map query pattern for benchmarks
-fn uniform_query_pattern(layer_map: &LayerMap<DummyDelta, DummyImage>) -> Vec<(Key, Lsn)> {
+fn uniform_query_pattern(layer_map: &DummyLayerMap) -> Vec<(Key, Lsn)> {
     // For each image layer we query one of the pages contained, at LSN right
     // before the image layer was created. This gives us a somewhat uniform
     // coverage of both the lsn and key space because image layers have
@@ -251,7 +253,7 @@ fn bench_sequential(c: &mut Criterion) {
             key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
             lsn: Lsn(10 * i),
         };
-        layer_map.insert_historic(PersistentLayer::from(layer));
+        layer_map.insert_historic(layer);
     }
 
     // Manually measure runtime without criterion because criterion

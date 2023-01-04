@@ -138,12 +138,12 @@ pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i
 /// Returned by [`Layer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 
-pub enum PersistentLayer<D, I> {
+pub enum HistoricLayer<D, I> {
     Delta(LocalOrRemote<D>),
     Image(LocalOrRemote<I>),
 }
 
-impl<D, I> PartialEq for PersistentLayer<D, I>
+impl<D, I> PartialEq for HistoricLayer<D, I>
 where
     D: Layer,
     I: Layer,
@@ -157,7 +157,7 @@ where
     }
 }
 
-impl<D: Layer, I: Layer> Clone for PersistentLayer<D, I> {
+impl<D: Layer, I: Layer> Clone for HistoricLayer<D, I> {
     fn clone(&self) -> Self {
         match self {
             Self::Delta(d) => Self::Delta(d.clone()),
@@ -278,19 +278,19 @@ impl<L: Layer> Clone for LocalOrRemote<L> {
     }
 }
 
-impl From<DeltaLayer> for PersistentLayer<DeltaLayer, ImageLayer> {
+impl From<DeltaLayer> for HistoricLayer<DeltaLayer, ImageLayer> {
     fn from(delta: DeltaLayer) -> Self {
         Self::Delta(LocalOrRemote::Local(Arc::new(delta)))
     }
 }
 
-impl From<ImageLayer> for PersistentLayer<DeltaLayer, ImageLayer> {
+impl From<ImageLayer> for HistoricLayer<DeltaLayer, ImageLayer> {
     fn from(image: ImageLayer) -> Self {
         Self::Image(LocalOrRemote::Local(Arc::new(image)))
     }
 }
 
-impl From<RemoteLayer> for PersistentLayer<DeltaLayer, ImageLayer> {
+impl From<RemoteLayer> for HistoricLayer<DeltaLayer, ImageLayer> {
     fn from(remote: RemoteLayer) -> Self {
         match remote.layer_name() {
             LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(Arc::new(remote))),
@@ -301,7 +301,7 @@ impl From<RemoteLayer> for PersistentLayer<DeltaLayer, ImageLayer> {
     }
 }
 
-impl From<Arc<RemoteLayer>> for PersistentLayer<DeltaLayer, ImageLayer> {
+impl From<Arc<RemoteLayer>> for HistoricLayer<DeltaLayer, ImageLayer> {
     fn from(remote: Arc<RemoteLayer>) -> Self {
         match remote.layer_name() {
             LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(remote)),
@@ -327,7 +327,7 @@ impl From<Arc<RemoteLayer>> for PersistentLayer<DeltaLayer, ImageLayer> {
 /// LSN
 ///
 
-impl PersistentLayer<DeltaLayer, ImageLayer> {
+impl HistoricLayer<DeltaLayer, ImageLayer> {
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
     pub fn filename(&self) -> LayerFileName {
@@ -365,16 +365,13 @@ impl PersistentLayer<DeltaLayer, ImageLayer> {
 
     pub fn as_remote_layer(&self) -> Option<&Arc<RemoteLayer>> {
         match self {
-            PersistentLayer::Delta(d) => d.as_remote(),
-            PersistentLayer::Image(i) => i.as_remote(),
+            HistoricLayer::Delta(d) => d.as_remote(),
+            HistoricLayer::Image(i) => i.as_remote(),
         }
     }
 }
 
-impl<L> PartialEq for LocalOrRemote<L>
-where
-    L: Layer,
-{
+impl<L> PartialEq for LocalOrRemote<L> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (LocalOrRemote::Local(l0), LocalOrRemote::Local(l1)) => Arc::ptr_eq(l0, l1),
@@ -398,7 +395,7 @@ where
     }
 }
 
-impl<D, I> Deref for PersistentLayer<D, I>
+impl<D, I> Deref for HistoricLayer<D, I>
 where
     D: Layer,
     I: Layer,

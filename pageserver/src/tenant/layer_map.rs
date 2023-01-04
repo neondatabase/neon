@@ -27,7 +27,7 @@ use tracing::*;
 use utils::lsn::Lsn;
 
 use super::storage_layer::{
-    DeltaLayer, ImageLayer, InMemoryLayer, Layer, LocalOrRemote, PersistentLayer,
+    DeltaLayer, HistoricLayer, ImageLayer, InMemoryLayer, Layer, LocalOrRemote,
 };
 
 ///
@@ -54,7 +54,7 @@ pub struct LayerMap<D = DeltaLayer, I = ImageLayer> {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// All the historic layers are kept here
-    historic_layers: RTree<LayerRTreeObject<PersistentLayer<D, I>>>,
+    historic_layers: RTree<LayerRTreeObject<HistoricLayer<D, I>>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
@@ -79,7 +79,7 @@ struct LayerRTreeObject<L> {
     envelope: AABB<[IntKey; 2]>,
 }
 
-impl<D, I> PartialEq for LayerRTreeObject<PersistentLayer<D, I>>
+impl<D, I> PartialEq for LayerRTreeObject<HistoricLayer<D, I>>
 where
     D: Layer,
     I: Layer,
@@ -262,7 +262,7 @@ where
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<PersistentLayer<D, I>>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<HistoricLayer<D, I>>> {
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<LocalOrRemote<I>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
@@ -281,7 +281,7 @@ where
             if l.is_incremental() {
                 continue;
             }
-            if let PersistentLayer::Image(image_layer) = l {
+            if let HistoricLayer::Image(image_layer) = l {
                 assert!(image_layer.get_key_range().contains(&key));
                 let img_lsn = image_layer.get_lsn_range().start;
                 assert!(img_lsn < end_lsn);
@@ -311,7 +311,7 @@ where
             if !l.is_incremental() {
                 continue;
             }
-            if let PersistentLayer::Delta(delta_layer) = l {
+            if let HistoricLayer::Delta(delta_layer) = l {
                 assert!(delta_layer.get_key_range().contains(&key));
                 if delta_layer.get_lsn_range().start >= end_lsn {
                     info!(
@@ -358,13 +358,13 @@ where
             );
             Some(SearchResult {
                 lsn_floor,
-                layer: PersistentLayer::Delta(l),
+                layer: HistoricLayer::Delta(l),
             })
         } else if let Some(l) = latest_img {
             trace!("found img layer and no deltas for request on {key} at {end_lsn}");
             Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
-                layer: PersistentLayer::Image(l),
+                layer: HistoricLayer::Image(l),
             })
         } else {
             trace!("no layer found for request on {key} at {end_lsn}");
@@ -375,9 +375,9 @@ where
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: impl Into<PersistentLayer<D, I>>) {
+    pub fn insert_historic(&mut self, layer: impl Into<HistoricLayer<D, I>>) {
         let layer = layer.into();
-        if let PersistentLayer::Delta(delta_layer) = &layer {
+        if let HistoricLayer::Delta(delta_layer) = &layer {
             if layer.get_key_range() == (Key::MIN..Key::MAX) {
                 self.l0_delta_layers.push(delta_layer.clone());
             }
@@ -392,8 +392,9 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer_to_remove: PersistentLayer<D, I>) {
-        if let PersistentLayer::Delta(delta_image_to_remove) = &layer_to_remove {
+    pub fn remove_historic(&mut self, layer_to_remove: impl Into<HistoricLayer<D, I>>) {
+        let layer_to_remove = layer_to_remove.into();
+        if let HistoricLayer::Delta(delta_image_to_remove) = &layer_to_remove {
             if layer_to_remove.get_key_range() == (Key::MIN..Key::MAX) {
                 let len_before = self.l0_delta_layers.len();
 
@@ -458,7 +459,7 @@ where
         }
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = PersistentLayer<D, I>> {
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = HistoricLayer<D, I>> {
         self.historic_layers.iter().map(|e| e.layer.clone())
     }
 
@@ -479,7 +480,7 @@ where
             if l.is_incremental() {
                 continue;
             }
-            if let PersistentLayer::Image(image_layer) = l {
+            if let HistoricLayer::Image(image_layer) = l {
                 assert!(image_layer.get_key_range().contains(&key));
                 let this_lsn = image_layer.get_lsn_range().start;
                 assert!(this_lsn <= lsn);

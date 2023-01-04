@@ -33,7 +33,7 @@ use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
-    storage_layer::{PersistentLayer, ValueReconstructResult, ValueReconstructState},
+    storage_layer::{HistoricLayer, ValueReconstructResult, ValueReconstructState},
 };
 
 use crate::config::PageServerConf;
@@ -1077,9 +1077,9 @@ impl Timeline {
     async fn create_remote_layers(
         &self,
         index_part: &IndexPart,
-        local_layers: HashMap<LayerFileName, PersistentLayer<DeltaLayer, ImageLayer>>,
+        local_layers: HashMap<LayerFileName, HistoricLayer<DeltaLayer, ImageLayer>>,
         up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashMap<LayerFileName, PersistentLayer<DeltaLayer, ImageLayer>>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, HistoricLayer<DeltaLayer, ImageLayer>>> {
         // Are we missing some files that are present in remote storage?
         // Create RemoteLayer instances for them.
         let mut local_only_layers = local_layers;
@@ -1499,7 +1499,7 @@ trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
 }
 
-impl TraversalLayerExt for PersistentLayer<DeltaLayer, ImageLayer> {
+impl TraversalLayerExt for HistoricLayer<DeltaLayer, ImageLayer> {
     fn traversal_id(&self) -> TraversalId {
         match self.local_path() {
             Some(local_path) => {
@@ -2274,18 +2274,12 @@ impl Timeline {
     }
 }
 
-struct CompactLevel0Phase1Result<D>
-where
-    D: Layer,
-{
+struct CompactLevel0Phase1Result<D> {
     new_layers: Vec<DeltaLayer>,
     deltas_to_compact: Vec<LocalOrRemote<D>>,
 }
 
-impl<D> Default for CompactLevel0Phase1Result<D>
-where
-    D: Layer,
-{
+impl<D> Default for CompactLevel0Phase1Result<D> {
     fn default() -> Self {
         Self {
             new_layers: Vec::default(),
@@ -2610,7 +2604,7 @@ impl Timeline {
             }
             layer_names_to_delete.push(l.filename());
             l.delete()?;
-            layers.remove_historic(PersistentLayer::Delta(l));
+            layers.remove_historic(HistoricLayer::Delta(l));
         }
         drop(layers);
 
@@ -3080,7 +3074,7 @@ impl Timeline {
                     let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     let mut layers = self_clone.layers.write().unwrap();
                     {
-                        layers.remove_historic(PersistentLayer::from(Arc::clone(&remote_layer)));
+                        layers.remove_historic(Arc::clone(&remote_layer));
                     }
                     layers.insert_historic(new_layer);
                     drop(layers);

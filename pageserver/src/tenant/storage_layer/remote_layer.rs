@@ -16,7 +16,7 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
-use super::{DeltaLayer, LocalOrRemote, PersistentLayer};
+use super::{DeltaLayer, HistoricLayer, LocalOrRemote};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
@@ -133,13 +133,13 @@ impl RemoteLayer {
         &self,
         conf: &'static PageServerConf,
         file_size: u64,
-    ) -> PersistentLayer<DeltaLayer, ImageLayer> {
+    ) -> HistoricLayer<DeltaLayer, ImageLayer> {
         if self.is_delta {
             let fname = DeltaFileName {
                 key_range: self.key_range.clone(),
                 lsn_range: self.lsn_range.clone(),
             };
-            PersistentLayer::Delta(LocalOrRemote::Local(Arc::new(DeltaLayer::new(
+            HistoricLayer::Delta(LocalOrRemote::Local(Arc::new(DeltaLayer::new(
                 conf,
                 self.timeline_id,
                 self.tenant_id,
@@ -151,7 +151,7 @@ impl RemoteLayer {
                 key_range: self.key_range.clone(),
                 lsn: self.lsn_range.start,
             };
-            PersistentLayer::Image(LocalOrRemote::Local(Arc::new(ImageLayer::new(
+            HistoricLayer::Image(LocalOrRemote::Local(Arc::new(ImageLayer::new(
                 conf,
                 self.timeline_id,
                 self.tenant_id,
