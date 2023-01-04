@@ -11,6 +11,8 @@ base64.workspace = true
 bstr.workspace = true
 bytes = {workspace = true, features = ['serde'] }
 clap.workspace = true
+chrono.workspace = true
+consumption_metrics.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hashbrown.workspace = true
@@ -48,6 +50,9 @@ x509-parser.workspace = true
 metrics.workspace = true
 pq_proto.workspace = true
 utils.workspace = true
+prometheus.workspace = true
+humantime.workspace = true
+hostname.workspace = true
 
 workspace_hack.workspace = true
 

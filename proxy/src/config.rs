@@ -5,6 +5,12 @@ use std::sync::Arc;
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, ()>,
+    pub metric_collection_config: Option<MetricCollectionConfig>,
+}
+
+pub struct MetricCollectionConfig {
+    pub endpoint: reqwest::Url,
+    pub interval: std::time::Duration,
 }
 
 pub struct TlsConfig {

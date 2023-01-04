@@ -3,142 +3,42 @@
 //! and push them to a HTTP endpoint.
 //! Cache metrics to send only the updated ones.
 //!
-
-use anyhow;
-use tracing::*;
-use utils::id::NodeId;
-use utils::id::TimelineId;
-
-use crate::task_mgr;
-use crate::task_mgr::TaskKind;
-use crate::task_mgr::BACKGROUND_RUNTIME;
-
+use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::mgr;
+use anyhow;
+use chrono::Utc;
+use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use pageserver_api::models::TenantState;
-use utils::id::TenantId;
-
-use serde::{Deserialize, Serialize};
+use reqwest::Url;
+use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
-use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
+use tracing::*;
+use utils::id::{NodeId, TenantId, TimelineId};
 
-use chrono::{DateTime, Utc};
-use rand::Rng;
-use reqwest::Url;
+const WRITTEN_SIZE: &str = "written_size";
+const SYNTHETIC_STORAGE_SIZE: &str = "synthetic_storage_size";
+const RESIDENT_SIZE: &str = "resident_size";
+const REMOTE_STORAGE_SIZE: &str = "remote_storage_size";
+const TIMELINE_LOGICAL_SIZE: &str = "timeline_logical_size";
 
-/// ConsumptionMetric struct that defines the format for one metric entry
-/// i.e.
-///
-/// ```json
-/// {
-/// "metric": "remote_storage_size",
-/// "type": "absolute",
-/// "tenant_id": "5d07d9ce9237c4cd845ea7918c0afa7d",
-/// "timeline_id": "a03ebb4f5922a1c56ff7485cc8854143",
-/// "time": "2022-12-28T11:07:19.317310284Z",
-/// "idempotency_key": "2022-12-28 11:07:19.317310324 UTC-1-4019",
-/// "value": 12345454,
-/// }
-/// ```
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct ConsumptionMetric {
-    pub metric: ConsumptionMetricKind,
-    #[serde(rename = "type")]
-    pub metric_type: &'static str,
+#[derive(Serialize)]
+struct Ids {
     #[serde_as(as = "DisplayFromStr")]
-    pub tenant_id: TenantId,
+    tenant_id: TenantId,
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeline_id: Option<TimelineId>,
-    pub time: DateTime<Utc>,
-    pub idempotency_key: String,
-    pub value: u64,
-}
-
-impl ConsumptionMetric {
-    pub fn new_absolute<R: Rng + ?Sized>(
-        metric: ConsumptionMetricKind,
-        tenant_id: TenantId,
-        timeline_id: Option<TimelineId>,
-        value: u64,
-        node_id: NodeId,
-        rng: &mut R,
-    ) -> Self {
-        Self {
-            metric,
-            metric_type: "absolute",
-            tenant_id,
-            timeline_id,
-            time: Utc::now(),
-            // key that allows metric collector to distinguish unique events
-            idempotency_key: format!("{}-{}-{:04}", Utc::now(), node_id, rng.gen_range(0..=9999)),
-            value,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConsumptionMetricKind {
-    /// Amount of WAL produced , by a timeline, i.e. last_record_lsn
-    /// This is an absolute, per-timeline metric.
-    WrittenSize,
-    /// Size of all tenant branches including WAL
-    /// This is an absolute, per-tenant metric.
-    /// This is the same metric that tenant/tenant_id/size endpoint returns.
-    SyntheticStorageSize,
-    /// Size of all the layer files in the tenant's directory on disk on the pageserver.
-    /// This is an absolute, per-tenant metric.
-    /// See also prometheus metric RESIDENT_PHYSICAL_SIZE.
-    ResidentSize,
-    /// Size of the remote storage (S3) directory.
-    /// This is an absolute, per-tenant metric.
-    RemoteStorageSize,
-    /// Logical size of the data in the timeline
-    /// This is an absolute, per-timeline metric
-    TimelineLogicalSize,
-}
-
-impl FromStr for ConsumptionMetricKind {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "written_size" => Ok(Self::WrittenSize),
-            "synthetic_storage_size" => Ok(Self::SyntheticStorageSize),
-            "resident_size" => Ok(Self::ResidentSize),
-            "remote_storage_size" => Ok(Self::RemoteStorageSize),
-            "timeline_logical_size" => Ok(Self::TimelineLogicalSize),
-            _ => anyhow::bail!("invalid value \"{s}\" for metric type"),
-        }
-    }
-}
-
-impl fmt::Display for ConsumptionMetricKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            ConsumptionMetricKind::WrittenSize => "written_size",
-            ConsumptionMetricKind::SyntheticStorageSize => "synthetic_storage_size",
-            ConsumptionMetricKind::ResidentSize => "resident_size",
-            ConsumptionMetricKind::RemoteStorageSize => "remote_storage_size",
-            ConsumptionMetricKind::TimelineLogicalSize => "timeline_logical_size",
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ConsumptionMetricsKey {
-    tenant_id: TenantId,
     timeline_id: Option<TimelineId>,
-    metric: ConsumptionMetricKind,
 }
 
-#[derive(serde::Serialize)]
-struct EventChunk<'a> {
-    events: &'a [ConsumptionMetric],
+/// Key that uniquely identifies the object, this metric describes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PageserverConsumptionMetricsKey {
+    pub tenant_id: TenantId,
+    pub timeline_id: Option<TimelineId>,
+    pub metric: &'static str,
 }
 
 /// Main thread that serves metrics collection
@@ -170,7 +70,7 @@ pub async fn collect_metrics(
 
     // define client here to reuse it for all requests
     let client = reqwest::Client::new();
-    let mut cached_metrics: HashMap<ConsumptionMetricsKey, u64> = HashMap::new();
+    let mut cached_metrics: HashMap<PageserverConsumptionMetricsKey, u64> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -179,7 +79,7 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
-                if let Err(err) = collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await
+                if let Err(err) = collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await
                 {
                     error!("metrics collection failed: {err:?}");
                 }
@@ -192,15 +92,20 @@ pub async fn collect_metrics(
 ///
 /// Gather per-tenant and per-timeline metrics and send them to the `metric_collection_endpoint`.
 /// Cache metrics to avoid sending the same metrics multiple times.
-pub async fn collect_metrics_task(
+///
+/// TODO
+/// - refactor this function (chunking+sending part) to reuse it in proxy module;
+/// - improve error handling. Now if one tenant fails to collect metrics,
+/// the whole iteration fails and metrics for other tenants are not collected.
+pub async fn collect_metrics_iteration(
     client: &reqwest::Client,
-    cached_metrics: &mut HashMap<ConsumptionMetricsKey, u64>,
+    cached_metrics: &mut HashMap<PageserverConsumptionMetricsKey, u64>,
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
 ) -> anyhow::Result<()> {
-    let mut current_metrics: Vec<(ConsumptionMetricsKey, u64)> = Vec::new();
+    let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, u64)> = Vec::new();
     trace!(
-        "starting collect_metrics_task. metric_collection_endpoint: {}",
+        "starting collect_metrics_iteration. metric_collection_endpoint: {}",
         metric_collection_endpoint
     );
 
@@ -224,10 +129,10 @@ pub async fn collect_metrics_task(
                 let timeline_written_size = u64::from(timeline.get_last_record_lsn());
 
                 current_metrics.push((
-                    ConsumptionMetricsKey {
+                    PageserverConsumptionMetricsKey {
                         tenant_id,
                         timeline_id: Some(timeline.timeline_id),
-                        metric: ConsumptionMetricKind::WrittenSize,
+                        metric: WRITTEN_SIZE,
                     },
                     timeline_written_size,
                 ));
@@ -236,10 +141,10 @@ pub async fn collect_metrics_task(
                 // Only send timeline logical size when it is fully calculated.
                 if is_exact {
                     current_metrics.push((
-                        ConsumptionMetricsKey {
+                        PageserverConsumptionMetricsKey {
                             tenant_id,
                             timeline_id: Some(timeline.timeline_id),
-                            metric: ConsumptionMetricKind::TimelineLogicalSize,
+                            metric: TIMELINE_LOGICAL_SIZE,
                         },
                         timeline_logical_size,
                     ));
@@ -257,19 +162,19 @@ pub async fn collect_metrics_task(
         );
 
         current_metrics.push((
-            ConsumptionMetricsKey {
+            PageserverConsumptionMetricsKey {
                 tenant_id,
                 timeline_id: None,
-                metric: ConsumptionMetricKind::ResidentSize,
+                metric: RESIDENT_SIZE,
             },
             tenant_resident_size,
         ));
 
         current_metrics.push((
-            ConsumptionMetricsKey {
+            PageserverConsumptionMetricsKey {
                 tenant_id,
                 timeline_id: None,
-                metric: ConsumptionMetricKind::RemoteStorageSize,
+                metric: REMOTE_STORAGE_SIZE,
             },
             tenant_remote_size,
         ));
@@ -278,10 +183,10 @@ pub async fn collect_metrics_task(
         // Here we only use cached value, which may lag behind the real latest one
         let tenant_synthetic_size = tenant.get_cached_synthetic_size();
         current_metrics.push((
-            ConsumptionMetricsKey {
+            PageserverConsumptionMetricsKey {
                 tenant_id,
                 timeline_id: None,
-                metric: ConsumptionMetricKind::SyntheticStorageSize,
+                metric: SYNTHETIC_STORAGE_SIZE,
             },
             tenant_synthetic_size,
         ));
@@ -300,35 +205,29 @@ pub async fn collect_metrics_task(
 
     // Send metrics.
     // Split into chunks of 1000 metrics to avoid exceeding the max request size
-    const CHUNK_SIZE: usize = 1000;
     let chunks = current_metrics.chunks(CHUNK_SIZE);
 
-    let mut chunk_to_send: Vec<ConsumptionMetric> = Vec::with_capacity(1000);
+    let mut chunk_to_send: Vec<Event<Ids>> = Vec::with_capacity(CHUNK_SIZE);
 
     for chunk in chunks {
         chunk_to_send.clear();
 
-        // this code block is needed to convince compiler
-        // that rng is not reused aroung await point
-        {
-            // enrich metrics with timestamp and metric_kind before sending
-            let mut rng = rand::thread_rng();
-            chunk_to_send.extend(chunk.iter().map(|(curr_key, curr_val)| {
-                ConsumptionMetric::new_absolute(
-                    curr_key.metric,
-                    curr_key.tenant_id,
-                    curr_key.timeline_id,
-                    *curr_val,
-                    node_id,
-                    &mut rng,
-                )
-            }));
-        }
+        // enrich metrics with type,timestamp and idempotency key before sending
+        chunk_to_send.extend(chunk.iter().map(|(curr_key, curr_val)| Event {
+            kind: EventType::Absolute { time: Utc::now() },
+            metric: curr_key.metric,
+            idempotency_key: idempotency_key(node_id.to_string()),
+            value: *curr_val,
+            extra: Ids {
+                tenant_id: curr_key.tenant_id,
+                timeline_id: curr_key.timeline_id,
+            },
+        }));
 
         let chunk_json = serde_json::value::to_raw_value(&EventChunk {
             events: &chunk_to_send,
         })
-        .expect("ConsumptionMetric should not fail serialization");
+        .expect("PageserverConsumptionMetric should not fail serialization");
 
         let res = client
             .post(metric_collection_endpoint.clone())

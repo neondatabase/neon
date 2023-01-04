@@ -870,6 +870,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "consumption_metrics"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rand",
+ "serde",
+ "serde_with",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "control_plane"
 version = "0.1.0"
 dependencies = [
@@ -2228,6 +2241,7 @@ dependencies = [
  "clap 4.0.32",
  "close_fds",
  "const_format",
+ "consumption_metrics",
  "crc32c",
  "criterion",
  "crossbeam-utils",
@@ -2669,12 +2683,16 @@ dependencies = [
  "base64 0.13.1",
  "bstr",
  "bytes",
+ "chrono",
  "clap 4.0.32",
+ "consumption_metrics",
  "futures",
  "git-version",
  "hashbrown 0.13.2",
  "hex",
  "hmac",
+ "hostname",
+ "humantime",
  "hyper",
  "hyper-tungstenite",
  "itertools",
@@ -2684,6 +2702,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "pq_proto",
+ "prometheus",
  "rand",
  "rcgen",
  "regex",
