@@ -705,6 +705,10 @@ impl Timeline {
                 // "enough".
                 let layer_paths_to_upload =
                     self.create_image_layers(&partitioning, lsn, false).await?;
+                // GC decides to delete older layers obsoleted by layers in layer_paths_to_upload.
+                // The deletions are queued and executed, both locally and remotely.
+                // And only now do we schedule the new layers for upload.
+                // So, if this pageserver's disk dies now, we've lost data.
                 if let Some(remote_client) = &self.remote_client {
                     for (path, layer_metadata) in layer_paths_to_upload {
                         remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
@@ -1107,6 +1111,7 @@ impl Timeline {
                     );
 
                     rename_to_backup(&direntry_path)?;
+
                     continue;
                 }
 
@@ -2296,6 +2301,8 @@ impl Timeline {
             .collect::<Vec<_>>();
         par_fsync::par_fsync(&all_paths)?;
 
+        // nobody has seen this layer yet
+
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
         let mut layers = self.layers.write().unwrap();
@@ -2312,6 +2319,9 @@ impl Timeline {
             layers.insert_historic(Arc::new(l));
         }
         drop(layers);
+        // After dropping the layer map lock, other activities in pageserver can see the new layer and act on it.
+        // Importantly, GC can delete older layers that are obsoleted by this new layer file.
+        // However, we have not scheduled the layer upload yet. Go back to the caller to see why this is bad.
         timer.stop_and_record();
 
         Ok(layer_paths_to_upload)
