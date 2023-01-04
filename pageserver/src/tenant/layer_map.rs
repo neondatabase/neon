@@ -26,7 +26,7 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use super::storage_layer::{InMemoryLayer, Layer};
+use super::storage_layer::{InMemoryLayer, InMemoryOrHistoricLayer, Layer};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -241,7 +241,8 @@ where
 
 /// Return value of LayerMap::search
 pub struct SearchResult<L: ?Sized> {
-    pub layer: Arc<L>,
+    // FIXME: I wish this could be Arc<dyn Layer>. But I couldn't make that work.
+    pub layer: InMemoryOrHistoricLayer<L>,
     pub lsn_floor: Lsn,
 }
 
@@ -261,6 +262,30 @@ where
     /// layer.
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
+        // First check if an open or frozen layer matches
+        if let Some(open_layer) = &self.open_layer {
+            let start_lsn = open_layer.get_lsn_range().start;
+            if end_lsn > start_lsn {
+                return Some(SearchResult {
+                    layer: InMemoryOrHistoricLayer::InMemory(Arc::clone(open_layer)),
+                    lsn_floor: start_lsn,
+                });
+            }
+        }
+        for frozen_layer in self.frozen_layers.iter().rev() {
+            let start_lsn = frozen_layer.get_lsn_range().start;
+            if end_lsn > start_lsn {
+                return Some(SearchResult {
+                    layer: InMemoryOrHistoricLayer::InMemory(Arc::clone(frozen_layer)),
+                    lsn_floor: start_lsn,
+                });
+            }
+        }
+
+        self.search_historic(key, end_lsn)
+    }
+
+    fn search_historic(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
         // linear search
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<Arc<L>> = None;
@@ -286,7 +311,7 @@ where
             if Lsn(img_lsn.0 + 1) == end_lsn {
                 // found exact match
                 return Some(SearchResult {
-                    layer: Arc::clone(l),
+                    layer: InMemoryOrHistoricLayer::Historic(Arc::clone(l)),
                     lsn_floor: img_lsn,
                 });
             }
@@ -349,13 +374,13 @@ where
             );
             Some(SearchResult {
                 lsn_floor,
-                layer: l,
+                layer: InMemoryOrHistoricLayer::Historic(l),
             })
         } else if let Some(l) = latest_img {
             trace!("found img layer and no deltas for request on {key} at {end_lsn}");
             Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
-                layer: l,
+                layer: InMemoryOrHistoricLayer::Historic(l),
             })
         } else {
             trace!("no layer found for request on {key} at {end_lsn}");

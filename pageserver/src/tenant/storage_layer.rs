@@ -196,3 +196,38 @@ pub fn downcast_remote_layer(
         None
     }
 }
+
+pub enum InMemoryOrHistoricLayer<L: ?Sized> {
+    InMemory(Arc<InMemoryLayer>),
+    Historic(Arc<L>),
+}
+
+impl<L: ?Sized> InMemoryOrHistoricLayer<L>
+where
+    L: PersistentLayer,
+{
+    pub fn downcast_remote_layer(&self) -> Option<std::sync::Arc<RemoteLayer>> {
+        match self {
+            Self::InMemory(_) => None,
+            Self::Historic(l) => {
+                if l.is_remote_layer() {
+                    Arc::clone(l).downcast_remote_layer()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    pub fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValueReconstructState,
+    ) -> Result<ValueReconstructResult> {
+        match self {
+            Self::InMemory(l) => l.get_value_reconstruct_data(key, lsn_range, reconstruct_data),
+            Self::Historic(l) => l.get_value_reconstruct_data(key, lsn_range, reconstruct_data),
+        }
+    }
+}

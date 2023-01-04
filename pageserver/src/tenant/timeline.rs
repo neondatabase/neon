@@ -25,8 +25,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
-    DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer, LayerFileName,
-    RemoteLayer,
+    DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer,
+    InMemoryOrHistoricLayer, LayerFileName, RemoteLayer,
 };
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file,
@@ -1591,7 +1591,7 @@ trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
 }
 
-impl TraversalLayerExt for Arc<dyn PersistentLayer> {
+impl<T: PersistentLayer + ?Sized> TraversalLayerExt for T {
     fn traversal_id(&self) -> TraversalId {
         match self.local_path() {
             Some(local_path) => {
@@ -1621,6 +1621,15 @@ impl TraversalLayerExt for Arc<InMemoryLayer> {
     }
 }
 
+impl TraversalLayerExt for InMemoryOrHistoricLayer<dyn PersistentLayer> {
+    fn traversal_id(&self) -> String {
+        match self {
+            Self::InMemory(l) => l.traversal_id(),
+            Self::Historic(l) => l.traversal_id(),
+        }
+    }
+}
+
 impl Timeline {
     ///
     /// Get a handle to a Layer for reading.
@@ -1642,8 +1651,11 @@ impl Timeline {
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
-        let mut traversal_path =
-            Vec::<(ValueReconstructResult, Lsn, Box<dyn TraversalLayerExt>)>::new();
+        let mut traversal_path = Vec::<(
+            ValueReconstructResult,
+            Lsn,
+            Box<dyn TraversalLayerExt>,
+        )>::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -1679,7 +1691,7 @@ impl Timeline {
                             Lsn(cont_lsn.0 - 1),
                             request_lsn,
                             timeline.ancestor_lsn
-                        ), traversal_path);
+                        ), &traversal_path);
                     }
                     prev_lsn = cont_lsn;
                 }
@@ -1689,7 +1701,7 @@ impl Timeline {
                             "could not find data for key {} at LSN {}, for request at LSN {}",
                             key, cont_lsn, request_lsn
                         ),
-                        traversal_path,
+                        &traversal_path,
                     );
                 }
             }
@@ -1708,82 +1720,54 @@ impl Timeline {
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
-                continue;
+                continue 'outer;
             }
 
-            let layers = timeline.layers.read().unwrap();
-
-            // Check the open and frozen in-memory layers first, in order from newest
-            // to oldest.
-            if let Some(open_layer) = &layers.open_layer {
-                let start_lsn = open_layer.get_lsn_range().start;
-                if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
-                    // Get all the data needed to reconstruct the page version from this layer.
-                    // But if we have an older cached page image, no need to go past that.
-                    let lsn_floor = max(cached_lsn + 1, start_lsn);
-                    result = match open_layer.get_value_reconstruct_data(
-                        key,
-                        lsn_floor..cont_lsn,
-                        reconstruct_state,
-                    ) {
-                        Ok(result) => result,
-                        Err(e) => return PageReconstructResult::from(e),
-                    };
-                    cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, Box::new(open_layer.clone())));
-                    continue;
-                }
-            }
-            for frozen_layer in layers.frozen_layers.iter().rev() {
-                let start_lsn = frozen_layer.get_lsn_range().start;
-                if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
-                    let lsn_floor = max(cached_lsn + 1, start_lsn);
-                    result = match frozen_layer.get_value_reconstruct_data(
-                        key,
-                        lsn_floor..cont_lsn,
-                        reconstruct_state,
-                    ) {
-                        Ok(result) => result,
-                        Err(e) => return PageReconstructResult::from(e),
-                    };
-                    cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, Box::new(frozen_layer.clone())));
-                    continue 'outer;
-                }
-            }
-
-            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
-                //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
-
-                // If it's a remote layer, the caller can do the download and retry.
-                if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
-                    info!("need remote layer {}", layer.traversal_id());
-                    return PageReconstructResult::NeedsDownload(
-                        Weak::clone(&timeline.myself),
-                        Arc::downgrade(&remote_layer),
-                    );
-                }
-
-                let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                result = match layer.get_value_reconstruct_data(
-                    key,
-                    lsn_floor..cont_lsn,
-                    reconstruct_state,
-                ) {
-                    Ok(result) => result,
-                    Err(e) => return PageReconstructResult::from(e),
+            loop {
+                let remote_layer = {
+                    let layers = timeline.layers.read().unwrap();
+                    if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
+                        // If it's a remote layer, download it and retry.
+                        if let Some(remote_layer) = layer.downcast_remote_layer() {
+                            // TODO: push a breadcrumb to 'traversal_path' to record the fact that
+                            // we downloaded / would need to download this.
+                            remote_layer
+                        } else {
+                            // Get all the data needed to reconstruct the page version from this layer.
+                            // But if we have an older cached page image, no need to go past that.
+                            let lsn_floor = max(cached_lsn + 1, lsn_floor);
+                            result = match layer.get_value_reconstruct_data(
+                                key,
+                                lsn_floor..cont_lsn,
+                                reconstruct_state,
+                            ) {
+                                Ok(result) => result,
+                                Err(e) => return PageReconstructResult::from(e),
+                            };
+                            cont_lsn = lsn_floor;
+                            traversal_path.push((result, cont_lsn, Box::new(layer)));
+                            continue 'outer;
+                        }
+                    } else if timeline.ancestor_timeline.is_some() {
+                        // Nothing on this timeline. Traverse to parent
+                        result = ValueReconstructResult::Continue;
+                        cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
+                        continue 'outer;
+                    } else {
+                        // Nothing found
+                        result = ValueReconstructResult::Missing;
+                        continue 'outer;
+                    }
                 };
-                cont_lsn = lsn_floor;
-                traversal_path.push((result, cont_lsn, Box::new(layer.clone())));
-            } else if timeline.ancestor_timeline.is_some() {
-                // Nothing on this timeline. Traverse to parent
-                result = ValueReconstructResult::Continue;
-                cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
-            } else {
-                // Nothing found
-                result = ValueReconstructResult::Missing;
+
+                // The next layer doesn't exist locally. The caller can do the download and retry.
+                // (The control flow is a bit complicated here because we must drop the 'layers'
+                // lock before awaiting on the Future.)
+                info!("need remote layer {}", remote_layer.traversal_id());
+                return PageReconstructResult::NeedsDownload(
+                    Weak::clone(&timeline.myself),
+                    Arc::downgrade(&remote_layer),
+                );
             }
         }
     }
@@ -3362,7 +3346,7 @@ where
 /// to an error, as anyhow context information.
 fn layer_traversal_error(
     msg: String,
-    path: Vec<(ValueReconstructResult, Lsn, Box<dyn TraversalLayerExt>)>,
+    path: &[(ValueReconstructResult, Lsn, Box<dyn TraversalLayerExt>)],
 ) -> PageReconstructResult<()> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
