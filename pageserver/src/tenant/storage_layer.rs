@@ -1,4 +1,22 @@
 //! Common traits and structs for layers
+//!
+//! A Layer contains all data in a "rectangle" consisting of a range of keys and
+//! range of LSNs.
+//!
+//! There are two kinds of layers, in-memory and on-disk layers. In-memory
+//! layers are used to ingest incoming WAL, and provide fast access to the
+//! recent page versions. On-disk layers are stored as files on disk, and are
+//! immutable. This trait presents the common functionality of in-memory and
+//! on-disk layers.
+//!
+//! Furthermore, there are two kinds of on-disk layers: delta and image layers.
+//! A delta layer contains all modifications within a range of LSNs and keys.
+//! An image layer is a snapshot of all the data in a key-range, at a single
+//! LSN.
+//! Both on-disk layers are considered as hstoric ones,
+//! since contain history of the database, persisted into the layer files.
+//! The layer files could be present or not on the local disk, might get
+//! downloaded from the remote storage, if needed.
 
 mod delta_layer;
 mod filename;
@@ -52,7 +70,7 @@ where
 /// of the page, or the oldest WAL record in 'records' is a will_init-type
 /// record that initializes the page without requiring a previous image.
 ///
-/// If 'get_page_reconstruct_data' returns Continue, some 'records' may have
+/// If 'get_value_reconstruct_data' returns Continue, some 'records' may have
 /// been collected, but there are more records outside the current layer. Pass
 /// the same ValueReconstructState struct in the next 'get_value_reconstruct_data'
 /// call, to collect more records.
@@ -63,7 +81,7 @@ pub struct ValueReconstructState {
     pub img: Option<(Lsn, Bytes)>,
 }
 
-/// Return value from Layer::get_page_reconstruct_data
+/// Return value from LayerRange::get_value_reconstruct_data
 #[derive(Clone, Copy, Debug)]
 pub enum ValueReconstructResult {
     /// Got all the data needed to reconstruct the requested page
@@ -78,8 +96,7 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
-/// Supertrait of the [`Layer`] trait that captures the bare minimum interface
-/// required by [`LayerMap`].
+/// Basic trait of every layer, describing which [`Key`] and [`Lsn`] ranges this layer covers.
 pub trait LayerRange {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
@@ -102,7 +119,22 @@ pub trait LayerRange {
     fn short_id(&self) -> String;
 }
 
-// TODO kb docs everywhere
+/// A trait of a layer that has a corresponding file locally in FS.
+pub trait LayerFile {
+    fn layer_name(&self) -> LayerFileName;
+
+    fn local_path(&self) -> PathBuf;
+
+    fn file_size(&self) -> u64;
+
+    fn delete(&self) -> anyhow::Result<()> {
+        let path_to_delete = self.local_path();
+        std::fs::remove_file(&path_to_delete)
+            .with_context(|| format!("Failed to remove local layer file {path_to_delete:?}"))
+    }
+}
+
+/// A trait of a layer that has its contents available for reading.
 pub trait LayerContent {
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> anyhow::Result<()>;
@@ -132,6 +164,8 @@ pub type LayerIter<'i> = Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value
 /// Returned by [`Layer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 
+/// A layer that once had an FS file reprentation, with historical data.
+/// Could contain remote-only layers, that were once evicted from the local storage.
 pub enum HistoricLayer<D = DeltaLayer, I = ImageLayer> {
     Delta(LocalOrRemote<D>),
     Image(LocalOrRemote<I>),
@@ -156,13 +190,14 @@ impl<D, I> Clone for HistoricLayer<D, I> {
     }
 }
 
+/// A layer, that might need downloading before most of its [meta]data is accesible.
 pub enum LocalOrRemote<L> {
     Local(Arc<L>),
     Remote(Arc<RemoteLayer>),
 }
 
 impl<L> LocalOrRemote<L> {
-    pub fn as_remote(&self) -> Option<&Arc<RemoteLayer>> {
+    fn as_remote(&self) -> Option<&Arc<RemoteLayer>> {
         match self {
             Self::Local(_) => None,
             Self::Remote(remote_layer) => Some(remote_layer),
@@ -182,20 +217,9 @@ where
     }
 }
 
-pub trait LayerFile {
-    fn layer_name(&self) -> LayerFileName;
-
-    fn local_path(&self) -> PathBuf;
-
-    fn file_size(&self) -> u64;
-
-    fn delete(&self) -> anyhow::Result<()> {
-        let path_to_delete = self.local_path();
-        std::fs::remove_file(&path_to_delete)
-            .with_context(|| format!("Failed to remove local layer file {path_to_delete:?}"))
-    }
-}
-
+// Currently, we compact only `DeltaLayer`, creating `ImageLayer` out of them, ergo
+// current impl is needed for delta layers only.
+// This might serve as a base for another trait, if the same compaction approach is used for image layers.
 impl LocalOrRemote<DeltaLayer> {
     /// Iterate through all keys and values stored in the layer
     pub fn iter(&self) -> anyhow::Result<LayerIter<'_>> {
@@ -257,21 +281,6 @@ impl From<Arc<RemoteLayer>> for HistoricLayer {
         }
     }
 }
-
-/// A Layer contains all data in a "rectangle" consisting of a range of keys and
-/// range of LSNs.
-///
-/// There are two kinds of layers, in-memory and on-disk layers. In-memory
-/// layers are used to ingest incoming WAL, and provide fast access to the
-/// recent page versions. On-disk layers are stored as files on disk, and are
-/// immutable. This trait presents the common functionality of in-memory and
-/// on-disk layers.
-///
-/// Furthermore, there are two kinds of on-disk layers: delta and image layers.
-/// A delta layer contains all modifications within a range of LSNs and keys.
-/// An image layer is a snapshot of all the data in a key-range, at a single
-/// LSN
-///
 
 impl<D, I> HistoricLayer<D, I>
 where
