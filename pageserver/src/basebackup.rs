@@ -27,7 +27,7 @@ use tracing::*;
 ///
 use tokio_tar::{Builder, EntryType, Header};
 
-use crate::tenant::{with_ondemand_download, Timeline};
+use crate::tenant::{with_ondemand_download, TimelineGuard};
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};

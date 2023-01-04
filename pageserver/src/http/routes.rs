@@ -13,7 +13,7 @@ use super::models::{
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{with_ondemand_download, Timeline};
+use crate::tenant::{with_ondemand_download, TimelineGuard};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -79,7 +79,7 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 
 // Helper function to construct a TimelineInfo struct for a timeline
 async fn build_timeline_info(
-    timeline: &Arc<Timeline>,
+    timeline: &TimelineGuard,
     include_non_incremental_logical_size: bool,
 ) -> anyhow::Result<TimelineInfo> {
     let mut info = build_timeline_info_common(timeline)?;
@@ -99,7 +99,7 @@ async fn build_timeline_info(
     Ok(info)
 }
 
-fn build_timeline_info_common(timeline: &Arc<Timeline>) -> anyhow::Result<TimelineInfo> {
+fn build_timeline_info_common(timeline: &TimelineGuard) -> anyhow::Result<TimelineInfo> {
     let last_record_lsn = timeline.get_last_record_lsn();
     let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
         let guard = timeline.last_received_wal.lock().unwrap();

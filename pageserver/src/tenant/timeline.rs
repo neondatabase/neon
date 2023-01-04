@@ -202,14 +202,50 @@ pub struct TimelineRef {
     pub id: TenantTimelineId,
 }
 
+pub struct TimelineGuard(Arc<Timeline>);
+
+impl TimelineGuard {
+    pub fn get_current_logical_size(&self) -> anyhow::Result<(u64, bool)> {
+        Timeline::get_current_logical_size(&self.0)
+    }
+
+    pub async fn spawn_download_all_remote_layers(
+        &self,
+    ) -> Result<DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskInfo> {
+        Timeline::spawn_download_all_remote_layers(&self.0).await
+    }
+
+    pub async fn download_remote_layer(
+        &self,
+        remote_layer: Arc<RemoteLayer>,
+    ) -> anyhow::Result<()> {
+        Timeline::download_remote_layer(Arc::clone(&self.0), remote_layer).await
+    }
+
+    pub fn spawn_ondemand_logical_size_calculation(
+        &self,
+        lsn: Lsn,
+    ) -> oneshot::Receiver<Result<u64, CalculateLogicalSizeError>> {
+        Timeline::spawn_ondemand_logical_size_calculation(&self.0, lsn)
+    }
+}
+
+impl Deref for TimelineGuard {
+    type Target = Timeline;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
 impl TimelineRef {
     /// Use this as a `MutexGuard` and do not try to store the object.
     /// While the object is held, the timeline is not dropped fully, which might cause
     /// various jobs to continue working.
-    pub fn try_upgrade_timeline_arc(&self) -> anyhow::Result<Arc<Timeline>> {
-        self.timeline
-            .upgrade()
-            .with_context(|| format!("Timeline {} is dropped", self.id))
+    pub fn try_upgrade_timeline_arc(&self) -> anyhow::Result<TimelineGuard> {
+        Ok(TimelineGuard(self.timeline.upgrade().with_context(
+            || format!("Timeline {} is dropped", self.id),
+        )?))
     }
 }
 
@@ -3201,7 +3237,7 @@ impl Timeline {
     }
 
     pub async fn spawn_download_all_remote_layers(
-        self: Arc<Self>,
+        self: &Arc<Self>,
     ) -> Result<DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskInfo> {
         let mut status_guard = self.download_all_remote_layers_task_info.write().unwrap();
         if let Some(st) = &*status_guard {
@@ -3216,7 +3252,7 @@ impl Timeline {
             }
         }
 
-        let self_clone = Arc::clone(&self);
+        let self_clone = Arc::clone(self);
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
