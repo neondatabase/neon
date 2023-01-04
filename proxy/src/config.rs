@@ -2,7 +2,6 @@ use crate::auth;
 use anyhow::{ensure, Context};
 use std::sync::Arc;
 
-#[derive(Clone)]
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, ()>,

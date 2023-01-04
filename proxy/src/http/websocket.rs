@@ -7,17 +7,18 @@ use hyper::{Body, Request, Response, StatusCode};
 use hyper_tungstenite::{tungstenite, WebSocketStream};
 use hyper_tungstenite::{tungstenite::Message, HyperWebsocket};
 use pin_project_lite::pin_project;
+use tokio::net::TcpListener;
 
+use std::convert::Infallible;
 use std::future::ready;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::{convert::Infallible, net::TcpListener};
 use tls_listener::TlsListener;
 
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use tracing::{error, info, warn};
+use tracing::{error, info, info_span, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
 
 use crate::cancellation::CancelMap;
@@ -225,8 +226,7 @@ pub async fn task_main(
         }
     };
 
-    let tokio_listener = tokio::net::TcpListener::from_std(ws_listener)?;
-    let addr_incoming = AddrIncoming::from_listener(tokio_listener)?;
+    let addr_incoming = AddrIncoming::from_listener(ws_listener)?;
 
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
         if let Err(err) = conn {
@@ -242,7 +242,12 @@ pub async fn task_main(
             move |req: Request<Body>| async move {
                 let cancel_map = Arc::new(CancelMap::default());
                 let session_id = uuid::Uuid::new_v4();
-                ws_handler(req, config, cancel_map, session_id).await
+                ws_handler(req, config, cancel_map, session_id)
+                    .instrument(info_span!(
+                        "ws-client",
+                        session = format_args!("{session_id}")
+                    ))
+                    .await
             },
         ))
     });

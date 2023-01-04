@@ -114,11 +114,11 @@ pub async fn handle_client(
 
     // Extract credentials which we're going to use for auth.
     let creds = {
-        let sni = if config.secure_override_hostname.is_none() {
-            stream.get_ref().sni_hostname()
-        } else {
-            let hostname = config.secure_override_hostname.as_ref().unwrap();
-            Some(hostname.as_str())
+        let sni = match &config.secure_override_hostname {
+            // If `secure_override_hostname` is set, we use it as SNI.
+            Some(hostname) => Some(hostname.as_str()),
+            // Otherwise, we use the SNI from the TLS handshake.
+            None => stream.get_ref().sni_hostname(),
         };
         let common_name = tls.and_then(|tls| tls.common_name.as_deref());
         let result = config

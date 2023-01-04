@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(wss_address) = arg_matches.get_one::<String>("wss") {
         let wss_address: SocketAddr = wss_address.parse()?;
         info!("Starting wss on {}", wss_address);
-        let wss_listener = TcpListener::bind(wss_address).await?.into_std()?;
+        let wss_listener = TcpListener::bind(wss_address).await?;
         tasks.push(tokio::spawn(http::websocket::task_main(
             wss_listener,
             config,
