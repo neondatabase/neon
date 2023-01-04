@@ -93,8 +93,8 @@ mod timeline;
 pub mod size;
 
 pub use timeline::{
-    with_ondemand_download, PageReconstructError, PageReconstructResult, Timeline, TimelineGuard,
-    TimelineRef,
+    timeline_wrappers::{TimelineGuard, TimelineRef},
+    with_ondemand_download, PageReconstructError, PageReconstructResult, Timeline,
 };
 
 // re-export this function so that page_cache.rs can use it.

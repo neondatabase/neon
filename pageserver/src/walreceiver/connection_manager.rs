@@ -41,14 +41,14 @@ use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
 
 /// Spawns the loop to take care of the timeline's WAL streaming connection.
 pub fn spawn_connection_manager_task(
-    timeline_guard: TimelineRef,
+    timeline_ref: TimelineRef,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
     auth_token: Option<Arc<String>>,
 ) {
     let mut broker_client = get_broker_client().clone();
-    let id = timeline_guard.id;
+    let id = timeline_ref.id;
 
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
@@ -60,7 +60,7 @@ pub fn spawn_connection_manager_task(
         async move {
             info!("WAL receiver manager started, connecting to broker");
             let mut walreceiver_state = WalreceiverState::new(
-                timeline_guard,
+                timeline_ref,
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
@@ -93,9 +93,9 @@ pub fn spawn_connection_manager_task(
     );
 }
 
-macro_rules! try_upgrade_timeline_arc {
+macro_rules! try_update_to_any_timeline {
     ( $walreceiver_state:expr ) => {
-        match $walreceiver_state.timeline_ref.try_upgrade_timeline_arc() {
+        match $walreceiver_state.timeline_ref.any_timeline() {
             Ok(timeline) => timeline,
             Err(e) => {
                 warn!("Cannot acquire timeline read: {e:#}");
@@ -113,7 +113,7 @@ async fn connection_manager_loop_step(
     walreceiver_state: &mut WalreceiverState,
 ) -> ControlFlow<(), ()> {
     let mut timeline_state_updates =
-        try_upgrade_timeline_arc!(walreceiver_state).subscribe_for_state_updates();
+        try_update_to_any_timeline!(walreceiver_state).subscribe_for_state_updates();
 
     match wait_for_active_timeline(&mut timeline_state_updates).await {
         ControlFlow::Continue(()) => {}
@@ -192,7 +192,7 @@ async fn connection_manager_loop_step(
                 loop {
                     match timeline_state_updates.changed().await {
                         Ok(()) => {
-                            let new_state = try_upgrade_timeline_arc!(walreceiver_state).current_state();
+                            let new_state = try_update_to_any_timeline!(walreceiver_state).current_state();
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
@@ -366,14 +366,14 @@ struct BrokerSkTimeline {
 
 impl WalreceiverState {
     fn new(
-        timeline_guard: TimelineRef,
+        timeline_ref: TimelineRef,
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
         auth_token: Option<Arc<String>>,
     ) -> Self {
         Self {
-            timeline_ref: timeline_guard,
+            timeline_ref,
             wal_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
@@ -394,11 +394,11 @@ impl WalreceiverState {
 
         let id = self.timeline_ref.id;
         let connect_timeout = self.wal_connect_timeout;
-        let walreceiver_timeline_guard = self.timeline_ref.clone();
+        let walreceiver_timeline_ref = self.timeline_ref.clone();
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
-                    walreceiver_timeline_guard,
+                    walreceiver_timeline_ref,
                     new_wal_source_connconf,
                     events_sender,
                     cancellation,

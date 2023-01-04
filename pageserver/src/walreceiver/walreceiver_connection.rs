@@ -51,7 +51,7 @@ pub struct WalConnectionStatus {
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
-    timeline_guard: TimelineRef,
+    timeline_ref: TimelineRef,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
@@ -59,7 +59,7 @@ pub async fn handle_walreceiver_connection(
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
-    let id = timeline_guard.id;
+    let id = timeline_ref.id;
 
     let (mut replication_client, connection) = {
         let mut config = wal_source_connconf.to_tokio_postgres_config();
@@ -142,7 +142,7 @@ pub async fn handle_walreceiver_connection(
         return Ok(());
     }
 
-    let timeline_read = timeline_guard.any_timeline()?;
+    let timeline_read = timeline_ref.any_timeline()?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -178,7 +178,7 @@ pub async fn handle_walreceiver_connection(
     pin!(physical_stream);
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, pg_version);
-    let mut walingest = WalIngest::new(pg_version, timeline_guard.clone(), startpoint).await?;
+    let mut walingest = WalIngest::new(pg_version, timeline_ref.clone(), startpoint).await?;
     while let Some(replication_message) = {
         select! {
             _ = cancellation.changed() => {
@@ -191,7 +191,7 @@ pub async fn handle_walreceiver_connection(
         // We use this timeline for the entire replication message processing, since
         // `cancellation` for the loop is also tracked here above and unconditionally
         // interrupting byte streams could be bad
-        let walingest_timeline = timeline_guard.any_timeline()?;
+        let walingest_timeline = timeline_ref.any_timeline()?;
         let replication_message = match replication_message {
             Ok(message) => message,
             Err(replication_error) => {

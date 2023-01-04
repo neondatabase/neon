@@ -434,7 +434,6 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
-
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
             return Err(QueryError::Other(
