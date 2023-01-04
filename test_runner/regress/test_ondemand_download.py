@@ -368,7 +368,7 @@ def test_download_remote_layers_api(
     env.pageserver.allowed_errors.extend(
         [
             f".*download_all_remote_layers.*{tenant_id}.*{timeline_id}.*layer download failed.*remote-storage-download-pre-rename failpoint",
-            f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
+            f".*initial size calculation for {tenant_id}/{timeline_id} failed.*remote-storage-download-pre-rename failpoint",
         ]
     )
 

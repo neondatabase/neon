@@ -21,15 +21,15 @@ use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
 use crate::{
+    context::RequestContext,
     task_mgr,
-    task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
     tenant::{Timeline, WalReceiverInfo},
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
+use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
@@ -61,6 +61,7 @@ pub async fn handle_walreceiver_connection(
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
+    cxt: RequestContext,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
@@ -98,12 +99,10 @@ pub async fn handle_walreceiver_connection(
 
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
+    let cancellation_token = cxt.cancellation_token.clone();
     let mut connection_cancellation = cancellation.clone();
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
-        TaskKind::WalReceiverConnection,
-        Some(timeline.tenant_id),
-        Some(timeline.timeline_id),
         "walreceiver connection",
         false,
         async move {
@@ -118,6 +117,7 @@ pub async fn handle_walreceiver_connection(
                 },
 
                 _ = connection_cancellation.changed() => info!("Connection cancelled"),
+                _ = cancellation_token.cancelled() => info!("Connection cancelled"),
             }
             Ok(())
         },
@@ -179,11 +179,17 @@ pub async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint).await?;
+    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &cxt).await?;
+
+    let cancellation_token = cxt.cancellation_token.clone();
 
     while let Some(replication_message) = {
         select! {
             _ = cancellation.changed() => {
+                info!("walreceiver interrupted");
+                None
+            }
+            _ = cancellation_token.cancelled() => {
                 info!("walreceiver interrupted");
                 None
             }
@@ -250,7 +256,7 @@ pub async fn handle_walreceiver_connection(
                         ensure!(lsn.is_aligned());
 
                         walingest
-                            .ingest_record(recdata.clone(), lsn, &mut modification, &mut decoded)
+                            .ingest_record(recdata, lsn, &mut modification, &mut decoded, &cxt)
                             .await
                             .with_context(|| format!("could not ingest record at {lsn}"))?;
 

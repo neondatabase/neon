@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
 
-use crate::pgdatadir_mapping::CalculateLogicalSizeError;
+use crate::context::RequestContext;
+use crate::tenant::PageReconstructError;
 
 use super::Tenant;
 use utils::id::TimelineId;
@@ -63,13 +63,14 @@ pub(super) async fn gather_inputs(
     tenant: &Tenant,
     limit: &Arc<Semaphore>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
+    tenant_cxt: &RequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // with joinset, on drop, all of the tasks will just be de-scheduled, which we can use to
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
     let timelines = tenant
-        .refresh_gc_info()
+        .refresh_gc_info(tenant_cxt)
         .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
@@ -97,8 +98,20 @@ pub(super) async fn gather_inputs(
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
+    let mut cxt_dropguards: Vec<tokio_util::sync::DropGuard> = Vec::new();
+
     for timeline in timelines {
         let last_record_lsn = timeline.get_last_record_lsn();
+
+        let cxt = match timeline.get_context(tenant_cxt) {
+            Ok(cxt) => cxt,
+            Err(state) => {
+                info!("skipping tenant size calculation for timeline because it is in {state:?} state");
+                continue;
+            }
+        };
+        cxt_dropguards.push(cxt.cancellation_token.clone().drop_guard());
+        let cxt = Arc::new(cxt);
 
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
             // there's a race between the update (holding tenant.gc_lock) and this read but it
@@ -169,19 +182,23 @@ pub(super) async fn gather_inputs(
             timeline_id: timeline.timeline_id,
         });
 
-        for (lsn, _kind) in &interesting_lsns {
-            if let Some(size) = logical_size_cache.get(&(timeline.timeline_id, *lsn)) {
+        for (lsn, _kind) in interesting_lsns.iter() {
+            let lsn = *lsn;
+            if let Some(size) = logical_size_cache.get(&(timeline.timeline_id, lsn)) {
                 updates.push(Update {
-                    lsn: *lsn,
+                    lsn,
                     timeline_id: timeline.timeline_id,
                     command: Command::Update(*size),
                 });
 
-                needed_cache.insert((timeline.timeline_id, *lsn));
+                needed_cache.insert((timeline.timeline_id, lsn));
             } else {
                 let timeline = Arc::clone(&timeline);
                 let parallel_size_calcs = Arc::clone(limit);
-                joinset.spawn(calculate_logical_size(parallel_size_calcs, timeline, *lsn));
+                let cxt_clone = Arc::clone(&cxt);
+                joinset.spawn(async move {
+                    calculate_logical_size(parallel_size_calcs, timeline, lsn, &cxt_clone).await
+                });
             }
         }
 
@@ -357,7 +374,7 @@ enum LsnKind {
 struct TimelineAtLsnSizeResult(
     Arc<crate::tenant::Timeline>,
     utils::lsn::Lsn,
-    Result<u64, CalculateLogicalSizeError>,
+    Result<u64, PageReconstructError>,
 );
 
 #[instrument(skip_all, fields(timeline_id=%timeline.timeline_id, lsn=%lsn))]
@@ -365,14 +382,13 @@ async fn calculate_logical_size(
     limit: Arc<tokio::sync::Semaphore>,
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
-) -> Result<TimelineAtLsnSizeResult, RecvError> {
+    cxt: &RequestContext,
+) -> Result<TimelineAtLsnSizeResult, PageReconstructError> {
     let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
-        .expect("global semaphore should not had been closed");
+        .expect("global semaphore should not have been closed");
 
-    let size_res = timeline
-        .spawn_ondemand_logical_size_calculation(lsn)
-        .await?;
+    let size_res = timeline.calculate_logical_size(lsn, cxt).await;
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
 }
 

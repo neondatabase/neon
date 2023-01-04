@@ -11,7 +11,7 @@
 
 use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
 
-use crate::task_mgr::TaskKind;
+use crate::context::{DownloadBehavior, RequestContext, TaskKind};
 use crate::task_mgr::WALRECEIVER_RUNTIME;
 use crate::tenant::Timeline;
 use crate::{task_mgr, walreceiver::TaskStateUpdate};
@@ -52,11 +52,22 @@ pub fn spawn_connection_manager_task(
     let tenant_id = timeline.tenant_id;
     let timeline_id = timeline.timeline_id;
 
+    let cxt = {
+        let top_cxt = RequestContext::new(TaskKind::WalReceiverManager, DownloadBehavior::Error);
+        match timeline.get_context(&top_cxt) {
+            Ok(cxt) => cxt,
+            Err(state) => {
+                warn!(
+                    "could not spawn connection manager, timeline is in state {:?}",
+                    state
+                );
+                return;
+            }
+        }
+    };
+
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
-        TaskKind::WalReceiverManager,
-        Some(tenant_id),
-        Some(timeline_id),
         &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
         false,
         async move {
@@ -70,7 +81,7 @@ pub fn spawn_connection_manager_task(
             );
             loop {
                 select! {
-                    _ = task_mgr::shutdown_watcher() => {
+                    _ = cxt.cancelled() => {
                         info!("WAL receiver shutdown requested, shutting down");
                         walreceiver_state.shutdown().await;
                         return Ok(());
@@ -78,6 +89,7 @@ pub fn spawn_connection_manager_task(
                     loop_step_result = connection_manager_loop_step(
                         &mut broker_client,
                         &mut walreceiver_state,
+                        &cxt,
                     ) => match loop_step_result {
                         ControlFlow::Continue(()) => continue,
                         ControlFlow::Break(()) => {
@@ -101,6 +113,7 @@ pub fn spawn_connection_manager_task(
 async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     walreceiver_state: &mut WalreceiverState,
+    cxt: &RequestContext,
 ) -> ControlFlow<(), ()> {
     let mut timeline_state_updates = walreceiver_state.timeline.subscribe_for_state_updates();
 
@@ -226,6 +239,7 @@ async fn connection_manager_loop_step(
                 .change_connection(
                     new_candidate.safekeeper_id,
                     new_candidate.wal_source_connconf,
+                    cxt,
                 )
                 .await
         }
@@ -389,12 +403,17 @@ impl WalreceiverState {
         &mut self,
         new_sk_id: NodeId,
         new_wal_source_connconf: PgConnectionConfig,
+        cxt: &RequestContext,
     ) {
         self.drop_old_connection(true).await;
 
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
+
+        let mut child_cxt = RequestContext::with_parent(TaskKind::WalReceiverConnection, cxt);
+        child_cxt.download_behavior = DownloadBehavior::Download;
+
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
@@ -403,6 +422,7 @@ impl WalreceiverState {
                     events_sender,
                     cancellation,
                     connect_timeout,
+                    child_cxt,
                 )
                 .await
                 .context("walreceiver connection handling failure")
@@ -1233,18 +1253,18 @@ mod tests {
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
     async fn dummy_state(harness: &TenantHarness<'_>) -> WalreceiverState {
+        let (tenant, tenant_cxt) = harness.load().await;
+        let (timeline, _timeline_cxt) = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION, &tenant_cxt)
+            .expect("Failed to create an empty timeline for dummy wal connection manager");
+        let timeline = timeline.initialize().unwrap();
+
         WalreceiverState {
             id: TenantTimelineId {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
             },
-            timeline: harness
-                .load()
-                .await
-                .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
-                .expect("Failed to create an empty timeline for dummy wal connection manager")
-                .initialize()
-                .unwrap(),
+            timeline,
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),
             max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),

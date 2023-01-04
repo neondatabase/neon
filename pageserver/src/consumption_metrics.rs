@@ -9,9 +9,8 @@ use tracing::*;
 use utils::id::NodeId;
 use utils::id::TimelineId;
 
-use crate::task_mgr;
+use crate::context::RequestContext;
 use crate::tenant::mgr;
-use pageserver_api::models::TenantState;
 use utils::id::TenantId;
 
 use serde::{Deserialize, Serialize};
@@ -143,6 +142,7 @@ pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
     metric_collection_interval: Duration,
     node_id: NodeId,
+    metrics_cxt: RequestContext,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(metric_collection_interval);
 
@@ -154,12 +154,12 @@ pub async fn collect_metrics(
 
     loop {
         tokio::select! {
-            _ = task_mgr::shutdown_watcher() => {
+            _ = metrics_cxt.cancelled() => {
                 info!("collect_metrics received cancellation request");
                 return Ok(());
             },
             _ = ticker.tick() => {
-                collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await?;
+                collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &metrics_cxt).await?;
             }
         }
     }
@@ -174,6 +174,7 @@ pub async fn collect_metrics_task(
     cached_metrics: &mut HashMap<ConsumptionMetricsKey, u64>,
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
+    cxt: &RequestContext,
 ) -> anyhow::Result<()> {
     let mut current_metrics: Vec<(ConsumptionMetricsKey, u64)> = Vec::new();
     trace!(
@@ -186,11 +187,20 @@ pub async fn collect_metrics_task(
 
     // iterate through list of Active tenants and collect metrics
     for (tenant_id, tenant_state) in tenants {
-        if tenant_state != TenantState::Active {
+        if cxt.is_cancelled() {
             continue;
         }
-
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id).await?;
+        // If the tenant was shut down while while we were looking elsewhere, skip it.
+        let _subcxt = match tenant.get_context(cxt) {
+            Ok(cxt) => cxt,
+            Err(_state) => {
+                debug!(
+                    "skipping metrics collection for tenant {tenant_id} because it is not active"
+                );
+                continue;
+            }
+        };
 
         let mut tenant_resident_size = 0;
 

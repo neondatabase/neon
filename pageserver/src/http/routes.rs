@@ -4,16 +4,16 @@ use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use remote_storage::GenericRemoteStorage;
-use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
     TimelineCreateRequest, TimelineInfo,
 };
+use crate::context::{DownloadBehavior, RequestContext, TaskKind};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{with_ondemand_download, Timeline};
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -77,24 +77,42 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
     })
 }
 
+fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
+    match err {
+        PageReconstructError::Other(err) => ApiError::InternalServerError(err),
+        PageReconstructError::NeedsDownload(_, _) => {
+            // This shouldn't happen, because we use a RequestContext that requests to
+            // download any missing layer files on-demand.
+            ApiError::InternalServerError(anyhow::anyhow!(
+                "would need to download remote layer file"
+            ))
+        }
+        PageReconstructError::Cancelled => {
+            ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
+        }
+        PageReconstructError::WalRedo(err) => {
+            ApiError::InternalServerError(anyhow::anyhow!("wal redo failed: {err:?}"))
+        }
+    }
+}
+
 // Helper function to construct a TimelineInfo struct for a timeline
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
+    cxt: Option<&RequestContext>,
 ) -> anyhow::Result<TimelineInfo> {
     let mut info = build_timeline_info_common(timeline)?;
     if include_non_incremental_logical_size {
-        // XXX we should be using spawn_ondemand_logical_size_calculation here.
-        // Otherwise, if someone deletes the timeline / detaches the tenant while
-        // we're executing this function, we will outlive the timeline on-disk state.
-        info.current_logical_size_non_incremental = Some(
-            timeline
-                .get_current_logical_size_non_incremental(
-                    info.last_record_lsn,
-                    CancellationToken::new(),
-                )
-                .await?,
-        );
+        if let Some(cxt) = cxt {
+            info.current_logical_size_non_incremental = Some(
+                timeline
+                    .get_current_logical_size_non_incremental(info.last_record_lsn, cxt)
+                    .await?,
+            );
+        } else {
+            info!("could not calculate non-incremental size for timeline because it is not active");
+        }
     }
     Ok(info)
 }
@@ -170,14 +188,17 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         .new_timeline_id
         .unwrap_or_else(TimelineId::generate);
 
-    let tenant = mgr::get_tenant(tenant_id, true)
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let (tenant, cxt) = mgr::get_active_tenant(tenant_id, &cxt)
         .await
         .map_err(ApiError::NotFound)?;
     match tenant.create_timeline(
         new_timeline_id,
         request_data.ancestor_timeline_id.map(TimelineId::from),
         request_data.ancestor_start_lsn,
-        request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION)
+        request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+        &cxt,
     )
     .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await {
@@ -198,21 +219,25 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         query_param_present(&request, "include-non-incremental-logical-size");
     check_permission(&request, Some(tenant_id))?;
 
+    let top_cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
     let response_data = async {
-        let tenant = mgr::get_tenant(tenant_id, true)
+        let (tenant, tenant_cxt) = mgr::get_active_tenant(tenant_id, &top_cxt)
             .await
             .map_err(ApiError::NotFound)?;
         let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
-            let timeline_info =
-                build_timeline_info(&timeline, include_non_incremental_logical_size)
-                    .await
-                    .context(
-                        "Failed to convert tenant timeline {timeline_id} into the local one: {e:?}",
-                    )
-                    .map_err(ApiError::InternalServerError)?;
+            let timeline_cxt = timeline.get_context(&tenant_cxt).ok();
+            let timeline_info = build_timeline_info(
+                &timeline,
+                include_non_incremental_logical_size,
+                timeline_cxt.as_ref(),
+            )
+            .await
+            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
+            .map_err(ApiError::InternalServerError)?;
 
             response_data.push(timeline_info);
         }
@@ -261,19 +286,26 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         query_param_present(&request, "include-non-incremental-logical-size");
     check_permission(&request, Some(tenant_id))?;
 
+    let top_cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
     let timeline_info = async {
-        let tenant = mgr::get_tenant(tenant_id, true)
+        let (tenant, tenant_cxt) = mgr::get_active_tenant(tenant_id, &top_cxt)
             .await
             .map_err(ApiError::NotFound)?;
 
         let timeline = tenant
-            .get_timeline(timeline_id, false)
+            .get_timeline(timeline_id)
             .map_err(ApiError::NotFound)?;
+        let timeline_cxt = timeline.get_context(&tenant_cxt).ok();
 
-        let timeline_info = build_timeline_info(&timeline, include_non_incremental_logical_size)
-            .await
-            .context("Failed to get local timeline info: {e:#}")
-            .map_err(ApiError::InternalServerError)?;
+        let timeline_info = build_timeline_info(
+            &timeline,
+            include_non_incremental_logical_size,
+            timeline_cxt.as_ref(),
+        )
+        .await
+        .context("Failed to get local timeline info: {e:#}")
+        .map_err(ApiError::InternalServerError)?;
 
         Ok::<_, ApiError>(timeline_info)
     }
@@ -294,13 +326,19 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
-    let timeline = mgr::get_tenant(tenant_id, true)
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let (tenant, cxt) = mgr::get_active_tenant(tenant_id, &cxt)
         .await
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
         .map_err(ApiError::NotFound)?;
-    let result = with_ondemand_download(|| timeline.find_lsn_for_timestamp(timestamp_pg))
+
+    let (timeline, cxt) = tenant
+        .get_active_timeline(timeline_id, &cxt)
+        .map_err(ApiError::NotFound)?;
+    let result = timeline
+        .find_lsn_for_timestamp(timestamp_pg, &cxt)
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(apierror_from_prerror)?;
 
     let result = match result {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),
@@ -340,7 +378,10 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    mgr::delete_timeline(tenant_id, timeline_id)
+    // deleting shouldn't require downloading anything
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
+    mgr::delete_timeline(tenant_id, timeline_id, &cxt)
         .instrument(info_span!("timeline_delete", tenant = %tenant_id, timeline = %timeline_id))
         .await
         // FIXME: Errors from `delete_timeline` can occur for a number of reasons, incuding both
@@ -418,8 +459,10 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
+    let mut _req_cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
     let tenant_info = async {
-        let tenant = mgr::get_tenant(tenant_id, false).await?;
+        let tenant = mgr::get_tenant(tenant_id).await?;
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
@@ -446,13 +489,15 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let (tenant, cxt) = mgr::get_active_tenant(tenant_id, &cxt)
         .await
         .map_err(ApiError::InternalServerError)?;
 
     // this can be long operation, it currently is not backed by any request coalescing or similar
     let inputs = tenant
-        .gather_size_inputs()
+        .gather_size_inputs(&cxt)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -494,6 +539,8 @@ fn bad_duration<'a>(field_name: &'static str, value: &'a str) -> impl 'a + Fn() 
 
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
+
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
@@ -583,9 +630,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         Some(tenant) => {
             // We created the tenant. Existing API semantics are that the tenant
             // is Active when this function returns.
-            if let res @ Err(_) = tenant.wait_to_become_active().await {
+            if let res @ Err(_) = tenant.wait_to_become_active(&cxt).await {
                 // This shouldn't happen because we just created the tenant directory
-                // in tenant_mgr::create_tenant, and there aren't any remote timelines
+                // in tenant::mgr::create_tenant, and there aren't any remote timelines
                 // to load, so, nothing can really fail during load.
                 // Don't do cleanup because we don't know how we got here.
                 // The tenant will likely be in `Broken` state and subsequent
@@ -606,6 +653,8 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantConfigRequest = json_request(&mut request).await?;
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
+
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let mut tenant_conf: TenantConfOpt = Default::default();
     if let Some(gc_period) = request_data.gc_period {
@@ -669,7 +718,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
 
     let state = get_state(&request);
-    mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
+    mgr::update_tenant_config(state.conf, tenant_conf, tenant_id, &cxt)
         .instrument(info_span!("tenant_config", tenant = ?tenant_id))
         .await
         // FIXME: `update_tenant_config` can fail because of both user and internal errors.
@@ -721,11 +770,23 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
 
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
-    let wait_task_done = mgr::immediate_gc(tenant_id, timeline_id, gc_req).await?;
-    let gc_result = wait_task_done
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let (tenant, cxt) = mgr::get_active_tenant(tenant_id, &cxt)
         .await
-        .context("wait for gc task")
-        .map_err(ApiError::InternalServerError)?
+        .map_err(ApiError::NotFound)?;
+
+    let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
+    // Use tenant's pitr setting
+    let pitr = tenant.get_pitr_interval();
+
+    // Run in task_mgr to avoid race with detach operation
+    // FIXME: No. Use request context and cancellation token for that
+    fail::fail_point!("immediate_gc_task_pre");
+    let gc_result = tenant
+        .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cxt)
+        .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
+        .await
         .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, gc_result)
@@ -738,14 +799,16 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let (tenant, cxt) = mgr::get_active_tenant(tenant_id, &cxt)
         .await
         .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
+    let (timeline, cxt) = tenant
+        .get_active_timeline(timeline_id, &cxt)
         .map_err(ApiError::NotFound)?;
     timeline
-        .compact()
+        .compact(&cxt)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -759,18 +822,20 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let (tenant, cxt) = mgr::get_active_tenant(tenant_id, &cxt)
         .await
         .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
+    let (timeline, cxt) = tenant
+        .get_active_timeline(timeline_id, &cxt)
         .map_err(ApiError::NotFound)?;
     timeline
         .freeze_and_flush()
         .await
         .map_err(ApiError::InternalServerError)?;
     timeline
-        .compact()
+        .compact(&cxt)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -784,13 +849,15 @@ async fn timeline_download_remote_layers_handler_post(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let (tenant, cxt) = mgr::get_active_tenant(tenant_id, &cxt)
         .await
         .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
+    let (timeline, cxt) = tenant
+        .get_active_timeline(timeline_id, &cxt)
         .map_err(ApiError::NotFound)?;
-    match timeline.spawn_download_all_remote_layers().await {
+    match timeline.spawn_download_all_remote_layers(&cxt).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
     }
@@ -803,11 +870,13 @@ async fn timeline_download_remote_layers_handler_get(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
+    let cxt = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let (tenant, cxt) = mgr::get_active_tenant(tenant_id, &cxt)
         .await
         .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
+    let (timeline, _cxt) = tenant
+        .get_active_timeline(timeline_id, &cxt)
         .map_err(ApiError::NotFound)?;
     let info = timeline
         .get_download_all_remote_layers_task_info()

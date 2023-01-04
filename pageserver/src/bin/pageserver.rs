@@ -13,8 +13,8 @@ use tracing::*;
 use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
+    context::{DownloadBehavior, RequestContext, TaskKind},
     http, page_cache, page_service, task_mgr,
-    task_mgr::TaskKind,
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
     },
@@ -303,19 +303,18 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
+        let mgmt_cxt = RequestContext::new(TaskKind::HttpEndpointListener, DownloadBehavior::Error);
+        let cancellation_token = Box::leak(Box::new(mgmt_cxt.cancellation_token.clone()));
         let router = http::make_router(conf, auth.clone(), remote_storage)?
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
-            .with_graceful_shutdown(task_mgr::shutdown_watcher());
+            .with_graceful_shutdown(cancellation_token.cancelled());
 
         task_mgr::spawn(
             MGMT_REQUEST_RUNTIME.handle(),
-            TaskKind::HttpEndpointListener,
-            None,
-            None,
             "http endpoint listener",
             true,
             async {
@@ -323,42 +322,54 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 Ok(())
             },
         );
+    }
 
-        if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-            task_mgr::spawn(
-                MGMT_REQUEST_RUNTIME.handle(),
-                TaskKind::MetricsCollection,
-                None,
-                None,
-                "consumption metrics collection",
-                true,
-                async move {
-                    pageserver::consumption_metrics::collect_metrics(
-                        metric_collection_endpoint,
-                        conf.metric_collection_interval,
-                        conf.id,
-                    )
-                    .instrument(info_span!("metrics_collection"))
-                    .await?;
-                    Ok(())
-                },
-            );
-        }
+    if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
+        let metrics_cxt = RequestContext::new(
+            TaskKind::MetricsCollection,
+            DownloadBehavior::Error, // metrics collector shouldn't be downloading anything
+        );
+        task_mgr::spawn(
+            MGMT_REQUEST_RUNTIME.handle(),
+            "consumption metrics collection",
+            true,
+            async move {
+                pageserver::consumption_metrics::collect_metrics(
+                    metric_collection_endpoint,
+                    conf.metric_collection_interval,
+                    conf.id,
+                    metrics_cxt,
+                )
+                .instrument(info_span!("metrics_collection"))
+                .await?;
+                Ok(())
+            },
+        );
     }
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
-    task_mgr::spawn(
-        COMPUTE_REQUEST_RUNTIME.handle(),
-        TaskKind::LibpqEndpointListener,
-        None,
-        None,
-        "libpq endpoint listener",
-        true,
-        async move {
-            page_service::libpq_listener_main(conf, auth, pageserver_listener, conf.auth_type).await
-        },
-    );
+    {
+        let libpq_cxt = RequestContext::new(
+            TaskKind::LibpqEndpointListener,
+            DownloadBehavior::Error, // listener task shouldn't be downloading anything
+        );
+        task_mgr::spawn(
+            COMPUTE_REQUEST_RUNTIME.handle(),
+            "libpq endpoint listener",
+            true,
+            async move {
+                page_service::libpq_listener_main(
+                    conf,
+                    auth,
+                    pageserver_listener,
+                    conf.auth_type,
+                    libpq_cxt,
+                )
+                .await
+            },
+        );
+    }
 
     // All started up! Now just sit and wait for shutdown signal.
     signals.handle(|signal| match signal {
@@ -375,7 +386,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
+            BACKGROUND_RUNTIME.block_on(task_mgr::shutdown_pageserver(0));
             unreachable!()
         }
     })

@@ -1,59 +1,20 @@
 //!
-//! This module provides centralized handling of tokio tasks in the Page Server.
+//! This module provides some helpers for spawning tokio tasks in the pageserver.
 //!
-//! We provide a few basic facilities:
-//! - A global registry of tasks that lists what kind of tasks they are, and
-//!   which tenant or timeline they are working on
-//!
-//! - The ability to request a task to shut down.
-//!
-//!
-//! # How it works?
-//!
-//! There is a global hashmap of all the tasks (`TASKS`). Whenever a new
-//! task is spawned, a PageServerTask entry is added there, and when a
-//! task dies, it removes itself from the hashmap. If you want to kill a
-//! task, you can scan the hashmap to find it.
-//!
-//! # Task shutdown
-//!
-//! To kill a task, we rely on co-operation from the victim. Each task is
-//! expected to periodically call the `is_shutdown_requested()` function, and
-//! if it returns true, exit gracefully. In addition to that, when waiting for
-//! the network or other long-running operation, you can use
-//! `shutdown_watcher()` function to get a Future that will become ready if
-//! the current task has been requested to shut down. You can use that with
-//! Tokio select!().
-//!
-//! TODO: This would be a good place to also handle panics in a somewhat sane way.
-//! Depending on what task panics, we might want to kill the whole server, or
-//! only a single tenant or timeline.
+//! Mostly just a wrapper around tokio::spawn, with some code to handle panics.
 //!
 
-// Clippy 1.60 incorrectly complains about the tokio::task_local!() macro.
-// Silence it. See https://github.com/rust-lang/rust-clippy/issues/9224.
-#![allow(clippy::declare_interior_mutable_const)]
-
-use std::collections::HashMap;
-use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
 use tokio::runtime::Runtime;
-use tokio::task::JoinHandle;
-use tokio::task_local;
-use tokio_util::sync::CancellationToken;
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use once_cell::sync::Lazy;
 
-use utils::id::{TenantId, TimelineId};
-
-use crate::shutdown_pageserver;
+use crate::context::{self, TaskKind};
 
 //
 // There are four runtimes:
@@ -91,10 +52,6 @@ use crate::shutdown_pageserver;
 // Another example: the initial tenant loading tasks are launched in the background ops
 // runtime. If a GetPage request comes in before the load of a tenant has finished, the
 // GetPage request will wait for the tenant load to finish.
-//
-// The core Timeline code is synchronous, and uses a bunch of std Mutexes and RWLocks to
-// protect data structures. Let's keep it that way. Synchronous code is easier to debug
-// and analyze, and there's a lot of hairy, low-level, performance critical code there.
 //
 // It's nice to have different runtimes, so that you can quickly eyeball how much CPU
 // time each class of operations is taking, with 'top -H' or similar.
@@ -135,194 +92,34 @@ pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create background op runtime")
 });
 
-#[derive(Debug, Clone, Copy)]
-pub struct PageserverTaskId(u64);
-
-impl fmt::Display for PageserverTaskId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-/// Each task that we track is associated with a "task ID". It's just an
-/// increasing number that we assign. Note that it is different from tokio::task::Id.
-static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Global registry of tasks
-static TASKS: Lazy<Mutex<HashMap<u64, Arc<PageServerTask>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-task_local! {
-    // This is a cancellation token which will be cancelled when a task needs to shut down. The
-    // root token is kept in the global registry, so that anyone can send the signal to request
-    // task shutdown.
-    static SHUTDOWN_TOKEN: CancellationToken;
-
-    // Each task holds reference to its own PageServerTask here.
-    static CURRENT_TASK: Arc<PageServerTask>;
-}
-
-///
-/// There are many kinds of tasks in the system. Some are associated with a particular
-/// tenant or timeline, while others are global.
-///
-/// Note that we don't try to limit how many task of a certain kind can be running
-/// at the same time.
-///
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum TaskKind {
-    // libpq listener task. It just accepts connection and spawns a
-    // PageRequestHandler task for each connection.
-    LibpqEndpointListener,
-
-    // HTTP endpoint listener.
-    HttpEndpointListener,
-
-    // Task that handles a single connection. A PageRequestHandler task
-    // starts detached from any particular tenant or timeline, but it can be
-    // associated with one later, after receiving a command from the client.
-    PageRequestHandler,
-
-    // Manages the WAL receiver connection for one timeline. It subscribes to
-    // events from storage_broker, decides which safekeeper to connect to. It spawns a
-    // separate WalReceiverConnection task to handle each connection.
-    WalReceiverManager,
-
-    // Handles a connection to a safekeeper, to stream WAL to a timeline.
-    WalReceiverConnection,
-
-    // Garbage collection worker. One per tenant
-    GarbageCollector,
-
-    // Compaction. One per tenant.
-    Compaction,
-
-    // Initial logical size calculation
-    InitialLogicalSizeCalculation,
-
-    // Task that flushes frozen in-memory layers to disk
-    LayerFlushTask,
-
-    // Task that uploads a file to remote storage
-    RemoteUploadTask,
-
-    // Task that downloads a file from remote storage
-    RemoteDownloadTask,
-
-    // task that handles the initial downloading of all tenants
-    InitialLoad,
-
-    // task that handles attaching a tenant
-    Attach,
-
-    // task that handhes metrics collection
-    MetricsCollection,
-
-    // task that drives downloading layers
-    DownloadAllRemoteLayers,
-}
-
-#[derive(Default)]
-struct MutableTaskState {
-    /// Tenant and timeline that this task is associated with.
-    tenant_id: Option<TenantId>,
-    timeline_id: Option<TimelineId>,
-
-    /// Handle for waiting for the task to exit. It can be None, if the
-    /// the task has already exited.
-    join_handle: Option<JoinHandle<()>>,
-}
-
-struct PageServerTask {
-    #[allow(dead_code)] // unused currently
-    task_id: PageserverTaskId,
-
-    kind: TaskKind,
-
-    name: String,
-
-    // To request task shutdown, just cancel this token.
-    cancel: CancellationToken,
-
-    mutable: Mutex<MutableTaskState>,
-}
-
 /// Launch a new task
 /// Note: if shutdown_process_on_error is set to true failure
 ///   of the task will lead to shutdown of entire process
 pub fn spawn<F>(
     runtime: &tokio::runtime::Handle,
-    kind: TaskKind,
-    tenant_id: Option<TenantId>,
-    timeline_id: Option<TimelineId>,
     name: &str,
-    shutdown_process_on_error: bool,
-    future: F,
-) -> PageserverTaskId
-where
-    F: Future<Output = anyhow::Result<()>> + Send + 'static,
-{
-    let cancel = CancellationToken::new();
-    let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
-    let task = Arc::new(PageServerTask {
-        task_id: PageserverTaskId(task_id),
-        kind,
-        name: name.to_string(),
-        cancel: cancel.clone(),
-        mutable: Mutex::new(MutableTaskState {
-            tenant_id,
-            timeline_id,
-            join_handle: None,
-        }),
-    });
-
-    TASKS.lock().unwrap().insert(task_id, Arc::clone(&task));
-
-    let mut task_mut = task.mutable.lock().unwrap();
-
-    let task_name = name.to_string();
-    let task_cloned = Arc::clone(&task);
-    let join_handle = runtime.spawn(task_wrapper(
-        task_name,
-        task_id,
-        task_cloned,
-        cancel,
-        shutdown_process_on_error,
-        future,
-    ));
-    task_mut.join_handle = Some(join_handle);
-    drop(task_mut);
-
-    // The task is now running. Nothing more to do here
-    PageserverTaskId(task_id)
-}
-
-/// This wrapper function runs in a newly-spawned task. It initializes the
-/// task-local variables and calls the payload function.
-async fn task_wrapper<F>(
-    task_name: String,
-    task_id: u64,
-    task: Arc<PageServerTask>,
-    shutdown_token: CancellationToken,
     shutdown_process_on_error: bool,
     future: F,
 ) where
     F: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
+    let task_name = name.to_string();
+    let _join_handle = runtime.spawn(task_wrapper(task_name, shutdown_process_on_error, future));
+}
+
+/// This wrapper function runs in a newly-spawned task. It initializes the
+/// task-local variables and calls the payload function.
+async fn task_wrapper<F>(task_name: String, shutdown_process_on_error: bool, future: F)
+where
+    F: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
     debug!("Starting task '{}'", task_name);
 
-    let result = SHUTDOWN_TOKEN
-        .scope(
-            shutdown_token,
-            CURRENT_TASK.scope(task, {
-                // We use AssertUnwindSafe here so that the payload function
-                // doesn't need to be UnwindSafe. We don't do anything after the
-                // unwinding that would expose us to unwind-unsafe behavior.
-                AssertUnwindSafe(future).catch_unwind()
-            }),
-        )
-        .await;
-    task_finish(result, task_name, task_id, shutdown_process_on_error).await;
+    // We use AssertUnwindSafe here so that the payload function
+    // doesn't need to be UnwindSafe. We don't do anything after the
+    // unwinding that would expose us to unwind-unsafe behavior.
+    let result = AssertUnwindSafe(future).catch_unwind().await;
+    task_finish(result, task_name, shutdown_process_on_error).await;
 }
 
 async fn task_finish(
@@ -331,20 +128,10 @@ async fn task_finish(
         std::boxed::Box<dyn std::any::Any + std::marker::Send>,
     >,
     task_name: String,
-    task_id: u64,
     shutdown_process_on_error: bool,
 ) {
-    // Remove our entry from the global hashmap.
-    let task = TASKS
-        .lock()
-        .unwrap()
-        .remove(&task_id)
-        .expect("no task in registry");
-
     let mut shutdown_process = false;
     {
-        let task_mut = task.mutable.lock().unwrap();
-
         match result {
             Ok(Ok(())) => {
                 debug!("Task '{}' exited normally", task_name);
@@ -352,29 +139,20 @@ async fn task_finish(
             Ok(Err(err)) => {
                 if shutdown_process_on_error {
                     error!(
-                        "Shutting down: task '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
-                        task_name, task_mut.tenant_id, task_mut.timeline_id, err
+                        "Shutting down: task '{}' exited with error: {:?}",
+                        task_name, err
                     );
                     shutdown_process = true;
                 } else {
-                    error!(
-                        "Task '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
-                        task_name, task_mut.tenant_id, task_mut.timeline_id, err
-                    );
+                    error!("Task '{}'  exited with error: {:?}", task_name, err);
                 }
             }
             Err(err) => {
                 if shutdown_process_on_error {
-                    error!(
-                        "Shutting down: task '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
-                        task_name, task_mut.tenant_id, task_mut.timeline_id, err
-                    );
+                    error!("Shutting down: task '{}' panicked: {:?}", task_name, err);
                     shutdown_process = true;
                 } else {
-                    error!(
-                        "Task '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
-                        task_name, task_mut.tenant_id, task_mut.timeline_id, err
-                    );
+                    error!("Task '{}'  panicked: {:?}", task_name, err);
                 }
             }
         }
@@ -385,105 +163,27 @@ async fn task_finish(
     }
 }
 
-// expected to be called from the task of the given id.
-pub fn associate_with(tenant_id: Option<TenantId>, timeline_id: Option<TimelineId>) {
-    CURRENT_TASK.with(|ct| {
-        let mut task_mut = ct.mutable.lock().unwrap();
-        task_mut.tenant_id = tenant_id;
-        task_mut.timeline_id = timeline_id;
-    });
-}
-
-/// Is there a task running that matches the criteria
-
-/// Signal and wait for tasks to shut down.
 ///
+/// Perform pageserver shutdown. This is called on receiving a signal,
+/// or if one of the tasks marked as 'shutdown_process_on_error' dies.
 ///
-/// The arguments are used to select the tasks to kill. Any None arguments are
-/// ignored. For example, to shut down all WalReceiver tasks:
-///
-///   shutdown_tasks(Some(TaskKind::WalReceiver), None, None)
-///
-/// Or to shut down all tasks for given timeline:
-///
-///   shutdown_tasks(None, Some(tenant_id), Some(timeline_id))
-///
-pub async fn shutdown_tasks(
-    kind: Option<TaskKind>,
-    tenant_id: Option<TenantId>,
-    timeline_id: Option<TimelineId>,
-) {
-    let mut victim_tasks = Vec::new();
+/// This never returns.
+pub async fn shutdown_pageserver(exit_code: i32) {
+    // Shut down the libpq endpoint task. This prevents new connections from
+    // being accepted.
+    context::shutdown_tasks(TaskKind::LibpqEndpointListener).await;
 
-    {
-        let tasks = TASKS.lock().unwrap();
-        for task in tasks.values() {
-            let task_mut = task.mutable.lock().unwrap();
-            if (kind.is_none() || Some(task.kind) == kind)
-                && (tenant_id.is_none() || task_mut.tenant_id == tenant_id)
-                && (timeline_id.is_none() || task_mut.timeline_id == timeline_id)
-            {
-                task.cancel.cancel();
-                victim_tasks.push(Arc::clone(task));
-            }
-        }
-    }
+    // Shut down all tenants gracefully
+    crate::tenant::mgr::shutdown_all_tenants().await;
 
-    for task in victim_tasks {
-        let join_handle = {
-            let mut task_mut = task.mutable.lock().unwrap();
-            info!("waiting for {} to shut down", task.name);
-            let join_handle = task_mut.join_handle.take();
-            drop(task_mut);
-            join_handle
-        };
-        if let Some(join_handle) = join_handle {
-            let _ = join_handle.await;
-        } else {
-            // Possibly one of:
-            //  * The task had not even fully started yet.
-            //  * It was shut down concurrently and already exited
-        }
-    }
-}
+    // Shut down the HTTP endpoint last, so that you can still check the server's
+    // status while it's shutting down.
+    // FIXME: We should probably stop accepting commands like attach/detach earlier.
+    context::shutdown_tasks(TaskKind::HttpEndpointListener).await;
 
-pub fn current_task_kind() -> Option<TaskKind> {
-    CURRENT_TASK.try_with(|ct| ct.kind).ok()
-}
+    // There should be nothing left, but let's be sure
+    context::shutdown_all_tasks().await;
 
-pub fn current_task_id() -> Option<PageserverTaskId> {
-    CURRENT_TASK.try_with(|ct| ct.task_id).ok()
-}
-
-/// A Future that can be used to check if the current task has been requested to
-/// shut down.
-pub async fn shutdown_watcher() {
-    let token = SHUTDOWN_TOKEN
-        .try_with(|t| t.clone())
-        .expect("shutdown_requested() called in an unexpected task or thread");
-
-    token.cancelled().await;
-}
-
-/// Clone the current task's cancellation token, which can be moved across tasks.
-///
-/// When the task which is currently executing is shutdown, the cancellation token will be
-/// cancelled. It can however be moved to other tasks, such as `tokio::task::spawn_blocking` or
-/// `tokio::task::JoinSet::spawn`.
-pub fn shutdown_token() -> CancellationToken {
-    SHUTDOWN_TOKEN
-        .try_with(|t| t.clone())
-        .expect("shutdown_token() called in an unexpected task or thread")
-}
-
-/// Has the current task been requested to shut down?
-pub fn is_shutdown_requested() -> bool {
-    if let Ok(cancel) = SHUTDOWN_TOKEN.try_with(|t| t.clone()) {
-        cancel.is_cancelled()
-    } else {
-        if !cfg!(test) {
-            warn!("is_shutdown_requested() called in an unexpected task or thread");
-        }
-        false
-    }
+    info!("Shut down successfully completed");
+    std::process::exit(exit_code);
 }
