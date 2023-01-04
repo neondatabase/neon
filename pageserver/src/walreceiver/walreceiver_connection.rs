@@ -20,7 +20,7 @@ use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
+use crate::{metrics::LIVE_CONNECTIONS_COUNT, tenant::TimelineGuard, walreceiver::TaskStateUpdate};
 use crate::{
     task_mgr, task_mgr::TaskKind, task_mgr::WALRECEIVER_RUNTIME, tenant::WalReceiverInfo,
     walingest::WalIngest, walrecord::DecodedWALRecord,
