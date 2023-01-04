@@ -19,13 +19,11 @@ use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
 use crate::{
     task_mgr,
-    task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
     tenant::{Timeline, TimelineRequestContext, WalReceiverInfo},
     walingest::WalIngest,
@@ -60,7 +58,6 @@ pub async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
-    cancellation: CancellationToken,
     connect_timeout: Duration,
     ctx: TimelineRequestContext,
 ) -> anyhow::Result<()> {
@@ -100,12 +97,9 @@ pub async fn handle_walreceiver_connection(
 
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
-    let connection_cancellation = cancellation.clone();
+    let cancellation_token = ctx.cancellation_token().clone();
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
-        TaskKind::WalReceiverConnection,
-        Some(timeline.tenant_id),
-        Some(timeline.timeline_id),
         "walreceiver connection",
         false,
         async move {
@@ -119,9 +113,8 @@ pub async fn handle_walreceiver_connection(
                     }
                 },
 
-                _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
+                _ = cancellation_token.cancelled() => info!("Connection cancelled"),
             }
-            Ok(())
         },
     );
 
@@ -182,6 +175,8 @@ pub async fn handle_walreceiver_connection(
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
+
+    let cancellation = ctx.cancellation_token().clone();
 
     while let Some(replication_message) = {
         select! {

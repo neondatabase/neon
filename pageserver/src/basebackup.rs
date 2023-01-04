@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, bail, ensure, Context};
+use anyhow::{anyhow, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
 use std::fmt::Write as FmtWrite;
@@ -27,7 +27,8 @@ use tracing::*;
 ///
 use tokio_tar::{Builder, EntryType, Header};
 
-use crate::tenant::{Timeline, TimelineRequestContext};
+use crate::tenant::TimelineRequestContext;
+use crate::tenant::{PageReconstructError, Timeline};
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
@@ -53,7 +54,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     prev_lsn: Option<Lsn>,
     full_backup: bool,
     ctx: &'a TimelineRequestContext,
-) -> anyhow::Result<()>
+) -> Result<(), PageReconstructError>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
@@ -92,8 +93,10 @@ where
 
     // Consolidate the derived and the provided prev_lsn values
     let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
-        if backup_prev != Lsn(0) {
-            ensure!(backup_prev == provided_prev_lsn);
+        if backup_prev != Lsn(0) && backup_prev != provided_prev_lsn {
+            return Err(PageReconstructError::Other(anyhow!(
+                "prev LSN doesn't match"
+            )));
         }
         provided_prev_lsn
     } else {
@@ -138,7 +141,7 @@ impl<'a, W> Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
-    async fn send_tarball(mut self) -> anyhow::Result<()> {
+    async fn send_tarball(mut self) -> Result<(), PageReconstructError> {
         // TODO include checksum
 
         // Create pgdata subdirs structure
@@ -209,17 +212,19 @@ where
         }
 
         fail_point!("basebackup-before-control-file", |_| {
-            bail!("failpoint basebackup-before-control-file")
+            Err(PageReconstructError::from(anyhow!(
+                "failpoint basebackup-before-control-file"
+            )))
         });
 
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file().await?;
-        self.ar.finish().await?;
+        self.ar.finish().await.context("could not finish tarball")?;
         debug!("all tarred up!");
         Ok(())
     }
 
-    async fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
+    async fn add_rel(&mut self, tag: RelTag) -> Result<(), PageReconstructError> {
         let nblocks = self
             .timeline
             .get_rel_size(tag, self.lsn, false, self.ctx)
@@ -229,7 +234,10 @@ where
         if nblocks == 0 {
             let file_name = tag.to_segfile_name(0);
             let header = new_tar_header(&file_name, 0)?;
-            self.ar.append(&header, &mut io::empty()).await?;
+            self.ar
+                .append(&header, &mut io::empty())
+                .await
+                .context("could not write empty relfile to tar stream")?;
             return Ok(());
         }
 
@@ -249,7 +257,10 @@ where
 
             let file_name = tag.to_segfile_name(seg as u32);
             let header = new_tar_header(&file_name, segment_data.len() as u64)?;
-            self.ar.append(&header, segment_data.as_slice()).await?;
+            self.ar
+                .append(&header, segment_data.as_slice())
+                .await
+                .context("could not write relfile segment to tar stream")?;
 
             seg += 1;
             startblk = endblk;

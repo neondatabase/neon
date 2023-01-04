@@ -19,7 +19,6 @@ use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::Range;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -32,14 +31,6 @@ pub enum LsnForTimestamp {
     Future(Lsn),
     Past(Lsn),
     NoData(Lsn),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CalculateLogicalSizeError {
-    #[error("cancelled")]
-    Cancelled,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 ///
@@ -429,7 +420,8 @@ impl Timeline {
     ) -> Result<Bytes, PageReconstructError> {
         let key = relmap_file_key(spcnode, dbnode);
 
-        self.get(key, lsn, ctx).await
+        let buf = self.get(key, lsn, ctx).await?;
+        Ok(buf)
     }
 
     pub async fn list_dbdirs(
@@ -495,28 +487,20 @@ impl Timeline {
     pub async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
-        cancel: CancellationToken,
         ctx: &TimelineRequestContext,
-    ) -> Result<u64, CalculateLogicalSizeError> {
+    ) -> Result<u64, PageReconstructError> {
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await.context("read dbdir")?;
         let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self
-                .list_rels(*spcnode, *dbnode, lsn, ctx)
-                .await
-                .context("list rels")?
-            {
-                if cancel.is_cancelled() {
-                    return Err(CalculateLogicalSizeError::Cancelled);
+            for rel in self.list_rels(*spcnode, *dbnode, lsn, ctx).await? {
+                if ctx.is_cancelled() {
+                    return Err(PageReconstructError::Cancelled);
                 }
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self
-                    .get(relsize_key, lsn, ctx)
-                    .await
-                    .context("read relation size of {rel:?}")?;
+                let mut buf = self.get(relsize_key, lsn, ctx).await?;
                 let relsize = buf.get_u32_le();
 
                 total_size += relsize as u64;
@@ -553,7 +537,8 @@ impl Timeline {
             let mut rels: Vec<RelTag> = self
                 .list_rels(spcnode, dbnode, lsn, ctx)
                 .await?
-                .into_iter()
+                .iter()
+                .cloned()
                 .collect();
             rels.sort_unstable();
             for rel in rels {

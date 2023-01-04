@@ -25,7 +25,7 @@ use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
@@ -85,7 +85,7 @@ impl<'a> WalIngest<'a> {
         modification: &mut DatadirModification<'_>,
         decoded: &mut DecodedWALRecord,
         ctx: &TimelineRequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PageReconstructError> {
         modification.lsn = lsn;
         decode_wal_record(recdata, decoded, self.timeline.pg_version)?;
 
@@ -288,7 +288,8 @@ impl<'a> WalIngest<'a> {
             {
                 let mut checkpoint_bytes = [0u8; SIZEOF_CHECKPOINT];
                 buf.copy_to_slice(&mut checkpoint_bytes);
-                let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
+                let xlog_checkpoint =
+                    CheckPoint::decode(&checkpoint_bytes).context("error decoding checkpoint")?;
                 trace!(
                     "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
                     xlog_checkpoint.oldestXid,
@@ -315,7 +316,10 @@ impl<'a> WalIngest<'a> {
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
-            let new_checkpoint_bytes = self.checkpoint.encode()?;
+            let new_checkpoint_bytes = self
+                .checkpoint
+                .encode()
+                .context("error encoding checkpoint")?;
 
             modification.put_checkpoint(new_checkpoint_bytes)?;
             self.checkpoint_modified = false;
@@ -1198,8 +1202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
-        let tenant = TenantHarness::create("test_relsize")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_relsize")?.load().await;
         let (tline, ctx) =
             create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &tenant_ctx)?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
@@ -1419,8 +1422,7 @@ mod tests {
     // and then created it again within the same layer.
     #[tokio::test]
     async fn test_drop_extend() -> Result<()> {
-        let tenant = TenantHarness::create("test_drop_extend")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_drop_extend")?.load().await;
         let (tline, ctx) =
             create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &tenant_ctx)?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
@@ -1490,8 +1492,7 @@ mod tests {
     // and then extended it again within the same layer.
     #[tokio::test]
     async fn test_truncate_extend() -> Result<()> {
-        let tenant = TenantHarness::create("test_truncate_extend")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_truncate_extend")?.load().await;
         let (tline, ctx) =
             create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &tenant_ctx)?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
@@ -1632,8 +1633,7 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[tokio::test]
     async fn test_large_rel() -> Result<()> {
-        let tenant = TenantHarness::create("test_large_rel")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_large_rel")?.load().await;
         let (tline, ctx) =
             create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &tenant_ctx)?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;

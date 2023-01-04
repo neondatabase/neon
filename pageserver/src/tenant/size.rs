@@ -3,11 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
 
-use crate::pgdatadir_mapping::CalculateLogicalSizeError;
-use crate::tenant::{TenantRequestContext, TimelineRequestContext};
+use crate::tenant::{PageReconstructError, TenantRequestContext, TimelineRequestContext};
 
 use super::Tenant;
 use utils::id::TimelineId;
@@ -99,10 +97,19 @@ pub(super) async fn gather_inputs(
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
+    let mut ctx_dropguards: Vec<tokio_util::sync::DropGuard> = Vec::new();
+
     for timeline in timelines {
         let last_record_lsn = timeline.get_last_record_lsn();
 
-        let ctx = timeline.get_context();
+        let ctx = match timeline.get_context(tenant_ctx) {
+            Ok(ctx) => ctx,
+            Err(state) => {
+                info!("skipping tenant size calculation for timeline because it is in {state:?} state");
+                continue;
+            }
+        };
+        ctx_dropguards.push(ctx.cancellation_token().clone().drop_guard());
         let ctx = Arc::new(ctx);
 
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
@@ -366,7 +373,7 @@ enum LsnKind {
 struct TimelineAtLsnSizeResult(
     Arc<crate::tenant::Timeline>,
     utils::lsn::Lsn,
-    Result<u64, CalculateLogicalSizeError>,
+    Result<u64, PageReconstructError>,
 );
 
 #[instrument(skip_all, fields(timeline_id=%timeline.timeline_id, lsn=%lsn))]
@@ -375,14 +382,12 @@ async fn calculate_logical_size(
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
     ctx: &TimelineRequestContext,
-) -> Result<TimelineAtLsnSizeResult, RecvError> {
+) -> Result<TimelineAtLsnSizeResult, PageReconstructError> {
     let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
         .expect("global semaphore should not have been closed");
 
-    let size_res = timeline
-        .spawn_ondemand_logical_size_calculation(lsn, ctx)
-        .await?;
+    let size_res = timeline.calculate_logical_size(lsn, ctx).await;
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
 }
 

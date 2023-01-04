@@ -8,6 +8,8 @@ use std::sync::Arc;
 use tokio::fs;
 
 use anyhow::Context;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
 use tracing::*;
@@ -17,9 +19,8 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
-use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{Tenant, TenantState};
+use crate::tenant::{Tenant, TenantRequestContext, TenantState};
 use crate::IGNORED_TENANT_FILE_NAME;
 
 use utils::fs_ext::PathExt;
@@ -182,25 +183,11 @@ pub async fn shutdown_all_tenants() {
         tenants_to_shut_down
     };
 
-    // Shut down all existing walreceiver connections and stop accepting the new ones.
-    task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
-
-    // Ok, no background tasks running anymore. Flush any remaining data in
-    // memory to disk.
-    //
-    // We assume that any incoming connections that might request pages from
-    // the tenant have already been terminated by the caller, so there
-    // should be no more activity in any of the repositories.
-    //
-    // On error, log it but continue with the shutdown for other tenants.
-    for tenant in tenants_to_shut_down {
-        let tenant_id = tenant.tenant_id();
-        debug!("shutdown tenant {tenant_id}");
-
-        if let Err(err) = tenant.freeze_and_flush().await {
-            error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
-        }
+    let mut shutdown_futures: FuturesUnordered<_> = FuturesUnordered::new();
+    for tenant in tenants_to_shut_down.iter() {
+        shutdown_futures.push(tenant.graceful_shutdown(true));
     }
+    while let Some(_result) = shutdown_futures.next().await {}
 }
 
 pub async fn create_tenant(
@@ -238,28 +225,34 @@ pub async fn update_tenant_config(
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
-    get_tenant(tenant_id, true)
-        .await?
-        .update_tenant_config(tenant_conf);
+    let (tenant, _ctx) = get_active_tenant(tenant_id, ctx).await?;
+
+    tenant.update_tenant_config(tenant_conf);
     Tenant::persist_tenant_config(&conf.tenant_config_path(tenant_id), tenant_conf, false)?;
     Ok(())
 }
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-pub async fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
+pub async fn get_active_tenant(
+    tenant_id: TenantId,
+    parent_ctx: &RequestContext,
+) -> anyhow::Result<(Arc<Tenant>, TenantRequestContext)> {
+    let tenant = get_tenant(tenant_id).await?;
+    let tenant_ctx = match tenant.get_context(parent_ctx) {
+        Ok(ctx) => ctx,
+        Err(state) => anyhow::bail!("Tenant {} is not active, state: {:?}", tenant_id, state,),
+    };
+    Ok((tenant, tenant_ctx))
+}
+
+pub async fn get_tenant(tenant_id: TenantId) -> anyhow::Result<Arc<Tenant>> {
     let m = TENANTS.read().await;
     let tenant = m
         .get(&tenant_id)
         .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
-    if active_only && !tenant.is_active() {
-        anyhow::bail!(
-            "Tenant {tenant_id} is not active. Current state: {:?}",
-            tenant.current_state()
-        )
-    } else {
-        Ok(Arc::clone(tenant))
-    }
+
+    Ok(Arc::clone(tenant))
 }
 
 pub async fn delete_timeline(
@@ -267,10 +260,9 @@ pub async fn delete_timeline(
     timeline_id: TimelineId,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
-    match get_tenant(tenant_id, true).await {
-        Ok(tenant) => {
-            let tenant_ctx = tenant.get_context();
-            tenant.delete_timeline(timeline_id, &tenant_ctx).await?;
+    match get_active_tenant(tenant_id, ctx).await {
+        Ok((tenant, ctx)) => {
+            tenant.delete_timeline(timeline_id, &ctx).await?;
         }
         Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
     }
@@ -402,27 +394,31 @@ where
     // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
     // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
     // avoid holding the lock for the entire process.
-    {
+    let tenant = {
         let tenants_accessor = TENANTS.write().await;
         match tenants_accessor.get(&tenant_id) {
             Some(tenant) => match tenant.current_state() {
                 TenantState::Attaching
                 | TenantState::Loading
                 | TenantState::Broken
-                | TenantState::Active => tenant.set_stopping(),
+                | TenantState::Active => {
+                    tenant.set_stopping();
+                    Arc::clone(tenant)
+                }
                 TenantState::Stopping => {
                     anyhow::bail!("Tenant {tenant_id} is stopping already")
                 }
             },
             None => anyhow::bail!("Tenant not found for id {tenant_id}"),
         }
-    }
+    };
 
-    // shutdown all tenant and timeline tasks: gc, compaction, page service)
-    // No new tasks will be started for this tenant because it's in `Stopping` state.
-    // Hence, once we're done here, the `tenant_cleanup` callback can mutate tenant on-disk state freely.
-    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
+    // Shut down all tenant and timeline tasks.
+    tenant.graceful_shutdown(true).await;
 
+    // All tasks that operated on the tenant or any of its timelines have no finished,
+    // and they are in Stopped state so that new ones cannot appear anymore. Proceed
+    // with the cleanup.
     match tenant_cleanup
         .await
         .with_context(|| format!("Failed to run cleanup for tenant {tenant_id}"))
@@ -443,111 +439,4 @@ where
             Err(e)
         }
     }
-}
-
-#[cfg(feature = "testing")]
-use {
-    crate::repository::GcResult, pageserver_api::models::TimelineGcRequest,
-    utils::http::error::ApiError,
-};
-
-#[cfg(feature = "testing")]
-pub async fn immediate_gc(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    gc_req: TimelineGcRequest,
-) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
-    let guard = TENANTS.read().await;
-
-    let tenant = guard
-        .get(&tenant_id)
-        .map(Arc::clone)
-        .with_context(|| format!("Tenant {tenant_id} not found"))
-        .map_err(ApiError::NotFound)?;
-
-    let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
-    // Use tenant's pitr setting
-    let pitr = tenant.get_pitr_interval();
-
-    // Run in task_mgr to avoid race with detach operation
-    let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
-    task_mgr::spawn(
-        &tokio::runtime::Handle::current(),
-        TaskKind::GarbageCollector,
-        Some(tenant_id),
-        Some(timeline_id),
-        &format!("timeline_gc_handler garbage collection run for tenant {tenant_id} timeline {timeline_id}"),
-        false,
-        async move {
-            fail::fail_point!("immediate_gc_task_pre");
-            let tenant_ctx = tenant.get_context();
-            let result = tenant
-                .gc_iteration(Some(timeline_id), gc_horizon, pitr, &tenant_ctx)
-                .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
-                .await;
-                // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
-                // better once the types support it.
-            match task_done.send(result) {
-                Ok(_) => (),
-                Err(result) => error!("failed to send gc result: {result:?}"),
-            }
-            Ok(())
-        }
-    );
-
-    // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task
-    drop(guard);
-
-    Ok(wait_task_done)
-}
-
-#[cfg(feature = "testing")]
-pub async fn immediate_compact(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-) -> Result<tokio::sync::oneshot::Receiver<anyhow::Result<()>>, ApiError> {
-    let guard = TENANTS.read().await;
-
-    let tenant = guard
-        .get(&tenant_id)
-        .map(Arc::clone)
-        .with_context(|| format!("Tenant {tenant_id} not found"))
-        .map_err(ApiError::NotFound)?;
-
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
-    let timeline_ctx = timeline.get_context();
-
-    // Run in task_mgr to avoid race with detach operation
-    let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
-    task_mgr::spawn(
-        &tokio::runtime::Handle::current(),
-        TaskKind::Compaction,
-        Some(tenant_id),
-        Some(timeline_id),
-        &format!(
-            "timeline_compact_handler compaction run for tenant {tenant_id} timeline {timeline_id}"
-        ),
-        false,
-        async move {
-            let result = timeline
-                .compact(&timeline_ctx)
-                .instrument(
-                    info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id),
-                )
-                .await;
-
-            match task_done.send(result) {
-                Ok(_) => (),
-                Err(result) => error!("failed to send compaction result: {result:?}"),
-            }
-            Ok(())
-        },
-    );
-
-    // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task
-    drop(guard);
-
-    Ok(wait_task_done)
 }

@@ -13,6 +13,7 @@
 
 use anyhow::{bail, Context};
 use bytes::Bytes;
+use futures::stream::{FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use futures::Stream;
 use pageserver_api::models::TimelineState;
@@ -47,13 +48,12 @@ use std::time::{Duration, Instant};
 use self::metadata::TimelineMetadata;
 use self::remote_timeline_client::RemoteTimelineClient;
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{DownloadBehavior, RequestContext, RequestContextId, TaskKind};
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
 use crate::task_mgr;
-use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -141,6 +141,10 @@ pub struct Tenant {
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
+
+    /// RequestContexts associated with this tenant. Used on shutdown,
+    /// to cancel and wait for operations to finish.
+    active_contexts: Mutex<HashMap<RequestContextId, TaskKind>>,
 }
 
 /// A timeline with some of its files on disk, being initialized.
@@ -479,7 +483,7 @@ impl Tenant {
                 ancestor.clone(),
                 remote_client,
             )?;
-            let timeline_ctx = dummy_timeline.get_context();
+            let timeline_ctx = dummy_timeline.get_context(tenant_ctx).unwrap();
 
             let timeline = UninitializedTimeline {
                 owning_tenant: self,
@@ -525,7 +529,12 @@ impl Tenant {
             // Reconcile local state with remote storage, downloading anything that's
             // missing locally, and scheduling uploads for anything that's missing
             // in remote storage.
-            let timeline_ctx = timeline.get_context();
+            let timeline_ctx = match timeline.get_context(tenant_ctx) {
+                Ok(ctx) => ctx,
+                Err(state) => {
+                    bail!("could not reconcile timeline with remote because timeline is in state {:?}", state);
+                }
+            };
             timeline
                 .reconcile_with_remote(
                     up_to_date_metadata,
@@ -593,16 +602,18 @@ impl Tenant {
             Some(remote_storage),
         ));
 
-        let tenant_ctx = tenant.get_context();
+        let tenant_ctx = tenant
+            .register_context(RequestContext::new(
+                TaskKind::Attach,
+                DownloadBehavior::Warn,
+            ))
+            .unwrap();
 
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
 
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
-            TaskKind::Attach,
-            Some(tenant_id),
-            None,
             "attach tenant",
             false,
             async move {
@@ -613,7 +624,6 @@ impl Tenant {
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
-                Ok(())
             },
         );
         tenant
@@ -861,16 +871,18 @@ impl Tenant {
             remote_storage,
         );
         let tenant = Arc::new(tenant);
-        let tenant_ctx = tenant.get_context();
+        let tenant_ctx = tenant
+            .register_context(RequestContext::new(
+                TaskKind::InitialLoad,
+                DownloadBehavior::Warn,
+            ))
+            .unwrap();
 
         // Do all the hard work in a background task
         let tenant_clone = Arc::clone(&tenant);
 
-        let _ = task_mgr::spawn(
+        task_mgr::spawn(
             &tokio::runtime::Handle::current(),
-            TaskKind::InitialLoad,
-            Some(tenant_id),
-            None,
             "initial tenant load",
             false,
             async move {
@@ -882,7 +894,6 @@ impl Tenant {
                     }
                 }
                 info!("initial load for tenant {tenant_id} finished!");
-                Ok(())
             },
         );
 
@@ -1031,9 +1042,10 @@ impl Tenant {
         tenant_ctx: &TenantRequestContext,
     ) -> anyhow::Result<()> {
         let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
-            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
-            .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
-            Some(ancestor_timeline)
+            Some(
+                self.get_timeline(ancestor_timeline_id)
+                    .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?
+            )
         } else {
             None
         };
@@ -1081,28 +1093,38 @@ impl Tenant {
         self.tenant_id
     }
 
-    /// Get Timeline handle for given Neon timeline ID.
-    /// This function is idempotent. It doesn't change internal state in any way.
-    pub fn get_timeline(
+    /// Get a Timeline handle for given timeline ID, and a
+    /// TenantRequestContext associated with it.
+    ///
+    /// If the Timeline is being shut down, returns error.
+    pub fn get_active_timeline(
         &self,
         timeline_id: TimelineId,
-        active_only: bool,
-    ) -> anyhow::Result<Arc<Timeline>> {
+        parent_ctx: &TenantRequestContext,
+    ) -> anyhow::Result<(Arc<Timeline>, TimelineRequestContext)> {
+        let timeline = self.get_timeline(timeline_id)?;
+
+        let timeline_ctx = match timeline.get_context(parent_ctx) {
+            Ok(ctx) => ctx,
+            Err(state) => anyhow::bail!(
+                "Timeline {}/{} is not active, state: {:?}",
+                self.tenant_id,
+                timeline_id,
+                state,
+            ),
+        };
+        Ok((timeline, timeline_ctx))
+    }
+
+    /// Get Timeline handle for given timeline ID.
+    /// This function is idempotent. It doesn't change internal state in any way.
+    pub fn get_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<Arc<Timeline>> {
         let timelines_accessor = self.timelines.lock().unwrap();
         let timeline = timelines_accessor.get(&timeline_id).with_context(|| {
             format!("Timeline {}/{} was not found", self.tenant_id, timeline_id)
         })?;
 
-        if active_only && !timeline.is_active() {
-            anyhow::bail!(
-                "Timeline {}/{} is not active, state: {:?}",
-                self.tenant_id,
-                timeline_id,
-                timeline.current_state()
-            )
-        } else {
-            Ok(Arc::clone(timeline))
-        }
+        Ok(Arc::clone(timeline))
     }
 
     /// Lists timelines the tenant contains.
@@ -1152,7 +1174,11 @@ impl Tenant {
             None,
             tenant_ctx,
         )?;
-        let timeline_ctx = timeline.raw_timeline().unwrap().get_context();
+        let timeline_ctx = timeline
+            .raw_timeline()
+            .unwrap()
+            .get_context(tenant_ctx)
+            .unwrap();
         Ok((timeline, timeline_ctx))
     }
 
@@ -1170,23 +1196,24 @@ impl Tenant {
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
         ctx: &TenantRequestContext,
-    ) -> anyhow::Result<Option<Arc<Timeline>>> {
+    ) -> anyhow::Result<Option<(Arc<Timeline>, TimelineRequestContext)>> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot create timelines on inactive tenant"
         );
 
-        if self.get_timeline(new_timeline_id, false).is_ok() {
+        if self.get_timeline(new_timeline_id).is_ok() {
             debug!("timeline {new_timeline_id} already exists");
             return Ok(None);
         }
 
-        let loaded_timeline = match ancestor_timeline_id {
+        let (loaded_timeline, timeline_ctx) = match ancestor_timeline_id {
             Some(ancestor_timeline_id) => {
-                let ancestor_timeline = self
-                    .get_timeline(ancestor_timeline_id, false)
-                    .context("Cannot branch off the timeline that's not present in pageserver")?;
-                let ancestor_ctx = ancestor_timeline.get_context();
+                let (ancestor_timeline, ancestor_ctx) = self
+                    .get_active_timeline(ancestor_timeline_id, ctx)
+                    .context(
+                        "Cannot branch off a timeline that's not present and Active in pageserver",
+                    )?;
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
@@ -1220,7 +1247,7 @@ impl Tenant {
             }
         };
 
-        Ok(Some(loaded_timeline))
+        Ok(Some((loaded_timeline, timeline_ctx)))
     }
 
     /// perform one garbage collection iteration, removing old data files from disk.
@@ -1243,11 +1270,6 @@ impl Tenant {
         pitr: Duration,
         ctx: &TenantRequestContext,
     ) -> anyhow::Result<GcResult> {
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot run GC iteration on inactive tenant"
-        );
-
         let timeline_str = target_timeline_id
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
@@ -1269,11 +1291,6 @@ impl Tenant {
         &self,
         tenant_ctx: &TenantRequestContext,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot run compaction iteration on inactive tenant"
-        );
-
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
@@ -1289,7 +1306,20 @@ impl Tenant {
         };
 
         for (timeline_id, timeline) in &timelines_to_compact {
-            let timeline_ctx = timeline.get_context();
+            if tenant_ctx.is_cancelled() {
+                // We were requested to shut down. Stop and return with the progress we
+                // made.
+                break;
+            }
+
+            let timeline_ctx = match timeline.get_context(tenant_ctx) {
+                Ok(ctx) => ctx,
+                Err(state) => {
+                    let timeline_id = timeline.timeline_id;
+                    info!("skipping GC on timeline {timeline_id} because it is in {state:?} state");
+                    continue;
+                }
+            };
             timeline
                 .compact(&timeline_ctx)
                 .instrument(info_span!("compact_timeline", timeline = %timeline_id))
@@ -1364,18 +1394,8 @@ impl Tenant {
         // and don't error out if some of the shutdown tasks have already been
         // completed!
 
-        // Stop the walreceiver first.
-        debug!("waiting for wal receiver to shutdown");
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_id),
-            Some(timeline_id),
-        )
-        .await;
-        debug!("wal receiver shutdown confirmed");
-
-        info!("waiting for timeline tasks to shutdown");
-        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
+        debug!("waiting for timeline contexts to shutdown");
+        timeline.graceful_shutdown(false).await;
 
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.
@@ -1483,16 +1503,27 @@ impl Tenant {
                     info!("Activating tenant {}", self.tenant_id);
 
                     let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+                    let mut not_broken_timelines = Vec::new();
+
+                    for timeline in timelines_accessor.values() {
+                        let timeline_ctx = match timeline.get_context(tenant_ctx) {
+                            Ok(ctx) => ctx,
+                            Err(state) => {
+                                result = Err(anyhow::anyhow!(
+                                    "Could not activate tenant because its timeline {} is in unexpected state {:?}",
+                                    timeline.timeline_id, state
+                                ));
+                                return;
+                            }
+                        };
+                        not_broken_timelines.push((timeline, timeline_ctx));
+                    }
 
                     // Spawn gc and compaction loops. The loops will shut themselves
                     // down when they notice that the tenant is inactive.
-                    tasks::start_background_loops(self.tenant_id);
+                    tasks::start_background_loops(self);
 
-                    for timeline in not_broken_timelines {
-                        let timeline_ctx = timeline.get_context();
+                    for (timeline, timeline_ctx) in not_broken_timelines {
                         timeline.set_state(TimelineState::Active);
                         timeline.launch_wal_receiver(&timeline_ctx);
                     }
@@ -1500,6 +1531,67 @@ impl Tenant {
             }
         });
         result
+    }
+
+    /// Shutdown all tenant and timeline tasks
+    ///
+    /// The caller has already called `set_stopping`, so that no new contexts
+    /// can be registered with the tenant. This cancels any running contexts,
+    /// in the right order, and waits for them to finish. On return, the there
+    /// is no more activity on the tenant, so you can safely e.g. delete the
+    /// tenant directory on disk. There can still be tasks holding references
+    /// to the Arc<Tenant>, but without holding a TenantRequestContext, they
+    /// cannot do much with it.
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
+    pub async fn graceful_shutdown(&self, flush: bool) {
+        assert!(*self.state.borrow() == TenantState::Stopping);
+
+        let timelines = self.list_timelines();
+        let mut shutdown_futures: FuturesUnordered<_> = FuturesUnordered::new();
+        for timeline in timelines.iter() {
+            shutdown_futures.push(timeline.graceful_shutdown(flush));
+        }
+        while let Some(_result) = shutdown_futures.next().await {}
+
+        // Shut down tenant background tasks, too. They have possibly already exited, when
+        // they observed the tenant state change.
+        let mut contexts_to_kill = Vec::new();
+        {
+            let active_contexts = self.active_contexts.lock().unwrap();
+            for (&context_id, &task_kind) in active_contexts.iter() {
+                match task_kind {
+                    // GC and compaction are the only long-running tasks that register
+                    // with a tenant. InitialLoad, Attach only appear at tenant startup,
+                    // and MetricsCollection when we are just collecting metrics on the
+                    // tenant.
+                    TaskKind::GarbageCollector | TaskKind::Compaction => {}
+                    | TaskKind::InitialLoad | TaskKind::Attach
+                    | TaskKind::MetricsCollection
+
+                    | TaskKind::UnitTest => {}
+
+                    TaskKind::LibpqEndpointListener
+                    | TaskKind::HttpEndpointListener
+                    | TaskKind::MgmtRequest
+
+                    // These should only appear on a specific timeline, and we already
+                    // waited for TimelineRequestContexts to finish.
+                    | TaskKind::PageRequestHandler
+                    | TaskKind::InitialLogicalSizeCalculation
+                    | TaskKind::DownloadAllRemoteLayers
+                    | TaskKind::RemoteDownloadTask
+                    | TaskKind::WalReceiverConnection
+                    | TaskKind::WalReceiverManager
+                    | TaskKind::LayerFlush
+                    | TaskKind::RemoteUploadTask
+                     => {
+                        warn!("unexpected {task_kind:?} task on tenant");
+                    }
+                };
+                contexts_to_kill.push(context_id);
+            }
+        }
+        crate::context::cancel_and_wait(&mut contexts_to_kill).await;
     }
 
     /// Change tenant status to Stopping, to mark that it is being shut down
@@ -1564,24 +1656,64 @@ impl Tenant {
         });
     }
 
+    // FIXME: this could probably be replaced by watching TenantRequestContext.cancelled() now
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TenantState> {
         self.state.subscribe()
     }
 
-    /// Return a new TenantRequestContext.
+    /// Register a RequestContext with this Tenant.
     ///
-    /// XXX: This is a placeholder. In the next commit, this will
-    /// check that the tenant is still active.
-    pub fn get_context(self: &Arc<Self>) -> TenantRequestContext {
-        TenantRequestContext {
-            ctx: RequestContext {},
+    /// After registering the context with the tenant, the context will be automatically
+    /// cancelled if the Tenant goes into Stopping state. Holding the TenantRequestContext
+    /// prevents the Tenant from being detached or shut down.
+    ///
+    /// If the tenant is currently in Stopping or Broken state, returns the current
+    /// state as the error.
+    pub fn register_context(
+        self: &Arc<Self>,
+        ctx: RequestContext,
+    ) -> Result<TenantRequestContext, TenantState> {
+        let state_ref = self.state.borrow();
+        let state = *state_ref;
+
+        match state {
+            TenantState::Loading | TenantState::Attaching | TenantState::Active => {
+                if self
+                    .active_contexts
+                    .lock()
+                    .unwrap()
+                    .insert(ctx.context_id(), ctx.task_kind())
+                    .is_some()
+                {
+                    panic!("active_contexts out of sync");
+                }
+                let tenant_ctx = TenantRequestContext {
+                    ctx,
+                    tenant: Arc::clone(self),
+                };
+                Ok(tenant_ctx)
+            }
+            TenantState::Stopping | TenantState::Broken => Err(state),
         }
+    }
+
+    /// Convenience function, to create a child context of 'ctx', and register it with
+    /// this tenant, in one call.
+    pub fn get_context(
+        self: &Arc<Self>,
+        ctx: &RequestContext,
+    ) -> Result<TenantRequestContext, TenantState> {
+        self.register_context(RequestContext::with_parent(
+            ctx.task_kind(),
+            ctx.download_behavior(),
+            ctx,
+        ))
     }
 
     pub async fn wait_to_become_active(
         self: &Arc<Self>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+        ctx: RequestContext,
+    ) -> anyhow::Result<TenantRequestContext> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = *receiver.borrow_and_update();
@@ -1591,7 +1723,20 @@ impl Tenant {
                     receiver.changed().await?;
                 }
                 TenantState::Active { .. } => {
-                    return Ok(());
+                    if self
+                        .active_contexts
+                        .lock()
+                        .unwrap()
+                        .insert(ctx.context_id(), ctx.task_kind())
+                        .is_some()
+                    {
+                        panic!("active_contexts out of sync");
+                    }
+                    let tenant_ctx = TenantRequestContext {
+                        ctx,
+                        tenant: Arc::clone(self),
+                    };
+                    return Ok(tenant_ctx);
                 }
                 TenantState::Broken | TenantState::Stopping => {
                     // There's no chance the tenant can transition back into ::Active
@@ -1602,6 +1747,18 @@ impl Tenant {
                     );
                 }
             }
+        }
+    }
+
+    fn deregister_context(&self, context_id: RequestContextId) {
+        if self
+            .active_contexts
+            .lock()
+            .unwrap()
+            .remove(&context_id)
+            .is_none()
+        {
+            panic!("active_contexts out of sync");
         }
     }
 }
@@ -1772,6 +1929,7 @@ impl Tenant {
             remote_storage,
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
+            active_contexts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1943,13 +2101,20 @@ impl Tenant {
         // See comments in [`Tenant::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
-            if task_mgr::is_shutdown_requested() {
+            if tenant_ctx.is_cancelled() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
                 break;
             }
 
-            let timeline_ctx = timeline.get_context();
+            let timeline_ctx = match timeline.get_context(tenant_ctx) {
+                Ok(ctx) => ctx,
+                Err(state) => {
+                    let timeline_id = timeline.timeline_id;
+                    info!("skipping GC on timeline {timeline_id} because it is in {state:?} state");
+                    continue;
+                }
+            };
             let result = timeline.gc(&timeline_ctx).await?;
             totals += result;
         }
@@ -2037,18 +2202,26 @@ impl Tenant {
         // Update the GC information for each timeline.
         let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
         for timeline_id in timeline_ids {
-            // Timeline is known to be local and loaded.
-            let timeline = self
-                .get_timeline(timeline_id, false)
-                .with_context(|| format!("Timeline {timeline_id} was not found"))?;
-            let timeline_ctx = timeline.get_context();
-
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timeline_id) = target_timeline_id {
                 if timeline_id != target_timeline_id {
                     continue;
                 }
             }
+
+            // Timeline is known to be local and loaded.
+            let timeline = self
+                .get_timeline(timeline_id)
+                .with_context(|| format!("Timeline {timeline_id} was not found"))?;
+
+            let timeline_ctx = match timeline.get_context(tenant_ctx) {
+                Ok(timeline_ctx) => timeline_ctx,
+                Err(state) => {
+                    let timeline_id = timeline.timeline_id;
+                    info!("skipping GC on timeline {timeline_id} because it is in {state:?} state");
+                    continue;
+                }
+            };
 
             if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
                 let branchpoints: Vec<Lsn> = all_branchpoints
@@ -2076,7 +2249,7 @@ impl Tenant {
         dst: TimelineId,
         start_lsn: Option<Lsn>,
         tenant_ctx: &TenantRequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> anyhow::Result<(Arc<Timeline>, TimelineRequestContext)> {
         let src = src_timeline.timeline_id;
 
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
@@ -2149,8 +2322,8 @@ impl Tenant {
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
-
         let mut timelines = self.timelines.lock().unwrap();
+
         let uninit_timeline = self.prepare_timeline(
             dst,
             metadata,
@@ -2159,13 +2332,17 @@ impl Tenant {
             Some(Arc::clone(src_timeline)),
             tenant_ctx,
         )?;
-        let new_timeline_ctx = uninit_timeline.raw_timeline().unwrap().get_context();
+        let new_timeline_ctx = uninit_timeline
+            .raw_timeline()
+            .unwrap()
+            .get_context(tenant_ctx)
+            .unwrap();
         let new_timeline =
             uninit_timeline.initialize_with_lock(&mut timelines, true, true, &new_timeline_ctx)?;
         drop(timelines);
         info!("branched timeline {dst} from {src} at {start_lsn}");
 
-        Ok(new_timeline)
+        Ok((new_timeline, new_timeline_ctx))
     }
 
     /// - run initdb to init temporary instance and get bootstrap data
@@ -2175,7 +2352,7 @@ impl Tenant {
         timeline_id: TimelineId,
         pg_version: u32,
         tenant_ctx: &TenantRequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> anyhow::Result<(Arc<Timeline>, TimelineRequestContext)> {
         let timeline_uninit_mark = {
             let timelines = self.timelines.lock().unwrap();
             self.create_timeline_uninit_mark(timeline_id, &timelines)?
@@ -2235,7 +2412,15 @@ impl Tenant {
 
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
-        let timeline_ctx = unfinished_timeline.get_context();
+
+        let timeline_ctx = unfinished_timeline
+            .register_context(tenant_ctx.register_another(RequestContext::with_parent(
+                tenant_ctx.task_kind(),
+                // shouldn't need to download during import.
+                DownloadBehavior::Warn,
+                tenant_ctx,
+            )))
+            .unwrap();
 
         import_datadir::import_timeline_from_postgres_datadir(
             unfinished_timeline,
@@ -2278,7 +2463,7 @@ impl Tenant {
             timeline.get_last_record_lsn()
         );
 
-        Ok(timeline)
+        Ok((timeline, timeline_ctx))
     }
 
     /// Creates intermediate timeline structure and its files, without loading it into memory.
@@ -2301,7 +2486,6 @@ impl Tenant {
                 tenant_id,
                 new_timeline_id,
             );
-            remote_client.init_upload_queue_for_empty_remote(&new_metadata)?;
             Some(remote_client)
         } else {
             None
@@ -2319,6 +2503,15 @@ impl Tenant {
                     new_timeline.layers.write().unwrap().next_open_layer_at =
                         Some(new_timeline.initdb_lsn);
                 }
+                if let Some(remote_client) = &new_timeline.remote_client {
+                    let timeline_ctx = new_timeline.get_context(tenant_ctx).unwrap();
+                    let upload_ctx = timeline_ctx.register_another(RequestContext::new(
+                        TaskKind::RemoteUploadTask,
+                        DownloadBehavior::Error,
+                    ));
+                    remote_client.init_upload_queue_for_empty_remote(&new_metadata, upload_ctx)?;
+                }
+
                 debug!(
                     "Successfully created initial files for timeline {tenant_id}/{new_timeline_id}"
                 );
@@ -2639,9 +2832,20 @@ impl Drop for Tenant {
     }
 }
 
-/// XXX: Placeholder
+///
+/// TenantRequestContext is a RequestContext that has a reference to a Tenant.
+///
+/// Holding a TenantRequestContext prevents the Tenant from being detached or
+/// deleted while you are operating on it. If a detach or shutdown request for
+/// the tenant comes in, all its TenantRequestContexts are cancelled. You should
+/// react to cancellations, because the tenant shutdown cannot complete until
+/// all TenantRequestContexts are dropped.
+///
+/// To get a reference to a TenantRequestContext, use Tenant::get_context()
+///
 pub struct TenantRequestContext {
-    ctx: RequestContext,
+    pub ctx: RequestContext,
+    tenant: Arc<Tenant>,
 }
 
 impl Deref for TenantRequestContext {
@@ -2649,6 +2853,37 @@ impl Deref for TenantRequestContext {
 
     fn deref(&self) -> &RequestContext {
         &self.ctx
+    }
+}
+
+impl Drop for TenantRequestContext {
+    fn drop(&mut self) {
+        self.tenant.deregister_context(self.context_id())
+    }
+}
+
+impl TenantRequestContext {
+    ///
+    /// Register another context with the same tenant as 'self'.
+    ///
+    /// This is different from Tenant::register_context() in that this always succeeds
+    ///
+    pub fn register_another(&self, ctx: RequestContext) -> TenantRequestContext {
+        if self
+            .tenant
+            .active_contexts
+            .lock()
+            .unwrap()
+            .insert(ctx.context_id(), ctx.task_kind())
+            .is_some()
+        {
+            panic!("active_contexts out of sync");
+        }
+
+        TenantRequestContext {
+            ctx,
+            tenant: Arc::clone(&self.tenant),
+        }
     }
 }
 
@@ -2790,7 +3025,7 @@ pub mod harness {
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
-            let test_ctx = RequestContext::new();
+            let test_ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
             Ok(Self {
                 conf,
@@ -2801,11 +3036,11 @@ pub mod harness {
             })
         }
 
-        pub async fn load(&self) -> Arc<Tenant> {
+        pub async fn load(&self) -> (Arc<Tenant>, TenantRequestContext) {
             self.try_load().await.expect("failed to load test tenant")
         }
 
-        pub async fn try_load(&self) -> anyhow::Result<Arc<Tenant>> {
+        pub async fn try_load(&self) -> anyhow::Result<(Arc<Tenant>, TenantRequestContext)> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
             let tenant = Arc::new(Tenant::new(
@@ -2816,7 +3051,10 @@ pub mod harness {
                 self.tenant_id,
                 None,
             ));
-            let tenant_ctx = tenant.get_context();
+            let tenant_ctx = match tenant.get_context(&self.test_ctx) {
+                Ok(ctx) => ctx,
+                Err(state) => bail!("newly-loaded tenant is {state:?} state"),
+            };
             // populate tenant with locally available timelines
             let mut timelines_to_load = HashMap::new();
             for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
@@ -2835,7 +3073,7 @@ pub mod harness {
             }
             // FIXME starts background jobs
             tenant.load(&tenant_ctx).await?;
-            Ok(tenant)
+            Ok((tenant, tenant_ctx))
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> PathBuf {
@@ -2891,8 +3129,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_basic")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_basic")?.load().await;
         let (tline, ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let tline = tline.initialize(&ctx)?;
@@ -2925,10 +3162,9 @@ mod tests {
 
     #[tokio::test]
     async fn no_duplicate_timelines() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("no_duplicate_timelines")?
+        let (tenant, tenant_ctx) = TenantHarness::create("no_duplicate_timelines")?
             .load()
             .await;
-        let tenant_ctx = tenant.get_context();
         let (timeline, timeline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let _ = timeline.initialize(&timeline_ctx)?;
@@ -2961,8 +3197,7 @@ mod tests {
     async fn test_branch() -> anyhow::Result<()> {
         use std::str::from_utf8;
 
-        let tenant = TenantHarness::create("test_branch")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_branch")?.load().await;
         let (tline, tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let tline = tline.initialize(&tline_ctx)?;
@@ -2986,10 +3221,9 @@ mod tests {
         //assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        let newtline = tenant
+        let (newtline, newtline_ctx) = tenant
             .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x30)), &tenant_ctx)
             .await?;
-        let newtline_ctx = newtline.get_context();
         let new_writer = newtline.writer();
         new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
         new_writer.finish_write(Lsn(0x40));
@@ -3056,11 +3290,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
-        let tenant =
+        let (tenant, tenant_ctx) =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
                 .load()
                 .await;
-        let tenant_ctx = tenant.get_context();
         let (tline, tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let tline = tline.initialize(&tline_ctx)?;
@@ -3095,10 +3328,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?
-            .load()
-            .await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) =
+            TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?
+                .load()
+                .await;
         let (tline, tline_ctx) = tenant.create_empty_timeline(
             TIMELINE_ID,
             Lsn(0x50),
@@ -3150,10 +3383,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_retain_data_in_parent_which_is_needed_for_child() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
-            .load()
-            .await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) =
+            TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
+                .load()
+                .await;
         let (tline, tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let tline = tline.initialize(&tline_ctx)?;
@@ -3162,10 +3395,9 @@ mod tests {
         tenant
             .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &tenant_ctx)
             .await?;
-        let newtline = tenant
-            .get_timeline(NEW_TIMELINE_ID, true)
+        let (newtline, newtline_ctx) = tenant
+            .get_active_timeline(NEW_TIMELINE_ID, &tenant_ctx)
             .expect("Should have a local timeline");
-        let newtline_ctx = newtline.get_context();
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         tenant
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &tenant_ctx)
@@ -3179,10 +3411,10 @@ mod tests {
     }
     #[tokio::test]
     async fn test_parent_keeps_data_forever_after_branching() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_parent_keeps_data_forever_after_branching")?
-            .load()
-            .await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) =
+            TenantHarness::create("test_parent_keeps_data_forever_after_branching")?
+                .load()
+                .await;
         let (tline, tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let tline = tline.initialize(&tline_ctx)?;
@@ -3191,10 +3423,9 @@ mod tests {
         tenant
             .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &tenant_ctx)
             .await?;
-        let newtline = tenant
-            .get_timeline(NEW_TIMELINE_ID, true)
+        let (newtline, newtline_ctx) = tenant
+            .get_active_timeline(NEW_TIMELINE_ID, &tenant_ctx)
             .expect("Should have a local timeline");
-        let newtline_ctx = newtline.get_context();
 
         make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
 
@@ -3217,8 +3448,7 @@ mod tests {
         const TEST_NAME: &str = "timeline_load";
         let harness = TenantHarness::create(TEST_NAME)?;
         {
-            let tenant = harness.load().await;
-            let tenant_ctx = tenant.get_context();
+            let (tenant, tenant_ctx) = harness.load().await;
             let (tline, tline_ctx) = tenant.create_empty_timeline(
                 TIMELINE_ID,
                 Lsn(0x8000),
@@ -3229,9 +3459,9 @@ mod tests {
             make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
         }
 
-        let tenant = harness.load().await;
+        let (tenant, tenant_ctx) = harness.load().await;
         tenant
-            .get_timeline(TIMELINE_ID, true)
+            .get_active_timeline(TIMELINE_ID, &tenant_ctx)
             .expect("cannot load timeline");
 
         Ok(())
@@ -3243,8 +3473,7 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
         // create two timelines
         {
-            let tenant = harness.load().await;
-            let tenant_ctx = tenant.get_context();
+            let (tenant, tenant_ctx) = harness.load().await;
             let (tline, tline_ctx) = tenant.create_empty_timeline(
                 TIMELINE_ID,
                 Lsn(0),
@@ -3259,23 +3488,23 @@ mod tests {
                 .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &tenant_ctx)
                 .await?;
 
-            let newtline = tenant
-                .get_timeline(NEW_TIMELINE_ID, true)
+            let (newtline, _newtline_ctx) = tenant
+                .get_active_timeline(NEW_TIMELINE_ID, &tenant_ctx)
                 .expect("Should have a local timeline");
 
             make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
         }
 
         // check that both of them are initially unloaded
-        let tenant = harness.load().await;
+        let (tenant, tenant_ctx) = harness.load().await;
 
         // check that both, child and ancestor are loaded
         let _child_tline = tenant
-            .get_timeline(NEW_TIMELINE_ID, true)
+            .get_active_timeline(NEW_TIMELINE_ID, &tenant_ctx)
             .expect("cannot get child timeline loaded");
 
         let _ancestor_tline = tenant
-            .get_timeline(TIMELINE_ID, true)
+            .get_active_timeline(TIMELINE_ID, &tenant_ctx)
             .expect("cannot get ancestor timeline loaded");
 
         Ok(())
@@ -3287,8 +3516,7 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
 
         {
-            let tenant = harness.load().await;
-            let tenant_ctx = tenant.get_context();
+            let (tenant, tenant_ctx) = harness.load().await;
 
             let (tline, tline_ctx) = tenant.create_empty_timeline(
                 TIMELINE_ID,
@@ -3332,8 +3560,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_images() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_images")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_images")?.load().await;
         let (tline, tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let tline = tline.initialize(&tline_ctx)?;
@@ -3400,8 +3627,7 @@ mod tests {
     //
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_bulk_insert")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
         let (tline, tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let tline = tline.initialize(&tline_ctx)?;
@@ -3445,8 +3671,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_random_updates")?.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = TenantHarness::create("test_random_updates")?.load().await;
         let (tline, tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let tline = tline.initialize(&tline_ctx)?;
@@ -3519,10 +3744,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_traverse_branches() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_traverse_branches")?
+        let (tenant, tenant_ctx) = TenantHarness::create("test_traverse_branches")?
             .load()
             .await;
-        let tenant_ctx = tenant.get_context();
         let (init_tline, init_tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let init_tline = init_tline.initialize(&init_tline_ctx)?;
@@ -3562,10 +3786,9 @@ mod tests {
             tenant
                 .branch_timeline(&tline, new_tline_id, Some(lsn), &tenant_ctx)
                 .await?;
-            tline = tenant
-                .get_timeline(new_tline_id, true)
+            (tline, tline_ctx) = tenant
+                .get_active_timeline(new_tline_id, &tenant_ctx)
                 .expect("Should have the branched timeline");
-            tline_ctx = tline.get_context();
 
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
@@ -3607,11 +3830,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_traverse_ancestors() -> anyhow::Result<()> {
-        let tenant = TenantHarness::create("test_traverse_ancestors")?
+        let (tenant, tenant_ctx) = TenantHarness::create("test_traverse_ancestors")?
             .load()
             .await;
-        let tenant_ctx = tenant.get_context();
-        let (tline, tline_ctx) =
+        let (tline, mut tline_ctx) =
             tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let mut tline = tline.initialize(&tline_ctx)?;
 
@@ -3630,8 +3852,8 @@ mod tests {
             tenant
                 .branch_timeline(&tline, new_tline_id, Some(lsn), &tenant_ctx)
                 .await?;
-            tline = tenant
-                .get_timeline(new_tline_id, true)
+            (tline, tline_ctx) = tenant
+                .get_active_timeline(new_tline_id, &tenant_ctx)
                 .expect("Should have the branched timeline");
 
             for _ in 0..NUM_KEYS {

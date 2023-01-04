@@ -11,7 +11,7 @@
 
 use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
 
-use crate::task_mgr::TaskKind;
+use crate::context::{DownloadBehavior, RequestContext, TaskKind};
 use crate::task_mgr::WALRECEIVER_RUNTIME;
 use crate::tenant::{Timeline, TimelineRequestContext};
 use crate::{task_mgr, walreceiver::TaskStateUpdate};
@@ -55,9 +55,6 @@ pub fn spawn_connection_manager_task(
 
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
-        TaskKind::WalReceiverManager,
-        Some(tenant_id),
-        Some(timeline_id),
         &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
         false,
         async move {
@@ -71,10 +68,10 @@ pub fn spawn_connection_manager_task(
             );
             loop {
                 select! {
-                    _ = task_mgr::shutdown_watcher() => {
+                    _ = ctx.cancelled() => {
                         info!("WAL receiver shutdown requested, shutting down");
                         walreceiver_state.shutdown().await;
-                        return Ok(());
+                        return;
                     },
                     loop_step_result = connection_manager_loop_step(
                         &mut broker_client,
@@ -85,7 +82,7 @@ pub fn spawn_connection_manager_task(
                         ControlFlow::Break(()) => {
                             info!("Connection manager loop ended, shutting down");
                             walreceiver_state.shutdown().await;
-                            return Ok(());
+                            return;
                         }
                     },
                 }
@@ -400,22 +397,31 @@ impl WalreceiverState {
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
-        let child_ctx = timeline.get_context();
-        let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
-            async move {
-                super::walreceiver_connection::handle_walreceiver_connection(
-                    timeline,
-                    new_wal_source_connconf,
-                    events_sender,
-                    cancellation,
-                    connect_timeout,
-                    child_ctx,
-                )
-                .await
-                .context("walreceiver connection handling failure")
-            }
-            .instrument(info_span!("walreceiver_connection", id = %id, node_id = %new_sk_id))
-        });
+
+        let child_ctx = ctx.register_another(RequestContext::with_parent(
+            TaskKind::WalReceiverConnection,
+            DownloadBehavior::Download,
+            ctx,
+        ));
+        let cancellation_token = child_ctx.cancellation_token().clone();
+
+        let connection_handle = TaskHandle::spawn(
+            move |events_sender| {
+                async move {
+                    super::walreceiver_connection::handle_walreceiver_connection(
+                        timeline,
+                        new_wal_source_connconf,
+                        events_sender,
+                        connect_timeout,
+                        child_ctx,
+                    )
+                    .await
+                    .context("walreceiver connection handling failure")
+                }
+                .instrument(info_span!("walreceiver_connection", id = %id, node_id = %new_sk_id))
+            },
+            cancellation_token,
+        );
 
         let now = Utc::now().naive_utc();
         self.wal_connection = Some(WalConnection {
@@ -827,6 +833,7 @@ fn wal_stream_connection_config(
 mod tests {
     use super::*;
     use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
+    use tokio_util::sync::CancellationToken;
     use url::Host;
 
     fn dummy_broker_sk_timeline(
@@ -907,12 +914,15 @@ mod tests {
             started_at: now,
             sk_id: connected_sk_id,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
-                sender
-                    .send(TaskStateUpdate::Progress(connection_status))
-                    .ok();
-                Ok(())
-            }),
+            connection_task: TaskHandle::spawn(
+                move |sender| async move {
+                    sender
+                        .send(TaskStateUpdate::Progress(connection_status))
+                        .ok();
+                    Ok(())
+                },
+                CancellationToken::new(),
+            ),
             discovered_new_wal: None,
         });
         state.wal_stream_candidates = HashMap::from([
@@ -1069,12 +1079,15 @@ mod tests {
             started_at: now,
             sk_id: connected_sk_id,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
-                sender
-                    .send(TaskStateUpdate::Progress(connection_status))
-                    .ok();
-                Ok(())
-            }),
+            connection_task: TaskHandle::spawn(
+                move |sender| async move {
+                    sender
+                        .send(TaskStateUpdate::Progress(connection_status))
+                        .ok();
+                    Ok(())
+                },
+                CancellationToken::new(),
+            ),
             discovered_new_wal: None,
         });
         state.wal_stream_candidates = HashMap::from([
@@ -1134,12 +1147,15 @@ mod tests {
             started_at: now,
             sk_id: NodeId(1),
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
-                sender
-                    .send(TaskStateUpdate::Progress(connection_status))
-                    .ok();
-                Ok(())
-            }),
+            connection_task: TaskHandle::spawn(
+                move |sender| async move {
+                    sender
+                        .send(TaskStateUpdate::Progress(connection_status))
+                        .ok();
+                    Ok(())
+                },
+                CancellationToken::new(),
+            ),
             discovered_new_wal: None,
         });
         state.wal_stream_candidates = HashMap::from([(
@@ -1196,7 +1212,10 @@ mod tests {
             started_at: now,
             sk_id: NodeId(1),
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |_, _| async move { Ok(()) }),
+            connection_task: TaskHandle::spawn(
+                move |_| async move { Ok(()) },
+                CancellationToken::new(),
+            ),
             discovered_new_wal: Some(NewCommittedWAL {
                 discovered_at: time_over_threshold,
                 lsn: new_lsn,
@@ -1240,12 +1259,12 @@ mod tests {
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
     async fn dummy_state(harness: &TenantHarness<'_>) -> WalreceiverState {
-        let tenant = harness.load().await;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) = harness.load().await;
         let (timeline, timeline_ctx) = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION, &tenant_ctx)
             .expect("Failed to create an empty timeline for dummy wal connection manager");
         let timeline = timeline.initialize(&timeline_ctx).unwrap();
+
         WalreceiverState {
             id: TenantTimelineId {
                 tenant_id: harness.tenant_id,

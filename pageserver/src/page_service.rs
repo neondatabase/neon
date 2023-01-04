@@ -43,13 +43,12 @@ use utils::{
 use crate::auth::check_permission;
 use crate::basebackup;
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{DownloadBehavior, RequestContext, TaskKind};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::task_mgr;
-use crate::task_mgr::TaskKind;
 use crate::tenant::mgr;
-use crate::tenant::{Tenant, Timeline, TimelineRequestContext};
+use crate::tenant::{Tenant, TenantRequestContext, Timeline, TimelineRequestContext};
 use crate::trace::Tracer;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -64,7 +63,7 @@ fn copyin_stream<'a>(
             let msg = tokio::select! {
                 biased;
 
-                _ = task_mgr::shutdown_watcher() => {
+                _ = ctx.cancelled() => {
                     // We were requested to shut down.
                     let msg = format!("pageserver is shutting down");
                     let _ = pgb.write_message(&BeMessage::ErrorResponse(&msg, None));
@@ -127,6 +126,7 @@ pub async fn libpq_listener_main(
     auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
+    listener_ctx: RequestContext,
 ) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
     let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
@@ -135,8 +135,9 @@ pub async fn libpq_listener_main(
     while let Some(res) = tokio::select! {
         biased;
 
-        _ = task_mgr::shutdown_watcher() => {
+        _ = listener_ctx.cancelled() => {
             // We were requested to shut down.
+            info!("libpq listener shutting down");
             None
         }
 
@@ -150,7 +151,11 @@ pub async fn libpq_listener_main(
                 debug!("accepted connection from {}", peer_addr);
                 let local_auth = auth.clone();
 
-                let connection_ctx = RequestContext::new();
+                let connection_ctx = RequestContext::with_parent(
+                    TaskKind::PageRequestHandler,
+                    DownloadBehavior::Download,
+                    &listener_ctx,
+                );
 
                 // PageRequestHandler tasks are not associated with any particular
                 // timeline in the task manager. In practice most connections will
@@ -158,12 +163,21 @@ pub async fn libpq_listener_main(
                 // yet.
                 task_mgr::spawn(
                     &tokio::runtime::Handle::current(),
-                    TaskKind::PageRequestHandler,
-                    None,
-                    None,
                     "serving compute connection task",
                     false,
-                    page_service_conn_main(conf, local_auth, socket, auth_type, connection_ctx),
+                    async move {
+                        if let Err(err) = page_service_conn_main(
+                            conf,
+                            local_auth,
+                            socket,
+                            auth_type,
+                            connection_ctx,
+                        )
+                        .await
+                        {
+                            error!("connection handler exited with error: {err:?}");
+                        }
+                    },
                 );
             }
             Err(err) => {
@@ -198,11 +212,13 @@ async fn page_service_conn_main(
         .set_nodelay(true)
         .context("could not set TCP_NODELAY")?;
 
+    let cancellation_token = connection_ctx.cancellation_token().clone();
+
     let mut conn_handler = PageServerHandler::new(conf, auth, connection_ctx);
     let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
 
     let result = pgbackend
-        .run(&mut conn_handler, task_mgr::shutdown_watcher)
+        .run(&mut conn_handler, || cancellation_token.cancelled())
         .await;
     match result {
         Ok(()) => {
@@ -287,12 +303,9 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
-        // NOTE: pagerequests handler exits when connection is closed,
-        //       so there is no need to reset the association
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
+        let (tenant, ctx) = get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
 
         // Make request tracer if needed
-        let tenant = get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
             let path = tenant
@@ -304,8 +317,7 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = tenant.get_timeline(timeline_id, true)?;
-        let ctx = timeline.get_context();
+        let (timeline, ctx) = tenant.get_active_timeline(timeline_id, &ctx)?;
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -317,7 +329,7 @@ impl PageServerHandler {
             let msg = tokio::select! {
                 biased;
 
-                _ = task_mgr::shutdown_watcher() => {
+                _ = ctx.cancelled() => {
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
                     break;
@@ -343,6 +355,9 @@ impl PageServerHandler {
             }
 
             let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
+
+            // TODO: We could create a new per-request context here, with unique ID.
+            // Currently we use the same per-timeline context for all requests
 
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
@@ -382,7 +397,7 @@ impl PageServerHandler {
 
     #[instrument(skip(self, pgb))]
     async fn handle_import_basebackup(
-        &self,
+        &mut self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -390,11 +405,10 @@ impl PageServerHandler {
         _end_lsn: Lsn,
         pg_version: u32,
     ) -> Result<(), QueryError> {
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
-        let tenant_ctx = tenant.get_context();
+        let (tenant, tenant_ctx) =
+            get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
         let (timeline, ctx) =
             tenant.create_empty_timeline(timeline_id, base_lsn, pg_version, &tenant_ctx)?;
 
@@ -439,18 +453,15 @@ impl PageServerHandler {
 
     #[instrument(skip(self, pgb))]
     async fn handle_import_wal(
-        &self,
+        &mut self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         start_lsn: Lsn,
         end_lsn: Lsn,
     ) -> Result<(), QueryError> {
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
-
-        let timeline =
+        let (timeline, ctx) =
             get_active_timeline_with_timeout(tenant_id, timeline_id, &self.connection_ctx).await?;
-        let ctx = timeline.get_context();
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
             return Err(QueryError::Other(
@@ -659,9 +670,8 @@ impl PageServerHandler {
         full_backup: bool,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let timeline =
+        let (timeline, ctx) =
             get_active_timeline_with_timeout(tenant_id, timeline_id, &self.connection_ctx).await?;
-        let ctx = timeline.get_context();
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
@@ -826,7 +836,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
-            let timeline =
+            let (timeline, _ctx) =
                 get_active_timeline_with_timeout(tenant_id, timeline_id, &self.connection_ctx)
                     .await?;
 
@@ -988,7 +998,8 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
+            let (tenant, _ctx) =
+                get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
@@ -1042,17 +1053,22 @@ impl postgres_backend_async::Handler for PageServerHandler {
 async fn get_active_tenant_with_timeout(
     tenant_id: TenantId,
     parent_ctx: &RequestContext,
-) -> anyhow::Result<Arc<Tenant>> {
-    let tenant = mgr::get_tenant(tenant_id, false).await?;
+) -> anyhow::Result<(Arc<Tenant>, TenantRequestContext)> {
+    let child_ctx = RequestContext::with_parent(
+        parent_ctx.task_kind(),
+        parent_ctx.download_behavior(),
+        parent_ctx,
+    );
+
+    let tenant = mgr::get_tenant(tenant_id).await?;
     match tokio::time::timeout(
         Duration::from_secs(30),
-        tenant.wait_to_become_active(parent_ctx),
+        tenant.wait_to_become_active(child_ctx),
     )
     .await
     {
-        Ok(wait_result) => wait_result
-            // no .context(), the error message is good enough and some tests depend on it
-            .map(move |()| tenant),
+        Ok(Ok(ctx)) => Ok((tenant, ctx)),
+        Ok(Err(err)) => Err(err),
         Err(_) => anyhow::bail!("Timeout waiting for tenant {tenant_id} to become Active"),
     }
 }
@@ -1062,8 +1078,8 @@ async fn get_active_timeline_with_timeout(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     ctx: &RequestContext,
-) -> anyhow::Result<Arc<Timeline>> {
+) -> anyhow::Result<(Arc<Timeline>, TimelineRequestContext)> {
     get_active_tenant_with_timeout(tenant_id, ctx)
         .await
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
+        .and_then(|(tenant, ctx)| tenant.get_active_timeline(timeline_id, &ctx))
 }

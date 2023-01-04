@@ -261,7 +261,6 @@ async fn import_wal(
     endpoint: Lsn,
     ctx: &TimelineRequestContext,
 ) -> anyhow::Result<()> {
-    use std::io::Read;
     let mut waldecoder = WalStreamDecoder::new(startpoint, tline.pg_version);
 
     let mut segno = startpoint.segment_number(WAL_SEGMENT_SIZE);
@@ -291,6 +290,7 @@ async fn import_wal(
             file.seek(std::io::SeekFrom::Start(offset as u64))?;
         }
 
+        use std::io::Read;
         let nread = file.read_to_end(&mut buf)?;
         if nread != WAL_SEGMENT_SIZE - offset {
             // Maybe allow this for .partial files?

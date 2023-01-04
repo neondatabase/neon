@@ -543,6 +543,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     )
 
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.append(".*request cancelled while waiting on uploads to finish.*")
 
     # create tenant with config that will determinstically allow
     # compaction and gc
