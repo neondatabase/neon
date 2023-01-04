@@ -584,7 +584,7 @@ impl WalreceiverState {
 
                 let current_lsn = match existing_wal_connection.status.streaming_lsn {
                     Some(lsn) => lsn,
-                    None => match self.timeline_ref.try_upgrade_timeline_arc() {
+                    None => match self.timeline_ref.any_timeline() {
                         Ok(timeline) => timeline.get_last_record_lsn(),
                         Err(e) => {
                             warn!("Cannot acquire timeline read: {e:#}");

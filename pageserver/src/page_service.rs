@@ -48,7 +48,7 @@ use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::mgr;
-use crate::tenant::TimelineRef;
+use crate::tenant::TimelineGuard;
 use crate::tenant::{Tenant, Timeline};
 use crate::trace::Tracer;
 
@@ -292,7 +292,7 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline_ref = tenant.get_timeline(timeline_id, true)?;
+        let timeline_ref = tenant.get_timeline(timeline_id)?;
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -331,7 +331,7 @@ impl PageServerHandler {
 
             let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
-            let timeline = timeline_ref.try_upgrade_timeline_arc()?;
+            let timeline = timeline_ref.active_timeline()?;
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
@@ -433,8 +433,7 @@ impl PageServerHandler {
     ) -> Result<(), QueryError> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let timeline_ref = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
-        let timeline = timeline_ref.try_upgrade_timeline_arc()?;
+        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
 
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
@@ -641,9 +640,7 @@ impl PageServerHandler {
         full_backup: bool,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id)
-            .await?
-            .try_upgrade_timeline_arc()?;
+        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
@@ -802,11 +799,9 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
-            let timeline_ref = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+            let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
 
-            let end_of_timeline = timeline_ref
-                .try_upgrade_timeline_arc()?
-                .get_last_record_rlsn();
+            let end_of_timeline = timeline.get_last_record_rlsn();
 
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::text_col(b"prev_lsn"),
@@ -1025,13 +1020,14 @@ async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> anyhow::Result<A
     }
 }
 
-// TODO kb move to TimelineRef?
 /// Shorthand for getting a reference to a Timeline of an Active tenant.
 async fn get_active_timeline_with_timeout(
     tenant_id: TenantId,
     timeline_id: TimelineId,
-) -> anyhow::Result<TimelineRef> {
+) -> anyhow::Result<TimelineGuard> {
     get_active_tenant_with_timeout(tenant_id)
+        .await?
+        .get_timeline(timeline_id)?
+        .get_active_timeline_with_timeout()
         .await
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
 }

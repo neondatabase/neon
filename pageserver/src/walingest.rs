@@ -60,7 +60,7 @@ impl WalIngest {
     ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let timeline_read = timeline_guard.try_upgrade_timeline_arc()?;
+        let timeline_read = timeline_guard.any_timeline()?;
         let checkpoint_bytes =
             with_ondemand_download(|| timeline_read.get_checkpoint(startpoint)).await?;
         drop(timeline_read);
@@ -740,7 +740,7 @@ impl WalIngest {
             },
         )?;
 
-        let timeline_read = self.timeline_guard.try_upgrade_timeline_arc()?;
+        let timeline_read = self.timeline_guard.any_timeline()?;
         for xnode in &parsed.xnodes {
             for forknum in MAIN_FORKNUM..=VISIBILITYMAP_FORKNUM {
                 let rel = RelTag {
@@ -1000,7 +1000,7 @@ impl WalIngest {
     }
 
     async fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> anyhow::Result<BlockNumber> {
-        let timeline_read = self.timeline_guard.try_upgrade_timeline_arc()?;
+        let timeline_read = self.timeline_guard.any_timeline()?;
         let exists =
             with_ondemand_download(|| timeline_read.get_rel_exists(rel, lsn, true)).await?;
         let nblocks = if !exists {
@@ -1022,7 +1022,7 @@ impl WalIngest {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let timeline_read = self.timeline_guard.try_upgrade_timeline_arc()?;
+        let timeline_read = self.timeline_guard.any_timeline()?;
         let old_nblocks =
             if !with_ondemand_download(|| timeline_read.get_rel_exists(rel, last_lsn, true)).await?
             {
@@ -1074,7 +1074,7 @@ impl WalIngest {
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
-        let timeline_read = self.timeline_guard.try_upgrade_timeline_arc()?;
+        let timeline_read = self.timeline_guard.any_timeline()?;
         let last_lsn = timeline_read.get_last_record_lsn();
         let old_nblocks = if !with_ondemand_download(|| {
             timeline_read.get_slru_segment_exists(kind, segno, last_lsn)
