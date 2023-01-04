@@ -66,7 +66,9 @@ use crate::{is_temporary, task_mgr};
 
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LocalLayer, LocalOrRemote};
+use super::storage_layer::{
+    DeltaLayer, ImageLayer, LayerContent, LayerFile, LayerRange, LocalOrRemote,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {

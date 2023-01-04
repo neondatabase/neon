@@ -51,7 +51,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{DeltaFileName, Layer, LayerFileName, LayerIter, LayerKeyIter, LocalLayer, PathOrConf};
+use super::{
+    DeltaFileName, LayerContent, LayerFile, LayerFileName, LayerIter, LayerKeyIter, LayerRange,
+    PathOrConf,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -196,7 +199,7 @@ pub struct DeltaLayerInner {
     file: Option<FileBlockReader<VirtualFile>>,
 }
 
-impl Layer for DeltaLayer {
+impl LayerRange for DeltaLayer {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -211,6 +214,9 @@ impl Layer for DeltaLayer {
     fn short_id(&self) -> String {
         self.delta_layer_name().to_string()
     }
+}
+
+impl LayerContent for DeltaLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool) -> Result<()> {
         println!(
@@ -372,7 +378,7 @@ impl Layer for DeltaLayer {
     }
 }
 
-impl LocalLayer for DeltaLayer {
+impl LayerFile for DeltaLayer {
     fn layer_name(&self) -> LayerFileName {
         LayerFileName::Delta(self.delta_layer_name())
     }

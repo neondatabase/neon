@@ -4,8 +4,7 @@
 use crate::config::PageServerConf;
 use crate::repository::Key;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use anyhow::{bail, Result};
+use crate::tenant::storage_layer::LayerRange;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -16,7 +15,7 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
-use super::{DeltaLayer, HistoricLayer, LocalOrRemote};
+use super::{DeltaLayer, HistoricLayer};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
@@ -36,7 +35,7 @@ pub struct RemoteLayer {
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
 }
 
-impl Layer for RemoteLayer {
+impl LayerRange for RemoteLayer {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -45,35 +44,8 @@ impl Layer for RemoteLayer {
         self.lsn_range.clone()
     }
 
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        bail!(
-            "layer {} needs to be downloaded",
-            self.layer_name().file_name()
-        );
-    }
-
     fn is_incremental(&self) -> bool {
         self.is_incremental
-    }
-
-    /// debugging function to print out the contents of the layer
-    fn dump(&self, _verbose: bool) -> Result<()> {
-        println!(
-            "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
-            self.tenant_id,
-            self.timeline_id,
-            self.key_range.start,
-            self.key_range.end,
-            self.lsn_range.start,
-            self.lsn_range.end
-        );
-
-        Ok(())
     }
 
     fn short_id(&self) -> String {
@@ -131,25 +103,25 @@ impl RemoteLayer {
                 key_range: self.key_range.clone(),
                 lsn_range: self.lsn_range.clone(),
             };
-            HistoricLayer::Delta(LocalOrRemote::Local(Arc::new(DeltaLayer::new(
+            HistoricLayer::from(DeltaLayer::new(
                 conf,
                 self.timeline_id,
                 self.tenant_id,
                 &fname,
                 file_size,
-            ))))
+            ))
         } else {
             let fname = ImageFileName {
                 key_range: self.key_range.clone(),
                 lsn: self.lsn_range.start,
             };
-            HistoricLayer::Image(LocalOrRemote::Local(Arc::new(ImageLayer::new(
+            HistoricLayer::from(ImageLayer::new(
                 conf,
                 self.timeline_id,
                 self.tenant_id,
                 &fname,
                 file_size,
-            ))))
+            ))
         }
     }
 
@@ -165,5 +137,18 @@ impl RemoteLayer {
                 lsn: self.lsn_range.start,
             })
         }
+    }
+
+    /// Debugging function to print out the contents of the layer.
+    pub fn dump(&self) {
+        println!(
+            "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
+            self.tenant_id,
+            self.timeline_id,
+            self.key_range.start,
+            self.key_range.end,
+            self.lsn_range.start,
+            self.lsn_range.end
+        );
     }
 }

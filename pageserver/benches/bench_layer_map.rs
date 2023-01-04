@@ -1,10 +1,9 @@
-use anyhow::Result;
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
+use pageserver::tenant::storage_layer::LayerRange;
 use pageserver::tenant::storage_layer::{
-    DeltaFileName, HistoricLayer, ImageFileName, LocalOrRemote, ValueReconstructState,
+    DeltaFileName, HistoricLayer, ImageFileName, LocalOrRemote,
 };
-use pageserver::tenant::storage_layer::{Layer, ValueReconstructResult};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
@@ -25,7 +24,7 @@ struct DummyDelta {
     lsn_range: Range<Lsn>,
 }
 
-impl Layer for DummyDelta {
+impl LayerRange for DummyDelta {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -33,21 +32,9 @@ impl Layer for DummyDelta {
     fn get_lsn_range(&self) -> Range<Lsn> {
         self.lsn_range.clone()
     }
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        panic!()
-    }
 
     fn is_incremental(&self) -> bool {
         true
-    }
-
-    fn dump(&self, _verbose: bool) -> Result<()> {
-        unimplemented!()
     }
 
     fn short_id(&self) -> String {
@@ -61,7 +48,7 @@ struct DummyImage {
     lsn: Lsn,
 }
 
-impl Layer for DummyImage {
+impl LayerRange for DummyImage {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -71,21 +58,8 @@ impl Layer for DummyImage {
         self.lsn..(self.lsn + 1)
     }
 
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        panic!()
-    }
-
     fn is_incremental(&self) -> bool {
         false
-    }
-
-    fn dump(&self, _verbose: bool) -> Result<()> {
-        unimplemented!()
     }
 
     fn short_id(&self) -> String {

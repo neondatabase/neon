@@ -12,7 +12,7 @@
 
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
-use crate::tenant::storage_layer::{range_eq, range_overlaps};
+use crate::tenant::storage_layer::{range_eq, range_overlaps, LayerContent};
 use amplify_num::i256;
 use anyhow::Result;
 use num_traits::identities::{One, Zero};
@@ -27,7 +27,7 @@ use tracing::*;
 use utils::lsn::Lsn;
 
 use super::storage_layer::{
-    DeltaLayer, HistoricLayer, ImageLayer, InMemoryLayer, Layer, LocalOrRemote,
+    DeltaLayer, HistoricLayer, ImageLayer, InMemoryLayer, LayerRange, LocalOrRemote,
 };
 
 ///
@@ -213,7 +213,7 @@ impl<L> RTreeObject for LayerRTreeObject<L> {
 
 impl<L> LayerRTreeObject<L>
 where
-    L: Deref<Target = dyn Layer>,
+    L: Deref<Target = dyn LayerRange>,
 {
     fn new(layer: L) -> Self {
         let key_range = layer.get_key_range();
@@ -241,8 +241,8 @@ pub struct SearchResult<L> {
 
 impl<D, I> LayerMap<D, I>
 where
-    D: Layer,
-    I: Layer,
+    D: LayerRange + 'static,
+    I: LayerRange + 'static,
 {
     ///
     /// Find the latest layer that covers the given 'key', with lsn <
@@ -594,10 +594,16 @@ where
     pub fn get_level0_deltas(&self) -> Result<Vec<LocalOrRemote<D>>> {
         Ok(self.l0_delta_layers.clone())
     }
+}
 
+impl<D, I> LayerMap<D, I>
+where
+    D: LayerContent,
+    I: LayerContent,
+{
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
-    pub fn dump(&self, verbose: bool) -> Result<()> {
+    pub fn dump(&self, verbose: bool) -> anyhow::Result<()> {
         println!("Begin dump LayerMap");
 
         println!("open_layer:");

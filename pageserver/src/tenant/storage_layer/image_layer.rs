@@ -49,7 +49,7 @@ use utils::{
 };
 
 use super::filename::{ImageFileName, PathOrConf};
-use super::{Layer, LayerFileName, LocalLayer};
+use super::{LayerContent, LayerFile, LayerFileName, LayerRange};
 
 ///
 /// Header stored in the beginning of the file
@@ -123,7 +123,7 @@ pub struct ImageLayerInner {
     file: Option<FileBlockReader<VirtualFile>>,
 }
 
-impl Layer for ImageLayer {
+impl LayerRange for ImageLayer {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -139,7 +139,9 @@ impl Layer for ImageLayer {
     fn short_id(&self) -> String {
         self.image_layer_name().to_string()
     }
+}
 
+impl LayerContent for ImageLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool) -> Result<()> {
         println!(
@@ -202,7 +204,7 @@ impl Layer for ImageLayer {
     }
 }
 
-impl LocalLayer for ImageLayer {
+impl LayerFile for ImageLayer {
     fn layer_name(&self) -> LayerFileName {
         LayerFileName::Image(self.image_layer_name())
     }

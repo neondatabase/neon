@@ -80,7 +80,7 @@ pub enum ValueReconstructResult {
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
-pub trait Layer: Send + Sync + 'static {
+pub trait LayerRange {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -98,7 +98,15 @@ pub trait Layer: Send + Sync + 'static {
     /// the previous non-incremental layer.
     fn is_incremental(&self) -> bool;
 
-    ///
+    /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
+    fn short_id(&self) -> String;
+}
+
+// TODO kb docs everywhere
+pub trait LayerContent {
+    /// Dump summary of the contents of the layer to stdout
+    fn dump(&self, verbose: bool) -> anyhow::Result<()>;
+
     /// Return data needed to reconstruct given page at LSN.
     ///
     /// It is up to the caller to collect more data from previous layer and
@@ -116,12 +124,6 @@ pub trait Layer: Send + Sync + 'static {
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult>;
-
-    /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
-    fn short_id(&self) -> String;
-
-    /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool) -> anyhow::Result<()>;
 }
 
 /// Returned by [`Layer::iter`]
@@ -168,7 +170,7 @@ impl<L> LocalOrRemote<L> {
     }
 }
 
-pub trait LocalLayer: Layer {
+pub trait LayerFile {
     fn layer_name(&self) -> LayerFileName;
 
     fn local_path(&self) -> PathBuf;
@@ -268,8 +270,8 @@ impl From<Arc<RemoteLayer>> for HistoricLayer {
 
 impl<D, I> HistoricLayer<D, I>
 where
-    D: LocalLayer,
-    I: LocalLayer,
+    D: LayerFile,
+    I: LayerFile,
 {
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
@@ -318,8 +320,49 @@ where
 
     pub fn as_remote_layer(&self) -> Option<&Arc<RemoteLayer>> {
         match self {
-            HistoricLayer::Delta(d) => d.as_remote(),
-            HistoricLayer::Image(i) => i.as_remote(),
+            Self::Delta(d) => d.as_remote(),
+            Self::Image(i) => i.as_remote(),
+        }
+    }
+}
+
+impl<D, I> HistoricLayer<D, I>
+where
+    D: LayerContent,
+    I: LayerContent,
+{
+    pub fn dump(&self, verbose: bool) -> anyhow::Result<()> {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => delta.dump(verbose),
+            Self::Image(Local(image)) => image.dump(verbose),
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => {
+                remote.dump();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValueReconstructState,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => {
+                delta.get_value_reconstruct_data(key, lsn_range, reconstruct_data)
+            }
+            Self::Image(Local(image)) => {
+                image.get_value_reconstruct_data(key, lsn_range, reconstruct_data)
+            }
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => {
+                anyhow::bail!(
+                    "layer {} needs to be downloaded",
+                    remote.layer_name().file_name()
+                );
+            }
         }
     }
 }
@@ -347,9 +390,9 @@ impl<L> PartialEq for LocalOrRemote<L> {
 
 impl<L> Deref for LocalOrRemote<L>
 where
-    L: Layer,
+    L: LayerRange + 'static,
 {
-    type Target = dyn Layer;
+    type Target = dyn LayerRange;
 
     fn deref(&self) -> &Self::Target {
         match self {
@@ -361,10 +404,10 @@ where
 
 impl<D, I> Deref for HistoricLayer<D, I>
 where
-    D: Layer,
-    I: Layer,
+    D: LayerRange + 'static,
+    I: LayerRange + 'static,
 {
-    type Target = dyn Layer;
+    type Target = dyn LayerRange;
 
     fn deref(&self) -> &Self::Target {
         match self {
