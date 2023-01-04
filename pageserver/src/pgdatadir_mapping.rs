@@ -1511,7 +1511,8 @@ pub fn create_test_timeline(
 ) -> anyhow::Result<std::sync::Arc<Timeline>> {
     let tline = tenant
         .create_empty_timeline(timeline_id, Lsn(8), pg_version)?
-        .initialize()?;
+        .initialize()?
+        .try_upgrade_timeline_arc()?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;

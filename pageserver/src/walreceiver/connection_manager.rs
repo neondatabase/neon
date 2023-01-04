@@ -13,7 +13,7 @@ use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, ti
 
 use crate::task_mgr::TaskKind;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
-use crate::tenant::TimelineGuard;
+use crate::tenant::TimelineRef;
 use crate::{task_mgr, walreceiver::TaskStateUpdate};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
@@ -41,7 +41,7 @@ use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
 
 /// Spawns the loop to take care of the timeline's WAL streaming connection.
 pub fn spawn_connection_manager_task(
-    timeline_guard: TimelineGuard,
+    timeline_guard: TimelineRef,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
@@ -95,7 +95,7 @@ pub fn spawn_connection_manager_task(
 
 macro_rules! try_upgrade_timeline_arc {
     ( $walreceiver_state:expr ) => {
-        match $walreceiver_state.timeline_guard.try_upgrade_timeline_arc() {
+        match $walreceiver_state.timeline_ref.try_upgrade_timeline_arc() {
             Ok(timeline) => timeline,
             Err(e) => {
                 warn!("Cannot acquire timeline read: {e:#}");
@@ -127,7 +127,7 @@ async fn connection_manager_loop_step(
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
     let mut broker_subscription =
-        subscribe_for_timeline_updates(broker_client, walreceiver_state.timeline_guard.id).await;
+        subscribe_for_timeline_updates(broker_client, walreceiver_state.timeline_ref.id).await;
     info!("Subscribed for broker timeline updates");
 
     loop {
@@ -310,7 +310,7 @@ const WALCONNECTION_RETRY_BACKOFF_MULTIPLIER: f64 = 1.5;
 /// All data that's needed to run endless broker loop and keep the WAL streaming connection alive, if possible.
 struct WalreceiverState {
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
-    timeline_guard: TimelineGuard,
+    timeline_ref: TimelineRef,
     /// The timeout on the connection to safekeeper for WAL streaming.
     wal_connect_timeout: Duration,
     /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
@@ -366,14 +366,14 @@ struct BrokerSkTimeline {
 
 impl WalreceiverState {
     fn new(
-        timeline_guard: TimelineGuard,
+        timeline_guard: TimelineRef,
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
         auth_token: Option<Arc<String>>,
     ) -> Self {
         Self {
-            timeline_guard,
+            timeline_ref: timeline_guard,
             wal_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
@@ -392,9 +392,9 @@ impl WalreceiverState {
     ) {
         self.drop_old_connection(true).await;
 
-        let id = self.timeline_guard.id;
+        let id = self.timeline_ref.id;
         let connect_timeout = self.wal_connect_timeout;
-        let walreceiver_timeline_guard = self.timeline_guard.clone();
+        let walreceiver_timeline_guard = self.timeline_ref.clone();
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
@@ -584,7 +584,7 @@ impl WalreceiverState {
 
                 let current_lsn = match existing_wal_connection.status.streaming_lsn {
                     Some(lsn) => lsn,
-                    None => match self.timeline_guard.try_upgrade_timeline_arc() {
+                    None => match self.timeline_ref.try_upgrade_timeline_arc() {
                         Ok(timeline) => timeline.get_last_record_lsn(),
                         Err(e) => {
                             warn!("Cannot acquire timeline read: {e:#}");
@@ -719,7 +719,7 @@ impl WalreceiverState {
                     return None; // no connection string, ignore sk
                 }
                 match wal_stream_connection_config(
-                    self.timeline_guard.id,
+                    self.timeline_ref.id,
                     info.safekeeper_connstr.as_ref(),
                     match &self.auth_token {
                         None => None,
@@ -1239,7 +1239,7 @@ mod tests {
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
     async fn dummy_state(harness: &TenantHarness<'_>) -> WalreceiverState {
-        let timeline = harness
+        let timeline_ref = harness
             .load()
             .await
             .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
@@ -1247,7 +1247,7 @@ mod tests {
             .initialize()
             .unwrap();
         WalreceiverState {
-            timeline_guard: timeline.guard(),
+            timeline_ref,
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),
             max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),
