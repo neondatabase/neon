@@ -93,9 +93,9 @@ pub fn spawn_connection_manager_task(
     );
 }
 
-macro_rules! try_upgrade_timeline_arc {
+macro_rules! try_update_to_any_timeline {
     ( $walreceiver_state:expr ) => {
-        match $walreceiver_state.timeline_ref.try_upgrade_timeline_arc() {
+        match $walreceiver_state.timeline_ref.any_timeline() {
             Ok(timeline) => timeline,
             Err(e) => {
                 warn!("Cannot acquire timeline read: {e:#}");
@@ -113,7 +113,7 @@ async fn connection_manager_loop_step(
     walreceiver_state: &mut WalreceiverState,
 ) -> ControlFlow<(), ()> {
     let mut timeline_state_updates =
-        try_upgrade_timeline_arc!(walreceiver_state).subscribe_for_state_updates();
+        try_update_to_any_timeline!(walreceiver_state).subscribe_for_state_updates();
 
     match wait_for_active_timeline(&mut timeline_state_updates).await {
         ControlFlow::Continue(()) => {}
@@ -192,7 +192,7 @@ async fn connection_manager_loop_step(
                 loop {
                     match timeline_state_updates.changed().await {
                         Ok(()) => {
-                            let new_state = try_upgrade_timeline_arc!(walreceiver_state).current_state();
+                            let new_state = try_update_to_any_timeline!(walreceiver_state).current_state();
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,

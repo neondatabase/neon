@@ -754,7 +754,7 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
         .map_err(ApiError::NotFound)?;
     let timeline = tenant
         .get_timeline(timeline_id)
-        .and_then(|timeline| timeline.try_upgrade_active_timeline())
+        .and_then(|timeline| timeline.active_timeline())
         .map_err(ApiError::NotFound)?;
     timeline
         .compact()
@@ -776,7 +776,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         .map_err(ApiError::NotFound)?;
     let timeline = tenant
         .get_timeline(timeline_id)
-        .and_then(|timeline| timeline.try_upgrade_active_timeline())
+        .and_then(|timeline| timeline.active_timeline())
         .map_err(ApiError::NotFound)?;
     timeline
         .freeze_and_flush()
