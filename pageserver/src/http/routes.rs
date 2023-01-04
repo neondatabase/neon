@@ -738,16 +738,16 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
+    let result_receiver = mgr::immediate_compact(tenant_id, timeline_id)
         .await
-        .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
-    timeline
-        .compact()
-        .await
+        .context("spawn compaction task")
         .map_err(ApiError::InternalServerError)?;
+
+    let result: anyhow::Result<()> = result_receiver
+        .await
+        .context("receive compaction result")
+        .map_err(ApiError::InternalServerError)?;
+    result.map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
