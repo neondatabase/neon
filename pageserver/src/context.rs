@@ -1,8 +1,7 @@
 //!
-//! Most async functions throughout the pageserver take a
-//! `cxt: &mut RequestContext` argument. It is used to control desired
-//! behaviour of the operation, and to allow cancelling the operation
-//! gracefully.
+//! Most async functions throughout the pageserver take a `cxt: &RequestContext`
+//! argument. It is used to control desired behaviour of the operation, and to
+//! allow cancelling the operation gracefully.
 //!
 //! # Context hierarchy
 //!
@@ -62,7 +61,7 @@
 //! # Notes
 //!
 //! All RequestContexts in the system have a unique ID, and are also tracked
-//! in a global hash table, CONTENTS.
+//! in a global hash table, CONTEXTS.
 //!
 //! - Futures are normally not assumed to be async cancellation-safe. Pass a
 //!   RequestContext as argument and use cancel() on it instead.

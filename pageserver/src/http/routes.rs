@@ -780,8 +780,6 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
     // Use tenant's pitr setting
     let pitr = tenant.get_pitr_interval();
 
-    // Run in task_mgr to avoid race with detach operation
-    // FIXME: No. Use request context and cancellation token for that
     fail::fail_point!("immediate_gc_task_pre");
     let gc_result = tenant
         .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cxt)

@@ -413,12 +413,12 @@ where
         }
     };
 
-    // shutdown all tenant and timeline tasks: gc, compaction, page service)
-    // No new tasks will be started for this tenant because it's in `Stopping` state.
-    // Hence, once we're done here, the `tenant_cleanup` callback can mutate tenant on-disk state freely.
-    // FIXME update comment
+    // Shut down all tenant and timeline tasks.
     tenant.graceful_shutdown(true).await;
 
+    // All tasks that operated on the tenant or any of its timelines have no finished,
+    // and they are in Stopped state so that new ones cannot appear anymore. Proceed
+    // with the cleanup.
     match tenant_cleanup
         .await
         .with_context(|| format!("Failed to run cleanup for tenant {tenant_id}"))

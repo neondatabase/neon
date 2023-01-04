@@ -383,9 +383,10 @@ pub enum PageReconstructError {
     /// The operation would require downloading a layer that is missing locally.
     NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
 
-    /// FIXME
+    /// The operation was cancelled
     Cancelled,
 
+    /// An error happened replaying the WAL records
     #[error(transparent)]
     WalRedo(#[from] crate::walredo::WalRedoError),
 }
@@ -1518,16 +1519,13 @@ impl Timeline {
 
     /// Calculate the logical size of the database at the latest LSN.
     ///
-    /// NOTE: counted incrementally, includes ancestors, this can be a slow operation.
+    /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
+    /// especially if we need to download remote layers.
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
         cxt: &RequestContext,
     ) -> Result<u64, PageReconstructError> {
-        // FIXME: add yields or something?
-        // Run in a separate thread since this can do a lot of
-        // synchronous file IO without .await inbetween
-        // if there are no RemoteLayers that would require downloading.
         info!(
             "Calculating logical size for timeline {} at {}",
             self.timeline_id, up_to_lsn
@@ -1977,6 +1975,7 @@ impl Timeline {
     async fn flush_loop(&self, mut layer_flush_start_rx: tokio::sync::watch::Receiver<u64>) {
         info!("started flush loop");
         let cxt = {
+            // Flushing should normally require downloading any layers.
             let top_cxt = RequestContext::new(TaskKind::LayerFlush, DownloadBehavior::Error);
             match self.get_context(&top_cxt) {
                 Ok(cxt) => cxt,
@@ -2086,8 +2085,8 @@ impl Timeline {
         let lsn_range = frozen_layer.get_lsn_range();
         let layer_paths_to_upload =
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
-                // FIXME: cxt no automatic download here. If it fails, fall back to the other
-                // method?
+                // Note: The 'cxt' in use here has DownloadBehavior::Error. We should not
+                // require downloading anything during initial import.
                 let (partitioning, _lsn) = self
                     .repartition(self.initdb_lsn, self.get_compaction_target_size(), cxt)
                     .await?;

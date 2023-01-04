@@ -1147,10 +1147,9 @@ impl Tenant {
 
         let loaded_timeline = match ancestor_timeline_id {
             Some(ancestor_timeline_id) => {
-                // FIXME: we now require the ancestor to be Active
                 let (ancestor_timeline, ancestor_cxt) = self
                     .get_active_timeline(ancestor_timeline_id, cxt)
-                    .context("Cannot branch off the timeline that's not present in pageserver")?;
+                    .context("Cannot branch off a timeline that's not present and Active in pageserver")?;
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
