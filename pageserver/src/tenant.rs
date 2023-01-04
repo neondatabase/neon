@@ -91,7 +91,8 @@ mod timeline;
 pub mod size;
 
 pub use timeline::{
-    with_ondemand_download, PageReconstructError, PageReconstructResult, Timeline, TimelineRef,
+    with_ondemand_download, PageReconstructError, PageReconstructResult, Timeline, TimelineGuard,
+    TimelineRef,
 };
 
 // re-export this function so that page_cache.rs can use it.
@@ -1878,7 +1879,7 @@ impl Tenant {
     /// [`Tenant::get_gc_horizon`].
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
-    pub async fn refresh_gc_info(&self) -> anyhow::Result<Vec<Arc<Timeline>>> {
+    pub async fn refresh_gc_info(&self) -> anyhow::Result<Vec<TimelineGuard>> {
         // since this method can now be called at different rates than the configured gc loop, it
         // might be that these configuration values get applied faster than what it was previously,
         // since these were only read from the gc task.
@@ -1897,7 +1898,7 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
-    ) -> anyhow::Result<Vec<Arc<Timeline>>> {
+    ) -> anyhow::Result<Vec<TimelineGuard>> {
         // grab mutex to prevent new timelines from being created here.
         let gc_cs = self.gc_cs.lock().await;
 
@@ -2895,7 +2896,7 @@ mod tests {
         Ok(())
     }
 
-    async fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> anyhow::Result<()> {
+    async fn make_some_layers(tline: &TimelineGuard, start_lsn: Lsn) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
@@ -2946,7 +2947,7 @@ mod tests {
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
             .try_upgrade_timeline_arc()?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(&tline, Lsn(0x20)).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         // FIXME: this doesn't actually remove any layer currently, given how the flushing
@@ -3035,7 +3036,7 @@ mod tests {
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
             .try_upgrade_timeline_arc()?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(&tline, Lsn(0x20)).await?;
 
         tenant
             .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))
@@ -3064,7 +3065,7 @@ mod tests {
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
             .try_upgrade_timeline_arc()?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(&tline, Lsn(0x20)).await?;
 
         tenant
             .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))
@@ -3074,7 +3075,7 @@ mod tests {
             .expect("Should have a local timeline")
             .try_upgrade_timeline_arc()?;
 
-        make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+        make_some_layers(&newtline, Lsn(0x60)).await?;
 
         // run gc on parent
         tenant
@@ -3100,7 +3101,7 @@ mod tests {
                 .create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION)?
                 .initialize()?
                 .try_upgrade_timeline_arc()?;
-            make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
+            make_some_layers(&tline, Lsn(0x8000)).await?;
         }
 
         let tenant = harness.load().await;
@@ -3123,7 +3124,7 @@ mod tests {
                 .initialize()?
                 .try_upgrade_timeline_arc()?;
 
-            make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+            make_some_layers(&tline, Lsn(0x20)).await?;
 
             tenant
                 .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))
@@ -3134,7 +3135,7 @@ mod tests {
                 .expect("Should have a local timeline")
                 .try_upgrade_timeline_arc()?;
 
-            make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+            make_some_layers(&newtline, Lsn(0x60)).await?;
         }
 
         // check that both of them are initially unloaded

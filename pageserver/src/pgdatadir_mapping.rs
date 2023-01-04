@@ -1508,7 +1508,7 @@ pub fn create_test_timeline(
     tenant: &crate::tenant::Tenant,
     timeline_id: utils::id::TimelineId,
     pg_version: u32,
-) -> anyhow::Result<std::sync::Arc<Timeline>> {
+) -> anyhow::Result<crate::tenant::TimelineGuard> {
     let tline = tenant
         .create_empty_timeline(timeline_id, Lsn(8), pg_version)?
         .initialize()?

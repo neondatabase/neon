@@ -14,7 +14,6 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
 use std::fmt::Write as FmtWrite;
-use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::io;
 use tokio::io::AsyncWrite;
@@ -28,7 +27,7 @@ use tracing::*;
 ///
 use tokio_tar::{Builder, EntryType, Header};
 
-use crate::tenant::{with_ondemand_download, Timeline};
+use crate::tenant::{with_ondemand_download, TimelineGuard};
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
@@ -47,7 +46,7 @@ where
     W: AsyncWrite + Send + Sync + Unpin,
 {
     ar: Builder<&'a mut W>,
-    timeline: &'a Arc<Timeline>,
+    timeline: &'a TimelineGuard,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
@@ -67,7 +66,7 @@ where
 {
     pub fn new(
         write: &'a mut W,
-        timeline: &'a Arc<Timeline>,
+        timeline: &'a TimelineGuard,
         req_lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
