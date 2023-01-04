@@ -10,11 +10,10 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
 use std::fmt::Write as FmtWrite;
-use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::io;
 use tokio::io::AsyncWrite;
@@ -39,114 +38,130 @@ use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
+/// Create basebackup with non-rel data in it.
+/// Only include relational data if 'full_backup' is true.
+///
+/// Currently we use empty 'req_lsn' in two cases:
+///  * During the basebackup right after timeline creation
+///  * When working without safekeepers. In this situation it is important to match the lsn
+///    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
+///    to start the replication.
+pub async fn send_basebackup_tarball<'a, W>(
+    write: &'a mut W,
+    timeline: &'a Timeline,
+    req_lsn: Option<Lsn>,
+    prev_lsn: Option<Lsn>,
+    full_backup: bool,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Send + Sync + Unpin,
+{
+    // Compute postgres doesn't have any previous WAL files, but the first
+    // record that it's going to write needs to include the LSN of the
+    // previous record (xl_prev). We include prev_record_lsn in the
+    // "zenith.signal" file, so that postgres can read it during startup.
+    //
+    // We don't keep full history of record boundaries in the page server,
+    // however, only the predecessor of the latest record on each
+    // timeline. So we can only provide prev_record_lsn when you take a
+    // base backup at the end of the timeline, i.e. at last_record_lsn.
+    // Even at the end of the timeline, we sometimes don't have a valid
+    // prev_lsn value; that happens if the timeline was just branched from
+    // an old LSN and it doesn't have any WAL of its own yet. We will set
+    // prev_lsn to Lsn(0) if we cannot provide the correct value.
+    let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
+        // Backup was requested at a particular LSN. The caller should've
+        // already checked that it's a valid LSN.
+
+        // If the requested point is the end of the timeline, we can
+        // provide prev_lsn. (get_last_record_rlsn() might return it as
+        // zero, though, if no WAL has been generated on this timeline
+        // yet.)
+        let end_of_timeline = timeline.get_last_record_rlsn();
+        if req_lsn == end_of_timeline.last {
+            (end_of_timeline.prev, req_lsn)
+        } else {
+            (Lsn(0), req_lsn)
+        }
+    } else {
+        // Backup was requested at end of the timeline.
+        let end_of_timeline = timeline.get_last_record_rlsn();
+        (end_of_timeline.prev, end_of_timeline.last)
+    };
+
+    // Consolidate the derived and the provided prev_lsn values
+    let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
+        if backup_prev != Lsn(0) {
+            ensure!(backup_prev == provided_prev_lsn);
+        }
+        provided_prev_lsn
+    } else {
+        backup_prev
+    };
+
+    info!(
+        "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
+        backup_lsn, prev_lsn, full_backup
+    );
+
+    let basebackup = Basebackup {
+        ar: Builder::new_non_terminated(write),
+        timeline,
+        lsn: backup_lsn,
+        prev_record_lsn: prev_lsn,
+        full_backup,
+    };
+    basebackup
+        .send_tarball()
+        .instrument(info_span!("send_tarball", backup_lsn=%backup_lsn))
+        .await
+}
+
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a, W>
+struct Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
     ar: Builder<&'a mut W>,
-    timeline: &'a Arc<Timeline>,
-    pub lsn: Lsn,
+    timeline: &'a Timeline,
+    lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
 }
 
-// Create basebackup with non-rel data in it.
-// Only include relational data if 'full_backup' is true.
-//
-// Currently we use empty lsn in two cases:
-//  * During the basebackup right after timeline creation
-//  * When working without safekeepers. In this situation it is important to match the lsn
-//    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
-//    to start the replication.
 impl<'a, W> Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
-    pub fn new(
-        write: &'a mut W,
-        timeline: &'a Arc<Timeline>,
-        req_lsn: Option<Lsn>,
-        prev_lsn: Option<Lsn>,
-        full_backup: bool,
-    ) -> Result<Basebackup<'a, W>> {
-        // Compute postgres doesn't have any previous WAL files, but the first
-        // record that it's going to write needs to include the LSN of the
-        // previous record (xl_prev). We include prev_record_lsn in the
-        // "zenith.signal" file, so that postgres can read it during startup.
-        //
-        // We don't keep full history of record boundaries in the page server,
-        // however, only the predecessor of the latest record on each
-        // timeline. So we can only provide prev_record_lsn when you take a
-        // base backup at the end of the timeline, i.e. at last_record_lsn.
-        // Even at the end of the timeline, we sometimes don't have a valid
-        // prev_lsn value; that happens if the timeline was just branched from
-        // an old LSN and it doesn't have any WAL of its own yet. We will set
-        // prev_lsn to Lsn(0) if we cannot provide the correct value.
-        let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
-            // Backup was requested at a particular LSN. The caller should've
-            // already checked that it's a valid LSN.
-
-            // If the requested point is the end of the timeline, we can
-            // provide prev_lsn. (get_last_record_rlsn() might return it as
-            // zero, though, if no WAL has been generated on this timeline
-            // yet.)
-            let end_of_timeline = timeline.get_last_record_rlsn();
-            if req_lsn == end_of_timeline.last {
-                (end_of_timeline.prev, req_lsn)
-            } else {
-                (Lsn(0), req_lsn)
-            }
-        } else {
-            // Backup was requested at end of the timeline.
-            let end_of_timeline = timeline.get_last_record_rlsn();
-            (end_of_timeline.prev, end_of_timeline.last)
-        };
-
-        // Consolidate the derived and the provided prev_lsn values
-        let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
-            if backup_prev != Lsn(0) {
-                ensure!(backup_prev == provided_prev_lsn)
-            }
-            provided_prev_lsn
-        } else {
-            backup_prev
-        };
-
-        info!(
-            "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
-            backup_lsn, prev_lsn, full_backup
-        );
-
-        Ok(Basebackup {
-            ar: Builder::new_non_terminated(write),
-            timeline,
-            lsn: backup_lsn,
-            prev_record_lsn: prev_lsn,
-            full_backup,
-        })
-    }
-
-    pub async fn send_tarball(mut self) -> anyhow::Result<()> {
+    async fn send_tarball(mut self) -> anyhow::Result<()> {
         // TODO include checksum
 
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(dir)?;
-            self.ar.append(&header, &mut io::empty()).await?;
+            self.ar
+                .append(&header, &mut io::empty())
+                .await
+                .context("could not add directory to basebackup tarball")?;
         }
 
-        // Send empty config files.
+        // Send config files.
         for filepath in PGDATA_SPECIAL_FILES.iter() {
             if *filepath == "pg_hba.conf" {
                 let data = PG_HBA.as_bytes();
                 let header = new_tar_header(filepath, data.len() as u64)?;
-                self.ar.append(&header, data).await?;
+                self.ar
+                    .append(&header, data)
+                    .await
+                    .context("could not add config file to basebackup tarball")?;
             } else {
                 let header = new_tar_header(filepath, 0)?;
-                self.ar.append(&header, &mut io::empty()).await?;
+                self.ar
+                    .append(&header, &mut io::empty())
+                    .await
+                    .context("could not add config file to basebackup tarball")?;
             }
         }
 

@@ -654,10 +654,8 @@ impl PageServerHandler {
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = pgb.copyout_writer();
-            let basebackup =
-                basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
-            tracing::Span::current().record("lsn", basebackup.lsn.to_string().as_str());
-            basebackup.send_tarball().await?;
+            basebackup::send_basebackup_tarball(&mut writer, &timeline, lsn, prev_lsn, full_backup)
+                .await?;
         }
 
         pgb.write_message(&BeMessage::CopyDone)?;
