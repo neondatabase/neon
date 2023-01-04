@@ -21,19 +21,17 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
-use anyhow::Context;
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
-use crate::tenant::Timeline;
+use crate::tenant::TimelineGuard;
 use crate::tenant::{with_ondemand_download, PageReconstructError};
-use crate::walreceiver::acquire_timeline_read;
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -62,13 +60,12 @@ impl WalIngest {
     ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let timeline_read = try_page_reconstruct_result!(timeline_guard.try_upgrade_timeline_arc());
+        let timeline_read = timeline_guard.try_upgrade_timeline_arc()?;
         let checkpoint_bytes =
             with_ondemand_download(|| timeline_read.get_checkpoint(startpoint)).await?;
         drop(timeline_read);
-        let checkpoint = try_page_reconstruct_result!(
-            CheckPoint::decode(&checkpoint_bytes).context("Failed to decode checkpoint bytes")
-        );
+        let checkpoint =
+            CheckPoint::decode(&checkpoint_bytes).context("Failed to decode checkpoint bytes")?;
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
         Ok(WalIngest {
@@ -1025,7 +1022,7 @@ impl WalIngest {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let timeline_read = try_prr!(self.timeline_guard.try_upgrade_timeline_arc());
+        let timeline_read = self.timeline_guard.try_upgrade_timeline_arc()?;
         let old_nblocks =
             if !with_ondemand_download(|| timeline_read.get_rel_exists(rel, last_lsn, true)).await?
             {
