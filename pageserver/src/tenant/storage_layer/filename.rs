@@ -184,10 +184,10 @@ pub enum LayerFileName {
 impl LayerFileName {
     pub fn file_name(&self) -> String {
         match self {
-            LayerFileName::Image(fname) => format!("{fname}"),
-            LayerFileName::Delta(fname) => format!("{fname}"),
+            LayerFileName::Image(fname) => fname.to_string(),
+            LayerFileName::Delta(fname) => fname.to_string(),
             #[cfg(test)]
-            LayerFileName::Test(fname) => fname.to_string(),
+            LayerFileName::Test(fname) => fname.clone(),
         }
     }
     #[cfg(test)]

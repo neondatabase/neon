@@ -66,7 +66,7 @@ use crate::{is_temporary, task_mgr};
 
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LocalOrRemote};
+use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LocalLayer, LocalOrRemote};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -1077,9 +1077,9 @@ impl Timeline {
     async fn create_remote_layers(
         &self,
         index_part: &IndexPart,
-        local_layers: HashMap<LayerFileName, HistoricLayer<DeltaLayer, ImageLayer>>,
+        local_layers: HashMap<LayerFileName, HistoricLayer>,
         up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashMap<LayerFileName, HistoricLayer<DeltaLayer, ImageLayer>>> {
+    ) -> anyhow::Result<HashMap<LayerFileName, HistoricLayer>> {
         // Are we missing some files that are present in remote storage?
         // Create RemoteLayer instances for them.
         let mut local_only_layers = local_layers;
@@ -1499,7 +1499,7 @@ trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
 }
 
-impl TraversalLayerExt for HistoricLayer<DeltaLayer, ImageLayer> {
+impl TraversalLayerExt for HistoricLayer {
     fn traversal_id(&self) -> TraversalId {
         match self.local_path() {
             Some(local_path) => {
@@ -2068,7 +2068,7 @@ impl Timeline {
         // Write it out
         let new_delta = frozen_layer.write_to_disk()?;
         let new_delta_path = new_delta.path();
-        let new_delta_filename = LayerFileName::Delta(new_delta.layer_name());
+        let new_delta_filename = new_delta.layer_name();
 
         // Sync it to disk.
         //
@@ -2254,7 +2254,7 @@ impl Timeline {
         let mut layers = self.layers.write().unwrap();
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for l in image_layers {
-            let path = LayerFileName::Image(l.layer_name());
+            let path = l.layer_name();
             let metadata = timeline_path
                 .join(path.file_name())
                 .metadata()
@@ -2274,25 +2274,17 @@ impl Timeline {
     }
 }
 
-struct CompactLevel0Phase1Result<D> {
+#[derive(Default)]
+struct CompactLevel0Phase1Result {
     new_layers: Vec<DeltaLayer>,
-    deltas_to_compact: Vec<LocalOrRemote<D>>,
-}
-
-impl<D> Default for CompactLevel0Phase1Result<D> {
-    fn default() -> Self {
-        Self {
-            new_layers: Vec::default(),
-            deltas_to_compact: Vec::default(),
-        }
-    }
+    deltas_to_compact: Vec<LocalOrRemote<DeltaLayer>>,
 }
 
 impl Timeline {
     async fn compact_level0_phase1(
         &self,
         target_file_size: u64,
-    ) -> anyhow::Result<CompactLevel0Phase1Result<DeltaLayer>> {
+    ) -> anyhow::Result<CompactLevel0Phase1Result> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
@@ -2343,7 +2335,7 @@ impl Timeline {
             level0_deltas.len()
         );
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().file_name());
+            info!("compact includes {}", l.layer_name().file_name());
         }
         // We don't need the original list of layers anymore. Drop it so that
         // we don't accidentally use it later in the function.
@@ -2579,7 +2571,7 @@ impl Timeline {
 
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
-                    &LayerFileName::Delta(l.layer_name()),
+                    &l.layer_name(),
                     &LayerFileMetadata::new(metadata.len()),
                 )?;
             }
@@ -2597,13 +2589,14 @@ impl Timeline {
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
-            if let Some(path) = l.local_path() {
+            if let LocalOrRemote::Local(local_delta) = &l {
+                local_delta.delete()?;
                 self.metrics
                     .resident_physical_size_gauge
-                    .sub(path.metadata()?.len());
+                    .sub(local_delta.file_size);
             }
-            layer_names_to_delete.push(l.filename());
-            l.delete()?;
+
+            layer_names_to_delete.push(l.layer_name());
             layers.remove_historic(HistoricLayer::Delta(l));
         }
         drop(layers);

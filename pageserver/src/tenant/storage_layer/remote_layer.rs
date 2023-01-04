@@ -91,14 +91,14 @@ impl Layer for RemoteLayer {
 
 impl RemoteLayer {
     pub fn new_img(
-        tenantid: TenantId,
-        timelineid: TimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         fname: &ImageFileName,
         layer_metadata: &LayerFileMetadata,
     ) -> RemoteLayer {
         RemoteLayer {
-            tenant_id: tenantid,
-            timeline_id: timelineid,
+            tenant_id,
+            timeline_id,
             key_range: fname.key_range.clone(),
             lsn_range: fname.lsn..(fname.lsn + 1),
             is_delta: false,
@@ -133,7 +133,7 @@ impl RemoteLayer {
         &self,
         conf: &'static PageServerConf,
         file_size: u64,
-    ) -> HistoricLayer<DeltaLayer, ImageLayer> {
+    ) -> HistoricLayer {
         if self.is_delta {
             let fname = DeltaFileName {
                 key_range: self.key_range.clone(),

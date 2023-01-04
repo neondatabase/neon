@@ -49,7 +49,7 @@ use utils::{
 };
 
 use super::filename::{ImageFileName, PathOrConf};
-use super::Layer;
+use super::{Layer, LayerFileName, LocalLayer};
 
 ///
 /// Header stored in the beginning of the file
@@ -145,7 +145,7 @@ impl Layer for ImageLayer {
     }
 
     fn short_id(&self) -> String {
-        self.layer_name().to_string()
+        self.image_layer_name().to_string()
     }
 
     /// debugging function to print out the contents of the layer
@@ -207,6 +207,20 @@ impl Layer for ImageLayer {
         } else {
             Ok(ValueReconstructResult::Missing)
         }
+    }
+}
+
+impl LocalLayer for ImageLayer {
+    fn layer_name(&self) -> LayerFileName {
+        LayerFileName::Image(self.image_layer_name())
+    }
+
+    fn local_path(&self) -> PathBuf {
+        self.path()
+    }
+
+    fn file_size(&self) -> u64 {
+        self.file_size
     }
 }
 
@@ -300,7 +314,7 @@ impl ImageLayer {
             }
             PathOrConf::Path(path) => {
                 let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.layer_name().to_string();
+                let expected_filename = self.image_layer_name().to_string();
 
                 if actual_filename != expected_filename {
                     println!(
@@ -369,7 +383,7 @@ impl ImageLayer {
         })
     }
 
-    pub fn layer_name(&self) -> ImageFileName {
+    fn image_layer_name(&self) -> ImageFileName {
         ImageFileName {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
@@ -382,7 +396,7 @@ impl ImageLayer {
             &self.path_or_conf,
             self.timeline_id,
             self.tenant_id,
-            &self.layer_name(),
+            &self.image_layer_name(),
         )
     }
 }

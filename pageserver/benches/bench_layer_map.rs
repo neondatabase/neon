@@ -234,7 +234,7 @@ fn bench_from_real_project(c: &mut Criterion) {
 
 // Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
 fn bench_sequential(c: &mut Criterion) {
-    let mut layer_map = LayerMap::default();
+    let mut layer_map = DummyLayerMap::default();
 
     // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
     //

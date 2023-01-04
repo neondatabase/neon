@@ -79,11 +79,7 @@ struct LayerRTreeObject<L> {
     envelope: AABB<[IntKey; 2]>,
 }
 
-impl<D, I> PartialEq for LayerRTreeObject<HistoricLayer<D, I>>
-where
-    D: Layer,
-    I: Layer,
-{
+impl<D, I> PartialEq for LayerRTreeObject<HistoricLayer<D, I>> {
     fn eq(&self, other: &Self) -> bool {
         self.layer == other.layer
     }

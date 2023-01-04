@@ -51,7 +51,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{DeltaFileName, Layer, LayerIter, LayerKeyIter, PathOrConf};
+use super::{DeltaFileName, Layer, LayerFileName, LayerIter, LayerKeyIter, LocalLayer, PathOrConf};
 
 ///
 /// Header stored in the beginning of the file
@@ -217,7 +217,7 @@ impl Layer for DeltaLayer {
     }
 
     fn short_id(&self) -> String {
-        self.layer_name().to_string()
+        self.delta_layer_name().to_string()
     }
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool) -> Result<()> {
@@ -380,6 +380,20 @@ impl Layer for DeltaLayer {
     }
 }
 
+impl LocalLayer for DeltaLayer {
+    fn layer_name(&self) -> LayerFileName {
+        LayerFileName::Delta(self.delta_layer_name())
+    }
+
+    fn local_path(&self) -> PathBuf {
+        self.path()
+    }
+
+    fn file_size(&self) -> u64 {
+        self.file_size
+    }
+}
+
 impl DeltaLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
@@ -475,7 +489,7 @@ impl DeltaLayer {
             }
             PathOrConf::Path(path) => {
                 let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.layer_name().to_string();
+                let expected_filename = self.delta_layer_name().to_string();
 
                 if actual_filename != expected_filename {
                     println!(
@@ -549,7 +563,7 @@ impl DeltaLayer {
         })
     }
 
-    pub fn layer_name(&self) -> DeltaFileName {
+    fn delta_layer_name(&self) -> DeltaFileName {
         DeltaFileName {
             key_range: self.key_range.clone(),
             lsn_range: self.lsn_range.clone(),
@@ -562,7 +576,7 @@ impl DeltaLayer {
             &self.path_or_conf,
             self.timeline_id,
             self.tenant_id,
-            &self.layer_name(),
+            &self.delta_layer_name(),
         )
     }
 

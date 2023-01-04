@@ -8,9 +8,8 @@ mod remote_layer;
 
 use crate::repository::{Key, Value};
 use crate::walrecord::NeonWalRecord;
-use anyhow::{Context, Result};
+use anyhow::Context;
 use bytes::Bytes;
-use std::fs;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -133,21 +132,17 @@ pub trait Layer: Send + Sync + 'static {
 }
 
 /// Returned by [`Layer::iter`]
-pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i>;
+pub type LayerIter<'i> = Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'i>;
 
 /// Returned by [`Layer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 
-pub enum HistoricLayer<D, I> {
+pub enum HistoricLayer<D = DeltaLayer, I = ImageLayer> {
     Delta(LocalOrRemote<D>),
     Image(LocalOrRemote<I>),
 }
 
-impl<D, I> PartialEq for HistoricLayer<D, I>
-where
-    D: Layer,
-    I: Layer,
-{
+impl<D, I> PartialEq for HistoricLayer<D, I> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Delta(l0), Self::Delta(r0)) => l0 == r0,
@@ -157,7 +152,7 @@ where
     }
 }
 
-impl<D: Layer, I: Layer> Clone for HistoricLayer<D, I> {
+impl<D, I> Clone for HistoricLayer<D, I> {
     fn clone(&self) -> Self {
         match self {
             Self::Delta(d) => Self::Delta(d.clone()),
@@ -171,7 +166,7 @@ pub enum LocalOrRemote<L> {
     Remote(Arc<RemoteLayer>),
 }
 
-impl<L: Layer> LocalOrRemote<L> {
+impl<L> LocalOrRemote<L> {
     pub fn as_remote(&self) -> Option<&Arc<RemoteLayer>> {
         match self {
             Self::Local(_) => None,
@@ -180,41 +175,21 @@ impl<L: Layer> LocalOrRemote<L> {
     }
 }
 
+pub trait LocalLayer: Layer {
+    fn layer_name(&self) -> LayerFileName;
+
+    fn local_path(&self) -> PathBuf;
+
+    fn file_size(&self) -> u64;
+
+    fn delete(&self) -> anyhow::Result<()> {
+        let path_to_delete = self.local_path();
+        std::fs::remove_file(&path_to_delete)
+            .with_context(|| format!("Failed to remove local layer file {path_to_delete:?}"))
+    }
+}
+
 impl LocalOrRemote<DeltaLayer> {
-    pub fn filename(&self) -> LayerFileName {
-        match self {
-            Self::Local(local_delta_layer) => LayerFileName::Delta(local_delta_layer.layer_name()),
-            Self::Remote(remote_layer) => remote_layer.layer_name(),
-        }
-    }
-
-    pub fn local_path(&self) -> Option<PathBuf> {
-        match self {
-            Self::Local(local_delta_layer) => Some(local_delta_layer.path()),
-            Self::Remote(_) => None,
-        }
-    }
-
-    pub fn delete(&self) -> anyhow::Result<()> {
-        match self {
-            Self::Local(local_delta_layer) => {
-                let path_to_delete = local_delta_layer.path();
-                fs::remove_file(&path_to_delete).with_context(|| {
-                    format!("Failed to remove delta layer file {path_to_delete:?}")
-                })?;
-                Ok(())
-            }
-            Self::Remote(_) => Ok(()),
-        }
-    }
-
-    pub fn file_size(&self) -> Option<u64> {
-        match self {
-            Self::Local(local_delta_layer) => Some(local_delta_layer.file_size),
-            Self::Remote(remote) => remote.layer_metadata.file_size(),
-        }
-    }
-
     /// Iterate through all keys and values stored in the layer
     pub fn iter(&self) -> anyhow::Result<LayerIter<'_>> {
         match self {
@@ -231,45 +206,16 @@ impl LocalOrRemote<DeltaLayer> {
             Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
         }
     }
-}
 
-impl LocalOrRemote<ImageLayer> {
-    pub fn filename(&self) -> LayerFileName {
+    pub fn layer_name(&self) -> LayerFileName {
         match self {
-            Self::Local(local_image_layer) => LayerFileName::Image(local_image_layer.layer_name()),
-            Self::Remote(remote_layer) => remote_layer.layer_name(),
-        }
-    }
-
-    pub fn local_path(&self) -> Option<PathBuf> {
-        match self {
-            Self::Local(local_image_layer) => Some(local_image_layer.path()),
-            Self::Remote(_) => None,
-        }
-    }
-
-    pub fn delete(&self) -> anyhow::Result<()> {
-        match self {
-            Self::Local(local_image_layer) => {
-                let path_to_delete = local_image_layer.path();
-                fs::remove_file(&path_to_delete).with_context(|| {
-                    format!("Failed to remove image layer file {path_to_delete:?}")
-                })?;
-                Ok(())
-            }
-            Self::Remote(_) => Ok(()),
-        }
-    }
-
-    pub fn file_size(&self) -> Option<u64> {
-        match self {
-            Self::Local(local_image_layer) => Some(local_image_layer.file_size),
-            Self::Remote(remote) => remote.layer_metadata.file_size(),
+            Self::Local(l) => l.layer_name(),
+            Self::Remote(r) => r.layer_name(),
         }
     }
 }
 
-impl<L: Layer> Clone for LocalOrRemote<L> {
+impl<L> Clone for LocalOrRemote<L> {
     fn clone(&self) -> Self {
         match self {
             Self::Local(l) => Self::Local(Arc::clone(l)),
@@ -278,19 +224,19 @@ impl<L: Layer> Clone for LocalOrRemote<L> {
     }
 }
 
-impl From<DeltaLayer> for HistoricLayer<DeltaLayer, ImageLayer> {
+impl From<DeltaLayer> for HistoricLayer {
     fn from(delta: DeltaLayer) -> Self {
         Self::Delta(LocalOrRemote::Local(Arc::new(delta)))
     }
 }
 
-impl From<ImageLayer> for HistoricLayer<DeltaLayer, ImageLayer> {
+impl From<ImageLayer> for HistoricLayer {
     fn from(image: ImageLayer) -> Self {
         Self::Image(LocalOrRemote::Local(Arc::new(image)))
     }
 }
 
-impl From<RemoteLayer> for HistoricLayer<DeltaLayer, ImageLayer> {
+impl<D, I> From<RemoteLayer> for HistoricLayer<D, I> {
     fn from(remote: RemoteLayer) -> Self {
         match remote.layer_name() {
             LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(Arc::new(remote))),
@@ -301,7 +247,7 @@ impl From<RemoteLayer> for HistoricLayer<DeltaLayer, ImageLayer> {
     }
 }
 
-impl From<Arc<RemoteLayer>> for HistoricLayer<DeltaLayer, ImageLayer> {
+impl From<Arc<RemoteLayer>> for HistoricLayer {
     fn from(remote: Arc<RemoteLayer>) -> Self {
         match remote.layer_name() {
             LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(remote)),
@@ -327,28 +273,38 @@ impl From<Arc<RemoteLayer>> for HistoricLayer<DeltaLayer, ImageLayer> {
 /// LSN
 ///
 
-impl HistoricLayer<DeltaLayer, ImageLayer> {
+impl<D, I> HistoricLayer<D, I>
+where
+    D: LocalLayer,
+    I: LocalLayer,
+{
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
     pub fn filename(&self) -> LayerFileName {
+        use LocalOrRemote::*;
         match self {
-            Self::Delta(delta) => delta.filename(),
-            Self::Image(image) => image.filename(),
+            Self::Delta(Local(delta)) => delta.layer_name(),
+            Self::Image(Local(image)) => image.layer_name(),
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => remote.layer_name(),
         }
     }
 
     pub fn local_path(&self) -> Option<PathBuf> {
+        use LocalOrRemote::*;
         match self {
-            Self::Delta(delta) => delta.local_path(),
-            Self::Image(image) => image.local_path(),
+            Self::Delta(Local(delta)) => Some(delta.local_path()),
+            Self::Image(Local(image)) => Some(image.local_path()),
+            Self::Delta(Remote(_)) | Self::Image(Remote(_)) => None,
         }
     }
 
     /// Permanently remove this layer from disk.
     pub fn delete(&self) -> anyhow::Result<()> {
+        use LocalOrRemote::*;
         match self {
-            Self::Delta(delta) => delta.delete(),
-            Self::Image(image) => image.delete(),
+            Self::Delta(Local(delta)) => delta.delete(),
+            Self::Image(Local(image)) => image.delete(),
+            Self::Delta(Remote(_)) | Self::Image(Remote(_)) => Ok(()),
         }
     }
 
@@ -357,9 +313,13 @@ impl HistoricLayer<DeltaLayer, ImageLayer> {
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
     pub fn file_size(&self) -> Option<u64> {
+        use LocalOrRemote::*;
         match self {
-            Self::Delta(delta) => delta.file_size(),
-            Self::Image(image) => image.file_size(),
+            Self::Delta(Local(delta)) => Some(delta.file_size()),
+            Self::Image(Local(image)) => Some(image.file_size()),
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => {
+                remote.layer_metadata.file_size()
+            }
         }
     }
 
