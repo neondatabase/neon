@@ -1647,7 +1647,7 @@ impl Timeline {
 
         'outer: loop {
             // The function should have updated 'state'
-            let timeline = match timeline_ref.any_timeline() {
+            let timeline = match timeline_ref.timeline() {
                 Ok(tli) => tli,
                 Err(e) => return PageReconstructResult::from(e),
             };
@@ -3373,7 +3373,7 @@ where
         match closure_result {
             PageReconstructResult::NeedsDownload(timeline_ref, weak_remote_layer) => {
                 // if the timeline is gone, it has likely been deleted / tenant detached
-                let tl = timeline_ref.any_timeline()?;
+                let tl = timeline_ref.timeline()?;
                 // if the remote layer got removed, retry the function, it might succeed now
                 let remote_layer = match weak_remote_layer.upgrade() {
                     None => {

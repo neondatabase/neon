@@ -1,4 +1,13 @@
-//! TODO kb
+//! [`Timeline`] instances are rarely supposed to be used directly.
+//!
+//! Inside, such timelines hold the only instance [`tokio::sync::watch::Sender`],
+//! that gets dropped/changed based on certain events.
+//! There's a main `Arc<Timeline>` instance present in [`crate::tenant::Tenant`],
+//! which gets dropped on timeline deletion.
+//!
+//! Such [`Arc`] is not supposed be shared elsewhere, since otherwise dropping main instance
+//! won't do anything, hence the wrappers are used to access [`Timeline`] methods, but
+//! ensure that no stray instance copies are stored.
 
 use std::{
     ops::Deref,
@@ -15,24 +24,90 @@ use crate::{pgdatadir_mapping::CalculateLogicalSizeError, tenant::storage_layer:
 
 use super::Timeline;
 
-/// A timeline wrapper, that ensures we can drop timeline and cause
-/// next operations that access the timeline to cancel.
+/// A weak reference to the main [`Timeline`] instance, that's stored in [`crate::tenant::Tenant`].
+/// It provides a way to upgrade to the timeline instance (with all its API), if the timeline is still in pageserver's memory.
+///
+/// This way, the weak reference could be held in any pageserver separate corner (e.g. [`crate::walreceiver`] loop), allowing
+/// pageserver to remove and clean up actual timeline and its data and be sure, that all subsequent weak ref upgrades will fail.
+///
+/// Such semantics means, that operations that use [`TimelineRef`] may interrupt (if implemented to reupgrade periodically),
+/// while operations that use `&Timeline` are "uninterruptable".
 #[derive(Clone)]
 pub struct TimelineRef {
     timeline: Weak<Timeline>,
     pub id: TenantTimelineId,
 }
 
-/// This is a struct that wraps `Arc<Timeline>` and timeline's API to
-///
-///
-/// Use this as a `MutexGuard` and do not try to store the object.
-/// While the object is held, the timeline is not dropped fully, which might cause
-/// various jobs to continue working.
+const ACTIVE_TIMELINE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+// XXX: the current API is under the development: "just" timeline and "active" timeline separation is not the final one.
+// It's more appropriate to allow the weak ref to consider timeline state and allow upgrading to "read" and "write" instances,
+// depending on the state and the ability to perform GC/compaction ("write") or just return metadata ("read"), or something else?
+//
+// `TimelineGuard` would need more improvements later, in particular, we need to track such guards and wait for them to stop before
+// graceful shutdown.
+impl TimelineRef {
+    // Let only Timeline module the ability to create weak references on itself.
+    pub(super) fn new(timeline: &Timeline) -> Self {
+        Self {
+            timeline: Weak::clone(&timeline.myself),
+            id: TenantTimelineId::new(timeline.tenant_id, timeline.timeline_id),
+        }
+    }
+
+    /// Successfully upgrades to [`TimelineGuard`] if the timeline is in pageserver's memory.
+    /// No state checks are made, only timeline liveness itself.
+    pub fn timeline(&self) -> anyhow::Result<TimelineGuard> {
+        Ok(TimelineGuard {
+            timeline: self
+                .timeline
+                .upgrade()
+                .with_context(|| format!("Timeline {} is dropped", self.id))?,
+        })
+    }
+
+    /// Successfully upgrades to [`TimelineGuard`] if the timeline is in pageserver's memory and
+    /// has [`TimelineState::Active`] state when upgraded.
+    ///
+    /// Further state checks are user's responsibility, the active state can change.
+    pub fn active_timeline(&self) -> anyhow::Result<TimelineGuard> {
+        let timeline = self.timeline()?;
+        anyhow::ensure!(
+            timeline.is_active(),
+            "Timeline {} is not active, state: {:?}",
+            self.id,
+            timeline.current_state(),
+        );
+        Ok(timeline)
+    }
+
+    /// Attempts to upgrade the timeline ref and wait for the timeline to get [`TimelineState::Active`] state (if not already).
+    /// Bails if the timeout expires or timeline fails to become active (e.g. gets into end state that never transitions to active).
+    ///
+    /// Further state checks are user's responsibility, the active state can change.
+    pub async fn get_active_timeline_with_timeout(&self) -> anyhow::Result<TimelineGuard> {
+        let timeline = self.timeline()?;
+        match tokio::time::timeout(
+            ACTIVE_TIMELINE_WAIT_TIMEOUT,
+            timeline.wait_to_become_active(),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(timeline),
+            Ok(Err(e)) => Err(e),
+            Err(_) => anyhow::bail!("Timeout waiting for timeline {} to become Active", self.id),
+        }
+    }
+}
+
+/// A wrapper around `Arc<Timeline>` that prevents it from being dropped fully and allows accessing timeline's methods.
+/// Not intended to be cloned or stored somewhere: use it to access timeline's properties and drop it afterwards.
+/// By reacquiring the guard periodically, the timeline-accessing processes can stop when the timeline is being shut down.
 pub struct TimelineGuard {
     timeline: Arc<Timeline>,
 }
 
+// All `Timeline::` methods here exist because `Arc<Timeline>` is needed for them to run
 impl TimelineGuard {
     pub fn get_current_logical_size(&self) -> anyhow::Result<(u64, bool)> {
         Timeline::get_current_logical_size(&self.timeline)
@@ -85,52 +160,10 @@ impl TimelineGuard {
 }
 
 impl Deref for TimelineGuard {
+    // Avoid exposing `Arc` here, so no `Arc::clone` leaks are possible.
     type Target = Timeline;
 
     fn deref(&self) -> &Self::Target {
         self.timeline.as_ref()
-    }
-}
-
-impl TimelineRef {
-    pub(super) fn new(timeline: &Timeline) -> Self {
-        Self {
-            timeline: Weak::clone(&timeline.myself),
-            id: TenantTimelineId::new(timeline.tenant_id, timeline.timeline_id),
-        }
-    }
-
-    pub fn any_timeline(&self) -> anyhow::Result<TimelineGuard> {
-        // XXX: ensure that the timeline writable now, and that it will remain writable until the guard object is dropped.
-        //    : For example, timeline delete should eventually just need wait for all guard objects to be dropped, then proceed
-        //    : with timeline state transition & layer file deletion.
-        Ok(TimelineGuard {
-            timeline: self
-                .timeline
-                .upgrade()
-                .with_context(|| format!("Timeline {} is dropped", self.id))?,
-        })
-    }
-
-    // TODO kb write some TODO about read/write separation
-    pub fn active_timeline(&self) -> anyhow::Result<TimelineGuard> {
-        let timeline = self.any_timeline()?;
-        anyhow::ensure!(
-            timeline.is_active(),
-            "Timeline {} is not active, state: {:?}",
-            self.id,
-            timeline.current_state(),
-        );
-        Ok(timeline)
-    }
-
-    pub async fn get_active_timeline_with_timeout(&self) -> anyhow::Result<TimelineGuard> {
-        let timeline = self.any_timeline()?;
-        match tokio::time::timeout(Duration::from_secs(30), timeline.wait_to_become_active()).await
-        {
-            Ok(Ok(())) => Ok(timeline),
-            Ok(Err(e)) => Err(e),
-            Err(_) => anyhow::bail!("Timeout waiting for timeline {} to become Active", self.id),
-        }
     }
 }

@@ -749,7 +749,7 @@ impl Tenant {
         let mut size = 0;
 
         for timeline in self.list_timelines().iter() {
-            if let Some(remote_client) = &timeline.any_timeline()?.remote_client {
+            if let Some(remote_client) = &timeline.timeline()?.remote_client {
                 size += remote_client.get_remote_physical_size();
             }
         }
@@ -1157,7 +1157,7 @@ impl Tenant {
                 let ancestor_timeline_ref = self
                     .get_timeline(ancestor_timeline_id)
                     .context("Cannot branch off the timeline that's not present in pageserver")?;
-                let ancestor_timeline = ancestor_timeline_ref.any_timeline()?;
+                let ancestor_timeline = ancestor_timeline_ref.timeline()?;
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
@@ -1979,7 +1979,7 @@ impl Tenant {
             let timeline = self
                 .get_timeline(timeline_id)
                 .with_context(|| format!("Timeline {timeline_id} was not found"))?
-                .any_timeline()?;
+                .timeline()?;
 
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timeline_id) = target_timeline_id {
@@ -2038,7 +2038,7 @@ impl Tenant {
                     src, self.tenant_id, dst
                 )
             })?
-            .any_timeline()?;
+            .timeline()?;
 
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
 
@@ -2803,7 +2803,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -2870,7 +2870,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
         let writer = tline.writer();
         use std::str::from_utf8;
 
@@ -2972,7 +2972,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
         make_some_layers(&tline, Lsn(0x20)).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
@@ -3061,7 +3061,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
         make_some_layers(&tline, Lsn(0x20)).await?;
 
         tenant
@@ -3090,7 +3090,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
         make_some_layers(&tline, Lsn(0x20)).await?;
 
         tenant
@@ -3126,7 +3126,7 @@ mod tests {
             let tline = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION)?
                 .initialize()?
-                .any_timeline()?;
+                .timeline()?;
             make_some_layers(&tline, Lsn(0x8000)).await?;
         }
 
@@ -3150,7 +3150,7 @@ mod tests {
             let tline = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
                 .initialize()?
-                .any_timeline()?;
+                .timeline()?;
 
             make_some_layers(&tline, Lsn(0x20)).await?;
 
@@ -3233,7 +3233,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -3301,7 +3301,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
 
         let mut lsn = Lsn(0x10);
 
@@ -3346,7 +3346,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -3422,7 +3422,7 @@ mod tests {
         let mut tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -3510,7 +3510,7 @@ mod tests {
         let mut tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .any_timeline()?;
+            .timeline()?;
 
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;

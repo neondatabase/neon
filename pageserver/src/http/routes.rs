@@ -183,7 +183,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     .await {
         Ok(Some(new_timeline)) => {
             // Created. Construct a TimelineInfo for it.
-            let timeline_info = new_timeline.any_timeline()
+            let timeline_info = new_timeline.timeline()
                 .and_then(|timeline| build_timeline_info_common(&timeline))
                 .map_err(ApiError::InternalServerError)?;
             json_response(StatusCode::CREATED, timeline_info)
@@ -208,7 +208,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline_ref in timelines {
             let timeline = timeline_ref
-                .any_timeline()
+                .timeline()
                 .map_err(ApiError::InternalServerError)?;
             let timeline_info =
                 build_timeline_info(&timeline, include_non_incremental_logical_size)
@@ -272,7 +272,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 
         let timeline = tenant
             .get_timeline(timeline_id)
-            .and_then(|timeline| timeline.any_timeline())
+            .and_then(|timeline| timeline.timeline())
             .map_err(ApiError::NotFound)?;
 
         let timeline_info = build_timeline_info(&timeline, include_non_incremental_logical_size)
@@ -432,7 +432,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         let mut current_physical_size = 0;
         for timeline in tenant.list_timelines().iter() {
             current_physical_size += timeline
-                .any_timeline()
+                .timeline()
                 .map_err(ApiError::NotFound)?
                 .layer_size_sum()
                 .approximate_is_ok();

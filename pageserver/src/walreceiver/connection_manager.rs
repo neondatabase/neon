@@ -95,7 +95,7 @@ pub fn spawn_connection_manager_task(
 
 macro_rules! try_update_to_any_timeline {
     ( $walreceiver_state:expr ) => {
-        match $walreceiver_state.timeline_ref.any_timeline() {
+        match $walreceiver_state.timeline_ref.timeline() {
             Ok(timeline) => timeline,
             Err(e) => {
                 warn!("Cannot acquire timeline read: {e:#}");
@@ -584,7 +584,7 @@ impl WalreceiverState {
 
                 let current_lsn = match existing_wal_connection.status.streaming_lsn {
                     Some(lsn) => lsn,
-                    None => match self.timeline_ref.any_timeline() {
+                    None => match self.timeline_ref.timeline() {
                         Ok(timeline) => timeline.get_last_record_lsn(),
                         Err(e) => {
                             warn!("Cannot acquire timeline read: {e:#}");
