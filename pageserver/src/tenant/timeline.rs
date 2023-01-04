@@ -1727,7 +1727,7 @@ impl Timeline {
                 // the if stmt above is not enough for current rustc: it requires
                 // that the layers lock guard is not in scope across the download
                 // await point.
-                let remote_layer_as_persistent = PersistentLayer::Remote(Arc::clone(&remote_layer));
+                let remote_layer_as_persistent = HistoricLayer::from(Arc::clone(&remote_layer));
                 let id = remote_layer_as_persistent.traversal_id();
                 info!("need remote layer {id}");
 

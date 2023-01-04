@@ -170,6 +170,18 @@ impl<L> LocalOrRemote<L> {
     }
 }
 
+impl<L> LocalOrRemote<L>
+where
+    L: LayerFile,
+{
+    pub fn layer_name(&self) -> LayerFileName {
+        match self {
+            Self::Local(l) => l.layer_name(),
+            Self::Remote(r) => r.layer_name(),
+        }
+    }
+}
+
 pub trait LayerFile {
     fn layer_name(&self) -> LayerFileName;
 
@@ -201,13 +213,6 @@ impl LocalOrRemote<DeltaLayer> {
             Self::Remote(_remote) => anyhow::bail!("cannot iterate a remote layer"),
         }
     }
-
-    pub fn layer_name(&self) -> LayerFileName {
-        match self {
-            Self::Local(l) => l.layer_name(),
-            Self::Remote(r) => r.layer_name(),
-        }
-    }
 }
 
 impl<L> Clone for LocalOrRemote<L> {
@@ -235,7 +240,7 @@ impl<D, I> From<RemoteLayer> for HistoricLayer<D, I> {
     fn from(remote: RemoteLayer) -> Self {
         match remote.layer_name() {
             LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(Arc::new(remote))),
-            LayerFileName::Delta(_) => Self::Image(LocalOrRemote::Remote(Arc::new(remote))),
+            LayerFileName::Delta(_) => Self::Delta(LocalOrRemote::Remote(Arc::new(remote))),
             #[cfg(test)]
             LayerFileName::Test(_) => unimplemented!(),
         }
@@ -246,7 +251,7 @@ impl From<Arc<RemoteLayer>> for HistoricLayer {
     fn from(remote: Arc<RemoteLayer>) -> Self {
         match remote.layer_name() {
             LayerFileName::Image(_) => Self::Image(LocalOrRemote::Remote(remote)),
-            LayerFileName::Delta(_) => Self::Image(LocalOrRemote::Remote(remote)),
+            LayerFileName::Delta(_) => Self::Delta(LocalOrRemote::Remote(remote)),
             #[cfg(test)]
             LayerFileName::Test(_) => unimplemented!(),
         }
