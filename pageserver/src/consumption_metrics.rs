@@ -197,7 +197,7 @@ pub async fn collect_metrics_task(
         // iterate through list of timelines in tenant
         for timeline_ref in tenant.list_timelines().iter() {
             // collect per-timeline metrics only for active timelines
-            if let Ok(timeline) = timeline_ref.try_upgrade_timeline_arc() {
+            if let Ok(timeline) = timeline_ref.any_timeline() {
                 let timeline_written_size = u64::from(timeline.get_last_record_lsn());
 
                 current_metrics.push((

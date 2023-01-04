@@ -142,7 +142,7 @@ pub async fn handle_walreceiver_connection(
         return Ok(());
     }
 
-    let timeline_read = timeline_guard.try_upgrade_timeline_arc()?;
+    let timeline_read = timeline_guard.any_timeline()?;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -191,7 +191,7 @@ pub async fn handle_walreceiver_connection(
         // We use this timeline for the entire replication message processing, since
         // `cancellation` for the loop is also tracked here above and unconditionally
         // interrupting byte streams could be bad
-        let walingest_timeline = timeline_guard.try_upgrade_timeline_arc()?;
+        let walingest_timeline = timeline_guard.any_timeline()?;
         let replication_message = match replication_message {
             Ok(message) => message,
             Err(replication_error) => {

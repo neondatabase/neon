@@ -383,7 +383,7 @@ async fn calculate_logical_size(
         .expect("global semaphore should not had been closed");
 
     let size_res = timeline_ref
-        .try_upgrade_timeline_arc()
+        .any_timeline()
         .map(|timeline| timeline.spawn_ondemand_logical_size_calculation(lsn))
         .map_err(CalculationError::Other)?
         .await

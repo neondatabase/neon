@@ -749,7 +749,7 @@ impl Tenant {
         let mut size = 0;
 
         for timeline in self.list_timelines().iter() {
-            if let Some(remote_client) = &timeline.try_upgrade_timeline_arc()?.remote_client {
+            if let Some(remote_client) = &timeline.any_timeline()?.remote_client {
                 size += remote_client.get_remote_physical_size();
             }
         }
@@ -1022,7 +1022,7 @@ impl Tenant {
         local_metadata: TimelineMetadata,
     ) -> anyhow::Result<()> {
         let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
-            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
+            let ancestor_timeline = self.get_timeline(ancestor_timeline_id)
             .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
             Some(ancestor_timeline)
         } else {
@@ -1073,26 +1073,12 @@ impl Tenant {
 
     /// Get Timeline handle for given Neon timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
-    pub fn get_timeline(
-        &self,
-        timeline_id: TimelineId,
-        active_only: bool,
-    ) -> anyhow::Result<TimelineRef> {
+    pub fn get_timeline(&self, timeline_id: TimelineId) -> anyhow::Result<TimelineRef> {
         let timelines_accessor = self.timelines.lock().unwrap();
         let timeline = timelines_accessor.get(&timeline_id).with_context(|| {
             format!("Timeline {}/{} was not found", self.tenant_id, timeline_id)
         })?;
-
-        if active_only && !timeline.is_active() {
-            anyhow::bail!(
-                "Timeline {}/{} is not active, state: {:?}",
-                self.tenant_id,
-                timeline_id,
-                timeline.current_state()
-            )
-        } else {
-            Ok(timeline.weak_ref())
-        }
+        Ok(timeline.weak_ref())
     }
 
     /// Lists timelines the tenant contains.
@@ -1161,7 +1147,7 @@ impl Tenant {
             "Cannot create timelines on inactive tenant"
         );
 
-        if self.get_timeline(new_timeline_id, false).is_ok() {
+        if self.get_timeline(new_timeline_id).is_ok() {
             debug!("timeline {new_timeline_id} already exists");
             return Ok(None);
         }
@@ -1169,9 +1155,9 @@ impl Tenant {
         let loaded_timeline = match ancestor_timeline_id {
             Some(ancestor_timeline_id) => {
                 let ancestor_timeline_ref = self
-                    .get_timeline(ancestor_timeline_id, false)
+                    .get_timeline(ancestor_timeline_id)
                     .context("Cannot branch off the timeline that's not present in pageserver")?;
-                let ancestor_timeline = ancestor_timeline_ref.try_upgrade_timeline_arc()?;
+                let ancestor_timeline = ancestor_timeline_ref.any_timeline()?;
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
@@ -1991,9 +1977,9 @@ impl Tenant {
         for timeline_id in timeline_ids {
             // Timeline is known to be local and loaded.
             let timeline = self
-                .get_timeline(timeline_id, false)
+                .get_timeline(timeline_id)
                 .with_context(|| format!("Timeline {timeline_id} was not found"))?
-                .try_upgrade_timeline_arc()?;
+                .any_timeline()?;
 
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timeline_id) = target_timeline_id {
@@ -2045,14 +2031,14 @@ impl Tenant {
         // or in-queue GC iterations.
 
         let src_timeline = self
-            .get_timeline(src, false)
+            .get_timeline(src)
             .with_context(|| {
                 format!(
                     "No ancestor {} found for timeline {}/{}",
                     src, self.tenant_id, dst
                 )
             })?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
 
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
 
@@ -2817,7 +2803,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -2884,7 +2870,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
         let writer = tline.writer();
         use std::str::from_utf8;
 
@@ -2910,9 +2896,9 @@ mod tests {
             .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x30)))
             .await?;
         let newtline = tenant
-            .get_timeline(NEW_TIMELINE_ID, true)
+            .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline")
-            .try_upgrade_timeline_arc()?;
+            .active_timeline()?;
         let new_writer = newtline.writer();
         new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
         new_writer.finish_write(Lsn(0x40));
@@ -2986,7 +2972,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
         make_some_layers(&tline, Lsn(0x20)).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
@@ -3075,16 +3061,16 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
         make_some_layers(&tline, Lsn(0x20)).await?;
 
         tenant
             .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))
             .await?;
         let newtline = tenant
-            .get_timeline(NEW_TIMELINE_ID, true)
+            .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline")
-            .try_upgrade_timeline_arc()?;
+            .active_timeline()?;
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         tenant
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
@@ -3104,16 +3090,16 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
         make_some_layers(&tline, Lsn(0x20)).await?;
 
         tenant
             .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))
             .await?;
         let newtline = tenant
-            .get_timeline(NEW_TIMELINE_ID, true)
+            .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline")
-            .try_upgrade_timeline_arc()?;
+            .active_timeline()?;
 
         make_some_layers(&newtline, Lsn(0x60)).await?;
 
@@ -3140,14 +3126,16 @@ mod tests {
             let tline = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION)?
                 .initialize()?
-                .try_upgrade_timeline_arc()?;
+                .any_timeline()?;
             make_some_layers(&tline, Lsn(0x8000)).await?;
         }
 
         let tenant = harness.load().await;
         tenant
-            .get_timeline(TIMELINE_ID, true)
-            .expect("cannot load timeline");
+            .get_timeline(TIMELINE_ID)
+            .expect("cannot load timeline")
+            .active_timeline()
+            .expect("Timeline should be active");
 
         Ok(())
     }
@@ -3162,7 +3150,7 @@ mod tests {
             let tline = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
                 .initialize()?
-                .try_upgrade_timeline_arc()?;
+                .any_timeline()?;
 
             make_some_layers(&tline, Lsn(0x20)).await?;
 
@@ -3171,9 +3159,9 @@ mod tests {
                 .await?;
 
             let newtline = tenant
-                .get_timeline(NEW_TIMELINE_ID, true)
+                .get_timeline(NEW_TIMELINE_ID)
                 .expect("Should have a local timeline")
-                .try_upgrade_timeline_arc()?;
+                .active_timeline()?;
 
             make_some_layers(&newtline, Lsn(0x60)).await?;
         }
@@ -3183,12 +3171,16 @@ mod tests {
 
         // check that both, child and ancestor are loaded
         let _child_tline = tenant
-            .get_timeline(NEW_TIMELINE_ID, true)
-            .expect("cannot get child timeline loaded");
+            .get_timeline(NEW_TIMELINE_ID)
+            .expect("cannot get child timeline loaded")
+            .active_timeline()
+            .expect("Timeline should be active");
 
         let _ancestor_tline = tenant
-            .get_timeline(TIMELINE_ID, true)
-            .expect("cannot get ancestor timeline loaded");
+            .get_timeline(TIMELINE_ID)
+            .expect("cannot get ancestor timeline loaded")
+            .active_timeline()
+            .expect("Ancestor timeline should be active");
 
         Ok(())
     }
@@ -3241,7 +3233,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -3309,7 +3301,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
 
         let mut lsn = Lsn(0x10);
 
@@ -3354,7 +3346,7 @@ mod tests {
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -3430,7 +3422,7 @@ mod tests {
         let mut tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -3467,9 +3459,9 @@ mod tests {
                 .branch_timeline(tline_id, new_tline_id, Some(lsn))
                 .await?;
             tline = tenant
-                .get_timeline(new_tline_id, true)
+                .get_timeline(new_tline_id)
                 .expect("Should have the branched timeline")
-                .try_upgrade_timeline_arc()?;
+                .active_timeline()?;
             tline_id = new_tline_id;
 
             for _ in 0..NUM_KEYS {
@@ -3518,7 +3510,7 @@ mod tests {
         let mut tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?
-            .try_upgrade_timeline_arc()?;
+            .any_timeline()?;
 
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;
@@ -3537,9 +3529,9 @@ mod tests {
                 .branch_timeline(tline_id, new_tline_id, Some(lsn))
                 .await?;
             tline = tenant
-                .get_timeline(new_tline_id, true)
+                .get_timeline(new_tline_id)
                 .expect("Should have the branched timeline")
-                .try_upgrade_timeline_arc()?;
+                .active_timeline()?;
             tline_id = new_tline_id;
 
             for _ in 0..NUM_KEYS {
