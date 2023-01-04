@@ -1913,6 +1913,7 @@ class NeonPageserver(PgProtocol):
             ".*kill_and_wait_impl.*: wait successful.*",
             ".*Replication stream finished: db error: ERROR: Socket IO error: end streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
+            ".*query handler for 'pagestream.*failed: Connection reset by peer (os error 104).*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
             # and streaming start
             ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
