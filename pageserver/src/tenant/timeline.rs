@@ -1503,7 +1503,7 @@ impl TraversalLayerExt for HistoricLayer {
     fn traversal_id(&self) -> TraversalId {
         match self.local_path() {
             Some(local_path) => {
-                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", self.get_timeline_id())),
+                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", self.timeline_id())),
                     "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
                 );
                 format!("{}", local_path.display())
@@ -1511,7 +1511,7 @@ impl TraversalLayerExt for HistoricLayer {
             None => {
                 format!(
                     "remote {}/{}",
-                    self.get_timeline_id(),
+                    self.timeline_id(),
                     self.filename().file_name()
                 )
             }
@@ -1523,7 +1523,7 @@ impl TraversalLayerExt for Arc<InMemoryLayer> {
     fn traversal_id(&self) -> TraversalId {
         format!(
             "timeline {} in-memory {}",
-            self.get_timeline_id(),
+            self.timeline_id,
             self.short_id()
         )
     }

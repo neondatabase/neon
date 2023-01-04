@@ -38,7 +38,7 @@ thread_local! {
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-    timeline_id: TimelineId,
+    pub timeline_id: TimelineId,
 
     ///
     /// This layer contains all the changes from 'start_lsn'. The
@@ -76,14 +76,6 @@ impl InMemoryLayerInner {
 }
 
 impl Layer for InMemoryLayer {
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
-
     fn get_key_range(&self) -> Range<Key> {
         Key::MIN..Key::MAX
     }

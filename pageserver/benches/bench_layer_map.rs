@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use utils::id::{TenantId, TimelineId};
 
 use utils::lsn::Lsn;
 
@@ -54,14 +53,6 @@ impl Layer for DummyDelta {
     fn short_id(&self) -> String {
         unimplemented!()
     }
-
-    fn get_tenant_id(&self) -> TenantId {
-        unimplemented!()
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        unimplemented!()
-    }
 }
 
 #[derive(PartialEq, Clone)]
@@ -98,14 +89,6 @@ impl Layer for DummyImage {
     }
 
     fn short_id(&self) -> String {
-        unimplemented!()
-    }
-
-    fn get_tenant_id(&self) -> TenantId {
-        unimplemented!()
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
         unimplemented!()
     }
 }

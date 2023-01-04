@@ -21,7 +21,7 @@ use super::{DeltaLayer, HistoricLayer, LocalOrRemote};
 #[derive(Debug)]
 pub struct RemoteLayer {
     tenant_id: TenantId,
-    timeline_id: TimelineId,
+    pub timeline_id: TimelineId,
     key_range: Range<Key>,
     lsn_range: Range<Lsn>,
 
@@ -37,14 +37,6 @@ pub struct RemoteLayer {
 }
 
 impl Layer for RemoteLayer {
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
-
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }

@@ -124,14 +124,6 @@ pub struct ImageLayerInner {
 }
 
 impl Layer for ImageLayer {
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
-
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }

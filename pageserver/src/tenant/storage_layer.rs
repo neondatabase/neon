@@ -13,11 +13,9 @@ use bytes::Bytes;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::Arc;
+use utils::id::TimelineId;
 
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::lsn::Lsn;
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName, PathOrConf};
@@ -83,11 +81,6 @@ pub enum ValueReconstructResult {
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
 pub trait Layer: Send + Sync + 'static {
-    fn get_tenant_id(&self) -> TenantId;
-
-    /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId;
-
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -327,6 +320,17 @@ where
         match self {
             HistoricLayer::Delta(d) => d.as_remote(),
             HistoricLayer::Image(i) => i.as_remote(),
+        }
+    }
+}
+
+impl HistoricLayer {
+    pub fn timeline_id(&self) -> TimelineId {
+        use LocalOrRemote::*;
+        match self {
+            Self::Delta(Local(delta)) => delta.timeline_id,
+            Self::Image(Local(image)) => image.timeline_id,
+            Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => remote.timeline_id,
         }
     }
 }
