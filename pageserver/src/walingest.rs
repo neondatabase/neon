@@ -1203,32 +1203,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
-        let (tenant, mut tenant_cxt) = TenantHarness::create("test_relsize")?.load().await;
-        let (tline, mut cxt) =
-            create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &mut tenant_cxt)?;
-        let mut walingest = init_walingest_test(&tline, &mut cxt).await?;
+        let (tenant, tenant_cxt) = TenantHarness::create("test_relsize")?.load().await;
+        let (tline, cxt) =
+            create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &tenant_cxt)?;
+        let mut walingest = init_walingest_test(&tline, &cxt).await?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
+        walingest.put_rel_creation(&mut m, TESTREL_A, &cxt).await?;
         walingest
-            .put_rel_creation(&mut m, TESTREL_A, &mut cxt)
-            .await?;
-        walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &mut cxt)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &cxt)
             .await?;
         m.commit()?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"), &mut cxt)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"), &cxt)
             .await?;
         m.commit()?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"), &mut cxt)
+            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"), &cxt)
             .await?;
         m.commit()?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"), &mut cxt)
+            .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"), &cxt)
             .await?;
         m.commit()?;
 
@@ -1237,30 +1235,30 @@ mod tests {
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x10), false, &mut cxt)
+                .get_rel_exists(TESTREL_A, Lsn(0x10), false, &cxt)
                 .await?,
             false
         );
         assert!(tline
-            .get_rel_size(TESTREL_A, Lsn(0x10), false, &mut cxt)
+            .get_rel_size(TESTREL_A, Lsn(0x10), false, &cxt)
             .await
             .is_err());
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &mut cxt)
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &cxt)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x20), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x20), false, &cxt)
                 .await?,
             1
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x50), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x50), false, &cxt)
                 .await?,
             3
         );
@@ -1268,46 +1266,46 @@ mod tests {
         // Check page contents at each LSN
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 0 at 2")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 0 at 3")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 1 at 4")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 2 at 5")
         );
@@ -1315,7 +1313,7 @@ mod tests {
         // Truncate last block
         let mut m = tline.begin_modification(Lsn(0x60));
         walingest
-            .put_rel_truncation(&mut m, TESTREL_A, 2, &mut cxt)
+            .put_rel_truncation(&mut m, TESTREL_A, 2, &cxt)
             .await?;
         m.commit()?;
         assert_current_logical_size(&tline, Lsn(0x60));
@@ -1323,19 +1321,19 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x60), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x60), false, &cxt)
                 .await?,
             2
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 1 at 4")
         );
@@ -1343,13 +1341,13 @@ mod tests {
         // should still see the truncated block with older LSN
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x50), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x50), false, &cxt)
                 .await?,
             3
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 2 at 5")
         );
@@ -1357,12 +1355,12 @@ mod tests {
         // Truncate to zero length
         let mut m = tline.begin_modification(Lsn(0x68));
         walingest
-            .put_rel_truncation(&mut m, TESTREL_A, 0, &mut cxt)
+            .put_rel_truncation(&mut m, TESTREL_A, 0, &cxt)
             .await?;
         m.commit()?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x68), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x68), false, &cxt)
                 .await?,
             0
         );
@@ -1370,24 +1368,24 @@ mod tests {
         // Extend from 0 to 2 blocks, leaving a gap
         let mut m = tline.begin_modification(Lsn(0x70));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), &mut cxt)
+            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), &cxt)
             .await?;
         m.commit()?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x70), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x70), false, &cxt)
                 .await?,
             2
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false, &cxt)
                 .await?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 1")
         );
@@ -1395,26 +1393,26 @@ mod tests {
         // Extend a lot more, leaving a big gap that spans across segments
         let mut m = tline.begin_modification(Lsn(0x80));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"), &mut cxt)
+            .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"), &cxt)
             .await?;
         m.commit()?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x80), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x80), false, &cxt)
                 .await?,
             1501
         );
         for blk in 2..1500 {
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false, &mut cxt)
+                    .get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false, &cxt)
                     .await?,
                 ZERO_PAGE
             );
         }
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false, &mut cxt)
+                .get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false, &cxt)
                 .await?,
             TEST_IMG("foo blk 1500")
         );
@@ -1426,40 +1424,40 @@ mod tests {
     // and then created it again within the same layer.
     #[tokio::test]
     async fn test_drop_extend() -> Result<()> {
-        let (tenant, mut tenant_cxt) = TenantHarness::create("test_drop_extend")?.load().await;
-        let (tline, mut cxt) =
-            create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &mut tenant_cxt)?;
-        let mut walingest = init_walingest_test(&tline, &mut cxt).await?;
+        let (tenant, tenant_cxt) = TenantHarness::create("test_drop_extend")?.load().await;
+        let (tline, cxt) =
+            create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &tenant_cxt)?;
+        let mut walingest = init_walingest_test(&tline, &cxt).await?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &mut cxt)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &cxt)
             .await?;
         m.commit()?;
 
         // Check that rel exists and size is correct
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &mut cxt)
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &cxt)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x20), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x20), false, &cxt)
                 .await?,
             1
         );
 
         // Drop rel
         let mut m = tline.begin_modification(Lsn(0x30));
-        walingest.put_rel_drop(&mut m, TESTREL_A, &mut cxt).await?;
+        walingest.put_rel_drop(&mut m, TESTREL_A, &cxt).await?;
         m.commit()?;
 
         // Check that rel is not visible anymore
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x30), false, &mut cxt)
+                .get_rel_exists(TESTREL_A, Lsn(0x30), false, &cxt)
                 .await?,
             false
         );
@@ -1470,20 +1468,20 @@ mod tests {
         // Re-create it
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"), &mut cxt)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"), &cxt)
             .await?;
         m.commit()?;
 
         // Check that rel exists and size is correct
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x40), false, &mut cxt)
+                .get_rel_exists(TESTREL_A, Lsn(0x40), false, &cxt)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x40), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x40), false, &cxt)
                 .await?,
             1
         );
@@ -1496,10 +1494,10 @@ mod tests {
     // and then extended it again within the same layer.
     #[tokio::test]
     async fn test_truncate_extend() -> Result<()> {
-        let (tenant, mut tenant_cxt) = TenantHarness::create("test_truncate_extend")?.load().await;
-        let (tline, mut cxt) =
-            create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &mut tenant_cxt)?;
-        let mut walingest = init_walingest_test(&tline, &mut cxt).await?;
+        let (tenant, tenant_cxt) = TenantHarness::create("test_truncate_extend")?.load().await;
+        let (tline, cxt) =
+            create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &tenant_cxt)?;
+        let mut walingest = init_walingest_test(&tline, &cxt).await?;
 
         // Create a 20 MB relation (the size is arbitrary)
         let relsize = 20 * 1024 * 1024 / 8192;
@@ -1507,7 +1505,7 @@ mod tests {
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &mut cxt)
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &cxt)
                 .await?;
         }
         m.commit()?;
@@ -1515,24 +1513,24 @@ mod tests {
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x10), false, &mut cxt)
+                .get_rel_exists(TESTREL_A, Lsn(0x10), false, &cxt)
                 .await?,
             false
         );
         assert!(tline
-            .get_rel_size(TESTREL_A, Lsn(0x10), false, &mut cxt)
+            .get_rel_size(TESTREL_A, Lsn(0x10), false, &cxt)
             .await
             .is_err());
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &mut cxt)
+                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &cxt)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x20), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x20), false, &cxt)
                 .await?,
             relsize
         );
@@ -1543,7 +1541,7 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false, &mut cxt)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false, &cxt)
                     .await?,
                 TEST_IMG(&data)
             );
@@ -1553,14 +1551,14 @@ mod tests {
         // - only leave one page
         let mut m = tline.begin_modification(Lsn(0x60));
         walingest
-            .put_rel_truncation(&mut m, TESTREL_A, 1, &mut cxt)
+            .put_rel_truncation(&mut m, TESTREL_A, 1, &cxt)
             .await?;
         m.commit()?;
 
         // Check reported size and contents after truncation
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x60), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x60), false, &cxt)
                 .await?,
             1
         );
@@ -1570,7 +1568,7 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false, &mut cxt)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false, &cxt)
                     .await?,
                 TEST_IMG(&data)
             );
@@ -1579,7 +1577,7 @@ mod tests {
         // should still see all blocks with older LSN
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x50), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x50), false, &cxt)
                 .await?,
             relsize
         );
@@ -1588,7 +1586,7 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false, &mut cxt)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false, &cxt)
                     .await?,
                 TEST_IMG(&data)
             );
@@ -1601,20 +1599,20 @@ mod tests {
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, lsn);
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &mut cxt)
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &cxt)
                 .await?;
         }
         m.commit()?;
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x80), false, &mut cxt)
+                .get_rel_exists(TESTREL_A, Lsn(0x80), false, &cxt)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x80), false, &mut cxt)
+                .get_rel_size(TESTREL_A, Lsn(0x80), false, &cxt)
                 .await?,
             relsize
         );
@@ -1624,7 +1622,7 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false, &mut cxt)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false, &cxt)
                     .await?,
                 TEST_IMG(&data)
             );
@@ -1637,10 +1635,10 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[tokio::test]
     async fn test_large_rel() -> Result<()> {
-        let (tenant, mut tenant_cxt) = TenantHarness::create("test_large_rel")?.load().await;
-        let (tline, mut cxt) =
-            create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &mut tenant_cxt)?;
-        let mut walingest = init_walingest_test(&tline, &mut cxt).await?;
+        let (tenant, tenant_cxt) = TenantHarness::create("test_large_rel")?.load().await;
+        let (tline, cxt) =
+            create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &tenant_cxt)?;
+        let mut walingest = init_walingest_test(&tline, &cxt).await?;
 
         let mut lsn = 0x10;
         for blknum in 0..RELSEG_SIZE + 1 {
@@ -1648,7 +1646,7 @@ mod tests {
             let mut m = tline.begin_modification(Lsn(lsn));
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img, &mut cxt)
+                .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img, &cxt)
                 .await?;
             m.commit()?;
         }
@@ -1656,9 +1654,7 @@ mod tests {
         assert_current_logical_size(&tline, Lsn(lsn));
 
         assert_eq!(
-            tline
-                .get_rel_size(TESTREL_A, Lsn(lsn), false, &mut cxt)
-                .await?,
+            tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &cxt).await?,
             RELSEG_SIZE + 1
         );
 
@@ -1666,13 +1662,11 @@ mod tests {
         lsn += 0x10;
         let mut m = tline.begin_modification(Lsn(lsn));
         walingest
-            .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE, &mut cxt)
+            .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE, &cxt)
             .await?;
         m.commit()?;
         assert_eq!(
-            tline
-                .get_rel_size(TESTREL_A, Lsn(lsn), false, &mut cxt)
-                .await?,
+            tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &cxt).await?,
             RELSEG_SIZE
         );
         assert_current_logical_size(&tline, Lsn(lsn));
@@ -1681,13 +1675,11 @@ mod tests {
         lsn += 0x10;
         let mut m = tline.begin_modification(Lsn(lsn));
         walingest
-            .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1, &mut cxt)
+            .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1, &cxt)
             .await?;
         m.commit()?;
         assert_eq!(
-            tline
-                .get_rel_size(TESTREL_A, Lsn(lsn), false, &mut cxt)
-                .await?,
+            tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &cxt).await?,
             RELSEG_SIZE - 1
         );
         assert_current_logical_size(&tline, Lsn(lsn));
@@ -1699,13 +1691,11 @@ mod tests {
             lsn += 0x10;
             let mut m = tline.begin_modification(Lsn(lsn));
             walingest
-                .put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber, &mut cxt)
+                .put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber, &cxt)
                 .await?;
             m.commit()?;
             assert_eq!(
-                tline
-                    .get_rel_size(TESTREL_A, Lsn(lsn), false, &mut cxt)
-                    .await?,
+                tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &cxt).await?,
                 size as BlockNumber
             );
 

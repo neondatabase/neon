@@ -1149,7 +1149,9 @@ impl Tenant {
             Some(ancestor_timeline_id) => {
                 let (ancestor_timeline, ancestor_cxt) = self
                     .get_active_timeline(ancestor_timeline_id, cxt)
-                    .context("Cannot branch off a timeline that's not present and Active in pageserver")?;
+                    .context(
+                        "Cannot branch off a timeline that's not present and Active in pageserver",
+                    )?;
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
