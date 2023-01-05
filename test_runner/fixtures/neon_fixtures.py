@@ -619,7 +619,7 @@ class NeonEnvBuilder:
         self.pg_version = pg_version
         self.preserve_database_files = preserve_database_files
 
-    def init(self) -> NeonEnv:
+    def init_configs(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
         self.env = NeonEnv(self)
@@ -630,11 +630,17 @@ class NeonEnvBuilder:
         self.env.start()
 
     def init_start(self) -> NeonEnv:
-        env = self.init()
+        env = self.init_configs()
         self.start()
+
         # Prepare the default branch to start the postgres on later.
-        # Pageserver itself does not create tenants and timelines, until asked via HTTP API.
-        env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
+        log.info(
+            f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
+        )
+        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
+
         return env
 
     def enable_remote_storage(

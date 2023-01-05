@@ -595,7 +595,6 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .map(|lsn_str| Lsn::from_str(lsn_str))
                 .transpose()
                 .context("Failed to parse Lsn from the request")?;
-            // TODO kb this fails now
             let timeline_id = env
                 .get_branch_timeline_id(branch_name, tenant_id)
                 .ok_or_else(|| anyhow!("Found no timeline id for branch name '{branch_name}'"))?;
