@@ -40,10 +40,9 @@ def parse_metrics(text: str, name: str = "") -> Metrics:
 
 
 PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
-    "pageserver_remote_upload_queue_unfinished_tasks",
-    "pageserver_remote_operation_seconds_bucket",
-    "pageserver_remote_operation_seconds_count",
-    "pageserver_remote_operation_seconds_sum",
+    "pageserver_remote_timeline_client_calls_unfinished",
+    *[f"pageserver_remote_timeline_client_calls_started_{x}" for x in ["bucket", "count", "sum"]],
+    *[f"pageserver_remote_operation_seconds_{x}" for x in ["bucket", "count", "sum"]],
     "pageserver_remote_physical_size",
 )
 

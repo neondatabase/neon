@@ -367,6 +367,10 @@ impl RemoteTimelineClient {
 
     /// Download index file
     pub async fn download_index_file(&self) -> Result<IndexPart, DownloadError> {
+        let _unfinished_gauge_guard = self
+            .metrics
+            .call_begin(&RemoteOpFileKind::Index, &RemoteOpKind::Download);
+
         download::download_index_part(
             self.conf,
             &self.storage_impl,
@@ -393,22 +397,27 @@ impl RemoteTimelineClient {
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
-        let downloaded_size = download::download_layer_file(
-            self.conf,
-            &self.storage_impl,
-            self.tenant_id,
-            self.timeline_id,
-            layer_file_name,
-            layer_metadata,
-        )
-        .measure_remote_op(
-            self.tenant_id,
-            self.timeline_id,
-            RemoteOpFileKind::Layer,
-            RemoteOpKind::Download,
-            Arc::clone(&self.metrics),
-        )
-        .await?;
+        let downloaded_size = {
+            let _unfinished_gauge_guard = self
+                .metrics
+                .call_begin(&RemoteOpFileKind::Layer, &RemoteOpKind::Download);
+            download::download_layer_file(
+                self.conf,
+                &self.storage_impl,
+                self.tenant_id,
+                self.timeline_id,
+                layer_file_name,
+                layer_metadata,
+            )
+            .measure_remote_op(
+                self.tenant_id,
+                self.timeline_id,
+                RemoteOpFileKind::Layer,
+                RemoteOpKind::Download,
+                Arc::clone(&self.metrics),
+            )
+            .await?
+        };
 
         // Update the metadata for given layer file. The remote index file
         // might be missing some information for the file; this allows us
@@ -517,7 +526,7 @@ impl RemoteTimelineClient {
             metadata_bytes,
         );
         let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
-        self.update_upload_queue_unfinished_metric(1, &op);
+        self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
         upload_queue.latest_files_changes_since_metadata_upload_scheduled = 0;
 
@@ -549,7 +558,7 @@ impl RemoteTimelineClient {
         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
 
         let op = UploadOp::UploadLayer(layer_file_name.clone(), layer_metadata.clone());
-        self.update_upload_queue_unfinished_metric(1, &op);
+        self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
 
         info!(
@@ -601,7 +610,7 @@ impl RemoteTimelineClient {
             // schedule the actual deletions
             for name in names {
                 let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone());
-                self.update_upload_queue_unfinished_metric(1, &op);
+                self.calls_unfinished_metric_begin(&op);
                 upload_queue.queued_operations.push_back(op);
                 info!("scheduled layer file deletion {}", name.file_name());
             }
@@ -753,7 +762,7 @@ impl RemoteTimelineClient {
             // upload finishes or times out soon enough.
             if task_mgr::is_shutdown_requested() {
                 info!("upload task cancelled by shutdown request");
-                self.update_upload_queue_unfinished_metric(-1, &task.op);
+                self.calls_unfinished_metric_end(&task.op);
                 self.stop();
                 return;
             }
@@ -901,22 +910,40 @@ impl RemoteTimelineClient {
             // Launch any queued tasks that were unblocked by this one.
             self.launch_queued_tasks(upload_queue);
         }
-        self.update_upload_queue_unfinished_metric(-1, &task.op);
+        self.calls_unfinished_metric_end(&task.op);
     }
 
-    fn update_upload_queue_unfinished_metric(&self, delta: i64, op: &UploadOp) {
-        let (file_kind, op_kind) = match op {
+    fn calls_unfinished_metric_impl(
+        &self,
+        op: &UploadOp,
+    ) -> Option<(RemoteOpFileKind, RemoteOpKind)> {
+        let res = match op {
             UploadOp::UploadLayer(_, _) => (RemoteOpFileKind::Layer, RemoteOpKind::Upload),
             UploadOp::UploadMetadata(_, _) => (RemoteOpFileKind::Index, RemoteOpKind::Upload),
             UploadOp::Delete(file_kind, _) => (*file_kind, RemoteOpKind::Delete),
             UploadOp::Barrier(_) => {
                 // we do not account these
-                return;
+                return None;
             }
         };
-        self.metrics
-            .unfinished_tasks(&file_kind, &op_kind)
-            .add(delta)
+        Some(res)
+    }
+
+    fn calls_unfinished_metric_begin(&self, op: &UploadOp) {
+        let (file_kind, op_kind) = match self.calls_unfinished_metric_impl(op) {
+            Some(x) => x,
+            None => return,
+        };
+        let guard = self.metrics.call_begin(&file_kind, &op_kind);
+        guard.will_decrement_manually(); // in unfinished_ops_metric_end()
+    }
+
+    fn calls_unfinished_metric_end(&self, op: &UploadOp) {
+        let (file_kind, op_kind) = match self.calls_unfinished_metric_impl(op) {
+            Some(x) => x,
+            None => return,
+        };
+        self.metrics.call_end(&file_kind, &op_kind);
     }
 
     fn stop(&self) {
@@ -967,7 +994,7 @@ impl RemoteTimelineClient {
 
                 // Tear down queued ops
                 for op in qi.queued_operations.into_iter() {
-                    self.update_upload_queue_unfinished_metric(-1, &op);
+                    self.calls_unfinished_metric_end(&op);
                     // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
                     // which is exactly what we want to happen.
                     drop(op);

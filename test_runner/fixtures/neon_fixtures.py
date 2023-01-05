@@ -34,6 +34,7 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -1408,6 +1409,33 @@ class PageserverHttpClient(requests.Session):
             and s.labels["timeline_id"] == str(timeline_id)
         ]
         return sample.value
+
+    def get_remote_timeline_client_metric(
+        self,
+        metric_name: str,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        file_kind: str,
+        op_kind: str,
+    ) -> Optional[float]:
+        metrics = parse_metrics(self.get_metrics(), "pageserver")
+        matches = metrics.query_all(
+            name=metric_name,
+            filter={
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+                "file_kind": str(file_kind),
+                "op_kind": str(op_kind),
+            },
+        )
+        if len(matches) == 0:
+            value = None
+        elif len(matches) == 1:
+            value = matches[0].value
+            assert value is not None
+        else:
+            assert len(matches) < 2, "above filter should uniquely identify metric"
+        return value
 
     def get_metric_value(self, name: str) -> Optional[str]:
         metrics = self.get_metrics()
