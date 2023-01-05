@@ -466,16 +466,19 @@ def test_remote_timeline_client_calls_started_metric(
                 x < y for x, y in zip(observations, observations[1:])
             ), f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
 
+    def churn(data_pass1, data_pass2):
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass1)
+        client.timeline_checkpoint(tenant_id, timeline_id)
+        client.timeline_compact(tenant_id, timeline_id)
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass2)
+        client.timeline_checkpoint(tenant_id, timeline_id)
+        client.timeline_compact(tenant_id, timeline_id)
+        gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
+        print_gc_result(gc_result)
+        assert gc_result["layers_removed"] > 0
+
     # create some layers & wait for uploads to finish
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
-    client.timeline_checkpoint(tenant_id, timeline_id)
-    client.timeline_compact(tenant_id, timeline_id)
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("b")
-    client.timeline_checkpoint(tenant_id, timeline_id)
-    client.timeline_compact(tenant_id, timeline_id)
-    gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
-    print_gc_result(gc_result)
-    assert gc_result["layers_removed"] > 0
+    churn("a", "b")
 
     wait_upload_queue_empty()
 
@@ -484,15 +487,7 @@ def test_remote_timeline_client_calls_started_metric(
     ensure_calls_started_grew()
 
     # more churn to cause more operations
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("c")
-    client.timeline_checkpoint(tenant_id, timeline_id)
-    client.timeline_compact(tenant_id, timeline_id)
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("d")
-    client.timeline_checkpoint(tenant_id, timeline_id)
-    client.timeline_compact(tenant_id, timeline_id)
-    gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
-    print_gc_result(gc_result)
-    assert gc_result["layers_removed"] > 0
+    churn("c", "d")
 
     # ensure that the calls_started metric continued to be updated
     fetch_calls_started()
