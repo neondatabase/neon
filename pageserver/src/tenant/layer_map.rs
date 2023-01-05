@@ -10,6 +10,7 @@
 //! corresponding files are written to disk.
 //!
 
+use crate::keyspace::KeyPartitioning;
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
@@ -319,6 +320,17 @@ where
         }
 
         Ok(max_stacked_deltas)
+    }
+
+    /// For each part of a keyspace partitioning, return the maximum number of layers
+    /// that would be needed for page reconstruction in that part at the given LSN.
+    ///
+    /// This method is used to decide where to create new image layers. Computing the
+    /// result for the entire partitioning at once allows this function to be more
+    /// efficient, and further optimization is possible by using iterators instead,
+    /// to allow early return.
+    pub fn get_difficulty_map(&self, _lsn: Lsn, _partitioning: &KeyPartitioning) -> Vec<usize> {
+        todo!()
     }
 
     /// Return all L0 delta layers

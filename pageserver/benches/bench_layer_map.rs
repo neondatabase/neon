@@ -125,12 +125,17 @@ fn bench_from_real_project(c: &mut Criterion) {
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
     // Define and name the benchmark function
-    let mut group = c.benchmark_group("real_map_uniform_queries");
-    group.bench_function("current_code", |b| {
+    let mut group = c.benchmark_group("real_map");
+    group.bench_function("uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1);
             }
+        });
+    });
+    group.bench_function("get_difficulty_map", |b| {
+        b.iter(|| {
+            // TODO call get_difficulty_map
         });
     });
     group.finish();
@@ -168,12 +173,17 @@ fn bench_sequential(c: &mut Criterion) {
         .collect();
 
     // Define and name the benchmark function
-    let mut group = c.benchmark_group("sequential_uniform_queries");
-    group.bench_function("current_code", |b| {
+    let mut group = c.benchmark_group("sequential");
+    group.bench_function("uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1);
             }
+        });
+    });
+    group.bench_function("get_difficulty_map", |b| {
+        b.iter(|| {
+            // TODO call get_difficulty_map
         });
     });
     group.finish();
