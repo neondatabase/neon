@@ -111,6 +111,7 @@ pageserver_connect()
 				PQfinish(pageserver_conn);
 				pageserver_conn = NULL;
 				FreeWaitEventSet(pageserver_conn_wes);
+				pageserver_conn_wes = NULL;
 
 				neon_log(ERROR, "could not complete handshake with pageserver: %s",
 						 msg);
@@ -179,7 +180,10 @@ pageserver_disconnect(void)
 		prefetch_on_ps_disconnect();
 	}
 	if (pageserver_conn_wes != NULL)
+	{
 		FreeWaitEventSet(pageserver_conn_wes);
+		pageserver_conn_wes = NULL;
+	}
 }
 
 static void
@@ -206,7 +210,7 @@ pageserver_send(NeonRequest * request)
 	 */
 	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
-		char	   *msg = PQerrorMessage(pageserver_conn);
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to send page request: %s", msg);
