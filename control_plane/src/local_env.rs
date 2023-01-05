@@ -296,11 +296,6 @@ impl LocalEnv {
             env.neon_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
         }
 
-        // If no initial tenant ID was given, generate it.
-        if env.default_tenant_id.is_none() {
-            env.default_tenant_id = Some(TenantId::generate());
-        }
-
         env.base_data_dir = base_path();
 
         Ok(env)

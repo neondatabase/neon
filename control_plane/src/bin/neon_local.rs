@@ -263,7 +263,7 @@ fn get_tenant_id(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::R
     } else if let Some(default_id) = env.default_tenant_id {
         Ok(default_id)
     } else {
-        bail!("No tenant id. Use --tenant-id, or set 'default_tenant_id' in the config file");
+        anyhow::bail!("No tenant id. Use --tenant-id, or set a default tenant");
     }
 }
 
@@ -372,6 +372,17 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
             println!(
                 "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {new_tenant_id}",
             );
+
+            if create_match.get_flag("set-default") {
+                println!("Setting tenant {new_tenant_id} as a default one");
+                env.default_tenant_id = Some(new_tenant_id);
+            }
+        }
+        Some(("set-default", set_default_match)) => {
+            let tenant_id =
+                parse_tenant_id(set_default_match)?.context("No tenant id specified")?;
+            println!("Setting tenant {tenant_id} as a default one");
+            env.default_tenant_id = Some(tenant_id);
         }
         Some(("config", create_match)) => {
             let tenant_id = get_tenant_id(create_match, env)?;
@@ -975,11 +986,14 @@ fn cli() -> Command {
                 .arg(timeline_id_arg.clone().help("Use a specific timeline id when creating a tenant and its initial timeline"))
                 .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false))
                 .arg(pg_version_arg.clone())
+                .arg(Arg::new("set-default").long("set-default").action(ArgAction::SetTrue).required(false)
+                    .help("Use this tenant in future CLI commands where tenant_id is needed, but not specified"))
                 )
+            .subcommand(Command::new("set-default").arg(tenant_id_arg.clone().required(true))
+                .about("Set a particular tenant as default in future CLI commands where tenant_id is needed, but not specified"))
             .subcommand(Command::new("config")
                 .arg(tenant_id_arg.clone())
-                .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false))
-                )
+                .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false)))
         )
         .subcommand(
             Command::new("pageserver")

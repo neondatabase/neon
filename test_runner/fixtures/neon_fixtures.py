@@ -1567,6 +1567,7 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
         conf: Optional[Dict[str, str]] = None,
+        set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1575,35 +1576,32 @@ class NeonCli(AbstractNeonCli):
             tenant_id = TenantId.generate()
         if timeline_id is None:
             timeline_id = TimelineId.generate()
-        if conf is None:
-            res = self.raw_cli(
-                [
-                    "tenant",
-                    "create",
-                    "--tenant-id",
-                    str(tenant_id),
-                    "--timeline-id",
-                    str(timeline_id),
-                    "--pg-version",
-                    self.env.pg_version,
-                ]
-            )
-        else:
-            res = self.raw_cli(
-                [
-                    "tenant",
-                    "create",
-                    "--tenant-id",
-                    str(tenant_id),
-                    "--timeline-id",
-                    str(timeline_id),
-                    "--pg-version",
-                    self.env.pg_version,
-                ]
-                + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
-            )
+
+        args = [
+            "tenant",
+            "create",
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+            "--pg-version",
+            self.env.pg_version,
+        ]
+        if conf is not None:
+            args += sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
+        if set_default:
+            args.append("--set-default")
+
+        res = self.raw_cli(args)
         res.check_returncode()
         return tenant_id, timeline_id
+
+    def set_default(self, tenant_id: TenantId):
+        """
+        Update default tenant for future operations that require tenant_id.
+        """
+        res = self.raw_cli(["tenant", "set-default", "--tenant-id", str(tenant_id)])
+        res.check_returncode()
 
     def config_tenant(self, tenant_id: TenantId, conf: Dict[str, str]):
         """
@@ -1649,36 +1647,6 @@ class NeonCli(AbstractNeonCli):
             created_timeline_id = matches.group("timeline_id")
 
         return TimelineId(str(created_timeline_id))
-
-    def create_root_branch(
-        self,
-        branch_name: str,
-        tenant_id: Optional[TenantId] = None,
-    ):
-        cmd = [
-            "timeline",
-            "create",
-            "--branch-name",
-            branch_name,
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
-            "--pg-version",
-            self.env.pg_version,
-        ]
-
-        res = self.raw_cli(cmd)
-        res.check_returncode()
-
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        if created_timeline_id is None:
-            raise Exception("could not find timeline id after `neon timeline create` invocation")
-        else:
-            return TimelineId(created_timeline_id)
 
     def create_branch(
         self,
