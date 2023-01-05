@@ -243,29 +243,33 @@ pageserver_receive(void)
 	PG_TRY();
 	{
 		/* read response */
-		resp_buff.len = call_PQgetCopyData(&resp_buff.data);
-		resp_buff.cursor = 0;
+		int			rc;
 
-		if (resp_buff.len < 0)
+		rc = call_PQgetCopyData(&resp_buff.data);
+		if (rc >= 0)
 		{
-			if (resp_buff.len == -1)
+			resp_buff.len = rc;
+			resp_buff.cursor = 0;
+			resp = nm_unpack_response(&resp_buff);
+			PQfreemem(resp_buff.data);
+
+			if (message_level_is_interesting(PageStoreTrace))
 			{
-				pageserver_disconnect();
-				return NULL;
+				char	   *msg = nm_to_string((NeonMessage *) resp);
+
+				neon_log(PageStoreTrace, "got response: %s", msg);
+				pfree(msg);
 			}
-			else if (resp_buff.len == -2)
-				neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
 		}
-		resp = nm_unpack_response(&resp_buff);
-		PQfreemem(resp_buff.data);
-
-		if (message_level_is_interesting(PageStoreTrace))
+		else if (rc == -1)
 		{
-			char	   *msg = nm_to_string((NeonMessage *) resp);
-
-			neon_log(PageStoreTrace, "got response: %s", msg);
-			pfree(msg);
+			pageserver_disconnect();
+			resp = NULL;
 		}
+		else if (rc == -2)
+			neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
+		else
+			neon_log(ERROR, "unexpected PQgetCopyData return value: %d", rc);
 	}
 	PG_CATCH();
 	{
