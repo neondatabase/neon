@@ -1,5 +1,4 @@
 use pageserver::repository::Key;
-use pageserver::tenant::bst_layer_map::RetroactiveLayerMap;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
 use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, LayerDescriptor};
@@ -122,23 +121,6 @@ fn bench_from_real_project(c: &mut Criterion) {
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
     println!("Finished layer map init in {:?}", now.elapsed());
 
-    // Init bst layer map with the same layers
-    let now = Instant::now();
-    let mut bstlm = RetroactiveLayerMap::new();
-    for layer in layer_map.iter_historic_layers() {
-        let kr = layer.get_key_range();
-        let lr = layer.get_lsn_range();
-
-        bstlm.insert(
-            kr.start.to_i128()..kr.end.to_i128(),
-            lr.start.0..lr.end.0,
-            format!("Layer {}", lr.start.0),
-            !layer.is_incremental(),
-        );
-    }
-    bstlm.rebuild();
-    println!("Finished bst init in {:?}", now.elapsed());
-
     // Choose uniformly distributed queries
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
@@ -148,13 +130,6 @@ fn bench_from_real_project(c: &mut Criterion) {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1);
-            }
-        });
-    });
-    group.bench_function("persistent_bst", |b| {
-        b.iter(|| {
-            for q in queries.clone().into_iter() {
-                bstlm.query(q.0.to_i128(), q.1 .0);
             }
         });
     });
@@ -185,23 +160,6 @@ fn bench_sequential(c: &mut Criterion) {
     layer_map.rebuild_index();
     println!("Finished layer map init in {:?}", now.elapsed());
 
-    // Init bst layer map with the same layers
-    let now = Instant::now();
-    let mut bstlm = RetroactiveLayerMap::new();
-    for layer in layer_map.iter_historic_layers() {
-        let kr = layer.get_key_range();
-        let lr = layer.get_lsn_range();
-
-        bstlm.insert(
-            kr.start.to_i128()..kr.end.to_i128(),
-            lr.start.0..lr.end.0,
-            format!("Layer {}", lr.start.0),
-            !layer.is_incremental(),
-        );
-    }
-    bstlm.rebuild();
-    println!("Finished bst init in {:?}", now.elapsed());
-
     // Choose 100 uniformly random queries
     let rng = &mut StdRng::seed_from_u64(1);
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map)
@@ -215,13 +173,6 @@ fn bench_sequential(c: &mut Criterion) {
         b.iter(|| {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1);
-            }
-        });
-    });
-    group.bench_function("persistent_bst", |b| {
-        b.iter(|| {
-            for q in queries.clone().into_iter() {
-                bstlm.query(q.0.to_i128(), q.1 .0);
             }
         });
     });
