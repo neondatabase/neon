@@ -596,6 +596,7 @@ class NeonEnvBuilder:
         rust_log_override: Optional[str] = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
         preserve_database_files: bool = False,
+        initial_tenant: Optional[TenantId] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -618,8 +619,9 @@ class NeonEnvBuilder:
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
         self.preserve_database_files = preserve_database_files
+        self.initial_tenant = initial_tenant or TenantId.generate()
 
-    def init(self) -> NeonEnv:
+    def init_configs(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
         self.env = NeonEnv(self)
@@ -630,8 +632,17 @@ class NeonEnvBuilder:
         self.env.start()
 
     def init_start(self) -> NeonEnv:
-        env = self.init()
+        env = self.init_configs()
         self.start()
+
+        # Prepare the default branch to start the postgres on later.
+        # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
+        log.info(
+            f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
+        )
+        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
+
         return env
 
     def enable_remote_storage(
@@ -890,12 +901,12 @@ class NeonEnv:
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
-        self.initial_tenant = TenantId.generate()
+        self.initial_tenant = config.initial_tenant
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
             f"""
-            default_tenant_id = '{self.initial_tenant}'
+            default_tenant_id = '{config.initial_tenant}'
         """
         )
 
@@ -1724,17 +1735,12 @@ class NeonCli(AbstractNeonCli):
     def init(
         self,
         config_toml: str,
-        initial_timeline_id: Optional[TimelineId] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(config_toml)
             tmp.flush()
 
-            cmd = ["init", f"--config={tmp.name}"]
-            if initial_timeline_id:
-                cmd.extend(["--timeline-id", str(initial_timeline_id)])
-
-            cmd.extend(["--pg-version", self.env.pg_version])
+            cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
 
             append_pageserver_param_overrides(
                 params_to_update=cmd,

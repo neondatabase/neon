@@ -20,7 +20,10 @@ use tokio_rustls::TlsAcceptor;
 
 pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
-    matches!(e.kind(), ConnectionRefused | ConnectionAborted)
+    matches!(
+        e.kind(),
+        ConnectionRefused | ConnectionAborted | ConnectionReset
+    )
 }
 
 /// An error, occurred during query processing:

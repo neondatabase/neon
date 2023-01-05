@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
@@ -20,9 +22,19 @@ def httpserver_listen_address(port_distributor: PortDistributor):
     return ("localhost", port)
 
 
-num_metrics_received = 0
+initial_tenant = TenantId.generate()
 remote_uploaded = 0
-first_request = True
+checks = {
+    "written_size": lambda value: value > 0,
+    "resident_size": lambda value: value >= 0,
+    # >= 0 check here is to avoid race condition when we receive metrics before
+    # remote_uploaded is updated
+    "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
+    # logical size may lag behind the actual size, so allow 0 here
+    "timeline_logical_size": lambda value: value >= 0,
+}
+
+metric_kinds_checked = set([])
 
 
 #
@@ -36,38 +48,19 @@ def metrics_handler(request: Request) -> Response:
     log.info("received events:")
     log.info(events)
 
-    checks = {
-        "written_size": lambda value: value > 0,
-        "resident_size": lambda value: value >= 0,
-        # >= 0 check here is to avoid race condition when we receive metrics before
-        # remote_uploaded is updated
-        "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
-        # logical size may lag behind the actual size, so allow 0 here
-        "timeline_logical_size": lambda value: value >= 0,
-    }
-
-    events_received = 0
     for event in events:
-        check = checks.get(event["metric"])
+        assert event["tenant_id"] == str(
+            initial_tenant
+        ), "Expecting metrics only from the initial tenant"
+        metric_name = event["metric"]
+
+        check = checks.get(metric_name)
         # calm down mypy
         if check is not None:
-            assert check(event["value"]), f"{event['metric']} isn't valid"
-            events_received += 1
+            assert check(event["value"]), f"{metric_name} isn't valid"
+            global metric_kinds_checked
+            metric_kinds_checked.add(metric_name)
 
-    global first_request
-    # check that all checks were sent
-    # but only on the first request, because we don't send non-changed metrics
-    if first_request:
-        # we may receive more metrics than we check,
-        # because there are two timelines
-        # and we may receive per-timeline metrics from both
-        # if the test was slow enough for these metrics to be collected
-        # -1 because that is ok to not receive timeline_logical_size
-        assert events_received >= len(checks) - 1
-        first_request = False
-
-    global num_metrics_received
-    num_metrics_received += 1
     return Response(status=200)
 
 
@@ -83,11 +76,14 @@ def test_metric_collection(
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
 
+    # Require collecting metrics frequently, since we change
+    # the timeline and want something to be logged about it.
+    #
     # Disable time-based pitr, we will use the manual GC calls
     # to trigger remote storage operations in a controlled way
     neon_env_builder.pageserver_config_override = (
         f"""
-        metric_collection_interval="60s"
+        metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
     """
         + "tenant_config={pitr_interval = '0 sec'}"
@@ -100,6 +96,9 @@ def test_metric_collection(
 
     log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")
 
+    # Set initial tenant of the test, that we expect the logs from
+    global initial_tenant
+    initial_tenant = neon_env_builder.initial_tenant
     # mock http server that returns OK for the metrics
     httpserver.expect_request("/billing/api/v1/usage_events", method="POST").respond_with_handler(
         metrics_handler
@@ -154,7 +153,11 @@ def test_metric_collection(
         remote_uploaded = get_num_remote_ops("index", "upload")
         assert remote_uploaded > 0
 
-    # check that all requests are served
+    # wait longer than collecting interval and check that all requests are served
+    time.sleep(3)
     httpserver.check()
-    global num_metrics_received
-    assert num_metrics_received > 0, "no metrics were received"
+    global metric_kinds_checked, checks
+    expected_checks = set(checks.keys())
+    assert len(metric_kinds_checked) == len(
+        checks
+    ), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
