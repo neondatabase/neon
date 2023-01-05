@@ -596,6 +596,7 @@ class NeonEnvBuilder:
         rust_log_override: Optional[str] = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
         preserve_database_files: bool = False,
+        initial_tenant: TenantId = TenantId.generate(),
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -618,6 +619,7 @@ class NeonEnvBuilder:
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
         self.preserve_database_files = preserve_database_files
+        self.initial_tenant = initial_tenant
 
     def init_configs(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -899,12 +901,12 @@ class NeonEnv:
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
-        self.initial_tenant = TenantId.generate()
+        self.initial_tenant = config.initial_tenant
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
             f"""
-            default_tenant_id = '{self.initial_tenant}'
+            default_tenant_id = '{config.initial_tenant}'
         """
         )
 
