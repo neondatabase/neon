@@ -1,3 +1,4 @@
+use pageserver::keyspace::KeyPartitioning;
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
@@ -81,6 +82,12 @@ fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn
         .collect()
 }
 
+// Construct a partitioning for testing get_difficulty map when we
+// don't have an exact result of `collect_keyspace` to work with.
+fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, lsn: Lsn) -> KeyPartitioning {
+    todo!()
+}
+
 // Benchmark using metadata extracted from our performance test environment, from
 // a project where we have run pgbench many timmes. The pgbench database was initialized
 // between each test run.
@@ -124,6 +131,10 @@ fn bench_from_real_project(c: &mut Criterion) {
     // Choose uniformly distributed queries
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
+    // Choose inputs for get_difficulty_map
+    let difficulty_map_lsn = todo!();
+    let partitioning = uniform_key_partitioning(&layer_map, difficulty_map_lsn);
+
     // Define and name the benchmark function
     let mut group = c.benchmark_group("real_map");
     group.bench_function("uniform_queries", |b| {
@@ -135,7 +146,7 @@ fn bench_from_real_project(c: &mut Criterion) {
     });
     group.bench_function("get_difficulty_map", |b| {
         b.iter(|| {
-            // TODO call get_difficulty_map
+            layer_map.get_difficulty_map(difficulty_map_lsn, &partitioning);
         });
     });
     group.finish();
@@ -172,6 +183,10 @@ fn bench_sequential(c: &mut Criterion) {
         .copied()
         .collect();
 
+    // Choose inputs for get_difficulty_map
+    let difficulty_map_lsn = todo!();
+    let partitioning = uniform_key_partitioning(&layer_map, difficulty_map_lsn);
+
     // Define and name the benchmark function
     let mut group = c.benchmark_group("sequential");
     group.bench_function("uniform_queries", |b| {
@@ -183,7 +198,7 @@ fn bench_sequential(c: &mut Criterion) {
     });
     group.bench_function("get_difficulty_map", |b| {
         b.iter(|| {
-            // TODO call get_difficulty_map
+            layer_map.get_difficulty_map(difficulty_map_lsn, &partitioning);
         });
     });
     group.finish();
