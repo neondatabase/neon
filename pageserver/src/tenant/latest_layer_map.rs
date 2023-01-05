@@ -44,6 +44,10 @@ impl<Value: Clone> LatestLayerMap<Value> {
         self.image_coverage.range(key)
     }
 
+    pub fn image_iter(self: &Self) -> impl '_ + Iterator<Item = (i128, Option<Value>)> {
+        self.image_coverage.iter()
+    }
+
     pub fn delta_coverage(
         self: &Self,
         key: Range<i128>,

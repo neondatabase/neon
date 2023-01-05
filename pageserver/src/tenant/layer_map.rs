@@ -329,8 +329,38 @@ where
     /// result for the entire partitioning at once allows this function to be more
     /// efficient, and further optimization is possible by using iterators instead,
     /// to allow early return.
-    pub fn get_difficulty_map(&self, _lsn: Lsn, _partitioning: &KeyPartitioning) -> Vec<usize> {
-        todo!()
+    pub fn get_difficulty_map(&self, lsn: Lsn, partitioning: &KeyPartitioning) -> Vec<usize> {
+        // TODO This is a naive implementation. Perf improvements to do:
+        // 1. Instead of calling self.image_coverage and self.count_deltas,
+        //    iterate the image and delta coverage only once.
+        // 2. Implement early return when the difficulty exceeds a threshold.
+        partitioning
+            .parts
+            .iter()
+            .map(|part| {
+                let mut difficulty = 0;
+                for range in &part.ranges {
+                    for (img_range, last_img) in self
+                        .image_coverage(range, lsn)
+                        .expect("why would this err?")
+                    {
+                        let img_lsn = if let Some(last_img) = last_img {
+                            last_img.get_lsn_range().end
+                        } else {
+                            Lsn(0)
+                        };
+
+                        if img_lsn < lsn {
+                            let num_deltas = self
+                                .count_deltas(&img_range, &(img_lsn..lsn))
+                                .expect("why would this err lol?");
+                            difficulty = std::cmp::max(difficulty, num_deltas);
+                        }
+                    }
+                }
+                difficulty
+            })
+            .collect()
     }
 
     /// Return all L0 delta layers

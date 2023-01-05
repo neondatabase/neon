@@ -96,6 +96,12 @@ impl<Value: Clone> Coverage<Value> {
             .map(|(k, v)| (k.clone(), v.as_ref().map(|x| x.1.clone())))
     }
 
+    pub fn iter(self: &Self) -> impl '_ + Iterator<Item = (i128, Option<Value>)> {
+        self.head
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_ref().map(|x| x.1.clone())))
+    }
+
     pub fn clone(self: &Self) -> Self {
         Self {
             head: self.head.clone(),
