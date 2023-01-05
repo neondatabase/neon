@@ -632,6 +632,9 @@ class NeonEnvBuilder:
     def init_start(self) -> NeonEnv:
         env = self.init()
         self.start()
+        # Prepare the default branch to start the postgres on later.
+        # Pageserver itself does not create tenants and timelines, until asked via HTTP API.
+        env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
         return env
 
     def enable_remote_storage(
@@ -1724,17 +1727,12 @@ class NeonCli(AbstractNeonCli):
     def init(
         self,
         config_toml: str,
-        initial_timeline_id: Optional[TimelineId] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(config_toml)
             tmp.flush()
 
-            cmd = ["init", f"--config={tmp.name}"]
-            if initial_timeline_id:
-                cmd.extend(["--timeline-id", str(initial_timeline_id)])
-
-            cmd.extend(["--pg-version", self.env.pg_version])
+            cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
 
             append_pageserver_param_overrides(
                 params_to_update=cmd,
