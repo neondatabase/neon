@@ -98,6 +98,7 @@ pub async fn handle_ws_client(
     let tls = config.tls_config.as_ref();
     let hostname = hostname.as_deref();
 
+    // TLS is None here, because the connection is already encrypted.
     let do_handshake = handshake(stream, None, cancel_map).instrument(info_span!("handshake"));
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,

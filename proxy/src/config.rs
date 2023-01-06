@@ -7,7 +7,6 @@ pub struct ProxyConfig {
     pub auth_backend: auth::BackendType<'static, ()>,
 }
 
-#[derive(Clone)]
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
     pub common_name: Option<String>,

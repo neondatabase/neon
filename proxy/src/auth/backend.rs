@@ -53,7 +53,7 @@ pub struct ConsoleReqExtra<'a> {
 /// * However, when we substitute `T` with [`ClientCredentials`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum BackendType<'a, T> {
     /// Current Cloud API (V2).
     Console(Cow<'a, http::Endpoint>, T),

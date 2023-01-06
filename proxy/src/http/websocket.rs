@@ -34,6 +34,7 @@ pin_project! {
     }
 }
 
+// FIXME: explain why this is safe or try to remove `unsafe impl`.
 unsafe impl Sync for WebSocketRW {}
 
 impl WebSocketRW {
