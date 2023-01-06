@@ -441,6 +441,8 @@ pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use crate::wal_craft;
+
     use super::super::PG_MAJORVERSION;
     use super::*;
     use regex::Regex;

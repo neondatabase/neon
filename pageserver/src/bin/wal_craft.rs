@@ -1,11 +1,11 @@
 use anyhow::*;
 use clap::{value_parser, Arg, ArgMatches, Command};
+use postgres_ffi::wal_craft::*;
 use std::{path::PathBuf, str::FromStr};
-use wal_craft::*;
+use utils::logging;
 
-fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("wal_craft=info"))
-        .init();
+fn main() -> anyhow::Result<()> {
+    logging::init(logging::LogFormat::Plain)?;
     let arg_matches = cli().get_matches();
 
     let wal_craft = |arg_matches: &ArgMatches, client| {
