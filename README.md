@@ -119,7 +119,7 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 > ./target/debug/neon_local init
 Starting pageserver at '127.0.0.1:64000' in '.neon'.
 
-# start pageserver, safekeeper and broker for their intercommunication
+# start pageserver, safekeeper, and broker for their intercommunication
 > ./target/debug/neon_local start
 Starting neon broker at 127.0.0.1:50051
 storage_broker started, pid: 2918372

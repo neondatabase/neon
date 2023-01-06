@@ -18,6 +18,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
 from functools import cached_property
+from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
@@ -1588,7 +1589,11 @@ class NeonCli(AbstractNeonCli):
             self.env.pg_version,
         ]
         if conf is not None:
-            args += sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
+            args.extend(
+                chain.from_iterable(
+                    product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
+                )
+            )
         if set_default:
             args.append("--set-default")
 
@@ -1607,13 +1612,16 @@ class NeonCli(AbstractNeonCli):
         """
         Update tenant config.
         """
-        if conf is None:
-            res = self.raw_cli(["tenant", "config", "--tenant-id", str(tenant_id)])
-        else:
-            res = self.raw_cli(
-                ["tenant", "config", "--tenant-id", str(tenant_id)]
-                + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
+
+        args = ["tenant", "config", "--tenant-id", str(tenant_id)]
+        if conf is not None:
+            args.extend(
+                chain.from_iterable(
+                    product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
+                )
             )
+
+        res = self.raw_cli(args)
         res.check_returncode()
 
     def list_tenants(self) -> "subprocess.CompletedProcess[str]":
