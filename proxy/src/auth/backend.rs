@@ -149,7 +149,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
         // If there's no project so far, that entails that client doesn't
         // support SNI or other means of passing the project name.
         // We now expect to see a very specific payload in the place of password.
-        let fetch_magic_payload = async {
+        let fetch_magic_payload = |client| async {
             warn!("project name not specified, resorting to the password hack auth flow");
             let payload = AuthFlow::new(client)
                 .begin(auth::PasswordHack)
@@ -161,10 +161,26 @@ impl BackendType<'_, ClientCredentials<'_>> {
             auth::Result::Ok(payload)
         };
 
+        // If we want to use cleartext password flow, we can read the password
+        // from the client and pretend that it's a magic payload (PasswordHack hack).
+        let fetch_plaintext_password = |client| async {
+            info!("using cleartext password flow");
+            let payload = AuthFlow::new(client)
+                .begin(auth::CleartextPassword)
+                .await?
+                .authenticate()
+                .await?;
+
+            auth::Result::Ok(auth::password_hack::PasswordHackPayload {
+                project: String::new(),
+                password: payload,
+            })
+        };
+
         // TODO: find a proper way to merge those very similar blocks.
         let (mut node, payload) = match self {
             Console(endpoint, creds) if creds.project.is_none() => {
-                let payload = fetch_magic_payload.await?;
+                let payload = fetch_magic_payload(client).await?;
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());
@@ -174,8 +190,18 @@ impl BackendType<'_, ClientCredentials<'_>> {
 
                 (node, payload)
             }
+            Console(endpoint, creds) if creds.use_cleartext_password_flow => {
+                // This is a hack to allow cleartext password in secure connections (wss).
+                let payload = fetch_plaintext_password(client).await?;
+                let creds = creds.as_ref();
+                let node = console::Api::new(endpoint, extra, &creds)
+                    .wake_compute()
+                    .await?;
+
+                (node, payload)
+            }
             Postgres(endpoint, creds) if creds.project.is_none() => {
-                let payload = fetch_magic_payload.await?;
+                let payload = fetch_magic_payload(client).await?;
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());

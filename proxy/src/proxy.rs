@@ -82,6 +82,47 @@ pub async fn task_main(
     }
 }
 
+pub async fn handle_ws_client(
+    config: &ProxyConfig,
+    cancel_map: &CancelMap,
+    session_id: uuid::Uuid,
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
+    hostname: Option<String>,
+) -> anyhow::Result<()> {
+    // The `closed` counter will increase when this future is destroyed.
+    NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
+    scopeguard::defer! {
+        NUM_CONNECTIONS_CLOSED_COUNTER.inc();
+    }
+
+    let tls = config.tls_config.as_ref();
+    let hostname = hostname.as_deref();
+
+    // TLS is None here, because the connection is already encrypted.
+    let do_handshake = handshake(stream, None, cancel_map).instrument(info_span!("handshake"));
+    let (mut stream, params) = match do_handshake.await? {
+        Some(x) => x,
+        None => return Ok(()), // it's a cancellation request
+    };
+
+    // Extract credentials which we're going to use for auth.
+    let creds = {
+        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        let result = config
+            .auth_backend
+            .as_ref()
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name, true))
+            .transpose();
+
+        async { result }.or_else(|e| stream.throw_error(e)).await?
+    };
+
+    let client = Client::new(stream, creds, &params, session_id);
+    cancel_map
+        .with_session(|session| client.connect_to_db(session))
+        .await
+}
+
 async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
@@ -108,7 +149,7 @@ async fn handle_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name, false))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?

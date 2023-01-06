@@ -1,4 +1,5 @@
 pub mod server;
+pub mod websocket;
 
 use crate::url::ApiUrl;
 
