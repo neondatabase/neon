@@ -249,8 +249,21 @@ impl<L> LayerMap<L>
 where
     L: ?Sized + Layer,
 {
+    ///
+    /// Find the latest layer that covers the given 'key', with lsn <
+    /// 'end_lsn'.
+    ///
+    /// Returns the layer, if any, and an 'lsn_floor' value that
+    /// indicates which portion of the layer the caller should
+    /// check. 'lsn_floor' is normally the start-LSN of the layer, but
+    /// can be greater if there is an overlapping layer that might
+    /// contain the version, even if it's missing from the returned
+    /// layer.
+    ///
+    /// NOTE: This only searches the 'historic' layers, *not* the
+    /// 'open' and 'frozen' layers!
+    ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
-        // linear search
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<Arc<L>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
