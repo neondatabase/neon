@@ -36,7 +36,6 @@ use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::MutexGuard;
@@ -2522,26 +2521,19 @@ fn run_initdb(
         initdb_lib_dir.display(),
     );
 
-    let initdb_output = Command::new(&initdb_bin_path)
-        .args(["-D", &initdb_target_dir.to_string_lossy()])
-        .args(["-U", &conf.superuser])
-        .args(["-E", "utf8"])
-        .arg("--no-instructions")
-        // This is only used for a temporary installation that is deleted shortly after,
-        // so no need to fsync it
-        .arg("--no-sync")
-        .env_clear()
-        .env("LD_LIBRARY_PATH", &initdb_lib_dir)
-        .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
-        .stdout(Stdio::null())
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to execute {} at target dir {}",
-                initdb_bin_path.display(),
-                initdb_target_dir.display()
-            )
-        })?;
+    let mut cmd = postgres_ffi::prepare_initdb_command(
+        &initdb_bin_path,
+        &initdb_lib_dir,
+        initdb_target_dir,
+        &conf.superuser,
+    );
+    let initdb_output = cmd.stdout(Stdio::null()).output().with_context(|| {
+        format!(
+            "failed to execute {} at target dir {}",
+            initdb_bin_path.display(),
+            initdb_target_dir.display()
+        )
+    })?;
     if !initdb_output.status.success() {
         bail!(
             "initdb failed: '{}'",

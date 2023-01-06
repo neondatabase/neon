@@ -598,27 +598,21 @@ impl PostgresRedoProcess {
             );
             fs::remove_dir_all(&datadir)?;
         }
-        let pg_bin_dir_path = conf.pg_bin_dir(pg_version).map_err(|e| {
-            Error::new(
-                ErrorKind::Other,
-                format!("incorrect pg_bin_dir path: {}", e),
-            )
-        })?;
-        let pg_lib_dir_path = conf.pg_lib_dir(pg_version).map_err(|e| {
-            Error::new(
-                ErrorKind::Other,
-                format!("incorrect pg_lib_dir path: {}", e),
-            )
-        })?;
+        let pg_bin_dir_path = conf
+            .pg_bin_dir(pg_version)
+            .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_bin_dir path: {e}")))?;
+        let pg_lib_dir_path = conf
+            .pg_lib_dir(pg_version)
+            .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_lib_dir path: {e}")))?;
 
-        info!("running initdb in {}", datadir.display());
-        let initdb = Command::new(pg_bin_dir_path.join("initdb"))
-            .args(["-D", &datadir.to_string_lossy()])
-            .arg("-N")
-            .env_clear()
-            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
-            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path) // macOS
-            .close_fds()
+        info!("running initdb in {datadir:?}");
+        let mut cmd = postgres_ffi::prepare_initdb_command(
+            &pg_bin_dir_path,
+            &pg_lib_dir_path,
+            &datadir,
+            &conf.superuser,
+        );
+        let initdb = cmd
             .output()
             .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
 

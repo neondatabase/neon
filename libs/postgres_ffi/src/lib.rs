@@ -9,8 +9,12 @@
 // types, and trigger a too eager lint.
 #![allow(clippy::duplicate_mod)]
 
+use std::path::Path;
+use std::process::Command;
+
 use bytes::Bytes;
 use utils::bin_ser::SerializeError;
+use utils::fs_ext::CloseFileDescriptors;
 use utils::lsn::Lsn;
 
 macro_rules! postgres_ffi {
@@ -183,6 +187,36 @@ pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
     }
     /* Turn the page count into 0-based block number */
     pages - 1
+}
+
+/// For some components, it's important to have better reproducible `initdb` command results.
+/// In particular, what pageserver parses from `initdb` output as `initdb_lsn`, is imporant to
+/// keep the same for the same branch.
+///
+/// Various env parameters influence that, same as various postgres versions may still change the
+/// values in the long run, but if this function was used, it's simpler to track such changes.
+pub fn prepare_initdb_command(
+    bin_path: &Path,
+    lib_path: &Path,
+    target_path: &Path,
+    user: &str,
+) -> Command {
+    let mut command = Command::new(bin_path.as_os_str());
+
+    command
+        .args(["-D", &target_path.to_string_lossy()])
+        .args(["-U", user])
+        .args(["-E", "utf8"])
+        .arg("--no-instructions")
+        // This is only used for a temporary installation that is deleted shortly after,
+        // so no need to fsync it
+        .arg("--no-sync")
+        .env_clear()
+        .env("LD_LIBRARY_PATH", lib_path.as_os_str())
+        .env("DYLD_LIBRARY_PATH", lib_path.as_os_str()) // macOS
+        .close_fds();
+
+    command
 }
 
 pub mod waldecoder {
