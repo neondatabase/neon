@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Instant;
 
 use anyhow::Result;
 use log::{info, log_enabled, warn, Level};
@@ -314,6 +315,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         // XXX: with a limited number of databases it is fine, but consider making it a HashMap
         let pg_db = existing_dbs.iter().find(|r| r.name == *name);
 
+        let start_time = Instant::now();
         if let Some(r) = pg_db {
             // XXX: db owner name is returned as quoted string from Postgres,
             // when quoting is needed.
@@ -332,6 +334,8 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 info_print!(" -> update");
 
                 client.execute(query.as_str(), &[])?;
+                let elapsed = start_time.elapsed().as_millis();
+                info_print!(" ({} ms)", elapsed);
             }
         } else {
             let mut query: String = format!("CREATE DATABASE {} ", name.pg_quote());
@@ -339,6 +343,9 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
             query.push_str(&db.to_pg_options());
             client.execute(query.as_str(), &[])?;
+
+            let elapsed = start_time.elapsed().as_millis();
+            info_print!(" ({} ms)", elapsed);
         }
 
         info_print!("\n");
