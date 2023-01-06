@@ -606,15 +606,14 @@ impl PostgresRedoProcess {
             .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_lib_dir path: {e}")))?;
 
         info!("running initdb in {datadir:?}");
-        let mut cmd = postgres_ffi::prepare_initdb_command(
+        let initdb = postgres_ffi::prepare_initdb_command(
             &pg_bin_dir_path,
             &pg_lib_dir_path,
             &datadir,
             &conf.superuser,
-        );
-        let initdb = cmd
-            .output()
-            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
+        )
+        .output()
+        .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
 
         if !initdb.status.success() {
             return Err(Error::new(

@@ -196,12 +196,12 @@ pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
 /// Various env parameters influence that, same as various postgres versions may still change the
 /// values in the long run, but if this function was used, it's simpler to track such changes.
 pub fn prepare_initdb_command(
-    bin_path: &Path,
-    lib_path: &Path,
+    pg_bin_path: &Path,
+    pg_lib_path: &Path,
     target_path: &Path,
     user: &str,
 ) -> Command {
-    let mut command = Command::new(bin_path.as_os_str());
+    let mut command = Command::new(pg_bin_path.join("initdb"));
 
     command
         .args(["-D", &target_path.to_string_lossy()])
@@ -212,8 +212,9 @@ pub fn prepare_initdb_command(
         // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
-        .env("LD_LIBRARY_PATH", lib_path.as_os_str())
-        .env("DYLD_LIBRARY_PATH", lib_path.as_os_str()) // macOS
+        .env("LD_LIBRARY_PATH", pg_lib_path)
+        // macOS
+        .env("DYLD_LIBRARY_PATH", pg_lib_path)
         .close_fds();
 
     command

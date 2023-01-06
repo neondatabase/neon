@@ -78,7 +78,7 @@ impl Conf {
             self.datadir
         );
         let output = super::prepare_initdb_command(
-            &self.pg_bin_dir()?.join("initdb"),
+            &self.pg_bin_dir()?,
             &self.pg_lib_dir()?,
             &self.datadir,
             "postgres",
