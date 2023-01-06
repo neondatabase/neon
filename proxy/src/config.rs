@@ -5,11 +5,6 @@ use std::sync::Arc;
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, ()>,
-    /// If this is set, connection is already considered secure and we won't try
-    /// to upgrade it to TLS. Also, we'll use this hostname instead of SNI.
-    ///
-    /// This is used for WebSocket connections, which are already secured by TLS.
-    pub secure_override_hostname: Option<String>,
 }
 
 #[derive(Clone)]

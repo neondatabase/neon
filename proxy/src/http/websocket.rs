@@ -23,7 +23,7 @@ use utils::http::{error::ApiError, json::json_response};
 
 use crate::cancellation::CancelMap;
 use crate::config::ProxyConfig;
-use crate::proxy::handle_client;
+use crate::proxy::handle_ws_client;
 
 pin_project! {
     /// This is a wrapper around a WebSocketStream that implements AsyncRead and AsyncWrite.
@@ -165,9 +165,17 @@ async fn serve_websocket(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
+    hostname: Option<String>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    handle_client(config, cancel_map, session_id, WebSocketRW::new(websocket)).await?;
+    handle_ws_client(
+        config,
+        cancel_map,
+        session_id,
+        WebSocketRW::new(websocket),
+        hostname,
+    )
+    .await?;
     Ok(())
 }
 
@@ -177,19 +185,12 @@ async fn ws_handler(
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
 ) -> Result<Response<Body>, ApiError> {
-    let host = request.headers().get("host").and_then(|h| h.to_str().ok());
-
-    // Create a new proxy config with the hostname from the request.
-    let config = ProxyConfig {
-        tls_config: config.tls_config.clone(),
-        auth_backend: config.auth_backend.clone(),
-        secure_override_hostname: host
-            .and_then(|h| {
-                // Remove the port from the hostname, if present.
-                h.split(':').next()
-            })
-            .map(|h| h.to_string()),
-    };
+    let host = request
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.split(':').next())
+        .map(|s| s.to_string());
 
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
@@ -197,7 +198,8 @@ async fn ws_handler(
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         tokio::spawn(async move {
-            if let Err(e) = serve_websocket(websocket, &config, &cancel_map, session_id).await {
+            if let Err(e) = serve_websocket(websocket, config, &cancel_map, session_id, host).await
+            {
                 error!("error in websocket connection: {:?}", e);
             }
         });

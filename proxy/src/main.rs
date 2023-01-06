@@ -95,7 +95,6 @@ async fn main() -> anyhow::Result<()> {
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
-        secure_override_hostname: None,
     }));
 
     info!("Version: {GIT_VERSION}");
