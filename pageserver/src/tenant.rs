@@ -2512,20 +2512,20 @@ fn run_initdb(
     initdb_target_dir: &Path,
     pg_version: u32,
 ) -> anyhow::Result<()> {
-    let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
-    let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
-    info!("running {initdb_bin_path:?} in {initdb_target_dir:?}, libdir: {initdb_lib_dir:?}");
+    let pg_bin_dir = conf.pg_bin_dir(pg_version)?;
+    let pg_lib_dir = conf.pg_lib_dir(pg_version)?;
+    info!("running {pg_bin_dir:?} in {initdb_target_dir:?}, libdir: {pg_lib_dir:?}");
 
     let initdb_output = postgres_ffi::prepare_initdb_command(
-        &initdb_bin_path,
-        &initdb_lib_dir,
+        &pg_bin_dir,
+        &pg_lib_dir,
         initdb_target_dir,
         &conf.superuser,
-    )
+    )?
     .stdout(Stdio::null())
     .output()
     .with_context(|| {
-        format!("failed to execute {initdb_bin_path:?} at target dir {initdb_target_dir:?}")
+        format!("failed to execute {pg_bin_dir:?} at target dir {initdb_target_dir:?}")
     })?;
     if !initdb_output.status.success() {
         bail!(

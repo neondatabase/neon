@@ -12,6 +12,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use anyhow::Context;
 use bytes::Bytes;
 use utils::bin_ser::SerializeError;
 use utils::fs_ext::CloseFileDescriptors;
@@ -195,16 +196,31 @@ pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
 ///
 /// Various env parameters influence that, same as various postgres versions may still change the
 /// values in the long run, but if this function was used, it's simpler to track such changes.
+///
+/// Ensures that there's a correct directory structure for initdb to run in.
 pub fn prepare_initdb_command(
-    pg_bin_path: &Path,
-    pg_lib_path: &Path,
-    target_path: &Path,
+    pg_bin_dir: &Path,
+    pg_lib_dir: &Path,
+    target_dir: &Path,
     user: &str,
-) -> Command {
-    let mut command = Command::new(pg_bin_path.join("initdb"));
+) -> anyhow::Result<Command> {
+    // Do not remove the existing directory, it might be used by some other process.
+    anyhow::ensure!(
+        !target_dir.exists(),
+        "initdb cannot run in a directory that already exist: {target_dir:?}"
+    );
+    let target_parent = target_dir
+        .parent()
+        .context("Cannot run initdb on a root directory")?;
+    if !target_parent.exists() {
+        std::fs::create_dir_all(target_parent).with_context(|| {
+            format!("Failed to create parent directory {target_parent:?} for initdb target dir")
+        })?;
+    }
 
+    let mut command = Command::new(pg_bin_dir.join("initdb"));
     command
-        .args(["-D", &target_path.to_string_lossy()])
+        .args(["-D", &target_dir.to_string_lossy()])
         .args(["-U", user])
         .args(["-E", "utf8"])
         .arg("--no-instructions")
@@ -212,12 +228,13 @@ pub fn prepare_initdb_command(
         // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
-        .env("LD_LIBRARY_PATH", pg_lib_path)
+        .env("LD_LIBRARY_PATH", pg_lib_dir)
         // macOS
-        .env("DYLD_LIBRARY_PATH", pg_lib_path)
+        .env("DYLD_LIBRARY_PATH", pg_lib_dir)
+        .current_dir(target_parent)
         .close_fds();
 
-    command
+    Ok(command)
 }
 
 pub mod waldecoder {

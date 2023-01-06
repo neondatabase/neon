@@ -67,12 +67,6 @@ impl Conf {
     }
 
     pub fn initdb(&self) -> anyhow::Result<()> {
-        if let Some(parent) = self.datadir.parent() {
-            info!("Pre-creating parent directory {parent:?}");
-            // Tests may be run concurrently and there may be a race to create `test_output/`.
-            // std::fs::create_dir_all is guaranteed to have no races with another thread creating directories.
-            std::fs::create_dir_all(parent)?;
-        }
         info!(
             "Running initdb in {:?} with user \"postgres\"",
             self.datadir
@@ -82,7 +76,7 @@ impl Conf {
             &self.pg_lib_dir()?,
             &self.datadir,
             "postgres",
-        )
+        )?
         .output()?;
         debug!("initdb output: {output:?}");
         anyhow::ensure!(

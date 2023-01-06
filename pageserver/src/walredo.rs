@@ -592,18 +592,21 @@ impl PostgresRedoProcess {
 
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
-            info!(
-                "old temporary datadir {} exists, removing",
-                datadir.display()
-            );
+            info!("old temporary datadir {datadir:?} exists, removing",);
             fs::remove_dir_all(&datadir)?;
         }
-        let pg_bin_dir_path = conf
-            .pg_bin_dir(pg_version)
-            .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_bin_dir path: {e}")))?;
-        let pg_lib_dir_path = conf
-            .pg_lib_dir(pg_version)
-            .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_lib_dir path: {e}")))?;
+        let pg_bin_dir_path = conf.pg_bin_dir(pg_version).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("incorrect pg_bin_dir path: {e:#}"),
+            )
+        })?;
+        let pg_lib_dir_path = conf.pg_lib_dir(pg_version).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("incorrect pg_lib_dir path: {e:#}"),
+            )
+        })?;
 
         info!("running initdb in {datadir:?}");
         let initdb = postgres_ffi::prepare_initdb_command(
@@ -612,6 +615,12 @@ impl PostgresRedoProcess {
             &datadir,
             &conf.superuser,
         )
+        .map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("failed to prepare for initdb: {e:#}"),
+            )
+        })?
         .output()
         .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
 
