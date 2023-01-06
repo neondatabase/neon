@@ -120,7 +120,7 @@ def test_ondemand_download_large_rel(
 
 
 #
-# If you have a relation with a long history of updates,the pageserver downloads the layer
+# If you have a relation with a long history of updates, the pageserver downloads the layer
 # files containing the history as needed by timetravel queries.
 #
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
@@ -189,13 +189,10 @@ def test_ondemand_download_timetravel(
         # run checkpoint manually to be sure that data landed in remote storage
         client.timeline_checkpoint(tenant_id, timeline_id)
 
-    # wait until pageserver successfully uploaded a checkpoint to remote storage
-    wait_for_upload(client, tenant_id, timeline_id, current_lsn)
-    log.info("uploads have finished")
-
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()
 
+    # wait until pageserver has successfully uploaded all the data to remote storage
     wait_for_sk_commit_lsn_to_reach_remote_storage(
         tenant_id, timeline_id, env.safekeepers, env.pageserver
     )
@@ -227,11 +224,15 @@ def test_ondemand_download_timetravel(
 
     wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
 
-    # current_physical_size reports sum of layer file sizes, regardless of local or remote
+    # The current_physical_size reports the sum of layers loaded in the layer
+    # map, regardless of where the layer files are located. So even though we
+    # just removed the local files, they still count towards
+    # current_physical_size because they are loaded as `RemoteLayer`s.
     assert filled_current_physical == get_api_current_physical_size()
 
+    # Run queries at different points in time
     num_layers_downloaded = [0]
-    physical_size = [get_resident_physical_size()]
+    resident_size = [get_resident_physical_size()]
     for (checkpoint_number, lsn) in lsns:
         pg_old = env.postgres.create_start(
             branch_name="main", node_name=f"test_old_lsn_{checkpoint_number}", lsn=lsn
@@ -268,13 +269,15 @@ def test_ondemand_download_timetravel(
         if len(num_layers_downloaded) > 4:
             assert after_downloads > num_layers_downloaded[len(num_layers_downloaded) - 4]
 
-        # Likewise, assert that the physical_size metric grows as layers are downloaded
-        physical_size.append(get_resident_physical_size())
-        log.info(f"physical_size[-1]={physical_size[-1]}")
-        if len(physical_size) > 4:
-            assert physical_size[-1] > physical_size[len(physical_size) - 4]
+        # Likewise, assert that the resident_physical_size metric grows as layers are downloaded
+        resident_size.append(get_resident_physical_size())
+        log.info(f"resident_size[-1]={resident_size[-1]}")
+        if len(resident_size) > 4:
+            assert resident_size[-1] > resident_size[len(resident_size) - 4]
 
-        # current_physical_size reports sum of layer file sizes, regardless of local or remote
+        # current_physical_size reports the total size of all layer files, whether
+        # they are present only in the remote storage, only locally, or both.
+        # It should not change.
         assert filled_current_physical == get_api_current_physical_size()
 
 
