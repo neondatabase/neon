@@ -1146,7 +1146,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
-        let tenant = TenantHarness::create("test_relsize")?.load().await;
+        let harness = TenantHarness::new()?;
+        let tenant = harness.load().await;
         let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&tline).await?;
 
@@ -1323,7 +1324,8 @@ mod tests {
     // and then created it again within the same layer.
     #[tokio::test]
     async fn test_drop_extend() -> Result<()> {
-        let tenant = TenantHarness::create("test_drop_extend")?.load().await;
+        let harness = TenantHarness::new()?;
+        let tenant = harness.load().await;
         let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&tline).await?;
 
@@ -1376,7 +1378,8 @@ mod tests {
     // and then extended it again within the same layer.
     #[tokio::test]
     async fn test_truncate_extend() -> Result<()> {
-        let tenant = TenantHarness::create("test_truncate_extend")?.load().await;
+        let harness = TenantHarness::new()?;
+        let tenant = harness.load().await;
         let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&tline).await?;
 
@@ -1497,7 +1500,8 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[tokio::test]
     async fn test_large_rel() -> Result<()> {
-        let tenant = TenantHarness::create("test_large_rel")?.load().await;
+        let harness = TenantHarness::new()?;
+        let tenant = harness.load().await;
         let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION)?;
         let mut walingest = init_walingest_test(&tline).await?;
 
