@@ -1,4 +1,4 @@
-use pageserver::keyspace::KeyPartitioning;
+use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
@@ -85,7 +85,34 @@ fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn
 // Construct a partitioning for testing get_difficulty map when we
 // don't have an exact result of `collect_keyspace` to work with.
 fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, lsn: Lsn) -> KeyPartitioning {
-    todo!()
+    let mut parts = Vec::new();
+
+    let mut keys: Vec<_> = layer_map
+        .iter_historic_layers()
+        .filter_map(|l| {
+            if l.is_incremental() {
+                None
+            } else {
+                let kr = l.get_key_range();
+                Some(kr.start.next())
+            }
+        })
+        .collect();
+    keys.sort();
+
+    let mut current_key = Key::from_hex("000000000000000000000000000000000000").unwrap();
+    for key in keys {
+        parts.push(KeySpace {
+            ranges: vec![current_key..key],
+        });
+        current_key = key;
+    }
+    // let max_key = Key::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap();
+    // parts.push(KeySpace {
+    //     ranges: vec![current_key..max_key],
+    // });
+
+    KeyPartitioning { parts }
 }
 
 // Benchmark using metadata extracted from our performance test environment, from
@@ -132,8 +159,12 @@ fn bench_from_real_project(c: &mut Criterion) {
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
     // Choose inputs for get_difficulty_map
-    let difficulty_map_lsn = todo!();
-    let partitioning = uniform_key_partitioning(&layer_map, difficulty_map_lsn);
+    let latest_lsn = layer_map
+        .iter_historic_layers()
+        .map(|l| l.get_lsn_range().end)
+        .max()
+        .unwrap();
+    let partitioning = uniform_key_partitioning(&layer_map, latest_lsn);
 
     // Define and name the benchmark function
     let mut group = c.benchmark_group("real_map");
@@ -146,7 +177,7 @@ fn bench_from_real_project(c: &mut Criterion) {
     });
     group.bench_function("get_difficulty_map", |b| {
         b.iter(|| {
-            layer_map.get_difficulty_map(difficulty_map_lsn, &partitioning);
+            layer_map.get_difficulty_map(latest_lsn, &partitioning);
         });
     });
     group.finish();
@@ -183,10 +214,6 @@ fn bench_sequential(c: &mut Criterion) {
         .copied()
         .collect();
 
-    // Choose inputs for get_difficulty_map
-    let difficulty_map_lsn = todo!();
-    let partitioning = uniform_key_partitioning(&layer_map, difficulty_map_lsn);
-
     // Define and name the benchmark function
     let mut group = c.benchmark_group("sequential");
     group.bench_function("uniform_queries", |b| {
@@ -194,11 +221,6 @@ fn bench_sequential(c: &mut Criterion) {
             for q in queries.clone().into_iter() {
                 layer_map.search(q.0, q.1);
             }
-        });
-    });
-    group.bench_function("get_difficulty_map", |b| {
-        b.iter(|| {
-            layer_map.get_difficulty_map(difficulty_map_lsn, &partitioning);
         });
     });
     group.finish();
