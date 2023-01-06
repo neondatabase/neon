@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
-use postgres_ffi::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
+use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
+use crate::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conf {

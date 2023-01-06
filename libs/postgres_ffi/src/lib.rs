@@ -50,6 +50,7 @@ postgres_ffi!(v15);
 
 pub mod pg_constants;
 pub mod relfile_utils;
+pub mod wal_craft;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
 pub use v14::bindings::{uint32, uint64, Oid};
