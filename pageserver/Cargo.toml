@@ -19,7 +19,6 @@ byteorder = "1.4.3"
 bytes = "1.0.1"
 chrono = { version = "0.4.23", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.0", features = ["string"] }
-close_fds = "0.3.2"
 const_format = "0.2.21"
 crc32c = "0.6.0"
 crossbeam-utils = "0.8.5"
