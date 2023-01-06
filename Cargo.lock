@@ -4275,7 +4275,6 @@ dependencies = [
  "once_cell",
  "postgres",
  "postgres_ffi",
- "tempfile",
  "workspace_hack",
 ]
 
