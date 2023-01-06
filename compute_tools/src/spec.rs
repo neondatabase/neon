@@ -197,22 +197,18 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
 /// Reassign all dependent objects and delete requested roles.
 pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<()> {
-    let spec = &node.spec;
-
-    // First, reassign all dependent objects to db owners.
-    if let Some(ops) = &spec.delta_operations {
+    if let Some(ops) = &node.spec.delta_operations {
+        // First, reassign all dependent objects to db owners.
         info!("reassigning dependent objects of to-be-deleted roles");
         for op in ops {
             if op.action == "delete_role" {
                 reassign_owned_objects(node, &op.name)?;
             }
         }
-    }
 
-    // Second, proceed with role deletions.
-    let mut xact = client.transaction()?;
-    if let Some(ops) = &spec.delta_operations {
+        // Second, proceed with role deletions.
         info!("processing role deletions");
+        let mut xact = client.transaction()?;
         for op in ops {
             // We do not check either role exists or not,
             // Postgres will take care of it for us
@@ -223,6 +219,7 @@ pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<
                 xact.execute(query.as_str(), &[])?;
             }
         }
+        xact.commit()?;
     }
 
     Ok(())
