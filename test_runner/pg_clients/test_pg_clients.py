@@ -37,6 +37,7 @@ def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres, client: st
             NEON_DATABASE={conn_options["dbname"]}
             NEON_USER={conn_options["user"]}
             NEON_PASSWORD={conn_options["password"]}
+            NEON_CONNSTR={remote_pg.connstr()}
         """
         )
 

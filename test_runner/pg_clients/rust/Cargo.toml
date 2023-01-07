@@ -1,0 +1,11 @@
+[package]
+name = "rust-neon"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+postgres = "0.19"
+postgres-openssl = "0.5"
+openssl = "0.10"
