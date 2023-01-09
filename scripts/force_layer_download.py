@@ -4,7 +4,7 @@ import json
 import logging
 import signal
 import sys
-from typing import Any, List, Tuple
+from typing import Any, Awaitable, List, Tuple
 
 import aiohttp
 
@@ -103,13 +103,13 @@ async def do_timeline(client: Client, tenant_id, timeline_id):
     # Don't start new downloads if user pressed SIGINT.
     # This task will show up as "raised_exception" in the report.
     if sigint_received.is_set():
-        raise Exception(f"{tenant_id}:{timeline_id}: not starting because SIGINT received")
+        raise Exception("not starting because SIGINT received")
 
     # run downloads to completion
 
     status = await client.timeline_poll_download_remote_layers_status(tenant_id, timeline_id)
     if status is not None and status["state"] == "Running":
-        raise Exception(f"{tenant_id}:{timeline_id}: download is already running")
+        raise Exception("download is already running")
 
     spawned = await client.timeline_spawn_download_remote_layers(
         tenant_id, timeline_id, ongoing_ok=False
@@ -135,10 +135,9 @@ async def do_timeline(client: Client, tenant_id, timeline_id):
 
 
 def handle_sigint():
-    # https://www.roguelynn.com/words/asyncio-graceful-shutdowns/
+    logging.info("SIGINT received, asyncio event set. Will not start new downloads.")
     global sigint_received
     sigint_received.set()
-    logging.info("SIGINT received, asyncio event set. Will not start new downloads.")
 
 
 async def main(args):
@@ -162,10 +161,8 @@ async def main_impl(args, report_out, client: Client):
         if comps == ["ALL"]:
             logging.info("get tenant list")
             tenant_ids = await client.get_tenant_ids()
-            tasks = [
-                asyncio.create_task(client.get_timeline_ids(tenant_id)) for tenant_id in tenant_ids
-            ]
-            gathered = await asyncio.gather(*tasks, return_exceptions=True)
+            get_timeline_id_coros = [client.get_timeline_ids(tenant_id) for tenant_id in tenant_ids]
+            gathered = await asyncio.gather(*get_timeline_id_coros, return_exceptions=True)
             assert len(tenant_ids) == len(gathered)
             tenant_and_timline_ids = []
             for tid, tlids in zip(tenant_ids, gathered):
@@ -192,30 +189,60 @@ async def main_impl(args, report_out, client: Client):
         logging.info(f"spec had {len(tenant_and_timline_ids) - len(tmp)} duplicates")
     tenant_and_timline_ids = tmp
 
-    logging.info("spawn tasks")
-    concurrent_tasks_sem = asyncio.Semaphore(value=args.concurrent_tasks)
+    logging.info("create tasks and process them at specified concurrency")
+    task_q: asyncio.Queue[Tuple[str, Awaitable[Any]]] = asyncio.Queue()
+    tasks = {
+        f"{tid}:{tlid}": do_timeline(client, tid, tlid) for tid, tlid in tenant_and_timline_ids
+    }
+    for task in tasks.items():
+        task_q.put_nowait(task)
 
-    async def task(*args):
-        async with concurrent_tasks_sem:
-            return await do_timeline(*args)
+    result_q: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue()
+    taskq_handlers = []
+    for _ in range(0, args.concurrent_tasks):
 
-    tasks = [
-        asyncio.create_task(task(client, tid, tlid), name=f"{tid}:{tlid}")
-        for tid, tlid in tenant_and_timline_ids
-    ]
+        async def taskq_handler(task_q):
+            while True:
+                try:
+                    (id, fut) = task_q.get_nowait()
+                except asyncio.QueueEmpty:
+                    logging.debug("taskq_handler observed empty task_q, returning")
+                    return
+                logging.info(f"starting task {id}")
+                try:
+                    res = await fut
+                except Exception as e:
+                    res = e
+                result_q.put_nowait((id, res))
 
-    logging.info("wait for tasks to finish")
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        taskq_handlers.append(taskq_handler(task_q))
 
-    logging.info("write report")
+    async def print_progress():
+        while True:
+            await asyncio.sleep(10)
+            logging.info(f"{result_q.qsize()} / {len(tasks)} tasks done")
+
+    print_progress_task = asyncio.create_task(print_progress())
+
+    await asyncio.gather(*taskq_handlers)
+    print_progress_task.cancel()
+
+    logging.info("all tasks handled, generating report")
+
+    results = []
+    while True:
+        try:
+            results.append(result_q.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    assert task_q.empty()
+
     report: dict[str, List[str]] = {
         "completed_without_errors": [],
         "completed_with_download_errors": [],
         "raised_exception": [],
     }
-    assert len(tenant_and_timline_ids) == len(results)
-    for (tid, tlid), result in zip(tenant_and_timline_ids, results):
-        id = f"{tid}:{tlid}"
+    for id, result in results:
         logging.info(f"result for {id}: {result}")
         if isinstance(result, Completed):
             if result["failed_download_count"] == 0:
@@ -256,6 +283,7 @@ if __name__ == "__main__":
         "--concurrent-tasks",
         required=False,
         default=1,
+        type=int,
         help="Max concurrent download tasks created & polled by this script",
     )
     parser.add_argument(
@@ -265,14 +293,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--verbose",
-        type=bool,
+        action="store_true",
         help="enable verbose logging",
     )
     args = parser.parse_args()
 
     level = logging.INFO
     if args.verbose:
-        logging.basicConfig(level=logging.DEBUG)
+        level = logging.DEBUG
     logging.basicConfig(
         format="%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
         datefmt="%Y-%m-%d:%H:%M:%S",
