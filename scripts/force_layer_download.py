@@ -21,6 +21,12 @@ class Client:
     async def close(self):
         await self.sess.close()
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_t, exc_v, exc_tb):
+        await self.close()
+
     async def get_tenant_ids(self):
         resp = await self.sess.get(f"{self.endpoint}/v1/tenant")
         body = await resp.json()
@@ -136,12 +142,10 @@ def handle_sigint():
 
 
 async def main(args):
-    client = Client(args.pageserver_http_endpoint)
 
-    with open(args.report_output, "w") as report_out:
-        exit_code = await main_impl(args, report_out, client)
-
-    await client.close()
+    async with Client(args.pageserver_http_endpoint) as client:
+        with open(args.report_output, "w") as report_out:
+            exit_code = await main_impl(args, report_out, client)
 
     return exit_code
 
