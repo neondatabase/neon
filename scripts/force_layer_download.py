@@ -14,13 +14,14 @@ class ClientException(Exception):
 
 class Client:
     def __init__(self, pageserver_api_endpoint: str):
-        self.sess = aiohttp.ClientSession(pageserver_api_endpoint)
+        self.endpoint = pageserver_api_endpoint
+        self.sess = aiohttp.ClientSession()
 
     async def close(self):
         await self.sess.close()
 
     async def get_tenant_ids(self):
-        resp = await self.sess.get("/v1/tenant")
+        resp = await self.sess.get(f"{self.endpoint}/v1/tenant")
         body = await resp.json()
         if not resp.ok:
             raise ClientException(f"{resp}")
@@ -29,7 +30,7 @@ class Client:
         return [t["id"] for t in body]
 
     async def get_timeline_ids(self, tenant_id):
-        resp = await self.sess.get(f"/v1/tenant/{tenant_id}/timeline")
+        resp = await self.sess.get(f"{self.endpoint}/v1/tenant/{tenant_id}/timeline")
         body = await resp.json()
         if not resp.ok:
             raise ClientException(f"{resp}")
@@ -40,7 +41,7 @@ class Client:
     async def timeline_spawn_download_remote_layers(self, tenant_id, timeline_id, ongoing_ok=False):
 
         resp = await self.sess.post(
-            f"/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+            f"{self.endpoint}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
         )
         body = await resp.json()
         if resp.status == 409:
@@ -61,7 +62,7 @@ class Client:
         timeline_id,
     ):
         resp = await self.sess.get(
-            f"/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+            f"{self.endpoint}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
         )
         body = await resp.json()
 
