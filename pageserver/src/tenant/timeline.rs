@@ -1710,8 +1710,8 @@ impl Timeline {
                 continue 'outer;
             }
 
-            #[allow(unused_labels, clippy::never_loop)] // see comment at bottom of this loop
-            'layer_map_search: loop {
+            #[allow(clippy::never_loop)] // see comment at bottom of this loop
+            '_layer_map_search: loop {
                 let remote_layer = {
                     let layers = timeline.layers.read().unwrap();
 
