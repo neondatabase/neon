@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import logging
+import signal
 import sys
 from typing import Any, List, Tuple
 
@@ -66,52 +67,72 @@ class Client:
         )
         body = await resp.json()
 
-        if not resp.ok:
+        if resp.status == 404:
+            return None
+        elif not resp.ok:
             raise ClientException(f"{resp}")
 
         return body
-
-    async def timeline_download_remote_layers(
-        self,
-        tenant_id,
-        timeline_id,
-    ):
-        """
-        Spawn download_remote_layers task for given timeline,
-        then poll until the download has reached a terminal state.
-        If the terminal state is not 'Completed', the method panics.
-        The caller is responsible for inspecting `failed_download_count`.
-        """
-        spawn_res = await self.timeline_spawn_download_remote_layers(
-            tenant_id, timeline_id, ongoing_ok=False
-        )
-        while True:
-            st = await self.timeline_poll_download_remote_layers_status(tenant_id, timeline_id)
-            logging.info("{tenant_id}:{timeline_id} state is: {st}")
-
-            if spawn_res["task_id"] != st["task_id"]:
-                raise ClientException("download task ids changed while polling")
-
-            if st["state"] == "Running":
-                await asyncio.sleep(10)
-                continue
-
-            if st["state"] != "Completed":
-                raise ClientException(
-                    f"download task reached terminal state != Completed: {st['state']}"
-                )
-
-            return st
 
 
 class Completed(dict[str, Any]):
     pass
 
 
+sigint_received = asyncio.Event()
+
+
 async def do_timeline(client: Client, tenant_id, timeline_id):
-    completed = await client.timeline_download_remote_layers(tenant_id, timeline_id)
-    assert completed["state"] == "Completed"
-    return Completed(completed)
+    """
+    Spawn download_remote_layers task for given timeline,
+    then poll until the download has reached a terminal state.
+
+    If the terminal state is not 'Completed', the method raises an exception.
+    The caller is responsible for inspecting `failed_download_count`.
+
+    If there is already a task going on when this method is invoked,
+    it raises an exception.
+    """
+
+    # Don't start new downloads if user pressed SIGINT.
+    # This task will show up as "raised_exception" in the report.
+    if sigint_received.is_set():
+        raise Exception(f"{tenant_id}:{timeline_id}: not starting because SIGINT received")
+
+    # run downloads to completion
+
+    status = await client.timeline_poll_download_remote_layers_status(tenant_id, timeline_id)
+    if status is not None and status["state"] == "Running":
+        raise Exception(f"{tenant_id}:{timeline_id}: download is already running")
+
+    spawned = await client.timeline_spawn_download_remote_layers(
+        tenant_id, timeline_id, ongoing_ok=False
+    )
+
+    while True:
+        st = await client.timeline_poll_download_remote_layers_status(tenant_id, timeline_id)
+        logging.info(f"{tenant_id}:{timeline_id} state is: {st}")
+
+        if spawned["task_id"] != st["task_id"]:
+            raise ClientException("download task ids changed while polling")
+
+        if st["state"] == "Running":
+            await asyncio.sleep(10)
+            continue
+
+        if st["state"] != "Completed":
+            raise ClientException(
+                f"download task reached terminal state != Completed: {st['state']}"
+            )
+
+        return Completed(st)
+
+
+def handle_sigint():
+    # https://www.roguelynn.com/words/asyncio-graceful-shutdowns/
+    global sigint_received
+    sigint_received.set()
+    logging.info("SIGINT received, asyncio event set. Will not start new downloads.")
 
 
 async def main(args):
@@ -168,12 +189,21 @@ async def main_impl(args, report_out, client: Client):
     tenant_and_timline_ids = tmp
 
     logging.info("spawn tasks")
+    concurrent_tasks_sem = asyncio.Semaphore(value=args.concurrent_tasks)
+
+    async def task(*args):
+        async with concurrent_tasks_sem:
+            return await do_timeline(*args)
+
     tasks = [
-        asyncio.create_task(do_timeline(client, tid, tlid), name=f"{tid}:{tlid}")
+        asyncio.create_task(task(client, tid, tlid), name=f"{tid}:{tlid}")
         for tid, tlid in tenant_and_timline_ids
     ]
-    logging.info("gather results")
+
+    logging.info("wait for tasks to finish")
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    logging.info("write report")
     report: dict[str, List[str]] = {
         "completed_without_errors": [],
         "completed_with_download_errors": [],
@@ -192,6 +222,7 @@ async def main_impl(args, report_out, client: Client):
             report["raised_exception"].append(id)
         else:
             raise ValueError("unexpected result type")
+    json.dump(report, report_out)
 
     logging.info("--------------------------------------------------------------------------------")
 
@@ -200,10 +231,7 @@ async def main_impl(args, report_out, client: Client):
         logging.error("One or more tasks encountered errors.")
     else:
         logging.info("All tasks reported success.")
-
-    json.dump(report, report_out)
-
-    logging.info("Inspect log for details and report file for JSON summary")
+    logging.info("Inspect log for details and report file for JSON summary.")
 
     return report_success
 
@@ -219,6 +247,12 @@ if __name__ == "__main__":
         "--pageserver-http-endpoint",
         required=True,
         help="where to write report output (default: stdout)",
+    )
+    parser.add_argument(
+        "--concurrent-tasks",
+        required=False,
+        default=1,
+        help="Max concurrent download tasks created & polled by this script",
     )
     parser.add_argument(
         "what",
@@ -242,6 +276,6 @@ if __name__ == "__main__":
     )
 
     loop = asyncio.get_event_loop()
-    exit_code = loop.run_until_complete(main(args))
 
-    sys.exit(exit_code)
+    loop.add_signal_handler(signal.SIGINT, handle_sigint)
+    sys.exit(asyncio.run(main(args)))
