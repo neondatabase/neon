@@ -596,7 +596,7 @@ impl Tenant {
                 match tenant_clone.attach().await {
                     Ok(_) => {}
                     Err(e) => {
-                        tenant_clone.set_broken();
+                        tenant_clone.set_broken(&e.to_string());
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
@@ -860,7 +860,7 @@ impl Tenant {
                 match tenant_clone.load().await {
                     Ok(()) => {}
                     Err(err) => {
-                        tenant_clone.set_broken();
+                        tenant_clone.set_broken(&err.to_string());
                         error!("could not load tenant {tenant_id}: {err:?}");
                     }
                 }
@@ -1496,7 +1496,7 @@ impl Tenant {
         });
     }
 
-    pub fn set_broken(&self) {
+    pub fn set_broken(&self, reason: &str) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Active => {
@@ -1505,18 +1505,22 @@ impl Tenant {
                     // activated should never be marked as broken. We cope with it the best
                     // we can, but it shouldn't happen.
                     *current_state = TenantState::Broken;
-                    warn!("Changing Active tenant to Broken state");
+                    warn!("Changing Active tenant to Broken state, reason: {}", reason);
                 }
                 TenantState::Broken => {
                     // This shouldn't happen either
-                    warn!("Tenant is already broken");
+                    warn!("Tenant is already in Broken state");
                 }
                 TenantState::Stopping => {
                     // This shouldn't happen either
                     *current_state = TenantState::Broken;
-                    warn!("Marking Stopping tenant as Broken");
+                    warn!(
+                        "Marking Stopping tenant as Broken state, reason: {}",
+                        reason
+                    );
                 }
                 TenantState::Loading | TenantState::Attaching => {
+                    info!("Setting tenant as Broken state, reason: {}", reason);
                     *current_state = TenantState::Broken;
                 }
             }
