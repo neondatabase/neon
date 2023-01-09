@@ -839,7 +839,9 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        target_region: [ us-east-2 ]
+        target_region: [ eu-west-1, us-east-2 ]
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
