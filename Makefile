@@ -108,12 +108,15 @@ postgres-%: postgres-configure-% \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
+	+@echo "Compiling bloom $*"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/bloom install
 
 .PHONY: postgres-clean-%
 postgres-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/bloom clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
 
 .PHONY: neon-pg-ext-%
