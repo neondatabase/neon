@@ -76,6 +76,12 @@ class Client:
         tenant_id,
         timeline_id,
     ):
+        """
+        Spawn download_remote_layers task for given timeline,
+        then poll until the download has reached a terminal state.
+        If the terminal state is not 'Completed', the method panics.
+        The caller is responsible for inspecting `failed_download_count`.
+        """
         spawn_res = await self.timeline_spawn_download_remote_layers(
             tenant_id, timeline_id, ongoing_ok=False
         )
@@ -86,9 +92,14 @@ class Client:
             if spawn_res["task_id"] != st["task_id"]:
                 raise ClientException("download task ids changed while polling")
 
-            if st["state"] != "Completed":
+            if st["state"] == "Running":
                 await asyncio.sleep(10)
                 continue
+
+            if st["state"] != "Completed":
+                raise ClientException(
+                    f"download task reached terminal state != Completed: {st['state']}"
+                )
 
             return st
 
