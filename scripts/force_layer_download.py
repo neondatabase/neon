@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Awaitable, List, Tuple
 
 import aiohttp
@@ -82,7 +83,11 @@ class Client:
         return body
 
 
-class Completed(dict[str, Any]):
+@dataclass
+class Completed:
+    """The status dict returned by the API"""
+
+    status: dict[str, Any]
     pass
 
 
@@ -242,7 +247,7 @@ async def main_impl(args, report_out, client: Client):
     for id, result in results:
         logging.info(f"result for {id}: {result}")
         if isinstance(result, Completed):
-            if result["failed_download_count"] == 0:
+            if result.status["failed_download_count"] == 0:
                 report["completed_without_errors"].append(id)
             else:
                 report["completed_with_download_errors"].append(id)
