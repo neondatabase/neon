@@ -4,6 +4,7 @@ import json
 import logging
 import signal
 import sys
+from collections import defaultdict
 from typing import Any, Awaitable, List, Tuple
 
 import aiohttp
@@ -237,11 +238,7 @@ async def main_impl(args, report_out, client: Client):
             break
     assert task_q.empty()
 
-    report: dict[str, List[str]] = {
-        "completed_without_errors": [],
-        "completed_with_download_errors": [],
-        "raised_exception": [],
-    }
+    report = defaultdict(list)
     for id, result in results:
         logging.info(f"result for {id}: {result}")
         if isinstance(result, Completed):
