@@ -8,13 +8,11 @@ use std::num::NonZeroUsize;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::FromRawFd;
 use std::path::Path;
-use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
 use nix::sys::mman::{MapFlags, ProtFlags};
-use shared::IntoGuard;
 
 /// C-api as defined in the `shmempipe.h`
 mod c_api;
@@ -52,10 +50,9 @@ pub struct RawSharedMemPipe {
 
     /// The processes participating in this.
     ///
-    /// First is the pageserver process, second is the single threaded walredo process.
-    ///
-    /// FIXME: these are unsafe in security barriers. use an adhoc spinlock instead?
-    pub participants: [shared::PinnedMutex<Option<u32>>; 2],
+    /// First is the pageserver process, second is the single threaded walredo process. Values are
+    /// practically Atomic<Option<u32>>, where zero means unoccupied/exited.
+    pub participants: [AtomicU32; 2],
 
     /// When non-zero, the worker side OwnedRequester::recv cannot go to sleep.
     pub to_worker_waiters: AtomicU32,
@@ -73,24 +70,12 @@ pub struct RawSharedMemPipe {
 impl SharedMemPipePtr<Created> {
     /// Wrap this in a new hopefully unique `Arc<OwnedRequester>`.
     pub fn try_acquire_requester(self) -> Option<std::sync::Arc<OwnedRequester>> {
-        let m = unsafe { Pin::new_unchecked(&self.participants[0]) };
-        let mut guard = m.try_lock().into_guard()?;
-
-        match *guard {
-            Some(x) if x == std::process::id() => {
-                // hopefully a re-acquiring
+        match self.participants[0].compare_exchange(0, std::process::id(), Relaxed, Relaxed) {
+            Ok(_zero) => {}
+            Err(_other) => {
+                return None;
             }
-            Some(_other) => return None,
-            None => {}
         }
-
-        // well, we cannot really do much more than this. I was initially planning to keep the
-        // mutex locked, but that would have zero guarantees that the thread which created this
-        // side is the one to drop it.
-        //
-        // could hold a semaphore instead?
-        *guard = Some(std::process::id());
-        drop(guard);
 
         Some(std::sync::Arc::new(OwnedRequester {
             producer: std::sync::Mutex::default(),
@@ -116,12 +101,12 @@ impl SharedMemPipePtr<Created> {
 
 impl SharedMemPipePtr<Joined> {
     pub fn try_acquire_responder(self) -> Option<OwnedResponder> {
-        let m = unsafe { Pin::new_unchecked(&self.participants[1]) };
-        let guard = m.try_lock().into_guard()?;
+        match self.participants[1].compare_exchange(0, std::process::id(), Relaxed, Relaxed) {
+            Ok(_zero) => {}
+            Err(_other) => return None,
+        }
+
         Some(OwnedResponder {
-            // Safety: the pointer `ptr` will not be remapped, and it will get dropped earlier than
-            // ptr
-            locked_mutex: unsafe { std::mem::transmute(guard) },
             ptr: self,
             remaining: None,
         })
@@ -397,8 +382,6 @@ impl OwnedRequester {
 /// This type is movable.
 #[repr(C)]
 pub struct OwnedResponder {
-    // self referential, has to be, also must be above ptr to get dropped first
-    locked_mutex: shared::MutexGuard<'static, Option<u32>>,
     /// How long currently received message is, and how much is remaining.
     remaining: Option<(u32, u32)>,
     ptr: SharedMemPipePtr<Joined>,
@@ -723,21 +706,10 @@ fn initialize_at(
         // Safety: array_assume_init is unstable
         let participants = unsafe { participants.assume_init_mut() };
 
-        let mut initialized = 0;
-
         for slot in participants.iter_mut() {
-            // panic safety: is not
-            match shared::PinnedMutex::initialize_at(slot, None) {
-                Ok(_) => initialized += 1,
-                Err(e) => {
-                    participants[..initialized]
-                        .iter_mut()
-                        // Safety: initialized up to `initialized`
-                        .for_each(|x| unsafe { x.assume_init_drop() });
-
-                    return Err(e);
-                }
-            }
+            // Panic safety: not needed, AtomicU32 don't panic.
+            slot.write(AtomicU32::new(0));
+            unsafe { slot.assume_init_mut() };
         }
     }
 
@@ -850,41 +822,17 @@ impl SharedMemPipePtr<MMapped> {
 
 impl<Stage> Drop for SharedMemPipePtr<Stage> {
     fn drop(&mut self) {
-        use shared::{MutexGuard, PinnedMutex};
-
-        // Helper for locking all of the participants.
-        fn lock_all<const N: usize>(
-            particpants: &[PinnedMutex<Option<u32>>; N],
-        ) -> [Option<MutexGuard<'_, Option<u32>>>; N] {
-            const NONE: Option<MutexGuard<'_, Option<u32>>> = None;
-
-            let mut res = [NONE; N];
-
-            for (i, m) in particpants.into_iter().enumerate() {
-                let m = unsafe { Pin::new_unchecked(m) };
-                res[i] = m.try_lock().into_guard();
-            }
-
-            res
-        }
-
         let _res = {
             if let Some(ptr) = self.ptr.take() {
-                // use another eventfd for this, something the creator takes during...?
                 if false && self.attempt_drop {
                     let shared = unsafe { ptr.as_ref() };
 
-                    // TODO: remove all this
-                    let locked = lock_all(&shared.participants);
+                    // FIXME: make sure only the owner does this
+                    shared.magic.store(0xffff_ffff, SeqCst);
 
-                    if locked.iter().all(|x| x.is_some()) {
-                        // in case anyone still joins, they'll first find this tombstone
-                        shared.magic.store(0xffff_ffff, SeqCst);
-
-                        drop(locked);
-
-                        unsafe { std::ptr::drop_in_place(ptr.as_ptr()) };
-                    }
+                    // TODO: as we no longer have anything which would require drop, perhaps this
+                    // could just be left out completly?
+                    unsafe { std::ptr::drop_in_place(ptr.as_ptr()) };
                 }
 
                 // FIXME: drop the eventfd somehow, is it dup'd or what?
@@ -895,8 +843,8 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
                 let do_unmap = self.munmap;
 
                 if false && do_unmap {
-                    // if any locks were still held by other processes, this should not be done
-                    // (link kernel robust futex doc here)
+                    // FIXME: both should do this, while the postgres side is very unlikely to do
+                    // this.
                     unsafe { nix::sys::mman::munmap(ptr.as_ptr().cast(), self.size.get()) }
                 } else {
                     Ok(())
@@ -932,9 +880,6 @@ pub fn open_existing<P: nix::NixPath + ?Sized>(
     use nix::fcntl::OFlag;
     use nix::sys::mman;
     use nix::sys::stat::Mode;
-
-    // assert!(path.is_absolute());
-    // assert!(path.as_os_str().len() < 255);
 
     let flags = OFlag::O_RDWR;
     let mode = Mode::S_IRUSR | Mode::S_IWUSR;
