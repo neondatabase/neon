@@ -33,6 +33,7 @@ psutil = "^5.9.4"
 types-psutil = "^5.9.5.4"
 types-toml = "^0.10.8"
 pytest-httpserver = "^1.0.6"
+aiohttp = "^3.8.3"
 
 [tool.poetry.dev-dependencies]
 flake8 = "^5.0.4"
