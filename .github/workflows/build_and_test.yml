@@ -794,6 +794,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -913,6 +915,8 @@ jobs:
     strategy:
       matrix:
         target_region: [ us-east-2, us-west-2, eu-central-1, ap-southeast-1 ]
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -952,6 +956,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     env:
       KUBECONFIG: .kubeconfig
     steps:
@@ -995,6 +1001,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     env:
       KUBECONFIG: .kubeconfig
     steps:
@@ -1132,6 +1140,8 @@ jobs:
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1171,6 +1181,8 @@ jobs:
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
