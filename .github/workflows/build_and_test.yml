@@ -1043,6 +1043,8 @@ jobs:
             target_cluster: dev-eu-west-1-zeta
             deploy_link_proxy: false
             deploy_legacy_scram_proxy: false
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1090,6 +1092,8 @@ jobs:
             target_cluster: dev-us-east-2-beta
           - target_region:  eu-west-1
             target_cluster: dev-eu-west-1-zeta
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
