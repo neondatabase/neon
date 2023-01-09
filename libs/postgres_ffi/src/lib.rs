@@ -220,7 +220,8 @@ pub fn prepare_initdb_command(
 
     let mut command = Command::new(pg_bin_dir.join("initdb"));
     command
-        .args(["-D", &target_dir.to_string_lossy()])
+        .arg("-D")
+        .arg(target_dir)
         .args(["-U", user])
         .args(["-E", "utf8"])
         .arg("--no-instructions")
