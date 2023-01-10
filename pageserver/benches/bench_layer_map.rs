@@ -87,6 +87,12 @@ fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn
 fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, lsn: Lsn) -> KeyPartitioning {
     let mut parts = Vec::new();
 
+    // We add a partition boundary at the start of each image layer,
+    // no matter what lsn range it covers. This is just the easiest
+    // thing to do. A better thing to do would be to get a real
+    // partitioning from some database. Even better, remove the need
+    // for key partitions by deciding where to create image layers
+    // directly based on a coverage-based difficulty map.
     let mut keys: Vec<_> = layer_map
         .iter_historic_layers()
         .filter_map(|l| {
@@ -107,10 +113,6 @@ fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, lsn: Lsn) -> 
         });
         current_key = key;
     }
-    // let max_key = Key::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap();
-    // parts.push(KeySpace {
-    //     ranges: vec![current_key..max_key],
-    // });
 
     KeyPartitioning { parts }
 }
