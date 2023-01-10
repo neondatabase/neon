@@ -1,4 +1,4 @@
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
@@ -208,6 +208,11 @@ pub struct TimelineInfo {
     pub pg_version: u32,
 
     pub state: TimelineState,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DownloadRemoteLayersTaskSpawnRequest {
+    pub max_concurrent_downloads: NonZeroUsize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
