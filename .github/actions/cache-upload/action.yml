@@ -42,7 +42,7 @@ runs:
         
         # remove each excluded folder listed
         while IFS= read -r line; do
-          rm -rvf "$line"
+          rm -rf "$line"
         done <ignore.txt
 
         time /bin/tar --posix --use-compress-program zstdmt -cf ${ARCHIVE} --exclude manifest.txt --exclude ignore.txt -P -C ${GITHUB_WORKSPACE} --files-from manifest.txt
