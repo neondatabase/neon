@@ -190,25 +190,38 @@ fn test_persistent_overlapping() {
     assert_eq!(map.query(8, 155).1, Some("Layer 6".to_string()));
 }
 
-/// Layer map that supports:
-/// - efficient historical queries
-/// - efficient append only updates
-/// - tombstones and similar methods for non-latest updates
-/// - compaction/rebuilding to remove tombstones
+/// Wrapper for PersistentLayerMap that allows us to hack around the lack
+/// of support for retroactive insertion by rebuilding the map since the
+/// change.
 ///
-/// See this for better retroactive techniques we can try
+/// Why is this needed? We most often insert new layers with newer LSNs,
+/// but during compaction we create layers with non-latest LSN, and during
+/// GC we delete historic layers.
+///
+/// Even though rebuilding is an expensive (N log N) solution to the problem,
+/// it's not critical since we do something equally expensive just to decide
+/// whether or not to create new image layers.
+///
+/// If this becomes an actual bottleneck, one solution would be to build a
+/// segment tree that holds PersistentLayerMaps. Though this would mean that
+/// we take an additional log(N) performance hit for queries, which will probably
+/// still be more critical.
+///
+/// See this for more on persistent and retroactive techniques:
 /// https://www.youtube.com/watch?v=WqCWghETNDc&t=581s
-///
-/// Layer type is abstracted as Value to make unit testing easier.
 pub struct RetroactiveLayerMap<Value> {
     /// A persistent layer map that we rebuild when we need to retroactively update
     map: PersistentLayerMap<Value>,
 
     /// We buffer insertion into the PersistentLayerMap to decrease the number of rebuilds.
+    ///
+    /// We implicitly assume that layers are identified by their key and lsn range.
     /// A value of None means we want to delete this item.
     buffer: BTreeMap<(u64, u64, i128, i128, bool), Option<Value>>,
 
     /// All current layers. This is not used for search. Only to make rebuilds easier.
+    ///
+    /// We implicitly assume that layers are identified by their key and lsn range.
     layers: BTreeMap<(u64, u64, i128, i128, bool), Value>,
 }
 
@@ -299,29 +312,30 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         self.map.trim(&0);
     }
 
-    pub fn query(self: &Self, key: i128, lsn: u64) -> (Option<Value>, Option<Value>) {
-        if !self.buffer.is_empty() {
-            panic!("rebuild pls")
-        }
-
-        self.map.query(key, lsn)
-    }
-
-    pub fn get_version(self: &Self, lsn: u64) -> Option<&LatestLayerMap<Value>> {
-        if !self.buffer.is_empty() {
-            panic!("rebuild pls")
-        }
-
-        self.map.get_version(lsn)
-    }
-
+    /// Iterate all the layers
     pub fn iter(self: &Self) -> impl '_ + Iterator<Item = Value> {
+        // NOTE we can actually perform this without rebuilding,
+        //      but it's not necessary for now.
         if !self.buffer.is_empty() {
             panic!("rebuild pls")
         }
 
         self.layers.iter().map(|(_, v)| v.clone())
     }
+
+    /// Return a reference to a queryable map, assuming all updates
+    /// have already been processed using self.rebuild()
+    pub fn get(self: &Self) -> anyhow::Result<&PersistentLayerMap<Value>> {
+        // NOTE we error here instead of implicitly rebuilding because
+        //      rebuilding is somewhat expensive.
+        // TODO maybe implicitly rebuild and log/sentry an error?
+        if !self.buffer.is_empty() {
+            anyhow::bail!("rebuild required")
+        }
+
+        Ok(&self.map)
+    }
+
 }
 
 #[test]
@@ -337,7 +351,7 @@ fn test_retroactive_regression_1() {
 
     map.rebuild();
 
-    assert_eq!(map.query(100, 23761457).0, Some("sdfsdfs".to_string()));
+    assert_eq!(map.get().unwrap().query(100, 23761457).0, Some("sdfsdfs".to_string()));
 }
 
 #[test]
@@ -357,17 +371,17 @@ fn test_retroactive_simple() {
     map.rebuild();
 
     // Query key 4
-    assert_eq!(map.query(4, 90).1, None);
-    assert_eq!(map.query(4, 102).1, Some("Image 1".to_string()));
-    assert_eq!(map.query(4, 107).1, Some("Delta 1".to_string()));
-    assert_eq!(map.query(4, 115).1, Some("Image 2".to_string()));
-    assert_eq!(map.query(4, 125).1, Some("Image 3".to_string()));
+    assert_eq!(map.get().unwrap().query(4, 90).1, None);
+    assert_eq!(map.get().unwrap().query(4, 102).1, Some("Image 1".to_string()));
+    assert_eq!(map.get().unwrap().query(4, 107).1, Some("Delta 1".to_string()));
+    assert_eq!(map.get().unwrap().query(4, 115).1, Some("Image 2".to_string()));
+    assert_eq!(map.get().unwrap().query(4, 125).1, Some("Image 3".to_string()));
 
     // Remove Image 3
     map.remove(4..6, 120..121, true);
     map.rebuild();
 
     // Check deletion worked
-    assert_eq!(map.query(4, 125).1, Some("Image 2".to_string()));
-    assert_eq!(map.query(8, 125).1, Some("Image 4".to_string()));
+    assert_eq!(map.get().unwrap().query(4, 125).1, Some("Image 2".to_string()));
+    assert_eq!(map.get().unwrap().query(8, 125).1, Some("Image 4".to_string()));
 }

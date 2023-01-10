@@ -91,7 +91,7 @@ where
     /// 'open' and 'frozen' layers!
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
-        match self.index.query(key.to_i128(), end_lsn.0 - 1) {
+        match self.index.get().unwrap().query(key.to_i128(), end_lsn.0 - 1) {
             (None, None) => None,
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
@@ -192,7 +192,7 @@ where
             return Ok(true);
         }
 
-        let version = match self.index.get_version(lsn.end.0) {
+        let version = match self.index.get().unwrap().get_version(lsn.end.0) {
             Some(v) => v,
             None => return Ok(false),
         };
@@ -237,7 +237,7 @@ where
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<L>>)>> {
-        let version = match self.index.get_version(lsn.0 - 1) {
+        let version = match self.index.get().unwrap().get_version(lsn.0 - 1) {
             Some(v) => v,
             None => return Ok(vec![]),
         };
@@ -279,7 +279,7 @@ where
             return Ok(0);
         }
 
-        let version = match self.index.get_version(lsn.end.0 - 1) {
+        let version = match self.index.get().unwrap().get_version(lsn.end.0 - 1) {
             Some(v) => v,
             None => return Ok(0),
         };
