@@ -1,6 +1,10 @@
-//!
 //! Common traits and structs for layers
-//!
+
+mod delta_layer;
+mod filename;
+mod image_layer;
+mod inmemory_layer;
+mod remote_layer;
 
 use crate::repository::{Key, Value};
 use crate::walrecord::NeonWalRecord;
@@ -8,13 +12,19 @@ use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
 
-use super::filename::LayerFileName;
+pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
+pub use filename::{DeltaFileName, ImageFileName, LayerFileName, PathOrConf};
+pub use image_layer::{ImageLayer, ImageLayerWriter};
+pub use inmemory_layer::InMemoryLayer;
+pub use remote_layer::RemoteLayer;
+
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -116,6 +126,12 @@ pub trait Layer: Send + Sync {
     fn dump(&self, verbose: bool) -> Result<()>;
 }
 
+/// Returned by [`Layer::iter`]
+pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i>;
+
+/// Returned by [`Layer::key_iter`]
+pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
+
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
@@ -141,17 +157,42 @@ pub trait PersistentLayer: Layer {
     fn filename(&self) -> LayerFileName;
 
     // Path to the layer file in the local filesystem.
-    fn local_path(&self) -> PathBuf;
+    // `None` for `RemoteLayer`.
+    fn local_path(&self) -> Option<PathBuf>;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
+    fn iter(&self) -> Result<LayerIter<'_>>;
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
         panic!("Not implemented")
     }
 
     /// Permanently remove this layer from disk.
     fn delete(&self) -> Result<()>;
+
+    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
+        None
+    }
+
+    fn is_remote_layer(&self) -> bool {
+        false
+    }
+
+    /// Returns None if the layer file size is not known.
+    ///
+    /// Should not change over the lifetime of the layer object because
+    /// current_physical_size is computed as the som of this value.
+    fn file_size(&self) -> Option<u64>;
+}
+
+pub fn downcast_remote_layer(
+    layer: &Arc<dyn PersistentLayer>,
+) -> Option<std::sync::Arc<RemoteLayer>> {
+    if layer.is_remote_layer() {
+        Arc::clone(layer).downcast_remote_layer()
+    } else {
+        None
+    }
 }

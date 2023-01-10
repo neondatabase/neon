@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Type-related stuff
-from typing import Callable, ClassVar, Iterator, Optional
+from typing import Callable, ClassVar, Dict, Iterator, Optional
 
 import pytest
 from _pytest.config import Config
@@ -135,23 +135,26 @@ class PgBenchRunResult:
 
 @dataclasses.dataclass
 class PgBenchInitResult:
-    REGEX: ClassVar[re.Pattern] = re.compile(  # type: ignore[type-arg]
-        r"done in (\d+\.\d+) s "
-        r"\("
-        r"(?:drop tables (\d+\.\d+) s)?(?:, )?"
-        r"(?:create tables (\d+\.\d+) s)?(?:, )?"
-        r"(?:client-side generate (\d+\.\d+) s)?(?:, )?"
-        r"(?:vacuum (\d+\.\d+) s)?(?:, )?"
-        r"(?:primary keys (\d+\.\d+) s)?(?:, )?"
-        r"\)\."
-    )
+    # Taken from https://github.com/postgres/postgres/blob/REL_15_1/src/bin/pgbench/pgbench.c#L5144-L5171
+    EXTRACTORS: ClassVar[Dict[str, re.Pattern]] = {  # type: ignore[type-arg]
+        "drop_tables": re.compile(r"drop tables (\d+\.\d+) s"),
+        "create_tables": re.compile(r"create tables (\d+\.\d+) s"),
+        "client_side_generate": re.compile(r"client-side generate (\d+\.\d+) s"),
+        "server_side_generate": re.compile(r"server-side generate (\d+\.\d+) s"),
+        "vacuum": re.compile(r"vacuum (\d+\.\d+) s"),
+        "primary_keys": re.compile(r"primary keys (\d+\.\d+) s"),
+        "foreign_keys": re.compile(r"foreign keys (\d+\.\d+) s"),
+        "total": re.compile(r"done in (\d+\.\d+) s"),  # Total time printed by pgbench
+    }
 
-    total: float
+    total: Optional[float]
     drop_tables: Optional[float]
     create_tables: Optional[float]
     client_side_generate: Optional[float]
+    server_side_generate: Optional[float]
     vacuum: Optional[float]
     primary_keys: Optional[float]
+    foreign_keys: Optional[float]
     duration: float
     start_timestamp: int
     end_timestamp: int
@@ -164,25 +167,35 @@ class PgBenchInitResult:
         start_timestamp: int,
         end_timestamp: int,
     ):
-        # Parses pgbench initialize output for default initialization steps (dtgvp)
+        # Parses pgbench initialize output
         # Example: done in 5.66 s (drop tables 0.05 s, create tables 0.31 s, client-side generate 2.01 s, vacuum 0.53 s, primary keys 0.38 s).
 
         last_line = stderr.splitlines()[-1]
 
-        if (m := cls.REGEX.match(last_line)) is not None:
-            total, drop_tables, create_tables, client_side_generate, vacuum, primary_keys = [
-                float(v) for v in m.groups() if v is not None
-            ]
-        else:
+        timings: Dict[str, Optional[float]] = {}
+        last_line_items = re.split(r"\(|\)|,", last_line)
+        for item in last_line_items:
+            for key, regex in cls.EXTRACTORS.items():
+                if (m := regex.match(item.strip())) is not None:
+                    if key in timings:
+                        raise RuntimeError(
+                            f"can't store pgbench results for repeated action `{key}`"
+                        )
+
+                    timings[key] = float(m.group(1))
+
+        if not timings or "total" not in timings:
             raise RuntimeError(f"can't parse pgbench initialize results from `{last_line}`")
 
         return cls(
-            total=total,
-            drop_tables=drop_tables,
-            create_tables=create_tables,
-            client_side_generate=client_side_generate,
-            vacuum=vacuum,
-            primary_keys=primary_keys,
+            total=timings["total"],
+            drop_tables=timings.get("drop_tables", 0.0),
+            create_tables=timings.get("create_tables", 0.0),
+            client_side_generate=timings.get("client_side_generate", 0.0),
+            server_side_generate=timings.get("server_side_generate", 0.0),
+            vacuum=timings.get("vacuum", 0.0),
+            primary_keys=timings.get("primary_keys", 0.0),
+            foreign_keys=timings.get("foreign_keys", 0.0),
             duration=duration,
             start_timestamp=start_timestamp,
             end_timestamp=end_timestamp,
@@ -326,8 +339,10 @@ class NeonBenchmarker:
             "drop_tables",
             "create_tables",
             "client_side_generate",
+            "server_side_generate",
             "vacuum",
             "primary_keys",
+            "foreign_keys",
         ]
         for metric in metrics:
             if (value := getattr(result, metric)) is not None:

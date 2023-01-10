@@ -32,7 +32,8 @@
 //! the corresponding remote operation with the timeline's [`RemoteTimelineClient`]:
 //!
 //! - [`RemoteTimelineClient::schedule_layer_file_upload`]  when we've created a new layer file.
-//! - [`RemoteTimelineClient::schedule_index_upload`] when we've updated the timeline metadata file.
+//! - [`RemoteTimelineClient::schedule_index_upload_for_metadata_update`] when we've updated the timeline metadata file.
+//! - [`RemoteTimelineClient::schedule_index_upload_for_file_changes`] to upload an updated index file, after we've scheduled file uploads
 //! - [`RemoteTimelineClient::schedule_layer_file_deletion`] when we've deleted one or more layer files.
 //!
 //! Internally, these functions create [`UploadOp`]s and put them in a queue.
@@ -57,7 +58,7 @@
 //! To have a consistent remote structure, it's important that uploads and
 //! deletions are performed in the right order. For example, the index file
 //! contains a list of layer files, so it must not be uploaded until all the
-//! layer files that are in its list have been succesfully uploaded.
+//! layer files that are in its list have been successfully uploaded.
 //!
 //! The contract between client and its user is that the user is responsible of
 //! scheduling operations in an order that keeps the remote consistent as
@@ -139,7 +140,7 @@
 //! Note that if we crash during file deletion between the index update
 //! that removes the file from the list of files, and deleting the remote file,
 //! the file is leaked in the remote storage. Similarly, if a new file is created
-//! and uploaded, but the pageserver dies permantently before updating the
+//! and uploaded, but the pageserver dies permanently before updating the
 //! remote index file, the new file is leaked in remote storage. We accept and
 //! tolerate that for now.
 //! Note further that we cannot easily fix this by scheduling deletes for every
@@ -147,31 +148,43 @@
 //! following two cases:
 //! - (1) We had the file locally, deleted it locally, scheduled a remote delete,
 //!   but crashed before it finished remotely.
-//! - (2) We never had the file locally because we were still in tenant attach
-//!   when we crashed. (Similar case for on-demand download in the future.)
+//! - (2) We never had the file locally because we haven't on-demand downloaded
+//!   it yet.
 //!
-//! # Downloads (= Tenant Attach)
+//! # Downloads
 //!
 //! In addition to the upload queue, [`RemoteTimelineClient`] has functions for
-//! downloading files from the remote storage. Downloads are performed immediately,
-//! independently of the uploads.
+//! downloading files from the remote storage. Downloads are performed immediately
+//! against the `RemoteStorage`, independently of the upload queue.
 //!
 //! When we attach a tenant, we perform the following steps:
 //! - create `Tenant` object in `TenantState::Attaching` state
-//! - List timelines that are present in remote storage, and download their remote [`IndexPart`]s
-//! - For each timeline, create `Timeline` struct and a `RemoteTimelineClient`, and initialize the client's upload queue with its `IndexPart`
-//! - eagerly download all the remote layers using the client's download APIs
-//! - transition tenant from `TenantState::Attaching` to `TenantState::Active` state.
+//! - List timelines that are present in remote storage, and for each:
+//!   - download their remote [`IndexPart`]s
+//!   - create `Timeline` struct and a `RemoteTimelineClient`
+//!   - initialize the client's upload queue with its `IndexPart`
+//!   - create [`RemoteLayer`] instances for layers that are referenced by `IndexPart`
+//!     but not present locally
+//!   - schedule uploads for layers that are only present locally.
+//!   - if the remote `IndexPart`'s metadata was newer than the metadata in
+//!     the local filesystem, write the remote metadata to the local filesystem
+//! - After the above is done for each timeline, open the tenant for business by
+//!   transitioning it from `TenantState::Attaching` to `TenantState::Active` state.
+//!   This starts the timelines' WAL-receivers and the tenant's GC & Compaction loops.
 //!
-//! Most of the above happens in [`Timeline::reconcile_with_remote`].
+//! Most of the above steps happen in [`Timeline::reconcile_with_remote`] or its callers.
 //! We keep track of the fact that a client is in `Attaching` state in a marker
-//! file on the local disk.
-//! However, the distinction is moot for storage sync since we call
-//! `reconcile_with_remote` for tenants both with and without the marker file.
-//!
-//! In the future, downloading will be done on-demand and `reconcile_with_remote`
-//! will only be responsible for re-scheduling upload ops after a crash of an
-//! `Active` tenant.
+//! file on the local disk. This is critical because, when we restart the pageserver,
+//! we do not want to do the `List timelines` step for each tenant that has already
+//! been successfully attached (for performance & cost reasons).
+//! Instead, for a tenant without the attach marker file, we assume that the
+//! local state is in sync or ahead of the remote state. This includes the list
+//! of all of the tenant's timelines, which is particularly critical to be up-to-date:
+//! if there's a timeline on the remote that the pageserver doesn't know about,
+//! the GC will not consider its branch point, leading to data loss.
+//! So, for a tenant with the attach marker file, we know that we do not yet have
+//! persisted all the remote timeline's metadata files locally. To exclude the
+//! risk above, we re-run the procedure for such tenants
 //!
 //! # Operating Without Remote Storage
 //!
@@ -194,38 +207,50 @@ mod upload;
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
 
-use std::collections::{HashMap, VecDeque};
-use std::fmt::Debug;
-use std::ops::DerefMut;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::ensure;
 use remote_storage::{DownloadError, GenericRemoteStorage};
+use std::ops::DerefMut;
 use tokio::runtime::Runtime;
 use tracing::{debug, info, warn};
 use tracing::{info_span, Instrument};
-
 use utils::lsn::Lsn;
 
-use self::index::IndexPart;
-
-use crate::metrics::MeasureRemoteOp;
 use crate::metrics::RemoteOpFileKind;
 use crate::metrics::RemoteOpKind;
-use crate::metrics::REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS;
-use crate::tenant::filename::LayerFileName;
+use crate::metrics::{MeasureRemoteOp, RemoteTimelineClientMetrics};
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::{
     config::PageServerConf,
-    storage_sync::index::LayerFileMetadata,
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
     tenant::metadata::TimelineMetadata,
+    tenant::upload_queue::{
+        UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
+    },
     {exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS},
 };
 
 use utils::id::{TenantId, TimelineId};
+
+use self::index::IndexPart;
+
+use super::storage_layer::LayerFileName;
+
+// Occasional network issues and such can cause remote operations to fail, and
+// that's expected. If a download fails, we log it at info-level, and retry.
+// But after FAILED_DOWNLOAD_WARN_THRESHOLD retries, we start to log it at WARN
+// level instead, as repeated failures can mean a more serious problem. If it
+// fails more than FAILED_DOWNLOAD_RETRIES times, we give up
+const FAILED_DOWNLOAD_WARN_THRESHOLD: u32 = 3;
+const FAILED_DOWNLOAD_RETRIES: u32 = 10;
+
+// Similarly log failed uploads and deletions at WARN level, after this many
+// retries. Uploads and deletions are retried forever, though.
+const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 
 /// A client for accessing a timeline's data in remote storage.
 ///
@@ -256,209 +281,42 @@ pub struct RemoteTimelineClient {
 
     upload_queue: Mutex<UploadQueue>,
 
+    metrics: Arc<RemoteTimelineClientMetrics>,
+
     storage_impl: GenericRemoteStorage,
 }
 
-// clippy warns that Uninitialized is much smaller than Initialized, which wastes
-// memory for Uninitialized variants. Doesn't matter in practice, there are not
-// that many upload queues in a running pageserver, and most of them are initialized
-// anyway.
-#[allow(clippy::large_enum_variant)]
-enum UploadQueue {
-    Uninitialized,
-    Initialized(UploadQueueInitialized),
-    Stopped(UploadQueueStopped),
-}
-
-impl UploadQueue {
-    fn as_str(&self) -> &'static str {
-        match self {
-            UploadQueue::Uninitialized => "Uninitialized",
-            UploadQueue::Initialized(_) => "Initialized",
-            UploadQueue::Stopped(_) => "Stopped",
-        }
-    }
-}
-
-/// This keeps track of queued and in-progress tasks.
-struct UploadQueueInitialized {
-    /// Counter to assign task IDs
-    task_counter: u64,
-
-    /// All layer files stored in the remote storage, taking into account all
-    /// in-progress and queued operations
-    latest_files: HashMap<LayerFileName, LayerFileMetadata>,
-
-    /// Metadata stored in the remote storage, taking into account all
-    /// in-progress and queued operations.
-    /// DANGER: do not return to outside world, e.g., safekeepers.
-    latest_metadata: TimelineMetadata,
-
-    /// `disk_consistent_lsn` from the last metadata file that was successfully
-    /// uploaded. `Lsn(0)` if nothing was uploaded yet.
-    /// Unlike `latest_files` or `latest_metadata`, this value is never ahead.
-    /// Safekeeper can rely on it to make decisions for WAL storage.
-    last_uploaded_consistent_lsn: Lsn,
-
-    // Breakdown of different kinds of tasks currently in-progress
-    num_inprogress_layer_uploads: usize,
-    num_inprogress_metadata_uploads: usize,
-    num_inprogress_deletions: usize,
-
-    /// Tasks that are currently in-progress. In-progress means that a tokio Task
-    /// has been launched for it. An in-progress task can be busy uploading, but it can
-    /// also be waiting on the `concurrency_limiter` Semaphore in S3Bucket, or it can
-    /// be waiting for retry in `exponential_backoff`.
-    inprogress_tasks: HashMap<u64, Arc<UploadTask>>,
-
-    /// Queued operations that have not been launched yet. They might depend on previous
-    /// tasks to finish. For example, metadata upload cannot be performed before all
-    /// preceding layer file uploads have completed.
-    queued_operations: VecDeque<UploadOp>,
-}
-
-struct UploadQueueStopped {
-    last_uploaded_consistent_lsn: Lsn,
-}
-
-impl UploadQueue {
-    fn initialize_empty_remote(
-        &mut self,
-        metadata: &TimelineMetadata,
-    ) -> anyhow::Result<&mut UploadQueueInitialized> {
-        match self {
-            UploadQueue::Uninitialized => (),
-            UploadQueue::Initialized(_) | UploadQueue::Stopped(_) => {
-                anyhow::bail!("already initialized, state {}", self.as_str())
-            }
-        }
-
-        info!("initializing upload queue for empty remote");
-
-        let state = UploadQueueInitialized {
-            // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
-            latest_files: HashMap::new(),
-            latest_metadata: metadata.clone(),
-            // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
-            // safekeepers from garbage-collecting anything.
-            last_uploaded_consistent_lsn: Lsn(0),
-            // what follows are boring default initializations
-            task_counter: 0,
-            num_inprogress_layer_uploads: 0,
-            num_inprogress_metadata_uploads: 0,
-            num_inprogress_deletions: 0,
-            inprogress_tasks: HashMap::new(),
-            queued_operations: VecDeque::new(),
-        };
-
-        *self = UploadQueue::Initialized(state);
-        Ok(self.initialized_mut().expect("we just set it"))
-    }
-
-    fn initialize_with_current_remote_index_part(
-        &mut self,
-        index_part: &IndexPart,
-    ) -> anyhow::Result<&mut UploadQueueInitialized> {
-        match self {
-            UploadQueue::Uninitialized => (),
-            UploadQueue::Initialized(_) | UploadQueue::Stopped(_) => {
-                anyhow::bail!("already initialized, state {}", self.as_str())
-            }
-        }
-
-        let mut files = HashMap::with_capacity(index_part.timeline_layers.len());
-        for layer_name in &index_part.timeline_layers {
-            let layer_metadata = index_part
-                .layer_metadata
-                .get(layer_name)
-                .map(LayerFileMetadata::from)
-                .unwrap_or(LayerFileMetadata::MISSING);
-            files.insert(layer_name.to_owned(), layer_metadata);
-        }
-
-        let index_part_metadata = index_part.parse_metadata()?;
-        info!(
-            "initializing upload queue with remote index_part.disk_consistent_lsn: {}",
-            index_part_metadata.disk_consistent_lsn()
-        );
-
-        let state = UploadQueueInitialized {
-            latest_files: files,
-            latest_metadata: index_part_metadata.clone(),
-            last_uploaded_consistent_lsn: index_part_metadata.disk_consistent_lsn(),
-            // what follows are boring default initializations
-            task_counter: 0,
-            num_inprogress_layer_uploads: 0,
-            num_inprogress_metadata_uploads: 0,
-            num_inprogress_deletions: 0,
-            inprogress_tasks: HashMap::new(),
-            queued_operations: VecDeque::new(),
-        };
-
-        *self = UploadQueue::Initialized(state);
-        Ok(self.initialized_mut().expect("we just set it"))
-    }
-
-    fn initialized_mut(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
-        match self {
-            UploadQueue::Uninitialized | UploadQueue::Stopped(_) => {
-                anyhow::bail!("queue is in state {}", self.as_str())
-            }
-            UploadQueue::Initialized(x) => Ok(x),
-        }
-    }
-}
-
-/// An in-progress upload or delete task.
-#[derive(Debug)]
-struct UploadTask {
-    /// Unique ID of this task. Used as the key in `inprogress_tasks` above.
-    task_id: u64,
-    retries: AtomicU32,
-
-    op: UploadOp,
-}
-
-#[derive(Debug)]
-enum UploadOp {
-    /// Upload a layer file
-    UploadLayer(LayerFileName, LayerFileMetadata),
-
-    /// Upload the metadata file
-    UploadMetadata(IndexPart, Lsn),
-
-    /// Delete a file.
-    Delete(RemoteOpFileKind, LayerFileName),
-
-    /// Barrier. When the barrier operation is reached,
-    Barrier(tokio::sync::watch::Sender<()>),
-}
-
-impl std::fmt::Display for UploadOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            UploadOp::UploadLayer(path, metadata) => {
-                write!(
-                    f,
-                    "UploadLayer({}, size={:?})",
-                    path.file_name(),
-                    metadata.file_size()
-                )
-            }
-            UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
-            UploadOp::Delete(_, path) => write!(f, "Delete({})", path.file_name()),
-            UploadOp::Barrier(_) => write!(f, "Barrier"),
-        }
-    }
-}
-
 impl RemoteTimelineClient {
+    ///
+    /// Create a remote storage client for given timeline
+    ///
+    /// Note: the caller must initialize the upload queue before any uploads can be scheduled,
+    /// by calling init_upload_queue.
+    ///
+    pub fn new(
+        remote_storage: GenericRemoteStorage,
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> RemoteTimelineClient {
+        RemoteTimelineClient {
+            conf,
+            runtime: &BACKGROUND_RUNTIME,
+            tenant_id,
+            timeline_id,
+            storage_impl: remote_storage,
+            upload_queue: Mutex::new(UploadQueue::Uninitialized),
+            metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
+        }
+    }
+
     /// Initialize the upload queue for a remote storage that already received
     /// an index file upload, i.e., it's not empty.
     /// The given `index_part` must be the one on the remote.
     pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_with_current_remote_index_part(index_part)?;
+        self.update_remote_physical_size_gauge(Some(index_part));
         Ok(())
     }
 
@@ -470,6 +328,7 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_empty_remote(local_metadata)?;
+        self.update_remote_physical_size_gauge(None);
         Ok(())
     }
 
@@ -481,6 +340,24 @@ impl RemoteTimelineClient {
         }
     }
 
+    fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
+        let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
+            current_remote_index_part
+                .layer_metadata
+                .values()
+                // If we don't have the file size for the layer, don't account for it in the metric.
+                .map(|ilmd| ilmd.file_size.unwrap_or(0))
+                .sum()
+        } else {
+            0
+        };
+        self.metrics.remote_physical_size_gauge().set(size);
+    }
+
+    pub fn get_remote_physical_size(&self) -> u64 {
+        self.metrics.remote_physical_size_gauge().get()
+    }
+
     //
     // Download operations.
     //
@@ -490,6 +367,10 @@ impl RemoteTimelineClient {
 
     /// Download index file
     pub async fn download_index_file(&self) -> Result<IndexPart, DownloadError> {
+        let _unfinished_gauge_guard = self
+            .metrics
+            .call_begin(&RemoteOpFileKind::Index, &RemoteOpKind::Download);
+
         download::download_index_part(
             self.conf,
             &self.storage_impl,
@@ -501,6 +382,7 @@ impl RemoteTimelineClient {
             self.timeline_id,
             RemoteOpFileKind::Index,
             RemoteOpKind::Download,
+            Arc::clone(&self.metrics),
         )
         .await
     }
@@ -515,21 +397,27 @@ impl RemoteTimelineClient {
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
-        let downloaded_size = download::download_layer_file(
-            self.conf,
-            &self.storage_impl,
-            self.tenant_id,
-            self.timeline_id,
-            layer_file_name,
-            layer_metadata,
-        )
-        .measure_remote_op(
-            self.tenant_id,
-            self.timeline_id,
-            RemoteOpFileKind::Layer,
-            RemoteOpKind::Download,
-        )
-        .await?;
+        let downloaded_size = {
+            let _unfinished_gauge_guard = self
+                .metrics
+                .call_begin(&RemoteOpFileKind::Layer, &RemoteOpKind::Download);
+            download::download_layer_file(
+                self.conf,
+                &self.storage_impl,
+                self.tenant_id,
+                self.timeline_id,
+                layer_file_name,
+                layer_metadata,
+            )
+            .measure_remote_op(
+                self.tenant_id,
+                self.timeline_id,
+                RemoteOpFileKind::Layer,
+                RemoteOpKind::Download,
+                Arc::clone(&self.metrics),
+            )
+            .await?
+        };
 
         // Update the metadata for given layer file. The remote index file
         // might be missing some information for the file; this allows us
@@ -539,7 +427,17 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
             if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
-                upgraded.merge(&new_metadata);
+                if upgraded.merge(&new_metadata) {
+                    upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+                }
+                // If we don't do an index file upload inbetween here and restart,
+                // the value will go back down after pageserver restart, since we will
+                // have lost this data point.
+                // But, we upload index part fairly frequently, and restart pageserver rarely.
+                // So, by accounting eagerly, we present a most-of-the-time-more-accurate value sooner.
+                self.metrics
+                    .remote_physical_size_gauge()
+                    .add(downloaded_size);
             } else {
                 // The file should exist, since we just downloaded it.
                 warn!(
@@ -556,14 +454,20 @@ impl RemoteTimelineClient {
     //
 
     ///
-    /// Launch an index-file upload operation in the background.
+    /// Launch an index-file upload operation in the background, with
+    /// updated metadata.
     ///
     /// The upload will be added to the queue immediately, but it
     /// won't be performed until all previosuly scheduled layer file
     /// upload operations have completed successfully.  This is to
     /// ensure that when the index file claims that layers X, Y and Z
-    /// exist in remote storage, they really do.
-    pub fn schedule_index_upload(
+    /// exist in remote storage, they really do. To wait for the upload
+    /// to complete, use `wait_completion`.
+    ///
+    /// If there were any changes to the list of files, i.e. if any
+    /// layer file uploads were scheduled, since the last index file
+    /// upload, those will be included too.
+    pub fn schedule_index_upload_for_metadata_update(
         self: &Arc<Self>,
         metadata: &TimelineMetadata,
     ) -> anyhow::Result<()> {
@@ -574,26 +478,60 @@ impl RemoteTimelineClient {
         // ahead of what's _actually_ on the remote during index upload.
         upload_queue.latest_metadata = metadata.clone();
 
+        let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
+        self.schedule_index_upload(upload_queue, metadata_bytes);
+
+        Ok(())
+    }
+
+    ///
+    /// Launch an index-file upload operation in the background, if necessary.
+    ///
+    /// Use this function to schedule the update of the index file after
+    /// scheduling file uploads or deletions. If no file uploads or deletions
+    /// have been scheduled since the last index file upload, this does
+    /// nothing.
+    ///
+    /// Like schedule_index_upload_for_metadata_update(), this merely adds
+    /// the upload to the upload queue and returns quickly.
+    pub fn schedule_index_upload_for_file_changes(self: &Arc<Self>) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
+            let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
+            self.schedule_index_upload(upload_queue, metadata_bytes);
+        }
+
+        Ok(())
+    }
+
+    /// Launch an index-file upload operation in the background (internal function)
+    fn schedule_index_upload(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        metadata_bytes: Vec<u8>,
+    ) {
+        info!(
+            "scheduling metadata upload with {} files ({} changed)",
+            upload_queue.latest_files.len(),
+            upload_queue.latest_files_changes_since_metadata_upload_scheduled,
+        );
+
         let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
 
         let index_part = IndexPart::new(
             upload_queue.latest_files.clone(),
             disk_consistent_lsn,
-            upload_queue.latest_metadata.to_bytes()?,
+            metadata_bytes,
         );
         let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
-        self.update_upload_queue_unfinished_metric(1, &op);
+        self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
-
-        info!(
-            "scheduled metadata upload with {} files",
-            upload_queue.latest_files.len()
-        );
+        upload_queue.latest_files_changes_since_metadata_upload_scheduled = 0;
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
-
-        Ok(())
     }
 
     ///
@@ -617,9 +555,10 @@ impl RemoteTimelineClient {
         upload_queue
             .latest_files
             .insert(layer_file_name.clone(), layer_metadata.clone());
+        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
 
         let op = UploadOp::UploadLayer(layer_file_name.clone(), layer_metadata.clone());
-        self.update_upload_queue_unfinished_metric(1, &op);
+        self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
 
         info!(
@@ -635,8 +574,11 @@ impl RemoteTimelineClient {
     ///
     /// Launch a delete operation in the background.
     ///
-    /// The deletion won't actually be performed, until all preceding
-    /// upload operations have completed succesfully.
+    /// Note: This schedules an index file upload before the deletions.  The
+    /// deletion won't actually be performed, until any previously scheduled
+    /// upload operations, and the index file upload, have completed
+    /// succesfully.
+    ///
     pub fn schedule_layer_file_deletion(
         self: &Arc<Self>,
         names: &[LayerFileName],
@@ -647,7 +589,6 @@ impl RemoteTimelineClient {
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
         // so we don't need update it. Just serialize it.
         let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
-        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
 
         // Update the remote index file, removing the to-be-deleted files from the index,
         // before deleting the actual files.
@@ -659,21 +600,17 @@ impl RemoteTimelineClient {
         let no_bail_here = || {
             for name in names {
                 upload_queue.latest_files.remove(name);
+                upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
             }
 
-            let index_part = IndexPart::new(
-                upload_queue.latest_files.clone(),
-                disk_consistent_lsn,
-                metadata_bytes,
-            );
-            let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
-            self.update_upload_queue_unfinished_metric(1, &op);
-            upload_queue.queued_operations.push_back(op);
+            if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
+                self.schedule_index_upload(upload_queue, metadata_bytes);
+            }
 
             // schedule the actual deletions
             for name in names {
                 let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone());
-                self.update_upload_queue_unfinished_metric(1, &op);
+                self.calls_unfinished_metric_begin(&op);
                 upload_queue.queued_operations.push_back(op);
                 info!("scheduled layer file deletion {}", name.file_name());
             }
@@ -825,7 +762,7 @@ impl RemoteTimelineClient {
             // upload finishes or times out soon enough.
             if task_mgr::is_shutdown_requested() {
                 info!("upload task cancelled by shutdown request");
-                self.update_upload_queue_unfinished_metric(-1, &task.op);
+                self.calls_unfinished_metric_end(&task.op);
                 self.stop();
                 return;
             }
@@ -847,11 +784,12 @@ impl RemoteTimelineClient {
                         self.timeline_id,
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
+                        Arc::clone(&self.metrics),
                     )
                     .await
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
-                    upload::upload_index_part(
+                    let res = upload::upload_index_part(
                         self.conf,
                         &self.storage_impl,
                         self.tenant_id,
@@ -863,8 +801,13 @@ impl RemoteTimelineClient {
                         self.timeline_id,
                         RemoteOpFileKind::Index,
                         RemoteOpKind::Upload,
+                        Arc::clone(&self.metrics),
                     )
-                    .await
+                    .await;
+                    if res.is_ok() {
+                        self.update_remote_physical_size_gauge(Some(index_part));
+                    }
+                    res
                 }
                 UploadOp::Delete(metric_file_kind, ref layer_file_name) => {
                     let path = &self
@@ -877,6 +820,7 @@ impl RemoteTimelineClient {
                             self.timeline_id,
                             *metric_file_kind,
                             RemoteOpKind::Delete,
+                            Arc::clone(&self.metrics),
                         )
                         .await
                 }
@@ -895,12 +839,14 @@ impl RemoteTimelineClient {
                 Err(e) => {
                     let retries = task.retries.fetch_add(1, Ordering::SeqCst);
 
-                    // uploads may fail due to rate limts (IAM, S3) or spurious network and external errors
-                    // such issues are relatively regular, so don't use WARN or ERROR to avoid alerting
-                    // people and tests until the retries are definitely causing delays.
-                    if retries < 3 {
+                    // Uploads can fail due to rate limits (IAM, S3), spurious network problems,
+                    // or other external reasons. Such issues are relatively regular, so log them
+                    // at info level at first, and only WARN if the operation fails repeatedly.
+                    //
+                    // (See similar logic for downloads in `download::download_retry`)
+                    if retries < FAILED_UPLOAD_WARN_THRESHOLD {
                         info!(
-                            "failed to perform remote task {}, will retry (attempt {}): {:?}",
+                            "failed to perform remote task {}, will retry (attempt {}): {:#}",
                             task.op, retries, e
                         );
                     } else {
@@ -964,28 +910,40 @@ impl RemoteTimelineClient {
             // Launch any queued tasks that were unblocked by this one.
             self.launch_queued_tasks(upload_queue);
         }
-        self.update_upload_queue_unfinished_metric(-1, &task.op);
+        self.calls_unfinished_metric_end(&task.op);
     }
 
-    fn update_upload_queue_unfinished_metric(&self, delta: i64, op: &UploadOp) {
-        let (file_kind, op_kind) = match op {
+    fn calls_unfinished_metric_impl(
+        &self,
+        op: &UploadOp,
+    ) -> Option<(RemoteOpFileKind, RemoteOpKind)> {
+        let res = match op {
             UploadOp::UploadLayer(_, _) => (RemoteOpFileKind::Layer, RemoteOpKind::Upload),
             UploadOp::UploadMetadata(_, _) => (RemoteOpFileKind::Index, RemoteOpKind::Upload),
             UploadOp::Delete(file_kind, _) => (*file_kind, RemoteOpKind::Delete),
             UploadOp::Barrier(_) => {
                 // we do not account these
-                return;
+                return None;
             }
         };
-        REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS
-            .get_metric_with_label_values(&[
-                &self.tenant_id.to_string(),
-                &self.timeline_id.to_string(),
-                file_kind.as_str(),
-                op_kind.as_str(),
-            ])
-            .unwrap()
-            .add(delta)
+        Some(res)
+    }
+
+    fn calls_unfinished_metric_begin(&self, op: &UploadOp) {
+        let (file_kind, op_kind) = match self.calls_unfinished_metric_impl(op) {
+            Some(x) => x,
+            None => return,
+        };
+        let guard = self.metrics.call_begin(&file_kind, &op_kind);
+        guard.will_decrement_manually(); // in unfinished_ops_metric_end()
+    }
+
+    fn calls_unfinished_metric_end(&self, op: &UploadOp) {
+        let (file_kind, op_kind) = match self.calls_unfinished_metric_impl(op) {
+            Some(x) => x,
+            None => return,
+        };
+        self.metrics.call_end(&file_kind, &op_kind);
     }
 
     fn stop(&self) {
@@ -1036,7 +994,7 @@ impl RemoteTimelineClient {
 
                 // Tear down queued ops
                 for op in qi.queued_operations.into_iter() {
-                    self.update_upload_queue_unfinished_metric(-1, &op);
+                    self.calls_unfinished_metric_end(&op);
                     // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
                     // which is exactly what we want to happen.
                     drop(op);
@@ -1047,28 +1005,6 @@ impl RemoteTimelineClient {
             }
         }
     }
-}
-
-///
-/// Create a remote storage client for given timeline
-///
-/// Note: the caller must initialize the upload queue before any uploads can be scheduled,
-/// by calling init_upload_queue.
-///
-pub fn create_remote_timeline_client(
-    remote_storage: GenericRemoteStorage,
-    conf: &'static PageServerConf,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-) -> anyhow::Result<RemoteTimelineClient> {
-    Ok(RemoteTimelineClient {
-        conf,
-        runtime: &BACKGROUND_RUNTIME,
-        tenant_id,
-        timeline_id,
-        storage_impl: remote_storage,
-        upload_queue: Mutex::new(UploadQueue::Uninitialized),
-    })
 }
 
 #[cfg(test)]
@@ -1180,6 +1116,10 @@ mod tests {
             timeline_id: TIMELINE_ID,
             storage_impl,
             upload_queue: Mutex::new(UploadQueue::Uninitialized),
+            metrics: Arc::new(RemoteTimelineClientMetrics::new(
+                &harness.tenant_id,
+                &TIMELINE_ID,
+            )),
         });
 
         let remote_timeline_dir =
@@ -1211,15 +1151,19 @@ mod tests {
             assert!(upload_queue.queued_operations.is_empty());
             assert!(upload_queue.inprogress_tasks.len() == 2);
             assert!(upload_queue.num_inprogress_layer_uploads == 2);
+
+            // also check that `latest_file_changes` was updated
+            assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 2);
         }
 
         // Schedule upload of index. Check that it is queued
         let metadata = dummy_metadata(Lsn(0x20));
-        client.schedule_index_upload(&metadata)?;
+        client.schedule_index_upload_for_metadata_update(&metadata)?;
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();
             assert!(upload_queue.queued_operations.len() == 1);
+            assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 0);
         }
 
         // Wait for the uploads to finish
@@ -1255,6 +1199,7 @@ mod tests {
             assert!(upload_queue.inprogress_tasks.len() == 1);
             assert!(upload_queue.num_inprogress_layer_uploads == 1);
             assert!(upload_queue.num_inprogress_deletions == 0);
+            assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 0);
         }
         assert_remote_files(&["foo", "bar", "index_part.json"], &remote_timeline_dir);
 

@@ -193,8 +193,8 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             timeout=10,
         )
     except TimeoutExpired as exc:
-        ctl_logs = exc.stderr.decode("utf-8")
-        log.info("compute_ctl output:\n" + ctl_logs)
+        ctl_logs = (exc.stderr or b"").decode("utf-8")
+        log.info("compute_ctl output:\n{ctl_logs}")
 
     with ExternalProcessManager(Path(pgdata) / "postmaster.pid"):
         start = "starting safekeepers syncing"
@@ -240,7 +240,7 @@ class ExternalProcessManager:
         with self.pid_file:
             try:
                 os.kill(self.pid, signal.SIGTERM)
-            except os.OsError as e:
+            except OSError as e:
                 if not self.path.is_file():
                     return
                 log.info(f"Failed to kill {self.pid}, but the pidfile remains: {e}")

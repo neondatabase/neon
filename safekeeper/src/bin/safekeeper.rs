@@ -82,6 +82,9 @@ struct Args {
     /// established; plaintext otherwise.
     #[arg(long, default_value = DEFAULT_ENDPOINT, verbatim_doc_comment)]
     broker_endpoint: Uri,
+    /// Broker keepalive interval.
+    #[arg(long, value_parser= humantime::parse_duration, default_value = storage_broker::DEFAULT_KEEPALIVE_INTERVAL)]
+    broker_keepalive_interval: Duration,
     /// Peer safekeeper is considered dead after not receiving heartbeats from
     /// it during this period passed as a human readable duration.
     #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HEARTBEAT_TIMEOUT)]
@@ -126,28 +129,47 @@ fn main() -> anyhow::Result<()> {
     logging::init(LogFormat::from_config(&args.log_format)?)?;
     info!("version: {GIT_VERSION}");
 
+    let args_workdir = &args.datadir;
+    let workdir = args_workdir.canonicalize().with_context(|| {
+        format!("Failed to get the absolute path for input workdir {args_workdir:?}")
+    })?;
+
     // Change into the data directory.
-    std::env::set_current_dir(&args.datadir)?;
+    std::env::set_current_dir(&workdir)?;
 
     // Set or read our ID.
-    let id = set_id(&args.datadir, args.id.map(NodeId))?;
+    let id = set_id(&workdir, args.id.map(NodeId))?;
     if args.init {
         return Ok(());
     }
 
+    let auth = match args.auth_validation_public_key_path.as_ref() {
+        None => {
+            info!("auth is disabled");
+            None
+        }
+        Some(path) => {
+            info!("loading JWT auth key from {}", path.display());
+            Some(Arc::new(
+                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+            ))
+        }
+    };
+
     let conf = SafeKeeperConf {
-        workdir: args.datadir,
+        workdir,
         my_id: id,
         listen_pg_addr: args.listen_pg,
         listen_http_addr: args.listen_http,
         no_sync: args.no_sync,
         broker_endpoint: args.broker_endpoint,
+        broker_keepalive_interval: args.broker_keepalive_interval,
         heartbeat_timeout: args.heartbeat_timeout,
         remote_storage: args.remote_storage,
         max_offloader_lag_bytes: args.max_offloader_lag,
         backup_runtime_threads: args.wal_backup_threads,
         wal_backup_enabled: !args.disable_wal_backup,
-        auth_validation_public_key_path: args.auth_validation_public_key_path,
+        auth,
     };
 
     // initialize sentry if SENTRY_DSN is provided
@@ -177,19 +199,6 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         e
     })?;
 
-    let auth = match conf.auth_validation_public_key_path.as_ref() {
-        None => {
-            info!("auth is disabled");
-            None
-        }
-        Some(path) => {
-            info!("loading JWT auth key from {}", path.display());
-            Some(Arc::new(
-                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-            ))
-        }
-    };
-
     // Register metrics collector for active timelines. It's important to do this
     // after daemonizing, otherwise process collector will be upset.
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
@@ -203,12 +212,11 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
 
     let conf_ = conf.clone();
-    let auth_ = auth.clone();
     threads.push(
         thread::Builder::new()
             .name("http_endpoint_thread".into())
             .spawn(|| {
-                let router = http::make_router(conf_, auth_);
+                let router = http::make_router(conf_);
                 endpoint::serve_thread_main(
                     router,
                     http_listener,
@@ -221,11 +229,7 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let conf_cloned = conf.clone();
     let safekeeper_thread = thread::Builder::new()
         .name("safekeeper thread".into())
-        .spawn(|| {
-            if let Err(e) = wal_service::thread_main(conf_cloned, pg_listener, auth) {
-                info!("safekeeper thread terminated: {e}");
-            }
-        })
+        .spawn(|| wal_service::thread_main(conf_cloned, pg_listener))
         .unwrap();
 
     threads.push(safekeeper_thread);
@@ -235,7 +239,6 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         thread::Builder::new()
             .name("broker thread".into())
             .spawn(|| {
-                // TODO: add auth?
                 broker::thread_main(conf_);
             })?,
     );
@@ -304,7 +307,8 @@ fn set_id(workdir: &Path, given_id: Option<NodeId>) -> Result<NodeId> {
                 } else {
                     bail!("safekeeper id is not specified");
                 };
-                let mut f = File::create(&id_file_path)?;
+                let mut f = File::create(&id_file_path)
+                    .with_context(|| format!("Failed to create id file at {id_file_path:?}"))?;
                 f.write_all(my_id.to_string().as_bytes())?;
                 f.sync_all()?;
                 info!("initialized safekeeper id {}", my_id);

@@ -5,7 +5,7 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::{ReplicaState, Timeline};
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
-use anyhow::{bail, Context, Result};
+use anyhow::Context;
 
 use bytes::Bytes;
 use postgres_ffi::get_current_timestamp;
@@ -15,7 +15,8 @@ use std::cmp::min;
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{str, thread};
+use std::{io, str, thread};
+use utils::postgres_backend_async::QueryError;
 
 use pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
 use tokio::sync::watch::Receiver;
@@ -91,7 +92,7 @@ impl ReplicationConn {
     fn background_thread(
         mut stream_in: ReadStream,
         replica_guard: Arc<ReplicationConnGuard>,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         let replica_id = replica_guard.replica;
         let timeline = &replica_guard.timeline;
 
@@ -140,7 +141,7 @@ impl ReplicationConn {
                     // Shutdown the connection, because rust-postgres client cannot be dropped
                     // when connection is alive.
                     let _ = stream_in.shutdown(Shutdown::Both);
-                    bail!("Copy failed");
+                    anyhow::bail!("Copy failed");
                 }
                 _ => {
                     // We only handle `CopyData`, 'Sync', 'CopyFail' messages. Anything else is ignored.
@@ -160,8 +161,8 @@ impl ReplicationConn {
         spg: &mut SafekeeperPostgresHandler,
         pgb: &mut PostgresBackend,
         mut start_pos: Lsn,
-    ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.timeline_id.unwrap()).entered();
+    ) -> Result<(), QueryError> {
+        let _enter = info_span!("WAL sender", ttid = %spg.ttid).entered();
 
         let tli = GlobalTimelines::get(spg.ttid)?;
 
@@ -256,8 +257,10 @@ impl ReplicationConn {
                         // to right pageserver.
                         if tli.should_walsender_stop(replica_id) {
                             // Shut down, timeline is suspended.
-                            // TODO create proper error type for this
-                            bail!("end streaming to {:?}", spg.appname);
+                            return Err(QueryError::from(io::Error::new(
+                                io::ErrorKind::ConnectionAborted,
+                                format!("end streaming to {:?}", spg.appname),
+                            )));
                         }
 
                         // timeout expired: request pageserver status
@@ -265,8 +268,7 @@ impl ReplicationConn {
                             sent_ptr: end_pos.0,
                             timestamp: get_current_timestamp(),
                             request_reply: true,
-                        }))
-                        .context("Failed to send KeepAlive message")?;
+                        }))?;
                         continue;
                     }
                 }
@@ -301,7 +303,7 @@ impl ReplicationConn {
 const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 
 // Wait until we have commit_lsn > lsn or timeout expires. Returns latest commit_lsn.
-async fn wait_for_lsn(rx: &mut Receiver<Lsn>, lsn: Lsn) -> Result<Option<Lsn>> {
+async fn wait_for_lsn(rx: &mut Receiver<Lsn>, lsn: Lsn) -> anyhow::Result<Option<Lsn>> {
     let commit_lsn: Lsn = *rx.borrow();
     if commit_lsn > lsn {
         return Ok(Some(commit_lsn));

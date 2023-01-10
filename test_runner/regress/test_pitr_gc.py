@@ -52,6 +52,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     # run GC
     with env.pageserver.http_client() as pageserver_http:
+        pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
         pageserver_http.timeline_compact(env.initial_tenant, timeline)
         # perform aggressive GC. Data still should be kept because of the PITR setting.
         gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)

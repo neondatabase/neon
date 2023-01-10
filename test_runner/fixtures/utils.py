@@ -148,7 +148,7 @@ def get_scale_for_db(size_mb: int) -> int:
 
 
 ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"flamegraph\.svg|regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html)"
+    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html)"
 )
 
 

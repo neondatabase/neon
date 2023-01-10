@@ -44,10 +44,13 @@ pub async fn init_broker_client(conf: &'static PageServerConf) -> anyhow::Result
     let broker_endpoint = conf.broker_endpoint.clone();
 
     // Note: we do not attempt connecting here (but validate endpoints sanity).
-    let broker_client = storage_broker::connect(broker_endpoint.clone()).context(format!(
-        "Failed to create broker client to {}",
-        &conf.broker_endpoint
-    ))?;
+    let broker_client =
+        storage_broker::connect(broker_endpoint.clone(), conf.broker_keepalive_interval).context(
+            format!(
+                "Failed to create broker client to {}",
+                &conf.broker_endpoint
+            ),
+        )?;
 
     if BROKER_CLIENT.set(broker_client).is_err() {
         panic!("broker already initialized");
@@ -126,15 +129,21 @@ impl<E: Clone> TaskHandle<E> {
         match self.events_receiver.changed().await {
             Ok(()) => TaskEvent::Update((self.events_receiver.borrow()).clone()),
             Err(_task_channel_part_dropped) => {
-                TaskEvent::End(match self.join_handle.take() {
+                TaskEvent::End(match self.join_handle.as_mut() {
                     Some(jh) => {
                         if !jh.is_finished() {
                             warn!("sender is dropped while join handle is still alive");
                         }
 
-                        jh.await
+                        let res = jh
+                            .await
                             .map_err(|e| anyhow::anyhow!("Failed to join task: {e}"))
-                            .and_then(|x| x)
+                            .and_then(|x| x);
+
+                        // For cancellation-safety, drop join_handle only after successful .await.
+                        self.join_handle = None;
+
+                        res
                     }
                     None => {
                         // Another option is to have an enum, join handle or result and give away the reference to it

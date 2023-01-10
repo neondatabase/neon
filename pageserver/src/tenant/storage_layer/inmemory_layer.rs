@@ -8,7 +8,6 @@ use crate::config::PageServerConf;
 use crate::repository::{Key, Value};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter};
 use crate::tenant::block_io::BlockReader;
-use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
@@ -28,7 +27,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::RwLock;
 
-use super::storage_layer::Layer;
+use super::{DeltaLayer, DeltaLayerWriter, Layer};
 
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
@@ -97,6 +96,7 @@ impl Layer for InMemoryLayer {
         };
         self.start_lsn..end_lsn
     }
+
     fn is_incremental(&self) -> bool {
         // in-memory layer is always considered incremental.
         true

@@ -24,7 +24,9 @@ pub mod wal_service;
 pub mod wal_storage;
 
 mod timelines_global_map;
+use std::sync::Arc;
 pub use timelines_global_map::GlobalTimelines;
+use utils::auth::JwtAuth;
 
 pub mod defaults {
     pub use safekeeper_api::{
@@ -51,12 +53,13 @@ pub struct SafeKeeperConf {
     pub listen_http_addr: String,
     pub no_sync: bool,
     pub broker_endpoint: Uri,
+    pub broker_keepalive_interval: Duration,
     pub heartbeat_timeout: Duration,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
     pub backup_runtime_threads: Option<usize>,
     pub wal_backup_enabled: bool,
-    pub auth_validation_public_key_path: Option<PathBuf>,
+    pub auth: Option<Arc<JwtAuth>>,
 }
 
 impl SafeKeeperConf {
@@ -83,9 +86,10 @@ impl SafeKeeperConf {
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint"),
+            broker_keepalive_interval: Duration::from_secs(5),
             backup_runtime_threads: None,
             wal_backup_enabled: true,
-            auth_validation_public_key_path: None,
+            auth: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
         }

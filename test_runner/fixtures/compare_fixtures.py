@@ -115,6 +115,7 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
+        self.pageserver_http_client.timeline_checkpoint(self.env.initial_tenant, self.timeline)
         self.pageserver_http_client.timeline_gc(self.env.initial_tenant, self.timeline, 0)
 
     def compact(self):
@@ -176,7 +177,7 @@ class VanillaCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
-    def pg(self) -> PgProtocol:
+    def pg(self) -> VanillaPostgres:
         return self._pg
 
     @property

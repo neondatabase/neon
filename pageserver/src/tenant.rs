@@ -13,13 +13,13 @@
 
 use anyhow::{bail, Context};
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::Stream;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::sync::watch;
-use tokio_util::io::StreamReader;
-use tokio_util::io::SyncIoBridge;
+use tokio::task::JoinSet;
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 
@@ -36,7 +36,6 @@ use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -45,24 +44,25 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::metadata::TimelineMetadata;
+use self::remote_timeline_client::RemoteTimelineClient;
 use crate::config::PageServerConf;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
-use crate::storage_sync::create_remote_timeline_client;
-use crate::storage_sync::index::IndexPart;
-use crate::storage_sync::list_remote_timelines;
-use crate::storage_sync::RemoteTimelineClient;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
+use crate::tenant::remote_timeline_client::index::IndexPart;
+use crate::tenant::storage_layer::DeltaLayer;
+use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
-use crate::tenant_config::TenantConfOpt;
+
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
 use crate::walredo::WalRedoManager;
-use crate::{CheckpointConfig, TEMP_FILE_SUFFIX};
+use crate::TEMP_FILE_SUFFIX;
 pub use pageserver_api::models::TenantState;
 
 use toml_edit;
@@ -74,23 +74,25 @@ use utils::{
 
 mod blob_io;
 pub mod block_io;
-mod delta_layer;
 mod disk_btree;
 pub(crate) mod ephemeral_file;
-pub mod filename;
-mod image_layer;
-mod inmemory_layer;
 pub mod layer_map;
 
 pub mod metadata;
 mod par_fsync;
+mod remote_timeline_client;
 pub mod storage_layer;
+
+pub mod config;
+pub mod mgr;
+pub mod tasks;
+pub mod upload_queue;
 
 mod timeline;
 
 pub mod size;
 
-pub use timeline::Timeline;
+pub use timeline::{with_ondemand_download, PageReconstructError, PageReconstructResult, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -125,11 +127,11 @@ pub struct Tenant {
     timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
-    // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
+    // `timelines` mutex during all GC iteration
     // may block for a long time `get_timeline`, `get_timelines_state`,... and other operations
     // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
     // timeout...
-    gc_cs: Mutex<()>,
+    gc_cs: tokio::sync::Mutex<()>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
 
     // provides access to timeline data sitting in the remote storage
@@ -233,23 +235,17 @@ impl UninitializedTimeline<'_> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub async fn import_basebackup_from_tar(
         self,
-        mut copyin_stream: &mut Pin<&mut impl Stream<Item = io::Result<Bytes>>>,
+        copyin_stream: &mut (impl Stream<Item = io::Result<Bytes>> + Sync + Send + Unpin),
         base_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
 
-        // import_basebackup_from_tar() is not async, mainly because the Tar crate
-        // it uses is not async. So we need to jump through some hoops:
-        // - convert the input from client connection to a synchronous Read
-        // - use block_in_place()
-        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
+        let mut reader = tokio_util::io::StreamReader::new(copyin_stream);
+        import_datadir::import_basebackup_from_tar(raw_timeline, &mut reader, base_lsn)
+            .await
+            .context("Failed to import basebackup")?;
 
-        tokio::task::block_in_place(|| {
-            import_datadir::import_basebackup_from_tar(raw_timeline, reader, base_lsn)
-                .context("Failed to import basebackup")
-        })?;
-
-        // Flush loop needs to be spawned in order for checkpoint to be able to flush.
+        // Flush loop needs to be spawned in order to be able to flush.
         // We want to run proper checkpoint before we mark timeline as available to outside world
         // Thus spawning flush loop manually and skipping flush_loop setup in initialize_with_lock
         raw_timeline.maybe_spawn_flush_loop();
@@ -259,9 +255,9 @@ impl UninitializedTimeline<'_> {
         });
 
         raw_timeline
-            .checkpoint(CheckpointConfig::Flush)
+            .freeze_and_flush()
             .await
-            .context("Failed to checkpoint after basebackup import")?;
+            .context("Failed to flush after basebackup import")?;
 
         let timeline = self.initialize()?;
 
@@ -336,7 +332,7 @@ impl TimelineUninitMark {
         let uninit_mark_parent = uninit_mark_file
             .parent()
             .with_context(|| format!("Uninit mark file {uninit_mark_file:?} has no parent"))?;
-        ignore_absent_files(|| fs::remove_file(&uninit_mark_file)).with_context(|| {
+        ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
             format!("Failed to remove uninit mark file at path {uninit_mark_file:?}")
         })?;
         crashsafe::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
@@ -371,7 +367,7 @@ impl Drop for TimelineUninitMark {
 
 // We should not blindly overwrite local metadata with remote one.
 // For example, consider the following case:
-//     Checkpoint comes, we update local metadata and start upload task but after that
+//     Image layer is flushed to disk as a new delta layer, we update local metadata and start upload task but after that
 //     pageserver crashes. During startup we'll load new metadata, and then reset it
 //     to the state of remote one. But current layermap will have layers from the old
 //     metadata which is inconsistent.
@@ -480,7 +476,7 @@ impl Tenant {
             let timeline = UninitializedTimeline {
                 owning_tenant: self,
                 timeline_id,
-                raw_timeline: Some((Arc::new(dummy_timeline), TimelineUninitMark::dummy())),
+                raw_timeline: Some((dummy_timeline, TimelineUninitMark::dummy())),
             };
             // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
@@ -510,7 +506,7 @@ impl Tenant {
                         )
                         })?;
                     broken_timeline.set_state(TimelineState::Broken);
-                    timelines_accessor.insert(timeline_id, Arc::new(broken_timeline));
+                    timelines_accessor.insert(timeline_id, broken_timeline);
                     Err(e)
                 }
             }
@@ -600,7 +596,7 @@ impl Tenant {
                 match tenant_clone.attach().await {
                     Ok(_) => {}
                     Err(e) => {
-                        tenant_clone.set_broken();
+                        tenant_clone.set_broken(&e.to_string());
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
@@ -645,22 +641,62 @@ impl Tenant {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
-        let remote_timelines =
-            list_remote_timelines(remote_storage, self.conf, self.tenant_id).await?;
+        let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
+            remote_storage,
+            self.conf,
+            self.tenant_id,
+        )
+        .await?;
 
-        info!("found {} timelines", remote_timelines.len());
+        info!("found {} timelines", remote_timeline_ids.len());
 
-        let mut timeline_ancestors: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-        let mut index_parts: HashMap<TimelineId, IndexPart> = HashMap::new();
-        for (timeline_id, index_part) in remote_timelines {
-            let remote_metadata = index_part.parse_metadata().with_context(|| {
-                format!(
-                    "Failed to parse metadata file from remote storage for tenant {} timeline {}",
-                    self.tenant_id, timeline_id
-                )
-            })?;
+        // Download & parse index parts
+        let mut part_downloads = JoinSet::new();
+        for timeline_id in remote_timeline_ids {
+            let client = RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            );
+            part_downloads.spawn(
+                async move {
+                    debug!("starting index part download");
+
+                    let index_part = client
+                        .download_index_file()
+                        .await
+                        .context("download index file")?;
+
+                    let remote_metadata = index_part.parse_metadata().context("parse metadata")?;
+
+                    debug!("finished index part download");
+
+                    Result::<_, anyhow::Error>::Ok((
+                        timeline_id,
+                        client,
+                        index_part,
+                        remote_metadata,
+                    ))
+                }
+                .map(move |res| {
+                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
+                })
+                .instrument(info_span!("download_index_part", timeline=%timeline_id)),
+            );
+        }
+        // Wait for all the download tasks to complete & collect results.
+        let mut remote_clients = HashMap::new();
+        let mut index_parts = HashMap::new();
+        let mut timeline_ancestors = HashMap::new();
+        while let Some(result) = part_downloads.join_next().await {
+            // NB: we already added timeline_id as context to the error
+            let result: Result<_, anyhow::Error> = result.context("joinset task join")?;
+            let (timeline_id, client, index_part, remote_metadata) = result?;
+            debug!("successfully downloaded index part for timeline {timeline_id}");
             timeline_ancestors.insert(timeline_id, remote_metadata);
             index_parts.insert(timeline_id, index_part);
+            remote_clients.insert(timeline_id, client);
         }
 
         // For every timeline, download the metadata file, scan the local directory,
@@ -673,7 +709,7 @@ impl Tenant {
                 timeline_id,
                 index_parts.remove(&timeline_id).unwrap(),
                 remote_metadata,
-                remote_storage.clone(),
+                remote_clients.remove(&timeline_id).unwrap(),
             )
             .await
             .with_context(|| {
@@ -700,21 +736,34 @@ impl Tenant {
         Ok(())
     }
 
-    #[instrument(skip(self, index_part, remote_metadata, remote_storage), fields(timeline_id=%timeline_id))]
+    /// get size of all remote timelines
+    ///
+    /// This function relies on the index_part instead of listing the remote storage
+    ///
+    pub async fn get_remote_size(&self) -> anyhow::Result<u64> {
+        let mut size = 0;
+
+        for timeline in self.list_timelines().iter() {
+            if let Some(remote_client) = &timeline.remote_client {
+                size += remote_client.get_remote_physical_size();
+            }
+        }
+
+        Ok(size)
+    }
+
+    #[instrument(skip_all, fields(timeline_id=%timeline_id))]
     async fn load_remote_timeline(
         &self,
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
-        remote_storage: GenericRemoteStorage,
+        remote_client: RemoteTimelineClient,
     ) -> anyhow::Result<()> {
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
             .context("Failed to create new timeline directory")?;
-
-        let remote_client =
-            create_remote_timeline_client(remote_storage, self.conf, self.tenant_id, timeline_id)?;
 
         let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
             let timelines = self.timelines.lock().unwrap();
@@ -811,7 +860,7 @@ impl Tenant {
                 match tenant_clone.load().await {
                     Ok(()) => {}
                     Err(err) => {
-                        tenant_clone.set_broken();
+                        tenant_clone.set_broken(&err.to_string());
                         error!("could not load tenant {tenant_id}: {err:?}");
                     }
                 }
@@ -972,18 +1021,14 @@ impl Tenant {
             None
         };
 
-        let remote_client = self
-            .remote_storage
-            .as_ref()
-            .map(|remote_storage| {
-                create_remote_timeline_client(
-                    remote_storage.clone(),
-                    self.conf,
-                    self.tenant_id,
-                    timeline_id,
-                )
-            })
-            .transpose()?;
+        let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
+            RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            )
+        });
 
         let remote_startup_data = match &remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
@@ -1142,7 +1187,8 @@ impl Tenant {
                     ancestor_timeline.wait_lsn(*lsn).await?;
                 }
 
-                self.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
+                self.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)
+                    .await?
             }
             None => self.bootstrap_timeline(new_timeline_id, pg_version).await?,
         };
@@ -1154,17 +1200,20 @@ impl Tenant {
     /// this function is periodically called by gc task.
     /// also it can be explicitly requested through page server api 'do_gc' command.
     ///
-    /// 'target_timeline_id' specifies the timeline to GC, or None for all.
-    /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
-    /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
-    /// to make tests more deterministic.
-    /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
+    /// `target_timeline_id` specifies the timeline to GC, or None for all.
+    ///
+    /// The `horizon` an `pitr` parameters determine how much WAL history needs to be retained.
+    /// Also known as the retention period, or the GC cutoff point. `horizon` specifies
+    /// the amount of history, as LSN difference from current latest LSN on each timeline.
+    /// `pitr` specifies the same as a time difference from the current time. The effective
+    /// GC cutoff point is determined conservatively by either `horizon` and `pitr`, whichever
+    /// requires more history to be retained.
+    //
     pub async fn gc_iteration(
         &self,
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
-        checkpoint_before_gc: bool,
     ) -> anyhow::Result<GcResult> {
         anyhow::ensure!(
             self.is_active(),
@@ -1179,7 +1228,7 @@ impl Tenant {
             let _timer = STORAGE_TIME
                 .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
                 .start_timer();
-            self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
+            self.gc_iteration_internal(target_timeline_id, horizon, pitr)
                 .await
         }
     }
@@ -1222,24 +1271,21 @@ impl Tenant {
     ///
     /// Used at graceful shutdown.
     ///
-    pub async fn checkpoint(&self) -> anyhow::Result<()> {
+    pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
-        // checkpoints. We don't want to block everything else while the
-        // checkpoint runs.
-        let timelines_to_checkpoint = {
+        // flushing. We don't want to block everything else while the
+        // flushing is performed.
+        let timelines_to_flush = {
             let timelines = self.timelines.lock().unwrap();
             timelines
                 .iter()
-                .map(|(id, timeline)| (*id, Arc::clone(timeline)))
+                .map(|(_id, timeline)| Arc::clone(timeline))
                 .collect::<Vec<_>>()
         };
 
-        for (id, timeline) in &timelines_to_checkpoint {
-            timeline
-                .checkpoint(CheckpointConfig::Flush)
-                .instrument(info_span!("checkpoint", timeline = %id, tenant = %self.tenant_id))
-                .await?;
+        for timeline in &timelines_to_flush {
+            timeline.freeze_and_flush().await?;
         }
 
         Ok(())
@@ -1274,26 +1320,62 @@ impl Tenant {
             timeline
         };
 
-        info!("waiting for layer_removal_cs.lock()");
-        // No timeout here, GC & Compaction should be responsive to the `TimelineState::Stopping` change.
-        let layer_removal_guard = timeline.layer_removal_cs.lock().await;
-        info!("got layer_removal_cs.lock(), deleting layer files");
+        // Now that the Timeline is in Stopping state, request all the related tasks to
+        // shut down.
+        //
+        // NB: If you call delete_timeline multiple times concurrently, they will
+        // all go through the motions here. Make sure the code here is idempotent,
+        // and don't error out if some of the shutdown tasks have already been
+        // completed!
 
-        // NB: storage_sync upload tasks that reference these layers have been cancelled
-        //     by the caller.
+        // Stop the walreceiver first.
+        debug!("waiting for wal receiver to shutdown");
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.tenant_id),
+            Some(timeline_id),
+        )
+        .await;
+        debug!("wal receiver shutdown confirmed");
 
-        let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
-        // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
-        // with some layers missing.
-        std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
-            format!(
-                "Failed to remove local timeline directory '{}'",
-                local_timeline_directory.display()
-            )
-        })?;
-        info!("finished deleting layer files, releasing layer_removal_cs.lock()");
+        info!("waiting for timeline tasks to shutdown");
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
 
-        drop(layer_removal_guard);
+        {
+            // Grab the layer_removal_cs lock, and actually perform the deletion.
+            //
+            // This lock prevents multiple concurrent delete_timeline calls from
+            // stepping on each other's toes, while deleting the files. It also
+            // prevents GC or compaction from running at the same time.
+            //
+            // Note that there are still other race conditions between
+            // GC, compaction and timeline deletion. GC task doesn't
+            // register itself properly with the timeline it's
+            // operating on. See
+            // https://github.com/neondatabase/neon/issues/2671
+            //
+            // No timeout here, GC & Compaction should be responsive to the
+            // `TimelineState::Stopping` change.
+            info!("waiting for layer_removal_cs.lock()");
+            let layer_removal_guard = timeline.layer_removal_cs.lock().await;
+            info!("got layer_removal_cs.lock(), deleting layer files");
+
+            // NB: storage_sync upload tasks that reference these layers have been cancelled
+            //     by the caller.
+
+            let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+            // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
+            // with some layers missing.
+            std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
+                format!(
+                    "Failed to remove local timeline directory '{}'",
+                    local_timeline_directory.display()
+                )
+            })?;
+
+            info!("finished deleting layer files, releasing layer_removal_cs.lock()");
+            drop(layer_removal_guard);
+        }
 
         // Remove the timeline from the map.
         let mut timelines = self.timelines.lock().unwrap();
@@ -1371,7 +1453,7 @@ impl Tenant {
 
                     // Spawn gc and compaction loops. The loops will shut themselves
                     // down when they notice that the tenant is inactive.
-                    crate::tenant_tasks::start_background_loops(self.tenant_id);
+                    tasks::start_background_loops(self.tenant_id);
 
                     for timeline in not_broken_timelines {
                         timeline.set_state(TimelineState::Active);
@@ -1414,7 +1496,7 @@ impl Tenant {
         });
     }
 
-    pub fn set_broken(&self) {
+    pub fn set_broken(&self, reason: &str) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Active => {
@@ -1423,18 +1505,22 @@ impl Tenant {
                     // activated should never be marked as broken. We cope with it the best
                     // we can, but it shouldn't happen.
                     *current_state = TenantState::Broken;
-                    warn!("Changing Active tenant to Broken state");
+                    warn!("Changing Active tenant to Broken state, reason: {}", reason);
                 }
                 TenantState::Broken => {
                     // This shouldn't happen either
-                    warn!("Tenant is already broken");
+                    warn!("Tenant is already in Broken state");
                 }
                 TenantState::Stopping => {
                     // This shouldn't happen either
                     *current_state = TenantState::Broken;
-                    warn!("Marking Stopping tenant as Broken");
+                    warn!(
+                        "Marking Stopping tenant as Broken state, reason: {}",
+                        reason
+                    );
                 }
                 TenantState::Loading | TenantState::Attaching => {
+                    info!("Setting tenant as Broken state, reason: {}", reason);
                     *current_state = TenantState::Broken;
                 }
             }
@@ -1595,7 +1681,7 @@ impl Tenant {
         new_metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
-    ) -> anyhow::Result<Timeline> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
             anyhow::ensure!(
                 ancestor.is_some(),
@@ -1631,7 +1717,7 @@ impl Tenant {
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
-            gc_cs: Mutex::new(()),
+            gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
             state,
@@ -1778,16 +1864,22 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
-        checkpoint_before_gc: bool,
     ) -> anyhow::Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        let gc_timelines = self.refresh_gc_info_internal(target_timeline_id, horizon, pitr)?;
+        let gc_timelines = self
+            .refresh_gc_info_internal(target_timeline_id, horizon, pitr)
+            .await?;
 
         utils::failpoint_sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
 
-        info!("starting on {} timelines", gc_timelines.len());
+        // If there is nothing to GC, we don't want any messages in the INFO log.
+        if !gc_timelines.is_empty() {
+            info!("{} timelines need GC", gc_timelines.len());
+        } else {
+            debug!("{} timelines need GC", gc_timelines.len());
+        }
 
         // Perform GC for each timeline.
         //
@@ -1805,18 +1897,6 @@ impl Tenant {
                 // made.
                 break;
             }
-
-            // If requested, force flush all in-memory layers to disk first,
-            // so that they too can be garbage collected. That's
-            // used in tests, so we want as deterministic results as possible.
-            if checkpoint_before_gc {
-                timeline.checkpoint(CheckpointConfig::Forced).await?;
-                info!(
-                    "timeline {} checkpoint_before_gc done",
-                    timeline.timeline_id
-                );
-            }
-
             let result = timeline.gc().await?;
             totals += result;
         }
@@ -1830,7 +1910,7 @@ impl Tenant {
     /// [`Tenant::get_gc_horizon`].
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
-    pub fn refresh_gc_info(&self) -> anyhow::Result<Vec<Arc<Timeline>>> {
+    pub async fn refresh_gc_info(&self) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // since this method can now be called at different rates than the configured gc loop, it
         // might be that these configuration values get applied faster than what it was previously,
         // since these were only read from the gc task.
@@ -1841,54 +1921,60 @@ impl Tenant {
         let target_timeline_id = None;
 
         self.refresh_gc_info_internal(target_timeline_id, horizon, pitr)
+            .await
     }
 
-    fn refresh_gc_info_internal(
+    async fn refresh_gc_info_internal(
         &self,
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // grab mutex to prevent new timelines from being created here.
-        let gc_cs = self.gc_cs.lock().unwrap();
-
-        let timelines = self.timelines.lock().unwrap();
+        let gc_cs = self.gc_cs.lock().await;
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let mut all_branchpoints: BTreeSet<(TimelineId, Lsn)> = BTreeSet::new();
-        let timeline_ids = {
-            if let Some(target_timeline_id) = target_timeline_id.as_ref() {
-                if timelines.get(target_timeline_id).is_none() {
-                    bail!("gc target timeline does not exist")
-                }
-            };
+        let (all_branchpoints, timeline_ids): (BTreeSet<(TimelineId, Lsn)>, _) = {
+            let timelines = self.timelines.lock().unwrap();
+            let mut all_branchpoints = BTreeSet::new();
+            let timeline_ids = {
+                if let Some(target_timeline_id) = target_timeline_id.as_ref() {
+                    if timelines.get(target_timeline_id).is_none() {
+                        bail!("gc target timeline does not exist")
+                    }
+                };
 
-            timelines
-                .iter()
-                .map(|(timeline_id, timeline_entry)| {
-                    if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
-                        // If target_timeline is specified, we only need to know branchpoints of its children
-                        if let Some(timeline_id) = target_timeline_id {
-                            if ancestor_timeline_id == &timeline_id {
+                timelines
+                    .iter()
+                    .map(|(timeline_id, timeline_entry)| {
+                        if let Some(ancestor_timeline_id) =
+                            &timeline_entry.get_ancestor_timeline_id()
+                        {
+                            // If target_timeline is specified, we only need to know branchpoints of its children
+                            if let Some(timeline_id) = target_timeline_id {
+                                if ancestor_timeline_id == &timeline_id {
+                                    all_branchpoints.insert((
+                                        *ancestor_timeline_id,
+                                        timeline_entry.get_ancestor_lsn(),
+                                    ));
+                                }
+                            }
+                            // Collect branchpoints for all timelines
+                            else {
                                 all_branchpoints.insert((
                                     *ancestor_timeline_id,
                                     timeline_entry.get_ancestor_lsn(),
                                 ));
                             }
                         }
-                        // Collect branchpoints for all timelines
-                        else {
-                            all_branchpoints
-                                .insert((*ancestor_timeline_id, timeline_entry.get_ancestor_lsn()));
-                        }
-                    }
 
-                    *timeline_id
-                })
-                .collect::<Vec<_>>()
+                        *timeline_id
+                    })
+                    .collect::<Vec<_>>()
+            };
+            (all_branchpoints, timeline_ids)
         };
-        drop(timelines);
 
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
@@ -1914,7 +2000,7 @@ impl Tenant {
                     ))
                     .map(|&x| x.1)
                     .collect();
-                timeline.update_gc_info(branchpoints, cutoff, pitr)?;
+                timeline.update_gc_info(branchpoints, cutoff, pitr).await?;
 
                 gc_timelines.push(timeline);
             }
@@ -1924,7 +2010,7 @@ impl Tenant {
     }
 
     /// Branch an existing timeline
-    fn branch_timeline(
+    async fn branch_timeline(
         &self,
         src: TimelineId,
         dst: TimelineId,
@@ -1933,10 +2019,11 @@ impl Tenant {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
-        let _gc_cs = self.gc_cs.lock().unwrap();
-        let timelines = self.timelines.lock().unwrap();
-        let timeline_uninit_mark = self.create_timeline_uninit_mark(dst, &timelines)?;
-        drop(timelines);
+        let _gc_cs = self.gc_cs.lock().await;
+        let timeline_uninit_mark = {
+            let timelines = self.timelines.lock().unwrap();
+            self.create_timeline_uninit_mark(dst, &timelines)?
+        };
 
         // In order for the branch creation task to not wait for GC/compaction,
         // we need to make sure that the starting LSN of the child branch is not out of scope midway by
@@ -2083,13 +2170,12 @@ impl Tenant {
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
 
-        tokio::task::block_in_place(|| {
-            import_datadir::import_timeline_from_postgres_datadir(
-                unfinished_timeline,
-                pgdata_path,
-                pgdata_lsn,
-            )
-        })
+        import_datadir::import_timeline_from_postgres_datadir(
+            unfinished_timeline,
+            pgdata_path,
+            pgdata_lsn,
+        )
+        .await
         .with_context(|| {
             format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
         })?;
@@ -2105,8 +2191,13 @@ impl Tenant {
         });
 
         unfinished_timeline
-            .checkpoint(CheckpointConfig::Flush).await
-            .with_context(|| format!("Failed to checkpoint after pgdatadir import for timeline {tenant_id}/{timeline_id}"))?;
+            .freeze_and_flush()
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to flush after pgdatadir import for timeline {tenant_id}/{timeline_id}"
+                )
+            })?;
 
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
@@ -2135,12 +2226,12 @@ impl Tenant {
         let tenant_id = self.tenant_id;
 
         let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
-            let remote_client = create_remote_timeline_client(
+            let remote_client = RemoteTimelineClient::new(
                 remote_storage.clone(),
                 self.conf,
                 tenant_id,
                 new_timeline_id,
-            )?;
+            );
             remote_client.init_upload_queue_for_empty_remote(&new_metadata)?;
             Some(remote_client)
         } else {
@@ -2165,7 +2256,7 @@ impl Tenant {
                 Ok(UninitializedTimeline {
                     owning_tenant: self,
                     timeline_id: new_timeline_id,
-                    raw_timeline: Some((Arc::new(new_timeline), uninit_mark)),
+                    raw_timeline: Some((new_timeline, uninit_mark)),
                 })
             }
             Err(e) => {
@@ -2183,7 +2274,7 @@ impl Tenant {
         new_metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
-    ) -> anyhow::Result<Timeline> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_data = self
             .create_timeline_data(
                 new_timeline_id,
@@ -2266,12 +2357,12 @@ impl Tenant {
         // See more for on the issue #2748 condenced out of the initial PR review.
         let mut shared_cache = self.cached_logical_sizes.lock().await;
 
-        size::gather_inputs(self, logical_sizes_at_once, &mut *shared_cache).await
+        size::gather_inputs(self, logical_sizes_at_once, &mut shared_cache).await
     }
 }
 
 fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
-    fs::remove_dir_all(&timeline_dir)
+    fs::remove_dir_all(timeline_dir)
         .or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 // we can leave the uninit mark without a timeline dir,
@@ -2287,7 +2378,7 @@ fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> a
                 timeline_dir.display()
             )
         })?;
-    fs::remove_file(&uninit_mark).with_context(|| {
+    fs::remove_file(uninit_mark).with_context(|| {
         format!(
             "Failed to remove timeline uninit mark file {}",
             uninit_mark.display()
@@ -2387,7 +2478,7 @@ fn try_create_target_tenant_dir(
         anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
     });
 
-    fs::rename(&temporary_tenant_dir, target_tenant_directory).with_context(|| {
+    fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
             "failed to move tenant {} temporary directory {} into the permanent one {}",
             tenant_id,
@@ -2441,9 +2532,9 @@ fn run_initdb(
     );
 
     let initdb_output = Command::new(&initdb_bin_path)
-        .args(&["-D", &initdb_target_dir.to_string_lossy()])
-        .args(&["-U", &conf.superuser])
-        .args(&["-E", "utf8"])
+        .args(["-D", &initdb_target_dir.to_string_lossy()])
+        .args(["-U", &conf.superuser])
+        .args(["-E", "utf8"])
         .arg("--no-instructions")
         // This is only used for a temporary installation that is deleted shortly after,
         // so no need to fsync it
@@ -2486,12 +2577,8 @@ pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> anyhow::Result<()
     file.read_exact_at(&mut header_buf, 0)?;
 
     match u16::from_be_bytes(header_buf) {
-        crate::IMAGE_FILE_MAGIC => {
-            image_layer::ImageLayer::new_for_path(path, file)?.dump(verbose)?
-        }
-        crate::DELTA_FILE_MAGIC => {
-            delta_layer::DeltaLayer::new_for_path(path, file)?.dump(verbose)?
-        }
+        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose)?,
+        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose)?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 
@@ -2528,7 +2615,7 @@ pub mod harness {
     };
 
     use super::*;
-    use crate::tenant_config::{TenantConf, TenantConfOpt};
+    use crate::tenant::config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
     use utils::id::{TenantId, TimelineId};
 
@@ -2605,9 +2692,11 @@ pub mod harness {
 
             // Disable automatic GC and compaction to make the unit tests more deterministic.
             // The tests perform them manually if needed.
-            let mut tenant_conf = TenantConf::dummy_conf();
-            tenant_conf.gc_period = Duration::ZERO;
-            tenant_conf.compaction_period = Duration::ZERO;
+            let tenant_conf = TenantConf {
+                gc_period: Duration::ZERO,
+                compaction_period: Duration::ZERO,
+                ..TenantConf::default()
+            };
 
             let tenant_id = TenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
@@ -2726,9 +2815,18 @@ mod tests {
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
-        assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
-        assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
-        assert_eq!(tline.get(*TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
+        assert_eq!(
+            tline.get(*TEST_KEY, Lsn(0x10)).no_ondemand_download()?,
+            TEST_IMG("foo at 0x10")
+        );
+        assert_eq!(
+            tline.get(*TEST_KEY, Lsn(0x1f)).no_ondemand_download()?,
+            TEST_IMG("foo at 0x10")
+        );
+        assert_eq!(
+            tline.get(*TEST_KEY, Lsn(0x20)).no_ondemand_download()?,
+            TEST_IMG("foo at 0x20")
+        );
 
         Ok(())
     }
@@ -2793,7 +2891,9 @@ mod tests {
         //assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x30)))?;
+        tenant
+            .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x30)))
+            .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
@@ -2803,15 +2903,15 @@ mod tests {
 
         // Check page contents on both branches
         assert_eq!(
-            from_utf8(&tline.get(TEST_KEY_A, Lsn(0x40))?)?,
+            from_utf8(&tline.get(TEST_KEY_A, Lsn(0x40)).no_ondemand_download()?)?,
             "foo at 0x40"
         );
         assert_eq!(
-            from_utf8(&newtline.get(TEST_KEY_A, Lsn(0x40))?)?,
+            from_utf8(&newtline.get(TEST_KEY_A, Lsn(0x40)).no_ondemand_download()?)?,
             "bar at 0x40"
         );
         assert_eq!(
-            from_utf8(&newtline.get(TEST_KEY_B, Lsn(0x40))?)?,
+            from_utf8(&newtline.get(TEST_KEY_B, Lsn(0x40)).no_ondemand_download()?)?,
             "foobar at 0x20"
         );
 
@@ -2841,7 +2941,7 @@ mod tests {
             writer.finish_write(lsn);
             lsn += 0x10;
         }
-        tline.checkpoint(CheckpointConfig::Forced).await?;
+        tline.freeze_and_flush().await?;
         {
             let writer = tline.writer();
             writer.put(
@@ -2858,7 +2958,7 @@ mod tests {
             )?;
             writer.finish_write(lsn);
         }
-        tline.checkpoint(CheckpointConfig::Forced).await
+        tline.freeze_and_flush().await
     }
 
     #[tokio::test]
@@ -2873,15 +2973,18 @@ mod tests {
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        // FIXME: this doesn't actually remove any layer currently, given how the checkpointing
+        // FIXME: this doesn't actually remove any layer currently, given how the flushing
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
             .await?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
-        match tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
+        match tenant
+            .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25)))
+            .await
+        {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
                 assert!(err.to_string().contains("invalid branch start lsn"));
@@ -2906,7 +3009,10 @@ mod tests {
             .create_empty_timeline(TIMELINE_ID, Lsn(0x50), DEFAULT_PG_VERSION)?
             .initialize()?;
         // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
-        match tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
+        match tenant
+            .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25)))
+            .await
+        {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
                 assert!(&err.to_string().contains("invalid branch start lsn"));
@@ -2933,7 +3039,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)?;
         let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
         assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
         match tline.get(*TEST_KEY, Lsn(0x25)) {
@@ -2954,15 +3060,20 @@ mod tests {
             .initialize()?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
-        tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
+        tenant
+            .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))
+            .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
             .await?;
-        assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
+        assert!(newtline
+            .get(*TEST_KEY, Lsn(0x25))
+            .no_ondemand_download()
+            .is_ok());
 
         Ok(())
     }
@@ -2976,7 +3087,9 @@ mod tests {
             .initialize()?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
-        tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
+        tenant
+            .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))
+            .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
@@ -2985,12 +3098,12 @@ mod tests {
 
         // run gc on parent
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
             .await?;
 
         // Check that the data is still accessible on the branch.
         assert_eq!(
-            newtline.get(*TEST_KEY, Lsn(0x50))?,
+            newtline.get(*TEST_KEY, Lsn(0x50)).no_ondemand_download()?,
             TEST_IMG(&format!("foo at {}", Lsn(0x40)))
         );
 
@@ -3007,7 +3120,6 @@ mod tests {
                 .create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION)?
                 .initialize()?;
             make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
         }
 
         let tenant = harness.load().await;
@@ -3030,16 +3142,16 @@ mod tests {
                 .initialize()?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
 
-            tenant.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
+            tenant
+                .branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))
+                .await?;
 
             let newtline = tenant
                 .get_timeline(NEW_TIMELINE_ID, true)
                 .expect("Should have a local timeline");
 
             make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
         }
 
         // check that both of them are initially unloaded
@@ -3111,7 +3223,7 @@ mod tests {
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
-        tline.checkpoint(CheckpointConfig::Forced).await?;
+        tline.freeze_and_flush().await?;
         tline.compact().await?;
 
         let writer = tline.writer();
@@ -3119,7 +3231,7 @@ mod tests {
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
-        tline.checkpoint(CheckpointConfig::Forced).await?;
+        tline.freeze_and_flush().await?;
         tline.compact().await?;
 
         let writer = tline.writer();
@@ -3127,7 +3239,7 @@ mod tests {
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
-        tline.checkpoint(CheckpointConfig::Forced).await?;
+        tline.freeze_and_flush().await?;
         tline.compact().await?;
 
         let writer = tline.writer();
@@ -3135,21 +3247,36 @@ mod tests {
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
-        tline.checkpoint(CheckpointConfig::Forced).await?;
+        tline.freeze_and_flush().await?;
         tline.compact().await?;
 
-        assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
-        assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
-        assert_eq!(tline.get(*TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
-        assert_eq!(tline.get(*TEST_KEY, Lsn(0x30))?, TEST_IMG("foo at 0x30"));
-        assert_eq!(tline.get(*TEST_KEY, Lsn(0x40))?, TEST_IMG("foo at 0x40"));
+        assert_eq!(
+            tline.get(*TEST_KEY, Lsn(0x10)).no_ondemand_download()?,
+            TEST_IMG("foo at 0x10")
+        );
+        assert_eq!(
+            tline.get(*TEST_KEY, Lsn(0x1f)).no_ondemand_download()?,
+            TEST_IMG("foo at 0x10")
+        );
+        assert_eq!(
+            tline.get(*TEST_KEY, Lsn(0x20)).no_ondemand_download()?,
+            TEST_IMG("foo at 0x20")
+        );
+        assert_eq!(
+            tline.get(*TEST_KEY, Lsn(0x30)).no_ondemand_download()?,
+            TEST_IMG("foo at 0x30")
+        );
+        assert_eq!(
+            tline.get(*TEST_KEY, Lsn(0x40)).no_ondemand_download()?,
+            TEST_IMG("foo at 0x40")
+        );
 
         Ok(())
     }
 
     //
-    // Insert 1000 key-value pairs with increasing keys, checkpoint,
-    // repeat 50 times.
+    // Insert 1000 key-value pairs with increasing keys, flush, compact, GC.
+    // Repeat 50 times.
     //
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
@@ -3184,8 +3311,10 @@ mod tests {
 
             let cutoff = tline.get_last_record_lsn();
 
-            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
+            tline
+                .update_gc_info(Vec::new(), cutoff, Duration::ZERO)
+                .await?;
+            tline.freeze_and_flush().await?;
             tline.compact().await?;
             tline.gc().await?;
         }
@@ -3248,16 +3377,17 @@ mod tests {
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, lsn)?,
+                    tline.get(test_key, lsn).no_ondemand_download()?,
                     TEST_IMG(&format!("{} at {}", blknum, last_lsn))
                 );
             }
 
-            // Perform a cycle of checkpoint, compaction, and GC
-            println!("checkpointing {}", lsn);
+            // Perform a cycle of flush, compact, and GC
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
+            tline
+                .update_gc_info(Vec::new(), cutoff, Duration::ZERO)
+                .await?;
+            tline.freeze_and_flush().await?;
             tline.compact().await?;
             tline.gc().await?;
         }
@@ -3305,7 +3435,9 @@ mod tests {
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
             let new_tline_id = TimelineId::generate();
-            tenant.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
+            tenant
+                .branch_timeline(tline_id, new_tline_id, Some(lsn))
+                .await?;
             tline = tenant
                 .get_timeline(new_tline_id, true)
                 .expect("Should have the branched timeline");
@@ -3331,16 +3463,17 @@ mod tests {
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, lsn)?,
+                    tline.get(test_key, lsn).no_ondemand_download()?,
                     TEST_IMG(&format!("{} at {}", blknum, last_lsn))
                 );
             }
 
-            // Perform a cycle of checkpoint, compaction, and GC
-            println!("checkpointing {}", lsn);
+            // Perform a cycle of flush, compact, and GC
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
-            tline.checkpoint(CheckpointConfig::Forced).await?;
+            tline
+                .update_gc_info(Vec::new(), cutoff, Duration::ZERO)
+                .await?;
+            tline.freeze_and_flush().await?;
             tline.compact().await?;
             tline.gc().await?;
         }
@@ -3370,7 +3503,9 @@ mod tests {
         #[allow(clippy::needless_range_loop)]
         for idx in 0..NUM_TLINES {
             let new_tline_id = TimelineId::generate();
-            tenant.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
+            tenant
+                .branch_timeline(tline_id, new_tline_id, Some(lsn))
+                .await?;
             tline = tenant
                 .get_timeline(new_tline_id, true)
                 .expect("Should have the branched timeline");
@@ -3403,7 +3538,7 @@ mod tests {
                 println!("checking [{idx}][{blknum}] at {lsn}");
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, *lsn)?,
+                    tline.get(test_key, *lsn).no_ondemand_download()?,
                     TEST_IMG(&format!("{idx} {blknum} at {lsn}"))
                 );
             }

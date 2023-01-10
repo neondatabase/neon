@@ -84,7 +84,7 @@ fn add_multithreaded_walredo_requesters(
 
                             barrier.wait();
 
-                            execute_all(input, &*manager).unwrap();
+                            execute_all(input, &manager).unwrap();
 
                             barrier.wait();
                         }

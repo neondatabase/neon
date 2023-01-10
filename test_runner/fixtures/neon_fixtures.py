@@ -18,6 +18,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
 from functools import cached_property
+from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
@@ -26,6 +27,7 @@ import asyncpg
 import backoff  # type: ignore
 import boto3
 import jwt
+import prometheus_client
 import psycopg2
 import pytest
 import requests
@@ -33,6 +35,7 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -41,6 +44,7 @@ from fixtures.utils import (
     get_self_dir,
     subprocess_capture,
 )
+from prometheus_client.parser import text_string_to_metric_families
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -286,24 +290,19 @@ def port_distributor(worker_base_port: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def default_broker(
-    request: FixtureRequest,
     port_distributor: PortDistributor,
-    top_output_dir: Path,
+    test_output_dir: Path,
     neon_binpath: Path,
 ) -> Iterator[NeonBroker]:
     # multiple pytest sessions could get launched in parallel, get them different ports/datadirs
     client_port = port_distributor.get_port()
-    broker_logfile = (
-        get_test_output_dir(request, top_output_dir) / f"storage_broker_{client_port}.log"
-    )
-    broker_logfile.parents[0].mkdir(exist_ok=True, parents=True)
+    broker_logfile = test_output_dir / "repo" / "storage_broker.log"
 
     broker = NeonBroker(logfile=broker_logfile, port=client_port, neon_binpath=neon_binpath)
     yield broker
     broker.stop()
-    allure_attach_from_dir(Path(broker_logfile))
 
 
 @pytest.fixture(scope="session")
@@ -598,6 +597,7 @@ class NeonEnvBuilder:
         rust_log_override: Optional[str] = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
         preserve_database_files: bool = False,
+        initial_tenant: Optional[TenantId] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -620,19 +620,30 @@ class NeonEnvBuilder:
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
         self.preserve_database_files = preserve_database_files
+        self.initial_tenant = initial_tenant or TenantId.generate()
 
-    def init(self) -> NeonEnv:
+    def init_configs(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
         self.env = NeonEnv(self)
         return self.env
 
     def start(self):
+        assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
     def init_start(self) -> NeonEnv:
-        env = self.init()
+        env = self.init_configs()
         self.start()
+
+        # Prepare the default branch to start the postgres on later.
+        # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
+        log.info(
+            f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
+        )
+        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
+
         return env
 
     def enable_remote_storage(
@@ -756,6 +767,11 @@ class NeonEnvBuilder:
             log.info("no remote storage was set up, skipping cleanup")
             return
 
+        # Making mypy happy with allowing only `S3Storage` further.
+        # `self.remote_storage_prefix` is coupled with `S3Storage` storage type,
+        # so this line effectively a no-op
+        assert isinstance(self.remote_storage, S3Storage)
+
         if self.keep_remote_storage_contents:
             log.info("keep_remote_storage_contents skipping remote storage cleanup")
             return
@@ -771,7 +787,8 @@ class NeonEnvBuilder:
             Prefix=self.remote_storage_prefix,
         )
 
-        objects_to_delete = {"Objects": []}
+        # Using Any because DeleteTypeDef (from boto3-stubs) doesn't fit our case
+        objects_to_delete: Any = {"Objects": []}
         cnt = 0
         for item in pages.search("Contents"):
             # weirdly when nothing is found it returns [None]
@@ -786,16 +803,17 @@ class NeonEnvBuilder:
                     Bucket=self.remote_storage.bucket_name,
                     Delete=objects_to_delete,
                 )
-                objects_to_delete = dict(Objects=[])
+                objects_to_delete = {"Objects": []}
                 cnt += 1
 
         # flush rest
         if len(objects_to_delete["Objects"]):
             self.remote_storage_client.delete_objects(
-                Bucket=self.remote_storage.bucket_name, Delete=objects_to_delete
+                Bucket=self.remote_storage.bucket_name,
+                Delete=objects_to_delete,
             )
 
-        log.info("deleted %s objects from remote storage", cnt)
+        log.info(f"deleted {cnt} objects from remote storage")
 
     def __enter__(self) -> "NeonEnvBuilder":
         return self
@@ -884,12 +902,12 @@ class NeonEnv:
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
-        self.initial_tenant = TenantId.generate()
+        self.initial_tenant = config.initial_tenant
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
             f"""
-            default_tenant_id = '{self.initial_tenant}'
+            default_tenant_id = '{config.initial_tenant}'
         """
         )
 
@@ -1012,7 +1030,7 @@ def _shared_simple_env(
 
     if os.environ.get("TEST_SHARED_FIXTURES") is None:
         # Create the environment in the per-test output directory
-        repo_dir = get_test_output_dir(request, top_output_dir) / "repo"
+        repo_dir = get_test_repo_dir(request, top_output_dir)
     else:
         # We're running shared fixtures. Share a single directory.
         repo_dir = top_output_dir / "shared_repo"
@@ -1201,8 +1219,22 @@ class PageserverHttpClient(requests.Session):
         # there are no tests for those right now.
         return size
 
-    def timeline_list(self, tenant_id: TenantId) -> List[Dict[str, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline")
+    def timeline_list(
+        self,
+        tenant_id: TenantId,
+        include_non_incremental_logical_size: bool = False,
+        include_timeline_dir_layer_file_size_sum: bool = False,
+    ) -> List[Dict[str, Any]]:
+
+        params = {}
+        if include_non_incremental_logical_size:
+            params["include-non-incremental-logical-size"] = "yes"
+        if include_timeline_dir_layer_file_size_sum:
+            params["include-timeline-dir-layer-file-size-sum"] = "yes"
+
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", params=params
+        )
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
@@ -1236,13 +1268,13 @@ class PageserverHttpClient(requests.Session):
         tenant_id: TenantId,
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
-        include_non_incremental_physical_size: bool = False,
+        include_timeline_dir_layer_file_size_sum: bool = False,
     ) -> Dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "yes"
-        if include_non_incremental_physical_size:
-            params["include-non-incremental-physical-size"] = "yes"
+        if include_timeline_dir_layer_file_size_sum:
+            params["include-timeline-dir-layer-file-size-sum"] = "yes"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
@@ -1317,10 +1349,114 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         assert res_json is None
 
+    def timeline_spawn_download_remote_layers(
+        self, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> dict[str, Any]:
+
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_poll_download_remote_layers_status(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        spawn_response: dict[str, Any],
+        poll_state=None,
+    ) -> None | dict[str, Any]:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+
+        # assumption in this API client here is that nobody else spawns the task
+        assert res_json["task_id"] == spawn_response["task_id"]
+
+        if poll_state is None or res_json["state"] == poll_state:
+            return res_json
+        return None
+
+    def timeline_download_remote_layers(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        errors_ok=False,
+        at_least_one_download=True,
+    ):
+        res = self.timeline_spawn_download_remote_layers(tenant_id, timeline_id)
+        while True:
+            completed = self.timeline_poll_download_remote_layers_status(
+                tenant_id, timeline_id, res, poll_state="Completed"
+            )
+            if not completed:
+                time.sleep(0.1)
+                continue
+            if not errors_ok:
+                assert completed["failed_download_count"] == 0
+            if at_least_one_download:
+                assert completed["successful_download_count"] > 0
+            return completed
+
     def get_metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
         self.verbose_error(res)
         return res.text
+
+    def get_timeline_metric(self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str):
+        raw = self.get_metrics()
+        family: List[prometheus_client.Metric] = list(text_string_to_metric_families(raw))
+        [metric] = [m for m in family if m.name == metric_name]
+        [sample] = [
+            s
+            for s in metric.samples
+            if s.labels["tenant_id"] == str(tenant_id)
+            and s.labels["timeline_id"] == str(timeline_id)
+        ]
+        return sample.value
+
+    def get_remote_timeline_client_metric(
+        self,
+        metric_name: str,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        file_kind: str,
+        op_kind: str,
+    ) -> Optional[float]:
+        metrics = parse_metrics(self.get_metrics(), "pageserver")
+        matches = metrics.query_all(
+            name=metric_name,
+            filter={
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+                "file_kind": str(file_kind),
+                "op_kind": str(op_kind),
+            },
+        )
+        if len(matches) == 0:
+            value = None
+        elif len(matches) == 1:
+            value = matches[0].value
+            assert value is not None
+        else:
+            assert len(matches) < 2, "above filter should uniquely identify metric"
+        return value
+
+    def get_metric_value(self, name: str) -> Optional[str]:
+        metrics = self.get_metrics()
+        relevant = [line for line in metrics.splitlines() if line.startswith(name)]
+        if len(relevant) == 0:
+            log.info(f'could not find metric "{name}"')
+            return None
+        assert len(relevant) == 1
+        return relevant[0].lstrip(name).strip()
 
 
 @dataclass
@@ -1432,6 +1568,7 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
         conf: Optional[Dict[str, str]] = None,
+        set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1440,47 +1577,51 @@ class NeonCli(AbstractNeonCli):
             tenant_id = TenantId.generate()
         if timeline_id is None:
             timeline_id = TimelineId.generate()
-        if conf is None:
-            res = self.raw_cli(
-                [
-                    "tenant",
-                    "create",
-                    "--tenant-id",
-                    str(tenant_id),
-                    "--timeline-id",
-                    str(timeline_id),
-                    "--pg-version",
-                    self.env.pg_version,
-                ]
+
+        args = [
+            "tenant",
+            "create",
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+            "--pg-version",
+            self.env.pg_version,
+        ]
+        if conf is not None:
+            args.extend(
+                chain.from_iterable(
+                    product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
+                )
             )
-        else:
-            res = self.raw_cli(
-                [
-                    "tenant",
-                    "create",
-                    "--tenant-id",
-                    str(tenant_id),
-                    "--timeline-id",
-                    str(timeline_id),
-                    "--pg-version",
-                    self.env.pg_version,
-                ]
-                + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
-            )
+        if set_default:
+            args.append("--set-default")
+
+        res = self.raw_cli(args)
         res.check_returncode()
         return tenant_id, timeline_id
+
+    def set_default(self, tenant_id: TenantId):
+        """
+        Update default tenant for future operations that require tenant_id.
+        """
+        res = self.raw_cli(["tenant", "set-default", "--tenant-id", str(tenant_id)])
+        res.check_returncode()
 
     def config_tenant(self, tenant_id: TenantId, conf: Dict[str, str]):
         """
         Update tenant config.
         """
-        if conf is None:
-            res = self.raw_cli(["tenant", "config", "--tenant-id", str(tenant_id)])
-        else:
-            res = self.raw_cli(
-                ["tenant", "config", "--tenant-id", str(tenant_id)]
-                + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
+
+        args = ["tenant", "config", "--tenant-id", str(tenant_id)]
+        if conf is not None:
+            args.extend(
+                chain.from_iterable(
+                    product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
+                )
             )
+
+        res = self.raw_cli(args)
         res.check_returncode()
 
     def list_tenants(self) -> "subprocess.CompletedProcess[str]":
@@ -1514,36 +1655,6 @@ class NeonCli(AbstractNeonCli):
             created_timeline_id = matches.group("timeline_id")
 
         return TimelineId(str(created_timeline_id))
-
-    def create_root_branch(
-        self,
-        branch_name: str,
-        tenant_id: Optional[TenantId] = None,
-    ):
-        cmd = [
-            "timeline",
-            "create",
-            "--branch-name",
-            branch_name,
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
-            "--pg-version",
-            self.env.pg_version,
-        ]
-
-        res = self.raw_cli(cmd)
-        res.check_returncode()
-
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        if created_timeline_id is None:
-            raise Exception("could not find timeline id after `neon timeline create` invocation")
-        else:
-            return TimelineId(created_timeline_id)
 
     def create_branch(
         self,
@@ -1600,17 +1711,12 @@ class NeonCli(AbstractNeonCli):
     def init(
         self,
         config_toml: str,
-        initial_timeline_id: Optional[TimelineId] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(config_toml)
             tmp.flush()
 
-            cmd = ["init", f"--config={tmp.name}"]
-            if initial_timeline_id:
-                cmd.extend(["--timeline-id", str(initial_timeline_id)])
-
-            cmd.extend(["--pg-version", self.env.pg_version])
+            cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
 
             append_pageserver_param_overrides(
                 params_to_update=cmd,
@@ -1619,7 +1725,12 @@ class NeonCli(AbstractNeonCli):
                 pageserver_config_override=self.env.pageserver.config_override,
             )
 
-            res = self.raw_cli(cmd)
+            s3_env_vars = None
+            if self.env.remote_storage is not None and isinstance(
+                self.env.remote_storage, S3Storage
+            ):
+                s3_env_vars = self.env.remote_storage.access_env_vars()
+            res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
             return res
 
@@ -1742,6 +1853,12 @@ class NeonCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=check_return_code)
 
+    def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
+        return self.raw_cli(["start"], check_return_code=check_return_code)
+
+    def stop(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
+        return self.raw_cli(["stop"], check_return_code=check_return_code)
+
 
 class WalCraft(AbstractNeonCli):
     """
@@ -1796,14 +1913,17 @@ class NeonPageserver(PgProtocol):
             ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
             ".*Shutdown task error: walreceiver connection handling failure.*",
             ".*wal_connection_manager.*tcp connect error: Connection refused.*",
-            ".*query handler for .* failed: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Broken pipe.*",
-            ".*Connection aborted: error communicating with the server: Broken pipe.*",
-            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
-            ".*Connection aborted: error communicating with the server: Connection reset by peer.*",
+            ".*query handler for .* failed: Socket IO error: Connection reset by peer.*",
+            ".*serving compute connection task.*exited with error: Postgres connection error.*",
+            ".*serving compute connection task.*exited with error: Connection reset by peer.*",
+            ".*serving compute connection task.*exited with error: Postgres query error.*",
+            ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",
+            ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
+            ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*end streaming to Some.*",
+            ".*Replication stream finished: db error: ERROR: Socket IO error: end streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
+            ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
             # and streaming start
             ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
@@ -1873,10 +1993,6 @@ class NeonPageserver(PgProtocol):
         if '"testing"' not in self.version:
             pytest.skip("pageserver was built without 'testing' feature")
 
-    def is_profiling_enabled_or_skip(self):
-        if '"profiling"' not in self.version:
-            pytest.skip("pageserver was built without 'profiling' feature")
-
     def http_client(self, auth_token: Optional[str] = None) -> PageserverHttpClient:
         return PageserverHttpClient(
             port=self.service_port.http,
@@ -1902,6 +2018,28 @@ class NeonPageserver(PgProtocol):
                     errors.append(line)
 
         assert not errors
+
+    def log_contains(self, pattern: str) -> Optional[str]:
+        """Check that the pageserver log contains a line that matches the given regex"""
+        logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
+
+        contains_re = re.compile(pattern)
+
+        # XXX: Our rust logging machinery buffers the messages, so if you
+        # call this function immediately after it's been logged, there is
+        # no guarantee it is already present in the log file. This hasn't
+        # been a problem in practice, our python tests are not fast enough
+        # to hit that race condition.
+        while True:
+            line = logfile.readline()
+            if not line:
+                break
+
+            if contains_re.search(line):
+                # found it!
+                return line
+
+        return None
 
 
 def append_pageserver_param_overrides(
@@ -2749,7 +2887,7 @@ class NeonBroker:
         log.info(f'starting storage_broker to listen incoming connections at "{listen_addr}"')
         with open(self.logfile, "wb") as logfile:
             args = [
-                self.neon_binpath / "storage_broker",
+                str(self.neon_binpath / "storage_broker"),
                 f"--listen-addr={listen_addr}",
             ]
             self.handle = subprocess.Popen(args, stdout=logfile, stderr=logfile)
@@ -2783,6 +2921,10 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     # make mypy happy
     assert isinstance(test_dir, Path)
     return test_dir
+
+
+def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
+    return get_test_output_dir(request, top_output_dir) / "repo"
 
 
 def pytest_addoption(parser: Parser):
@@ -2961,13 +3103,55 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def assert_no_in_progress_downloads_for_tenant(
-    pageserver_http_client: PageserverHttpClient,
-    tenant: TenantId,
+def wait_until(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns successfully, without exception. Returns the
+    last return value from the function.
+    """
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            res = func()
+        except Exception as e:
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            last_exception = e
+            time.sleep(interval)
+            continue
+        return res
+    raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def wait_while(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns false, or throws an exception.
+    """
+    for i in range(number_of_iterations):
+        try:
+            if not func():
+                return
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            time.sleep(interval)
+            continue
+        except Exception:
+            return
+    raise Exception("timed out while waiting for %s" % func)
+
+
+def assert_tenant_status(
+    pageserver_http_client: PageserverHttpClient, tenant: TenantId, expected_status: str
 ):
     tenant_status = pageserver_http_client.tenant_status(tenant)
-    assert tenant_status["has_in_progress_downloads"] is False, tenant_status
-    assert tenant_status["state"] == "Active"
+    log.info(f"tenant_status: {tenant_status}")
+    assert tenant_status["state"] == expected_status, tenant_status
+
+
+def tenant_exists(ps_http: PageserverHttpClient, tenant_id: TenantId):
+    tenants = ps_http.tenant_list()
+    matching = [t for t in tenants if TenantId(t["id"]) == tenant_id]
+    assert len(matching) < 2
+    if len(matching) == 0:
+        return None
+    return matching[0]
 
 
 def remote_consistent_lsn(
@@ -2975,14 +3159,15 @@ def remote_consistent_lsn(
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail["remote_consistent_lsn"]
-    if lsn_str is None:
+    if detail["remote_consistent_lsn"] is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return Lsn(0)
-    assert isinstance(lsn_str, str)
-    return Lsn(lsn_str)
+    else:
+        lsn_str = detail["remote_consistent_lsn"]
+        assert isinstance(lsn_str, str)
+        return Lsn(lsn_str)
 
 
 def wait_for_upload(
@@ -2995,6 +3180,7 @@ def wait_for_upload(
     for i in range(20):
         current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
+            log.info("wait finished")
             return
         log.info(
             "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
@@ -3084,3 +3270,34 @@ def fork_at_current_lsn(
     """
     current_lsn = pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
+
+
+def wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    safekeepers: List[Safekeeper],
+    pageserver: NeonPageserver,
+):
+    sk_commit_lsns = [
+        sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn for sk in safekeepers
+    ]
+    lsn = max(sk_commit_lsns)
+    ps_http = pageserver.http_client()
+    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, lsn)
+    return lsn
+
+
+def wait_for_sk_commit_lsn_to_reach_remote_storage(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    safekeepers: List[Safekeeper],
+    pageserver: NeonPageserver,
+):
+    lsn = wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
+        tenant_id, timeline_id, safekeepers, pageserver
+    )
+    ps_http = pageserver.http_client()
+    # force a checkpoint to trigger upload
+    ps_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(ps_http, tenant_id, timeline_id, lsn)
+    return lsn

@@ -585,17 +585,23 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         if elapsed > wait_lsn_timeout:
             raise RuntimeError("Timed out waiting for WAL redo")
 
-        pageserver_lsn = Lsn(
-            env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["last_record_lsn"]
-        )
-        lag = last_lsn - pageserver_lsn
+        tenant_status = ps_cli.tenant_status(tenant_id)
+        if tenant_status["state"] == "Loading":
+            log.debug(f"Tenant {tenant_id} is still loading, retrying")
+        else:
+            pageserver_lsn = Lsn(
+                env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)[
+                    "last_record_lsn"
+                ]
+            )
+            lag = last_lsn - pageserver_lsn
 
-        if time.time() > last_debug_print + 10 or lag <= 0:
-            last_debug_print = time.time()
-            log.info(f"Pageserver last_record_lsn={pageserver_lsn}; lag is {lag / 1024}kb")
+            if time.time() > last_debug_print + 10 or lag <= 0:
+                last_debug_print = time.time()
+                log.info(f"Pageserver last_record_lsn={pageserver_lsn}; lag is {lag / 1024}kb")
 
-        if lag <= 0:
-            break
+                if lag <= 0:
+                    break
 
         time.sleep(1)
 
@@ -883,9 +889,12 @@ class SafekeeperEnv:
             raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}")
 
     def get_safekeeper_connstrs(self):
+        assert self.safekeepers is not None, "safekeepers are not initialized"
         return ",".join([sk_proc.args[2] for sk_proc in self.safekeepers])
 
     def create_postgres(self):
+        assert self.tenant_id is not None, "tenant_id is not initialized"
+        assert self.timeline_id is not None, "tenant_id is not initialized"
         pgdata_dir = os.path.join(self.repo_dir, "proposer_pgdata")
         pg = ProposerPostgres(
             pgdata_dir,
@@ -1096,7 +1105,6 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env.pageserver.allowed_errors.extend(
         [
             ".*Failed to process query for timeline .*: Timeline .* was not found in global map.*",
-            ".*end streaming to Some.*",
         ]
     )
 

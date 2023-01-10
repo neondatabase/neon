@@ -12,6 +12,7 @@ use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
 
 use once_cell::sync::OnceCell;
+use reqwest::Url;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -26,14 +27,15 @@ use utils::{
     postgres_backend::AuthType,
 };
 
+use crate::tenant::config::TenantConf;
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
-use crate::tenant_config::{TenantConf, TenantConfOpt};
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
 pub mod defaults {
-    use crate::tenant_config::defaults::*;
+    use crate::tenant::config::defaults::*;
     use const_format::formatcp;
 
     pub use pageserver_api::{
@@ -55,6 +57,8 @@ pub mod defaults {
     pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize =
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
+    pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
+    pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     ///
     /// Default built-in configuration file.
     ///
@@ -77,6 +81,8 @@ pub mod defaults {
 #log_format = '{DEFAULT_LOG_FORMAT}'
 
 #concurrent_tenant_size_logical_size_queries = '{DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES}'
+
+#metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
 
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -132,16 +138,22 @@ pub struct PageServerConf {
     pub auth_validation_public_key_path: Option<PathBuf>,
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
-    pub profiling: ProfilingConfig,
     pub default_tenant_conf: TenantConf,
 
     /// Storage broker endpoints to connect to.
     pub broker_endpoint: Uri,
+    pub broker_keepalive_interval: Duration,
 
     pub log_format: LogFormat,
 
     /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
+
+    // How often to collect metrics and send them to the metrics endpoint.
+    pub metric_collection_interval: Duration,
+    pub metric_collection_endpoint: Option<Url>,
+
+    pub test_remote_failures: u64,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -151,25 +163,6 @@ pub struct PageServerConf {
 /// Hence, we resort to a global variable for now instead of passing the token from the
 /// startup code to the connection code through a dozen layers.
 pub static SAFEKEEPER_AUTH_TOKEN: OnceCell<Arc<String>> = OnceCell::new();
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProfilingConfig {
-    Disabled,
-    PageRequests,
-}
-
-impl FromStr for ProfilingConfig {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<ProfilingConfig, Self::Err> {
-        let result = match s {
-            "disabled"  => ProfilingConfig::Disabled,
-            "page_requests"  => ProfilingConfig::PageRequests,
-            _ => bail!("invalid value \"{s}\" for profiling option, valid values are \"disabled\" and \"page_requests\""),
-        };
-        Ok(result)
-    }
-}
 
 // use dedicated enum for builder to better indicate the intention
 // and avoid possible confusion with nested options
@@ -213,12 +206,17 @@ struct PageServerConfigBuilder {
 
     id: BuilderValue<NodeId>,
 
-    profiling: BuilderValue<ProfilingConfig>,
     broker_endpoint: BuilderValue<Uri>,
+    broker_keepalive_interval: BuilderValue<Duration>,
 
     log_format: BuilderValue<LogFormat>,
 
     concurrent_tenant_size_logical_size_queries: BuilderValue<ConfigurableSemaphore>,
+
+    metric_collection_interval: BuilderValue<Duration>,
+    metric_collection_endpoint: BuilderValue<Option<Url>>,
+
+    test_remote_failures: BuilderValue<u64>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -243,13 +241,23 @@ impl Default for PageServerConfigBuilder {
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
             id: NotSet,
-            profiling: Set(ProfilingConfig::Disabled),
             broker_endpoint: Set(storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint")),
+            broker_keepalive_interval: Set(humantime::parse_duration(
+                storage_broker::DEFAULT_KEEPALIVE_INTERVAL,
+            )
+            .expect("cannot parse default keepalive interval")),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
             concurrent_tenant_size_logical_size_queries: Set(ConfigurableSemaphore::default()),
+            metric_collection_interval: Set(humantime::parse_duration(
+                DEFAULT_METRIC_COLLECTION_INTERVAL,
+            )
+            .expect("cannot parse default metric collection interval")),
+            metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
+
+            test_remote_failures: Set(0),
         }
     }
 }
@@ -310,12 +318,12 @@ impl PageServerConfigBuilder {
         self.broker_endpoint = BuilderValue::Set(broker_endpoint)
     }
 
-    pub fn id(&mut self, node_id: NodeId) {
-        self.id = BuilderValue::Set(node_id)
+    pub fn broker_keepalive_interval(&mut self, broker_keepalive_interval: Duration) {
+        self.broker_keepalive_interval = BuilderValue::Set(broker_keepalive_interval)
     }
 
-    pub fn profiling(&mut self, profiling: ProfilingConfig) {
-        self.profiling = BuilderValue::Set(profiling)
+    pub fn id(&mut self, node_id: NodeId) {
+        self.id = BuilderValue::Set(node_id)
     }
 
     pub fn log_format(&mut self, log_format: LogFormat) {
@@ -324,6 +332,18 @@ impl PageServerConfigBuilder {
 
     pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: ConfigurableSemaphore) {
         self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
+    }
+
+    pub fn metric_collection_interval(&mut self, metric_collection_interval: Duration) {
+        self.metric_collection_interval = BuilderValue::Set(metric_collection_interval)
+    }
+
+    pub fn metric_collection_endpoint(&mut self, metric_collection_endpoint: Option<Url>) {
+        self.metric_collection_endpoint = BuilderValue::Set(metric_collection_endpoint)
+    }
+
+    pub fn test_remote_failures(&mut self, fail_first: u64) {
+        self.test_remote_failures = BuilderValue::Set(fail_first);
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
@@ -359,18 +379,29 @@ impl PageServerConfigBuilder {
                 .remote_storage_config
                 .ok_or(anyhow!("missing remote_storage_config"))?,
             id: self.id.ok_or(anyhow!("missing id"))?,
-            profiling: self.profiling.ok_or(anyhow!("missing profiling"))?,
             // TenantConf is handled separately
             default_tenant_conf: TenantConf::default(),
             broker_endpoint: self
                 .broker_endpoint
                 .ok_or(anyhow!("No broker endpoints provided"))?,
+            broker_keepalive_interval: self
+                .broker_keepalive_interval
+                .ok_or(anyhow!("No broker keepalive interval provided"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
             concurrent_tenant_size_logical_size_queries: self
                 .concurrent_tenant_size_logical_size_queries
                 .ok_or(anyhow!(
                     "missing concurrent_tenant_size_logical_size_queries"
                 ))?,
+            metric_collection_interval: self
+                .metric_collection_interval
+                .ok_or(anyhow!("missing metric_collection_interval"))?,
+            metric_collection_endpoint: self
+                .metric_collection_endpoint
+                .ok_or(anyhow!("missing metric_collection_endpoint"))?,
+            test_remote_failures: self
+                .test_remote_failures
+                .ok_or(anyhow!("missing test_remote_failuers"))?,
         })
     }
 }
@@ -530,8 +561,8 @@ impl PageServerConf {
                     t_conf = Self::parse_toml_tenant_conf(item)?;
                 }
                 "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
-                "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
+                "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
                     LogFormat::from_config(&parse_toml_string(key, item)?)?
                 ),
@@ -541,6 +572,13 @@ impl PageServerConf {
                     let permits = NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
                     ConfigurableSemaphore::new(permits)
                 }),
+                "metric_collection_interval" => builder.metric_collection_interval(parse_toml_duration(key, item)?),
+                "metric_collection_endpoint" => {
+                    let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
+                    builder.metric_collection_endpoint(Some(endpoint));
+                },
+
+                "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -656,11 +694,14 @@ impl PageServerConf {
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
-            profiling: ProfilingConfig::Disabled,
-            default_tenant_conf: TenantConf::dummy_conf(),
+            default_tenant_conf: TenantConf::default(),
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+            broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+            metric_collection_interval: Duration::from_secs(60),
+            metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+            test_remote_failures: 0,
         }
     }
 }
@@ -791,6 +832,8 @@ max_file_descriptors = 333
 initial_superuser_name = 'zzzz'
 id = 10
 
+metric_collection_interval = '222 s'
+metric_collection_endpoint = 'http://localhost:80/metrics'
 log_format = 'json'
 
 "#;
@@ -826,11 +869,18 @@ log_format = 'json'
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
-                profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+                broker_keepalive_interval: humantime::parse_duration(
+                    storage_broker::DEFAULT_KEEPALIVE_INTERVAL
+                )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                metric_collection_interval: humantime::parse_duration(
+                    defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
+                )?,
+                metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+                test_remote_failures: 0,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -869,11 +919,14 @@ log_format = 'json'
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
-                profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
+                broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                metric_collection_interval: Duration::from_secs(222),
+                metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
+                test_remote_failures: 0,
             },
             "Should be able to parse all basic config values correctly"
         );

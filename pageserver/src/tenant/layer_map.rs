@@ -12,7 +12,6 @@
 
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
-use crate::tenant::inmemory_layer::InMemoryLayer;
 use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use amplify_num::i256;
 use anyhow::Result;
@@ -27,7 +26,7 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use super::storage_layer::Layer;
+use super::storage_layer::{InMemoryLayer, Layer};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -261,8 +260,10 @@ where
     /// contain the version, even if it's missing from the returned
     /// layer.
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult<L>>> {
-        // linear search
+    /// NOTE: This only searches the 'historic' layers, *not* the
+    /// 'open' and 'frozen' layers!
+    ///
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<Arc<L>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
@@ -286,10 +287,10 @@ where
             assert!(img_lsn < end_lsn);
             if Lsn(img_lsn.0 + 1) == end_lsn {
                 // found exact match
-                return Ok(Some(SearchResult {
+                return Some(SearchResult {
                     layer: Arc::clone(l),
                     lsn_floor: img_lsn,
-                }));
+                });
             }
             if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
                 latest_img = Some(Arc::clone(l));
@@ -327,14 +328,16 @@ where
                 latest_delta.replace(Arc::clone(l));
                 break;
             }
-            // this layer's end LSN is smaller than the requested point. If there's
-            // nothing newer, this is what we need to return. Remember this.
-            if let Some(old_candidate) = &latest_delta {
-                if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
+            if l.get_lsn_range().end > latest_img_lsn.unwrap_or(Lsn(0)) {
+                // this layer's end LSN is smaller than the requested point. If there's
+                // nothing newer, this is what we need to return. Remember this.
+                if let Some(old_candidate) = &latest_delta {
+                    if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
+                        latest_delta.replace(Arc::clone(l));
+                    }
+                } else {
                     latest_delta.replace(Arc::clone(l));
                 }
-            } else {
-                latest_delta.replace(Arc::clone(l));
             }
         }
         if let Some(l) = latest_delta {
@@ -346,19 +349,19 @@ where
                 Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
                 l.get_lsn_range().start,
             );
-            Ok(Some(SearchResult {
+            Some(SearchResult {
                 lsn_floor,
                 layer: l,
-            }))
+            })
         } else if let Some(l) = latest_img {
             trace!("found img layer and no deltas for request on {key} at {end_lsn}");
-            Ok(Some(SearchResult {
+            Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
                 layer: l,
-            }))
+            })
         } else {
             trace!("no layer found for request on {key} at {end_lsn}");
-            Ok(None)
+            None
         }
     }
 

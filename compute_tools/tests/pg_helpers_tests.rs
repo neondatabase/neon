@@ -38,4 +38,33 @@ mod pg_helpers_tests {
 
         assert_eq!(ident.pg_quote(), "\"\"\"name\"\";\\n select 1;\"");
     }
+
+    #[test]
+    fn generic_options_search() {
+        let generic_options: GenericOptions = Some(vec![
+            GenericOption {
+                name: "present_value".into(),
+                value: Some("value".into()),
+                vartype: "string".into(),
+            },
+            GenericOption {
+                name: "missed_value".into(),
+                value: None,
+                vartype: "int".into(),
+            },
+        ]);
+        assert_eq!(generic_options.find("present_value"), Some("value".into()));
+        assert_eq!(generic_options.find("missed_value"), None);
+        assert_eq!(generic_options.find("invalid_value"), None);
+
+        let empty_generic_options: GenericOptions = Some(vec![]);
+        assert_eq!(empty_generic_options.find("present_value"), None);
+        assert_eq!(empty_generic_options.find("missed_value"), None);
+        assert_eq!(empty_generic_options.find("invalid_value"), None);
+
+        let none_generic_options: GenericOptions = None;
+        assert_eq!(none_generic_options.find("present_value"), None);
+        assert_eq!(none_generic_options.find("missed_value"), None);
+        assert_eq!(none_generic_options.find("invalid_value"), None);
+    }
 }

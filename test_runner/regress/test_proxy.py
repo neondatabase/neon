@@ -63,7 +63,11 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
                         "port": local_vanilla_pg.default_options["port"],
                         "dbname": local_vanilla_pg.default_options["dbname"],
                         "user": pg_user,
-                        "project": "irrelevant",
+                        "aux": {
+                            "project_id": "project",
+                            "endpoint_id": "endpoint",
+                            "branch_id": "branch",
+                        },
                     }
                 },
             }
@@ -71,6 +75,7 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
 
         log.info("sending session activation message")
         psql = await PSQL(host=link_proxy.host, port=link_proxy.mgmt_port).run(db_info)
+        assert psql.stdout is not None
         out = (await psql.stdout.read()).decode("utf-8").strip()
         assert out == "ok"
 
@@ -122,3 +127,33 @@ def test_auth_errors(static_proxy: NeonProxy):
     # Finally, check that the user can connect
     with static_proxy.connect(user="pinocchio", password="magic", options="project=irrelevant"):
         pass
+
+
+def test_forward_params_to_client(static_proxy: NeonProxy):
+    # A subset of parameters (GUCs) which postgres
+    # sends to the client during connection setup.
+    # Unfortunately, `GUC_REPORT` can't be queried.
+    # Proxy *should* forward them, otherwise client library
+    # might misbehave (e.g. parse timestamps incorrectly).
+    reported_params_subset = [
+        "client_encoding",
+        "integer_datetimes",
+        "is_superuser",
+        "server_encoding",
+        "server_version",
+        "session_authorization",
+        "standard_conforming_strings",
+    ]
+
+    query = """
+        select name, setting
+        from pg_catalog.pg_settings
+        where name = any(%s)
+    """
+
+    with static_proxy.connect(options="project=irrelevant") as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (reported_params_subset,))
+            for name, value in cur.fetchall():
+                # Check that proxy has forwarded this parameter.
+                assert conn.get_parameter_status(name) == value

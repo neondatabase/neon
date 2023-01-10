@@ -5,7 +5,7 @@ use tokio_postgres::NoTls;
 
 use crate::compute::ComputeNode;
 
-pub fn create_writablity_check_data(client: &mut Client) -> Result<()> {
+pub fn create_writability_check_data(client: &mut Client) -> Result<()> {
     let query = "
     CREATE TABLE IF NOT EXISTS health_check (
         id serial primary key,

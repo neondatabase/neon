@@ -1,8 +1,7 @@
 use anyhow::Result;
 use pageserver::repository::Key;
-use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::ValueReconstructState;
+use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, ValueReconstructState};
 use pageserver::tenant::storage_layer::{Layer, ValueReconstructResult};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
@@ -163,7 +162,7 @@ fn bench_from_captest_env(c: &mut Criterion) {
     c.bench_function("captest_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1).unwrap();
+                layer_map.search(q.0, q.1);
             }
         });
     });
@@ -192,7 +191,7 @@ fn bench_from_real_project(c: &mut Criterion) {
     c.bench_function("real_map_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1).unwrap();
+                layer_map.search(q.0, q.1);
             }
         });
     });
@@ -238,7 +237,7 @@ fn bench_sequential(c: &mut Criterion) {
         // Run the search queries
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1).unwrap();
+                layer_map.search(q.0, q.1);
             }
         });
     });

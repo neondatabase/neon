@@ -77,16 +77,6 @@ paths:
         schema:
           type: string
           format: hex
-      - name: include-non-incremental-logical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_logical_size_non_incremental
-      - name: include-non-incremental-physical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_physical_size_non_incremental
     get:
       description: Get timelines for tenant
       responses:
@@ -139,17 +129,6 @@ paths:
           format: hex
     get:
       description: Get info about the timeline
-      parameters:
-        - name: include-non-incremental-logical-size
-          in: query
-          schema:
-            type: string
-          description: Controls calculation of current_logical_size_non_incremental
-        - name: include-non-incremental-physical-size
-          in: query
-          schema:
-            type: string
-            description: Controls calculation of current_physical_size_non_incremental
       responses:
         "200":
           description: TimelineInfo
@@ -779,10 +758,6 @@ components:
           type: integer
         current_physical_size:
           type: integer
-        current_logical_size_non_incremental:
-          type: integer
-        current_physical_size_non_incremental:
-          type: integer
         wal_source_connstr:
           type: string
         last_received_msg_lsn:
@@ -793,37 +768,6 @@ components:
         state:
           type: string
         latest_gc_cutoff_lsn:
-          type: string
-          format: hex
-
-        # These 'local' and 'remote' fields just duplicate some of the fields
-        # above. They are kept for backwards-compatibility. They can be removed,
-        # when the control plane has been updated to look at the above fields
-        # directly.
-        local:
-          $ref: "#/components/schemas/LocalTimelineInfo"
-        remote:
-          $ref: "#/components/schemas/RemoteTimelineInfo"
-
-    LocalTimelineInfo:
-      type: object
-      properties:
-        ancestor_timeline_id:
-          type: string
-          format: hex
-        ancestor_lsn:
-          type: string
-          format: hex
-        current_logical_size:
-          type: integer
-        current_physical_size:
-          type: integer
-    RemoteTimelineInfo:
-      type: object
-      required:
-        - remote_consistent_lsn
-      properties:
-        remote_consistent_lsn:
           type: string
           format: hex
     Error:

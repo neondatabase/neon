@@ -31,7 +31,8 @@ libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
-  libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler
+  libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
+  protobuf-devel
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -117,11 +118,8 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 # Later that would be responsibility of a package install script
 > ./target/debug/neon_local init
 Starting pageserver at '127.0.0.1:64000' in '.neon'.
-pageserver started, pid: 2545906
-Successfully initialized timeline de200bd42b49cc1814412c7e592dd6e9
-Stopped pageserver 1 process with pid 2545906
 
-# start pageserver and safekeeper
+# start pageserver, safekeeper, and broker for their intercommunication
 > ./target/debug/neon_local start
 Starting neon broker at 127.0.0.1:50051
 storage_broker started, pid: 2918372
@@ -129,6 +127,12 @@ Starting pageserver at '127.0.0.1:64000' in '.neon'.
 pageserver started, pid: 2918386
 Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'.
 safekeeper 1 started, pid: 2918437
+
+# create initial tenant and use it as a default for every future neon_local invocation
+> ./target/debug/neon_local tenant create --set-default
+tenant 9ef87a5bf0d92544f6fafeeb3239695c successfully created on the pageserver
+Created an initial timeline 'de200bd42b49cc1814412c7e592dd6e9' at Lsn 0/16B5A50 for tenant: 9ef87a5bf0d92544f6fafeeb3239695c
+Setting tenant 9ef87a5bf0d92544f6fafeeb3239695c as a default one
 
 # start postgres compute node
 > ./target/debug/neon_local pg start main

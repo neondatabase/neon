@@ -52,10 +52,16 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     let mut idle_backs: Vec<DateTime<Utc>> = vec![];
 
                     for b in backs.into_iter() {
-                        let state: String = b.get("state");
-                        let change: String = b.get("state_change");
+                        let state: String = match b.try_get("state") {
+                            Ok(state) => state,
+                            Err(_) => continue,
+                        };
 
                         if state == "idle" {
+                            let change: String = match b.try_get("state_change") {
+                                Ok(state_change) => state_change,
+                                Err(_) => continue,
+                            };
                             let change = DateTime::parse_from_rfc3339(&change);
                             match change {
                                 Ok(t) => idle_backs.push(t.with_timezone(&Utc)),
@@ -74,10 +80,8 @@ fn watch_compute_activity(compute: &ComputeNode) {
                         }
                     }
 
-                    // Sort idle backend `state_change` timestamps. The last one corresponds
-                    // to the last activity.
-                    idle_backs.sort();
-                    if let Some(last) = idle_backs.last() {
+                    // Get idle backend `state_change` with the max timestamp.
+                    if let Some(last) = idle_backs.iter().max() {
                         last_active = *last;
                     }
                 }

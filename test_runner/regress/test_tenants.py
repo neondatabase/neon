@@ -7,7 +7,11 @@ from typing import List
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import PAGESERVER_PER_TENANT_METRICS, parse_metrics
+from fixtures.metrics import (
+    PAGESERVER_PER_TENANT_METRICS,
+    PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
+    parse_metrics,
+)
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
@@ -157,8 +161,20 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         )
 
 
-def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize(
+    "remote_storage_kind",
+    # exercise both the code paths where remote_storage=None and remote_storage=Some(...)
+    [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3],
+)
+def test_pageserver_metrics_removed_after_detach(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
     """Tests that when a tenant is detached, the tenant specific metrics are not left behind"""
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_pageserver_metrics_removed_after_detach",
+    )
 
     neon_env_builder.num_safekeepers = 3
 
@@ -192,7 +208,11 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
 
     for tenant in [tenant_1, tenant_2]:
         pre_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
-        assert pre_detach_samples == set(PAGESERVER_PER_TENANT_METRICS)
+        expected = set(PAGESERVER_PER_TENANT_METRICS)
+        if remote_storage_kind == RemoteStorageKind.NOOP:
+            # if there's no remote storage configured, we don't expose the remote timeline client metrics
+            expected -= set(PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS)
+        assert pre_detach_samples == expected
 
         env.pageserver.http_client().tenant_detach(tenant)
 

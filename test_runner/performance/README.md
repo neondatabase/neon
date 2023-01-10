@@ -1,12 +1,8 @@
 # Running locally
 
-First make a release build. The profiling flag is optional, used only for tests that
-generate flame graphs. The `-s` flag just silences a lot of output, and makes it
+First make a release build. The `-s` flag silences a lot of output, and makes it
 easier to see if you have compile errors without scrolling up.
-`BUILD_TYPE=release CARGO_BUILD_FLAGS="--features=testing,profiling" make -s -j8`
-
-NOTE: the `profiling` flag only works on linux because we use linux-specific
-libc APIs like `libc::timer_t`.
+`BUILD_TYPE=release CARGO_BUILD_FLAGS="--features=testing" make -s -j8`
 
 Then run the tests
 `NEON_BIN=./target/release poetry run pytest test_runner/performance"`
