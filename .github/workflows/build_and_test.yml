@@ -89,7 +89,7 @@ jobs:
   check-codestyle-rust:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
 
     steps:
@@ -137,7 +137,7 @@ jobs:
   build-neon:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:3823723562
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
     strategy:
       fail-fast: false
@@ -329,7 +329,9 @@ jobs:
         with:
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           path: |
-            .cargo
+            .cargo/registry
+            !.cargo/registry/src
+            .cargo/git
             target
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
@@ -340,7 +342,7 @@ jobs:
   regress-tests:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
     needs: [ build-neon ]
     strategy:
@@ -373,7 +375,7 @@ jobs:
   benchmarks:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
     needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -404,7 +406,7 @@ jobs:
   merge-allure-report:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
     needs: [ regress-tests, benchmarks ]
     if: ${{ !cancelled() }}
@@ -441,7 +443,7 @@ jobs:
   coverage-report:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
     needs: [ regress-tests ]
     strategy:
@@ -1266,7 +1268,7 @@ jobs:
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
     needs: [ deploy, deploy-proxy ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'

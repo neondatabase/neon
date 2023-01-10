@@ -13,7 +13,7 @@ inputs:
     required: false
   override:
     description: "Allow force upload existing cache"
-    default: false
+    default: true
     required: false
 
 runs:
@@ -27,13 +27,25 @@ runs:
       run: |
         mkdir -p $(dirname $ARCHIVE)
         echo "" > manifest.txt
+        echo "" > ignore.txt
         
         for i in ${SOURCE} 
         do
           echo "$i" >> manifest.txt
         done
         
-        time /bin/tar --posix --use-compress-program zstdmt -cf ${ARCHIVE} --exclude manifest.txt -P -C ${GITHUB_WORKSPACE} --files-from manifest.txt
+        # split excluded folders to ignore.txt
+        sed -i -e '/^!/{w ignore.txt' -e 'd}' manifest.txt
+        
+        # remove leading '!' identifier
+        sed -i -e 's/^.//' ignore.txt
+        
+        # remove each excluded folder listed
+        while IFS= read -r line; do
+          rm -rvf "$line"
+        done <ignore.txt
+
+        time /bin/tar --posix --use-compress-program zstdmt -cf ${ARCHIVE} --exclude manifest.txt --exclude ignore.txt -P -C ${GITHUB_WORKSPACE} --files-from manifest.txt
 
     - name: Upload cache
       shell: bash -euxo pipefail {0}
