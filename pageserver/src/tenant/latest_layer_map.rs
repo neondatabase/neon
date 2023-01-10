@@ -1,17 +1,17 @@
 use std::ops::Range;
 
-use super::coverage::Coverage;
+use super::layer_coverage::LayerCoverage;
 
 pub struct LatestLayerMap<Value> {
-    image_coverage: Coverage<Value>,
-    delta_coverage: Coverage<Value>,
+    image_coverage: LayerCoverage<Value>,
+    delta_coverage: LayerCoverage<Value>,
 }
 
 impl<T: Clone> Default for LatestLayerMap<T> {
     fn default() -> Self {
         Self {
-            image_coverage: Coverage::default(),
-            delta_coverage: Coverage::default(),
+            image_coverage: LayerCoverage::default(),
+            delta_coverage: LayerCoverage::default(),
         }
     }
 }

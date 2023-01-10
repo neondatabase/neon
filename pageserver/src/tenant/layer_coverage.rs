@@ -5,7 +5,7 @@ use std::ops::Range;
 // results are not the same on some tests.
 use rpds::RedBlackTreeMapSync;
 
-pub struct Coverage<Value> {
+pub struct LayerCoverage<Value> {
     /// Mapping key to the latest layer (if any) until the next key.
     /// We use the Sync version of the map because we want Self to
     /// be Sync. Using nonsync might be faster, if we can work with
@@ -13,13 +13,13 @@ pub struct Coverage<Value> {
     head: RedBlackTreeMapSync<i128, Option<(u64, Value)>>,
 }
 
-impl<T: Clone> Default for Coverage<T> {
+impl<T: Clone> Default for LayerCoverage<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Value: Clone> Coverage<Value> {
+impl<Value: Clone> LayerCoverage<Value> {
     pub fn new() -> Self {
         Self {
             head: RedBlackTreeMapSync::default(),

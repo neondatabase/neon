@@ -75,10 +75,10 @@ use utils::{
 mod blob_io;
 pub mod block_io;
 pub mod bst_layer_map;
-pub mod coverage;
 mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod latest_layer_map;
+pub mod layer_coverage;
 pub mod layer_map;
 
 pub mod metadata;
