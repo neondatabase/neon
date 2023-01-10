@@ -12,10 +12,8 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     # Override default checkpointer settings to run it more often
     neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
 
-    env = neon_env_builder.init()
+    env = neon_env_builder.init_start()
     env.pageserver.is_testing_enabled_or_skip()
-
-    neon_env_builder.start()
 
     # These warnings are expected, when the pageserver is restarted abruptly
     env.pageserver.allowed_errors.append(".*found future delta layer.*")

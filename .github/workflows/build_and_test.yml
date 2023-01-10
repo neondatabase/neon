@@ -111,6 +111,7 @@ jobs:
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
+
       - name: Run cargo clippy
         run: ./run_clippy.sh
 
@@ -125,6 +126,11 @@ jobs:
         run: |
           cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
           cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+
+      # https://github.com/EmbarkStudios/cargo-deny
+      - name: Check rust licenses/bans/advisories/sources
+        if: ${{ !cancelled() }}
+        run: cargo deny check
 
   build-neon:
     runs-on: [ self-hosted, dev, x64 ]
@@ -177,13 +183,12 @@ jobs:
       # corresponding Cargo.toml files for their descriptions.
       - name: Set env variables
         run: |
+          CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-            CARGO_FEATURES="--features testing"
             CARGO_FLAGS="--locked $CARGO_FEATURES"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
-            CARGO_FEATURES="--features testing,profiling"
             CARGO_FLAGS="--locked --release $CARGO_FEATURES"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
@@ -789,6 +794,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -834,7 +841,9 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        target_region: [ us-east-2 ]
+        target_region: [ eu-west-1, us-east-2 ]
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -906,6 +915,8 @@ jobs:
     strategy:
       matrix:
         target_region: [ us-east-2, us-west-2, eu-central-1, ap-southeast-1 ]
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -945,6 +956,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     env:
       KUBECONFIG: .kubeconfig
     steps:
@@ -970,8 +983,8 @@ jobs:
       - name: Re-deploy proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml       --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
-          helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install --atomic -f .github/helm-values/${{ matrix.proxy_config }}.yaml       --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install --atomic -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
@@ -988,6 +1001,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     env:
       KUBECONFIG: .kubeconfig
     steps:
@@ -1036,6 +1051,8 @@ jobs:
             target_cluster: dev-eu-west-1-zeta
             deploy_link_proxy: false
             deploy_legacy_scram_proxy: false
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1051,19 +1068,19 @@ jobs:
       - name: Re-deploy scram proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
       - name: Re-deploy link proxy
         if: matrix.deploy_link_proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
       - name: Re-deploy legacy scram proxy
         if: matrix.deploy_legacy_scram_proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-dev-new:
     runs-on: [ self-hosted, dev, x64 ]
@@ -1083,6 +1100,8 @@ jobs:
             target_cluster: dev-us-east-2-beta
           - target_region:  eu-west-1
             target_cluster: dev-eu-west-1-zeta
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1121,6 +1140,8 @@ jobs:
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1136,7 +1157,7 @@ jobs:
       - name: Re-deploy proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-prod-new:
     runs-on: prod
@@ -1160,6 +1181,8 @@ jobs:
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3

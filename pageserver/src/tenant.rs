@@ -13,13 +13,13 @@
 
 use anyhow::{bail, Context};
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::Stream;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::sync::watch;
-use tokio_util::io::StreamReader;
-use tokio_util::io::SyncIoBridge;
+use tokio::task::JoinSet;
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 
@@ -36,7 +36,6 @@ use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -239,21 +238,15 @@ impl UninitializedTimeline<'_> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub async fn import_basebackup_from_tar(
         self,
-        mut copyin_stream: &mut Pin<&mut impl Stream<Item = io::Result<Bytes>>>,
+        copyin_stream: &mut (impl Stream<Item = io::Result<Bytes>> + Sync + Send + Unpin),
         base_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
 
-        // import_basebackup_from_tar() is not async, mainly because the Tar crate
-        // it uses is not async. So we need to jump through some hoops:
-        // - convert the input from client connection to a synchronous Read
-        // - use block_in_place()
-        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-
-        tokio::task::block_in_place(|| {
-            import_datadir::import_basebackup_from_tar(raw_timeline, reader, base_lsn)
-                .context("Failed to import basebackup")
-        })?;
+        let mut reader = tokio_util::io::StreamReader::new(copyin_stream);
+        import_datadir::import_basebackup_from_tar(raw_timeline, &mut reader, base_lsn)
+            .await
+            .context("Failed to import basebackup")?;
 
         // Flush loop needs to be spawned in order to be able to flush.
         // We want to run proper checkpoint before we mark timeline as available to outside world
@@ -606,7 +599,7 @@ impl Tenant {
                 match tenant_clone.attach().await {
                     Ok(_) => {}
                     Err(e) => {
-                        tenant_clone.set_broken();
+                        tenant_clone.set_broken(&e.to_string());
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
@@ -651,26 +644,62 @@ impl Tenant {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
-        let remote_timelines = remote_timeline_client::list_remote_timelines(
+        let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
             remote_storage,
             self.conf,
             self.tenant_id,
         )
         .await?;
 
-        info!("found {} timelines", remote_timelines.len());
+        info!("found {} timelines", remote_timeline_ids.len());
 
-        let mut timeline_ancestors: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-        let mut index_parts: HashMap<TimelineId, IndexPart> = HashMap::new();
-        for (timeline_id, index_part) in remote_timelines {
-            let remote_metadata = index_part.parse_metadata().with_context(|| {
-                format!(
-                    "Failed to parse metadata file from remote storage for tenant {} timeline {}",
-                    self.tenant_id, timeline_id
-                )
-            })?;
+        // Download & parse index parts
+        let mut part_downloads = JoinSet::new();
+        for timeline_id in remote_timeline_ids {
+            let client = RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            );
+            part_downloads.spawn(
+                async move {
+                    debug!("starting index part download");
+
+                    let index_part = client
+                        .download_index_file()
+                        .await
+                        .context("download index file")?;
+
+                    let remote_metadata = index_part.parse_metadata().context("parse metadata")?;
+
+                    debug!("finished index part download");
+
+                    Result::<_, anyhow::Error>::Ok((
+                        timeline_id,
+                        client,
+                        index_part,
+                        remote_metadata,
+                    ))
+                }
+                .map(move |res| {
+                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
+                })
+                .instrument(info_span!("download_index_part", timeline=%timeline_id)),
+            );
+        }
+        // Wait for all the download tasks to complete & collect results.
+        let mut remote_clients = HashMap::new();
+        let mut index_parts = HashMap::new();
+        let mut timeline_ancestors = HashMap::new();
+        while let Some(result) = part_downloads.join_next().await {
+            // NB: we already added timeline_id as context to the error
+            let result: Result<_, anyhow::Error> = result.context("joinset task join")?;
+            let (timeline_id, client, index_part, remote_metadata) = result?;
+            debug!("successfully downloaded index part for timeline {timeline_id}");
             timeline_ancestors.insert(timeline_id, remote_metadata);
             index_parts.insert(timeline_id, index_part);
+            remote_clients.insert(timeline_id, client);
         }
 
         // For every timeline, download the metadata file, scan the local directory,
@@ -683,7 +712,7 @@ impl Tenant {
                 timeline_id,
                 index_parts.remove(&timeline_id).unwrap(),
                 remote_metadata,
-                remote_storage.clone(),
+                remote_clients.remove(&timeline_id).unwrap(),
             )
             .await
             .with_context(|| {
@@ -726,21 +755,18 @@ impl Tenant {
         Ok(size)
     }
 
-    #[instrument(skip(self, index_part, remote_metadata, remote_storage), fields(timeline_id=%timeline_id))]
+    #[instrument(skip_all, fields(timeline_id=%timeline_id))]
     async fn load_remote_timeline(
         &self,
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
-        remote_storage: GenericRemoteStorage,
+        remote_client: RemoteTimelineClient,
     ) -> anyhow::Result<()> {
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
             .context("Failed to create new timeline directory")?;
-
-        let remote_client =
-            RemoteTimelineClient::new(remote_storage, self.conf, self.tenant_id, timeline_id)?;
 
         let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
             let timelines = self.timelines.lock().unwrap();
@@ -837,7 +863,7 @@ impl Tenant {
                 match tenant_clone.load().await {
                     Ok(()) => {}
                     Err(err) => {
-                        tenant_clone.set_broken();
+                        tenant_clone.set_broken(&err.to_string());
                         error!("could not load tenant {tenant_id}: {err:?}");
                     }
                 }
@@ -998,18 +1024,14 @@ impl Tenant {
             None
         };
 
-        let remote_client = self
-            .remote_storage
-            .as_ref()
-            .map(|remote_storage| {
-                RemoteTimelineClient::new(
-                    remote_storage.clone(),
-                    self.conf,
-                    self.tenant_id,
-                    timeline_id,
-                )
-            })
-            .transpose()?;
+        let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
+            RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            )
+        });
 
         let remote_startup_data = match &remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
@@ -1477,7 +1499,7 @@ impl Tenant {
         });
     }
 
-    pub fn set_broken(&self) {
+    pub fn set_broken(&self, reason: &str) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Active => {
@@ -1486,18 +1508,22 @@ impl Tenant {
                     // activated should never be marked as broken. We cope with it the best
                     // we can, but it shouldn't happen.
                     *current_state = TenantState::Broken;
-                    warn!("Changing Active tenant to Broken state");
+                    warn!("Changing Active tenant to Broken state, reason: {}", reason);
                 }
                 TenantState::Broken => {
                     // This shouldn't happen either
-                    warn!("Tenant is already broken");
+                    warn!("Tenant is already in Broken state");
                 }
                 TenantState::Stopping => {
                     // This shouldn't happen either
                     *current_state = TenantState::Broken;
-                    warn!("Marking Stopping tenant as Broken");
+                    warn!(
+                        "Marking Stopping tenant as Broken state, reason: {}",
+                        reason
+                    );
                 }
                 TenantState::Loading | TenantState::Attaching => {
+                    info!("Setting tenant as Broken state, reason: {}", reason);
                     *current_state = TenantState::Broken;
                 }
             }
@@ -1851,7 +1877,12 @@ impl Tenant {
 
         utils::failpoint_sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
 
-        info!("starting on {} timelines", gc_timelines.len());
+        // If there is nothing to GC, we don't want any messages in the INFO log.
+        if !gc_timelines.is_empty() {
+            info!("{} timelines need GC", gc_timelines.len());
+        } else {
+            debug!("{} timelines need GC", gc_timelines.len());
+        }
 
         // Perform GC for each timeline.
         //
@@ -2142,13 +2173,12 @@ impl Tenant {
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
 
-        tokio::task::block_in_place(|| {
-            import_datadir::import_timeline_from_postgres_datadir(
-                unfinished_timeline,
-                pgdata_path,
-                pgdata_lsn,
-            )
-        })
+        import_datadir::import_timeline_from_postgres_datadir(
+            unfinished_timeline,
+            pgdata_path,
+            pgdata_lsn,
+        )
+        .await
         .with_context(|| {
             format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
         })?;
@@ -2204,7 +2234,7 @@ impl Tenant {
                 self.conf,
                 tenant_id,
                 new_timeline_id,
-            )?;
+            );
             remote_client.init_upload_queue_for_empty_remote(&new_metadata)?;
             Some(remote_client)
         } else {

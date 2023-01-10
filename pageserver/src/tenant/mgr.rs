@@ -430,7 +430,7 @@ where
         Err(e) => {
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
-                Some(tenant) => tenant.set_broken(),
+                Some(tenant) => tenant.set_broken(&e.to_string()),
                 None => warn!("Tenant {tenant_id} got removed from memory"),
             }
             Err(e)
@@ -485,6 +485,56 @@ pub async fn immediate_gc(
             }
             Ok(())
         }
+    );
+
+    // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task
+    drop(guard);
+
+    Ok(wait_task_done)
+}
+
+#[cfg(feature = "testing")]
+pub async fn immediate_compact(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<tokio::sync::oneshot::Receiver<anyhow::Result<()>>, ApiError> {
+    let guard = TENANTS.read().await;
+
+    let tenant = guard
+        .get(&tenant_id)
+        .map(Arc::clone)
+        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .map_err(ApiError::NotFound)?;
+
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)?;
+
+    // Run in task_mgr to avoid race with detach operation
+    let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
+    task_mgr::spawn(
+        &tokio::runtime::Handle::current(),
+        TaskKind::Compaction,
+        Some(tenant_id),
+        Some(timeline_id),
+        &format!(
+            "timeline_compact_handler compaction run for tenant {tenant_id} timeline {timeline_id}"
+        ),
+        false,
+        async move {
+            let result = timeline
+                .compact()
+                .instrument(
+                    info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id),
+                )
+                .await;
+
+            match task_done.send(result) {
+                Ok(_) => (),
+                Err(result) => error!("failed to send compaction result: {result:?}"),
+            }
+            Ok(())
+        },
     );
 
     // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task

@@ -209,11 +209,30 @@ pub static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
 
 // remote storage metrics
 
-static REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS: Lazy<IntGaugeVec> = Lazy::new(|| {
+/// NB: increment _after_ recording the current value into [`REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST`].
+static REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
-        "pageserver_remote_upload_queue_unfinished_tasks",
-        "Number of tasks in the upload queue that are not finished yet.",
+        "pageserver_remote_timeline_client_calls_unfinished",
+        "Number of ongoing calls to remote timeline client. \
+         Used to populate pageserver_remote_timeline_client_calls_started. \
+         This metric is not useful for sampling from Prometheus, but useful in tests.",
         &["tenant_id", "timeline_id", "file_kind", "op_kind"],
+    )
+    .expect("failed to define a metric")
+});
+
+static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_remote_timeline_client_calls_started",
+        "When calling a remote timeline client method, we record the current value \
+         of the calls_unfinished gauge in this histogram. Plot the histogram \
+         over time in a heatmap to visualize how many operations were ongoing \
+         at a given instant. It gives you a better idea of the queue depth \
+         than plotting the gauge directly, since operations may complete faster \
+         than the sampling interval.",
+        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
+        // The calls_unfinished gauge is an integer gauge, hence we have integer buckets.
+        vec![0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 40.0, 60.0, 80.0, 100.0, 500.0],
     )
     .expect("failed to define a metric")
 });
@@ -248,15 +267,12 @@ impl RemoteOpFileKind {
     }
 }
 
-pub static REMOTE_OPERATION_KINDS: &[&str] = &["upload", "download", "delete"];
-pub static REMOTE_OPERATION_FILE_KINDS: &[&str] = &["layer", "index"];
-pub static REMOTE_OPERATION_STATUSES: &[&str] = &["success", "failure"];
-
 pub static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_remote_operation_seconds",
         "Time spent on remote storage operations. \
-        Grouped by tenant, timeline, operation_kind and status",
+        Grouped by tenant, timeline, operation_kind and status. \
+        Does not account for time spent waiting in remote timeline client's queues.",
         &["tenant_id", "timeline_id", "file_kind", "op_kind", "status"]
     )
     .expect("failed to define a metric")
@@ -475,21 +491,6 @@ impl Drop for TimelineMetrics {
         for op in SMGR_QUERY_TIME_OPERATIONS {
             let _ = SMGR_QUERY_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
         }
-
-        let _ = REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS.remove_label_values(&[tenant_id, timeline_id]);
-        for file_kind in REMOTE_OPERATION_FILE_KINDS {
-            for op in REMOTE_OPERATION_KINDS {
-                for status in REMOTE_OPERATION_STATUSES {
-                    let _ = REMOTE_OPERATION_TIME.remove_label_values(&[
-                        tenant_id,
-                        timeline_id,
-                        file_kind,
-                        op,
-                        status,
-                    ]);
-                }
-            }
-        }
     }
 }
 
@@ -510,7 +511,8 @@ pub struct RemoteTimelineClientMetrics {
     timeline_id: String,
     remote_physical_size_gauge: Mutex<Option<UIntGauge>>,
     remote_operation_time: Mutex<HashMap<(&'static str, &'static str, &'static str), Histogram>>,
-    unfinished_tasks: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
+    calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
+    calls_started_hist: Mutex<HashMap<(&'static str, &'static str), Histogram>>,
 }
 
 impl RemoteTimelineClientMetrics {
@@ -519,7 +521,8 @@ impl RemoteTimelineClientMetrics {
             tenant_id: tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             remote_operation_time: Mutex::new(HashMap::default()),
-            unfinished_tasks: Mutex::new(HashMap::default()),
+            calls_unfinished_gauge: Mutex::new(HashMap::default()),
+            calls_started_hist: Mutex::new(HashMap::default()),
             remote_physical_size_gauge: Mutex::new(None),
         }
     }
@@ -558,16 +561,37 @@ impl RemoteTimelineClientMetrics {
         });
         metric.clone()
     }
-    pub fn unfinished_tasks(
+    fn calls_unfinished_gauge(
         &self,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> IntGauge {
         // XXX would be nice to have an upgradable RwLock
-        let mut guard = self.unfinished_tasks.lock().unwrap();
+        let mut guard = self.calls_unfinished_gauge.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS
+            REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE
+                .get_metric_with_label_values(&[
+                    &self.tenant_id.to_string(),
+                    &self.timeline_id.to_string(),
+                    key.0,
+                    key.1,
+                ])
+                .unwrap()
+        });
+        metric.clone()
+    }
+
+    fn calls_started_hist(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+    ) -> Histogram {
+        // XXX would be nice to have an upgradable RwLock
+        let mut guard = self.calls_started_hist.lock().unwrap();
+        let key = (file_kind.as_str(), op_kind.as_str());
+        let metric = guard.entry(key).or_insert_with(move || {
+            REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST
                 .get_metric_with_label_values(&[
                     &self.tenant_id.to_string(),
                     &self.timeline_id.to_string(),
@@ -580,6 +604,58 @@ impl RemoteTimelineClientMetrics {
     }
 }
 
+/// See [`RemoteTimelineClientMetrics::call_begin`].
+#[must_use]
+pub(crate) struct RemoteTimelineClientCallMetricGuard(Option<IntGauge>);
+
+impl RemoteTimelineClientCallMetricGuard {
+    /// Consume this guard object without decrementing the metric.
+    /// The caller vouches to do this manually, so that the prior increment of the gauge will cancel out.
+    pub fn will_decrement_manually(mut self) {
+        self.0 = None; // prevent drop() from decrementing
+    }
+}
+
+impl Drop for RemoteTimelineClientCallMetricGuard {
+    fn drop(&mut self) {
+        if let RemoteTimelineClientCallMetricGuard(Some(guard)) = self {
+            guard.dec();
+        }
+    }
+}
+
+impl RemoteTimelineClientMetrics {
+    /// Increment the metrics that track ongoing calls to the remote timeline client instance.
+    ///
+    /// Drop the returned guard object once the operation is finished to decrement the values.
+    /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`] if that
+    /// is more suitable.
+    /// Never do both.
+    pub(crate) fn call_begin(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+    ) -> RemoteTimelineClientCallMetricGuard {
+        let unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
+        self.calls_started_hist(file_kind, op_kind)
+            .observe(unfinished_metric.get() as f64);
+        unfinished_metric.inc();
+        RemoteTimelineClientCallMetricGuard(Some(unfinished_metric))
+    }
+
+    /// Manually decrement the metric instead of using the guard object.
+    /// Using the guard object is generally preferable.
+    /// See [`call_begin`] for more context.
+    pub(crate) fn call_end(&self, file_kind: &RemoteOpFileKind, op_kind: &RemoteOpKind) {
+        let unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
+        debug_assert!(
+            unfinished_metric.get() > 0,
+            "begin and end should cancel out"
+        );
+        unfinished_metric.dec();
+    }
+}
+
 impl Drop for RemoteTimelineClientMetrics {
     fn drop(&mut self) {
         let RemoteTimelineClientMetrics {
@@ -587,13 +663,22 @@ impl Drop for RemoteTimelineClientMetrics {
             timeline_id,
             remote_physical_size_gauge,
             remote_operation_time,
-            unfinished_tasks,
+            calls_unfinished_gauge,
+            calls_started_hist,
         } = self;
         for ((a, b, c), _) in remote_operation_time.get_mut().unwrap().drain() {
             let _ = REMOTE_OPERATION_TIME.remove_label_values(&[tenant_id, timeline_id, a, b, c]);
         }
-        for ((a, b), _) in unfinished_tasks.get_mut().unwrap().drain() {
-            let _ = REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS.remove_label_values(&[
+        for ((a, b), _) in calls_unfinished_gauge.get_mut().unwrap().drain() {
+            let _ = REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE.remove_label_values(&[
+                tenant_id,
+                timeline_id,
+                a,
+                b,
+            ]);
+        }
+        for ((a, b), _) in calls_started_hist.get_mut().unwrap().drain() {
+            let _ = REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST.remove_label_values(&[
                 tenant_id,
                 timeline_id,
                 a,

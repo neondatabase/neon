@@ -87,6 +87,9 @@ where
     /// contain the version, even if it's missing from the returned
     /// layer.
     ///
+    /// NOTE: This only searches the 'historic' layers, *not* the
+    /// 'open' and 'frozen' layers!
+    ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
         match self.index.query(key.to_i128(), end_lsn.0 - 1) {
             (None, None) => None,

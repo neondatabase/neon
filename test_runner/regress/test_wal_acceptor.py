@@ -1105,7 +1105,6 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env.pageserver.allowed_errors.extend(
         [
             ".*Failed to process query for timeline .*: Timeline .* was not found in global map.*",
-            ".*end streaming to Some.*",
         ]
     )
 

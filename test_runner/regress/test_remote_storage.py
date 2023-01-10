@@ -2,11 +2,11 @@
 # env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import os
-import re
 import shutil
 import threading
 import time
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 import pytest
 from fixtures.log_helper import log
@@ -271,14 +271,15 @@ def test_remote_storage_upload_queue_retries(
         wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
-        metrics = client.get_metrics()
-        matches = re.search(
-            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
-            metrics,
-            re.MULTILINE,
+        val = client.get_remote_timeline_client_metric(
+            "pageserver_remote_timeline_client_calls_unfinished",
+            tenant_id,
+            timeline_id,
+            file_kind,
+            op_kind,
         )
-        assert matches
-        return int(matches[1])
+        assert val is not None, "expecting metric to be present"
+        return int(val)
 
     # create some layers & wait for uploads to finish
     overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
@@ -368,6 +369,168 @@ def test_remote_storage_upload_queue_retries(
         assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
 
 
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_remote_timeline_client_calls_started_metric(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_remote_timeline_client_metrics",
+    )
+
+    env = neon_env_builder.init_start()
+
+    # create tenant with config that will determinstically allow
+    # compaction and gc
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        conf={
+            # small checkpointing and compaction targets to ensure we generate many upload operations
+            "checkpoint_distance": f"{128 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{128 * 1024}",
+            # no PITR horizon, we specify the horizon when we request on-demand GC
+            "pitr_interval": "0s",
+            # disable background compaction and GC. We invoke it manually when we want it to happen.
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            # don't create image layers, that causes just noise
+            "image_creation_threshold": "10000",
+        }
+    )
+
+    client = env.pageserver.http_client()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+
+    pg.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+
+    def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
+        # create initial set of layers & upload them with failpoints configured
+        pg.safe_psql_many(
+            [
+                f"""
+               INSERT INTO foo (id, val)
+               SELECT g, '{data}'
+               FROM generate_series(1, 10000) g
+               ON CONFLICT (id) DO UPDATE
+               SET val = EXCLUDED.val
+               """,
+                # to ensure that GC can actually remove some layers
+                "VACUUM foo",
+            ]
+        )
+        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+
+    def get_queued_count(file_kind, op_kind):
+        val = client.get_remote_timeline_client_metric(
+            "pageserver_remote_timeline_client_calls_unfinished",
+            tenant_id,
+            timeline_id,
+            file_kind,
+            op_kind,
+        )
+        if val is None:
+            return val
+        return int(val)
+
+    def wait_upload_queue_empty():
+        wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
+        wait_until(2, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
+        wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+
+    calls_started: Dict[Tuple[str, str], List[int]] = {
+        ("layer", "upload"): [0],
+        ("index", "upload"): [0],
+        ("layer", "delete"): [0],
+    }
+
+    def fetch_calls_started():
+        for (file_kind, op_kind), observations in calls_started.items():
+            val = client.get_remote_timeline_client_metric(
+                "pageserver_remote_timeline_client_calls_started_count",
+                tenant_id,
+                timeline_id,
+                file_kind,
+                op_kind,
+            )
+            assert val is not None, f"expecting metric to be present: {file_kind} {op_kind}"
+            val = int(val)
+            observations.append(val)
+
+    def ensure_calls_started_grew():
+        for (file_kind, op_kind), observations in calls_started.items():
+            log.info(f"ensure_calls_started_grew: {file_kind} {op_kind}: {observations}")
+            assert all(
+                x < y for x, y in zip(observations, observations[1:])
+            ), f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
+
+    def churn(data_pass1, data_pass2):
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass1)
+        client.timeline_checkpoint(tenant_id, timeline_id)
+        client.timeline_compact(tenant_id, timeline_id)
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass2)
+        client.timeline_checkpoint(tenant_id, timeline_id)
+        client.timeline_compact(tenant_id, timeline_id)
+        gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
+        print_gc_result(gc_result)
+        assert gc_result["layers_removed"] > 0
+
+    # create some layers & wait for uploads to finish
+    churn("a", "b")
+
+    wait_upload_queue_empty()
+
+    # ensure that we updated the calls_started metric
+    fetch_calls_started()
+    ensure_calls_started_grew()
+
+    # more churn to cause more operations
+    churn("c", "d")
+
+    # ensure that the calls_started metric continued to be updated
+    fetch_calls_started()
+    ensure_calls_started_grew()
+
+    ### now we exercise the download path
+    calls_started.clear()
+    calls_started.update(
+        {
+            ("index", "download"): [0],
+            ("layer", "download"): [0],
+        }
+    )
+
+    env.pageserver.stop(immediate=True)
+    env.postgres.stop_all()
+
+    dir_to_clear = Path(env.repo_dir) / "tenants"
+    shutil.rmtree(dir_to_clear)
+    os.mkdir(dir_to_clear)
+
+    env.pageserver.start()
+    client = env.pageserver.http_client()
+
+    client.tenant_attach(tenant_id)
+
+    def tenant_active():
+        all_states = client.tenant_list()
+        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
+        assert tenant["state"] == "Active"
+
+    wait_until(30, 1, tenant_active)
+
+    log.info("restarting postgres to validate")
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    with pg.cursor() as cur:
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
+
+    # ensure that we updated the calls_started download metric
+    fetch_calls_started()
+    ensure_calls_started_grew()
+
+
 # Test that we correctly handle timeline with layers stuck in upload queue
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_timeline_deletion_with_files_stuck_in_upload_queue(
@@ -401,15 +564,14 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     client = env.pageserver.http_client()
 
     def get_queued_count(file_kind, op_kind):
-        metrics = client.get_metrics()
-        matches = re.search(
-            f'^pageserver_remote_upload_queue_unfinished_tasks{{file_kind="{file_kind}",op_kind="{op_kind}",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
-            metrics,
-            re.MULTILINE,
+        val = client.get_remote_timeline_client_metric(
+            "pageserver_remote_timeline_client_calls_unfinished",
+            tenant_id,
+            timeline_id,
+            file_kind,
+            op_kind,
         )
-        if matches is None:
-            return None
-        return int(matches[1])
+        return int(val) if val is not None else val
 
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
 
