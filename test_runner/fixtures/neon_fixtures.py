@@ -1351,11 +1351,18 @@ class PageserverHttpClient(requests.Session):
         assert res_json is None
 
     def timeline_spawn_download_remote_layers(
-        self, tenant_id: TenantId, timeline_id: TimelineId
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        max_concurrent_downloads: int,
     ) -> dict[str, Any]:
 
+        body = {
+            "max_concurrent_downloads": max_concurrent_downloads,
+        }
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+            json=body,
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -1389,10 +1396,13 @@ class PageserverHttpClient(requests.Session):
         self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        max_concurrent_downloads: int,
         errors_ok=False,
         at_least_one_download=True,
     ):
-        res = self.timeline_spawn_download_remote_layers(tenant_id, timeline_id)
+        res = self.timeline_spawn_download_remote_layers(
+            tenant_id, timeline_id, max_concurrent_downloads
+        )
         while True:
             completed = self.timeline_poll_download_remote_layers_status(
                 tenant_id, timeline_id, res, poll_state="Completed"

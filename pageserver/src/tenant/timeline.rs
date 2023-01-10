@@ -3,12 +3,12 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
 use fail::fail_point;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::{
-    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskState, TimelineState,
+    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
+    DownloadRemoteLayersTaskState, TimelineState,
 };
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
@@ -3116,6 +3116,7 @@ impl Timeline {
 
     pub async fn spawn_download_all_remote_layers(
         self: Arc<Self>,
+        request: DownloadRemoteLayersTaskSpawnRequest,
     ) -> Result<DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskInfo> {
         let mut status_guard = self.download_all_remote_layers_task_info.write().unwrap();
         if let Some(st) = &*status_guard {
@@ -3139,7 +3140,7 @@ impl Timeline {
             "download all remote layers task",
             false,
             async move {
-                self_clone.download_all_remote_layers().await;
+                self_clone.download_all_remote_layers(request).await;
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
                  match &mut *status_guard {
                     None => {
@@ -3171,15 +3172,23 @@ impl Timeline {
         Ok(initial_info)
     }
 
-    async fn download_all_remote_layers(self: &Arc<Self>) {
-        let mut downloads: FuturesUnordered<_> = {
+    async fn download_all_remote_layers(
+        self: &Arc<Self>,
+        request: DownloadRemoteLayersTaskSpawnRequest,
+    ) {
+        let mut downloads = Vec::new();
+        {
             let layers = self.layers.read().unwrap();
             layers
                 .iter_historic_layers()
                 .filter_map(|l| l.downcast_remote_layer())
                 .map(|l| self.download_remote_layer(l))
-                .collect()
-        };
+                .for_each(|dl| downloads.push(dl))
+        }
+        let total_layer_count = downloads.len();
+        // limit download concurrency as specified in request
+        let downloads = futures::stream::iter(downloads);
+        let mut downloads = downloads.buffer_unordered(request.max_concurrent_downloads.get());
 
         macro_rules! lock_status {
             ($st:ident) => {
@@ -3200,7 +3209,7 @@ impl Timeline {
 
         {
             lock_status!(st);
-            st.total_layer_count = downloads.len().try_into().unwrap();
+            st.total_layer_count = total_layer_count as u64;
         }
         loop {
             tokio::select! {

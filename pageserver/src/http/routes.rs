@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
+use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -788,10 +789,11 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
 }
 
 async fn timeline_download_remote_layers_handler_post(
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let body: DownloadRemoteLayersTaskSpawnRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
     let tenant = mgr::get_tenant(tenant_id, true)
@@ -800,7 +802,7 @@ async fn timeline_download_remote_layers_handler_post(
     let timeline = tenant
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
-    match timeline.spawn_download_all_remote_layers().await {
+    match timeline.spawn_download_all_remote_layers(body).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
     }
