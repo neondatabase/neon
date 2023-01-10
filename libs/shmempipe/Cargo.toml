@@ -28,6 +28,7 @@ rand = { version = "0.8.3", optional = true }
 
 [dev-dependencies]
 rand = { version = "0.8.3" }
+tempfile = "3"
 
 [[bin]]
 name = "producer_consumer"

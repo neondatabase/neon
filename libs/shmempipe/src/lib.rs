@@ -748,18 +748,22 @@ fn initialize_at(
 /// Type state for the cleanup on drop pointer.
 ///
 /// Without any test specific configuration, will call `munmap` afterwards.
+#[derive(Debug)]
 pub struct MMapped;
 
 /// Type state to fully cleanup on drop pointer, created with [`create`].
+#[derive(Debug)]
 pub struct Created;
 
 /// Type state to fully cleanup on drop pointer, created with [`open_existing`].
+#[derive(Debug)]
 pub struct Joined;
 
 /// Owning pointer to the mmap'd shared memory section.
 ///
 /// This has a phantom type parameter, which differentiates the pointed memory in different states,
 /// and doesn't allow for example the `join_initialized_at` to call `try_acquire_responder`.
+#[derive(Debug)]
 pub struct SharedMemPipePtr<Stage> {
     ptr: Option<NonNull<RawSharedMemPipe>>,
     size: NonZeroUsize,
@@ -1033,7 +1037,6 @@ mod tests {
     use super::RawSharedMemPipe;
 
     /// This is a test for miri to detect any UB, or valgrind memcheck.
-    // #[cfg(miri)]
     #[test]
     fn initialize_at_on_boxed() {
         // use of seqcst is confusing here, it is not needed for anything
@@ -1042,66 +1045,27 @@ mod tests {
         let mem = Box::new(MaybeUninit::<RawSharedMemPipe>::uninit());
         let ptr = Box::into_raw(mem);
 
+        // with miri, there's automatic leak checking, comment out to see it in action
         let _guard = DropRawBoxOnDrop(ptr);
 
         let ptr = NonNull::new(ptr).unwrap();
         let size = std::mem::size_of::<RawSharedMemPipe>();
         let size = NonZeroUsize::new(size).unwrap();
 
-        // miri does not yet support the tempfile crate, which always uses a secure mode
-        let mut tempfiles = std::iter::from_fn(|| {
-            let dir = std::env::temp_dir();
+        let fake_eventfds = if cfg!(miri) {
+            (miri_tempfile().unwrap(), miri_tempfile().unwrap())
+        } else {
+            (tempfile::tempfile().unwrap(), tempfile::tempfile().unwrap())
+        };
 
-            let mut rng = rand::thread_rng();
-
-            const ATTEMPTS: usize = 50;
-
-            for attempt in 0..ATTEMPTS {
-                let last_attempt = attempt == ATTEMPTS - 1;
-
-                let filename = (&mut rng)
-                    .sample_iter(&rand::distributions::Alphanumeric)
-                    .take(8)
-                    .map(|b| b as char)
-                    .collect::<String>();
-                let path = dir.join(filename);
-                match std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&path)
-                {
-                    Ok(f) => {
-                        std::fs::remove_file(&path)
-                            .expect("should had managed to remove just created tempfile");
-                        return Some(Ok(f));
-                    }
-                    Err(e) if !last_attempt && e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        continue
-                    }
-                    Err(other) => return Some(Err(other)),
-                }
-            }
-
-            unreachable!()
-        });
-
-        let file_a = tempfiles
-            .next()
-            .expect("must be able to create two tempfiles")
-            .unwrap();
-        let file_b = tempfiles
-            .next()
-            .expect("must be able to create two tempfiles")
-            .unwrap();
-
-        let expected_fds = (file_a.as_raw_fd(), file_b.as_raw_fd());
+        let expected_fds = (fake_eventfds.0.as_raw_fd(), fake_eventfds.1.as_raw_fd());
 
         // TODO: maybe add Stage::Target = { MaybeUninit<_>, _ }? it is what the types basically
         // do.
         let ready = {
             let ptr = SharedMemPipePtr::post_mmap(ptr.cast(), size).with_munmap_on_drop(false);
 
-            super::initialize_at(ptr, file_a, file_b).unwrap()
+            super::initialize_at(ptr, fake_eventfds.0, fake_eventfds.1).unwrap()
         };
 
         {
@@ -1132,6 +1096,12 @@ mod tests {
 
         drop(ready);
 
+        {
+            let ptr = SharedMemPipePtr::post_mmap(ptr.cast(), size).with_munmap_on_drop(false);
+            super::join_initialized_at(ptr)
+                .expect_err("should not had been able to join after dropping owner");
+        };
+
         // the memory is still valid, it hasn't been dropped, the _guard will drop it
         {
             let target = ptr.cast::<RawSharedMemPipe>();
@@ -1139,6 +1109,45 @@ mod tests {
             let magic = target.magic.load(ordering);
             assert_eq!(0xffff_ffff, magic, "0x{magic:08x}");
         }
+    }
+
+    /// Miri does not support the `tempfile` crate, so we need to work around.
+    ///
+    /// Miri still requires a -Zdisable-isolation
+    fn miri_tempfile() -> std::io::Result<std::fs::File> {
+        let dir = std::env::temp_dir();
+
+        let mut rng = rand::thread_rng();
+
+        const ATTEMPTS: usize = 50;
+
+        for attempt in 0..ATTEMPTS {
+            let last_attempt = attempt == ATTEMPTS - 1;
+
+            let filename = (&mut rng)
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(8)
+                .map(|b| b as char)
+                .collect::<String>();
+            let path = dir.join(filename);
+            match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+            {
+                Ok(f) => {
+                    std::fs::remove_file(&path)
+                        .expect("should had managed to remove just created tempfile");
+                    return Ok(f);
+                }
+                Err(e) if !last_attempt && e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    continue
+                }
+                Err(other) => return Err(other),
+            }
+        }
+
+        unreachable!("because we will have returned an error on the last attempt")
     }
 
     struct DropRawBoxOnDrop<T>(*mut T);

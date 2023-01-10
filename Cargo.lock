@@ -3416,6 +3416,7 @@ dependencies = [
  "rand",
  "ringbuf",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
