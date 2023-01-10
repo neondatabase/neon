@@ -91,7 +91,11 @@ where
     /// 'open' and 'frozen' layers!
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
-        match self.index.get().unwrap().query(key.to_i128(), end_lsn.0 - 1) {
+        let version = self.index.get().unwrap().get_version(end_lsn.0 - 1)?;
+        let latest_delta = version.delta_coverage.query(key.to_i128());
+        let latest_image = version.image_coverage.query(key.to_i128());
+
+        match (latest_delta, latest_image) {
             (None, None) => None,
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
@@ -206,12 +210,12 @@ where
         };
 
         // Check the start is covered
-        if !layer_covers(version.query(start).1) {
+        if !layer_covers(version.image_coverage.query(start)) {
             return Ok(false);
         }
 
         // Check after all changes of coverage
-        for (_, change_val) in version.image_coverage(start..end) {
+        for (_, change_val) in version.image_coverage.range(start..end) {
             if !layer_covers(change_val) {
                 return Ok(false);
             }
@@ -248,10 +252,10 @@ where
         // Initialize loop variables
         let mut coverage: Vec<(Range<Key>, Option<Arc<L>>)> = vec![];
         let mut current_key = start.clone();
-        let mut current_val = version.query(start).1;
+        let mut current_val = version.image_coverage.query(start);
 
         // Loop through the change events and push intervals
-        for (change_key, change_val) in version.image_coverage(start..end) {
+        for (change_key, change_val) in version.image_coverage.range(start..end) {
             let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
             coverage.push((kr, current_val.take()));
             current_key = change_key.clone();
@@ -290,10 +294,10 @@ where
         // Initialize loop variables
         let mut max_stacked_deltas = 0;
         let mut current_key = start.clone();
-        let mut current_val = version.query(start).0;
+        let mut current_val = version.delta_coverage.query(start);
 
         // Loop through the delta coverage and recurse on each part
-        for (change_key, change_val) in version.delta_coverage(start..end) {
+        for (change_key, change_val) in version.delta_coverage.range(start..end) {
             // If there's a relevant delta in this part, add 1 and recurse down
             if let Some(val) = current_val {
                 if val.get_lsn_range().end.0 >= lsn.start.0 {

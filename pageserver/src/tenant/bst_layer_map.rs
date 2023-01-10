@@ -43,18 +43,17 @@ impl<Value: Clone> PersistentLayerMap<Value> {
             }
         }
 
-        self.head.insert(key, lsn.clone(), value, is_image);
+        // Insert into data structure
+        if is_image {
+            self.head.image_coverage.insert(key, lsn.clone(), value);
+        } else {
+            self.head
+                .delta_coverage
+                .insert(key.clone(), lsn.clone(), value);
+        }
 
         // Remember history. Clone is O(1)
         self.historic.insert(lsn.start, self.head.clone());
-    }
-
-    pub fn query(self: &Self, key: i128, lsn: u64) -> (Option<Value>, Option<Value>) {
-        let version = match self.historic.range(..=lsn).rev().next() {
-            Some((_, v)) => v,
-            None => return (None, None),
-        };
-        version.query(key)
     }
 
     pub fn get_version(self: &Self, lsn: u64) -> Option<&LatestLayerMap<Value>> {
@@ -86,18 +85,21 @@ fn test_persistent_simple() {
     map.insert(5..6, 120..121, "Layer 3".to_string(), true);
 
     // After Layer 1 insertion
-    assert_eq!(map.query(1, 105).1, Some("Layer 1".to_string()));
-    assert_eq!(map.query(4, 105).1, Some("Layer 1".to_string()));
+    let version = map.get_version(105).unwrap();
+    assert_eq!(version.image_coverage.query(1), Some("Layer 1".to_string()));
+    assert_eq!(version.image_coverage.query(4), Some("Layer 1".to_string()));
 
     // After Layer 2 insertion
-    assert_eq!(map.query(4, 115).1, Some("Layer 2".to_string()));
-    assert_eq!(map.query(8, 115).1, Some("Layer 2".to_string()));
-    assert_eq!(map.query(11, 115).1, None);
+    let version = map.get_version(115).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Layer 2".to_string()));
+    assert_eq!(version.image_coverage.query(8), Some("Layer 2".to_string()));
+    assert_eq!(version.image_coverage.query(11), None);
 
     // After Layer 3 insertion
-    assert_eq!(map.query(4, 125).1, Some("Layer 2".to_string()));
-    assert_eq!(map.query(5, 125).1, Some("Layer 3".to_string()));
-    assert_eq!(map.query(7, 125).1, Some("Layer 2".to_string()));
+    let version = map.get_version(125).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Layer 2".to_string()));
+    assert_eq!(version.image_coverage.query(5), Some("Layer 3".to_string()));
+    assert_eq!(version.image_coverage.query(7), Some("Layer 2".to_string()));
 }
 
 /// Cover simple off-by-one edge cases
@@ -107,15 +109,19 @@ fn test_off_by_one() {
     map.insert(3..5, 100..110, "Layer 1".to_string(), true);
 
     // Check different LSNs
-    assert_eq!(map.query(4, 99).1, None);
-    assert_eq!(map.query(4, 100).1, Some("Layer 1".to_string()));
-    assert_eq!(map.query(4, 110).1, Some("Layer 1".to_string()));
+    let version = map.get_version(99);
+    assert!(version.is_none());
+    let version = map.get_version(100).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Layer 1".to_string()));
+    let version = map.get_version(110).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Layer 1".to_string()));
 
     // Check different keys
-    assert_eq!(map.query(2, 105).1, None);
-    assert_eq!(map.query(3, 105).1, Some("Layer 1".to_string()));
-    assert_eq!(map.query(4, 105).1, Some("Layer 1".to_string()));
-    assert_eq!(map.query(5, 105).1, None);
+    let version = map.get_version(105).unwrap();
+    assert_eq!(version.image_coverage.query(2), None);
+    assert_eq!(version.image_coverage.query(3), Some("Layer 1".to_string()));
+    assert_eq!(version.image_coverage.query(4), Some("Layer 1".to_string()));
+    assert_eq!(version.image_coverage.query(5), None);
 }
 
 /// Cover edge cases where layers begin or end on the same key
@@ -129,18 +135,38 @@ fn test_key_collision() {
     map.insert(3..4, 200..210, "Layer 20".to_string(), true);
 
     // Check after layer 11
-    assert_eq!(map.query(2, 105).1, None);
-    assert_eq!(map.query(3, 105).1, Some("Layer 10".to_string()));
-    assert_eq!(map.query(5, 105).1, Some("Layer 11".to_string()));
-    assert_eq!(map.query(7, 105).1, Some("Layer 11".to_string()));
-    assert_eq!(map.query(8, 105).1, None);
+    let version = map.get_version(105).unwrap();
+    assert_eq!(version.image_coverage.query(2), None);
+    assert_eq!(
+        version.image_coverage.query(3),
+        Some("Layer 10".to_string())
+    );
+    assert_eq!(
+        version.image_coverage.query(5),
+        Some("Layer 11".to_string())
+    );
+    assert_eq!(
+        version.image_coverage.query(7),
+        Some("Layer 11".to_string())
+    );
+    assert_eq!(version.image_coverage.query(8), None);
 
     // Check after layer 20
-    assert_eq!(map.query(2, 205).1, None);
-    assert_eq!(map.query(3, 205).1, Some("Layer 20".to_string()));
-    assert_eq!(map.query(5, 205).1, Some("Layer 11".to_string()));
-    assert_eq!(map.query(7, 205).1, Some("Layer 11".to_string()));
-    assert_eq!(map.query(8, 205).1, None);
+    let version = map.get_version(205).unwrap();
+    assert_eq!(version.image_coverage.query(2), None);
+    assert_eq!(
+        version.image_coverage.query(3),
+        Some("Layer 20".to_string())
+    );
+    assert_eq!(
+        version.image_coverage.query(5),
+        Some("Layer 11".to_string())
+    );
+    assert_eq!(
+        version.image_coverage.query(7),
+        Some("Layer 11".to_string())
+    );
+    assert_eq!(version.image_coverage.query(8), None);
 }
 
 /// Test when rectangles have nontrivial height and possibly overlap
@@ -163,31 +189,34 @@ fn test_persistent_overlapping() {
     map.insert(0..9, 150..301, "Layer 6".to_string(), true);
 
     // After layer 4 insertion
-    assert_eq!(map.query(0, 135).1, Some("Layer 4".to_string()));
-    assert_eq!(map.query(1, 135).1, Some("Layer 1".to_string()));
-    assert_eq!(map.query(2, 135).1, Some("Layer 4".to_string()));
-    assert_eq!(map.query(4, 135).1, Some("Layer 2".to_string()));
-    assert_eq!(map.query(5, 135).1, Some("Layer 4".to_string()));
-    assert_eq!(map.query(7, 135).1, Some("Layer 3".to_string()));
-    assert_eq!(map.query(8, 135).1, Some("Layer 4".to_string()));
+    let version = map.get_version(135).unwrap();
+    assert_eq!(version.image_coverage.query(0), Some("Layer 4".to_string()));
+    assert_eq!(version.image_coverage.query(1), Some("Layer 1".to_string()));
+    assert_eq!(version.image_coverage.query(2), Some("Layer 4".to_string()));
+    assert_eq!(version.image_coverage.query(4), Some("Layer 2".to_string()));
+    assert_eq!(version.image_coverage.query(5), Some("Layer 4".to_string()));
+    assert_eq!(version.image_coverage.query(7), Some("Layer 3".to_string()));
+    assert_eq!(version.image_coverage.query(8), Some("Layer 4".to_string()));
 
     // After layer 5 insertion
-    assert_eq!(map.query(0, 145).1, Some("Layer 5".to_string()));
-    assert_eq!(map.query(1, 145).1, Some("Layer 5".to_string()));
-    assert_eq!(map.query(2, 145).1, Some("Layer 5".to_string()));
-    assert_eq!(map.query(4, 145).1, Some("Layer 5".to_string()));
-    assert_eq!(map.query(5, 145).1, Some("Layer 5".to_string()));
-    assert_eq!(map.query(7, 145).1, Some("Layer 3".to_string()));
-    assert_eq!(map.query(8, 145).1, Some("Layer 5".to_string()));
+    let version = map.get_version(145).unwrap();
+    assert_eq!(version.image_coverage.query(0), Some("Layer 5".to_string()));
+    assert_eq!(version.image_coverage.query(1), Some("Layer 5".to_string()));
+    assert_eq!(version.image_coverage.query(2), Some("Layer 5".to_string()));
+    assert_eq!(version.image_coverage.query(4), Some("Layer 5".to_string()));
+    assert_eq!(version.image_coverage.query(5), Some("Layer 5".to_string()));
+    assert_eq!(version.image_coverage.query(7), Some("Layer 3".to_string()));
+    assert_eq!(version.image_coverage.query(8), Some("Layer 5".to_string()));
 
     // After layer 6 insertion
-    assert_eq!(map.query(0, 155).1, Some("Layer 6".to_string()));
-    assert_eq!(map.query(1, 155).1, Some("Layer 6".to_string()));
-    assert_eq!(map.query(2, 155).1, Some("Layer 6".to_string()));
-    assert_eq!(map.query(4, 155).1, Some("Layer 6".to_string()));
-    assert_eq!(map.query(5, 155).1, Some("Layer 6".to_string()));
-    assert_eq!(map.query(7, 155).1, Some("Layer 6".to_string()));
-    assert_eq!(map.query(8, 155).1, Some("Layer 6".to_string()));
+    let version = map.get_version(155).unwrap();
+    assert_eq!(version.image_coverage.query(0), Some("Layer 6".to_string()));
+    assert_eq!(version.image_coverage.query(1), Some("Layer 6".to_string()));
+    assert_eq!(version.image_coverage.query(2), Some("Layer 6".to_string()));
+    assert_eq!(version.image_coverage.query(4), Some("Layer 6".to_string()));
+    assert_eq!(version.image_coverage.query(5), Some("Layer 6".to_string()));
+    assert_eq!(version.image_coverage.query(7), Some("Layer 6".to_string()));
+    assert_eq!(version.image_coverage.query(8), Some("Layer 6".to_string()));
 }
 
 /// Wrapper for PersistentLayerMap that allows us to hack around the lack
@@ -335,7 +364,6 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
 
         Ok(&self.map)
     }
-
 }
 
 #[test]
@@ -351,7 +379,11 @@ fn test_retroactive_regression_1() {
 
     map.rebuild();
 
-    assert_eq!(map.get().unwrap().query(100, 23761457).0, Some("sdfsdfs".to_string()));
+    let version = map.get().unwrap().get_version(23761457).unwrap();
+    assert_eq!(
+        version.delta_coverage.query(100),
+        Some("sdfsdfs".to_string())
+    );
 }
 
 #[test]
@@ -371,17 +403,23 @@ fn test_retroactive_simple() {
     map.rebuild();
 
     // Query key 4
-    assert_eq!(map.get().unwrap().query(4, 90).1, None);
-    assert_eq!(map.get().unwrap().query(4, 102).1, Some("Image 1".to_string()));
-    assert_eq!(map.get().unwrap().query(4, 107).1, Some("Delta 1".to_string()));
-    assert_eq!(map.get().unwrap().query(4, 115).1, Some("Image 2".to_string()));
-    assert_eq!(map.get().unwrap().query(4, 125).1, Some("Image 3".to_string()));
+    let version = map.get().unwrap().get_version(90);
+    assert!(version.is_none());
+    let version = map.get().unwrap().get_version(102).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
+    let version = map.get().unwrap().get_version(107).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Delta 1".to_string()));
+    let version = map.get().unwrap().get_version(115).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
+    let version = map.get().unwrap().get_version(125).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Image 3".to_string()));
 
     // Remove Image 3
     map.remove(4..6, 120..121, true);
     map.rebuild();
 
     // Check deletion worked
-    assert_eq!(map.get().unwrap().query(4, 125).1, Some("Image 2".to_string()));
-    assert_eq!(map.get().unwrap().query(8, 125).1, Some("Image 4".to_string()));
+    let version = map.get().unwrap().get_version(125).unwrap();
+    assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
+    assert_eq!(version.image_coverage.query(8), Some("Image 4".to_string()));
 }
