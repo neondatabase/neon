@@ -57,13 +57,14 @@ pub struct RawSharedMemPipe {
     /// When non-zero, the worker side OwnedRequester::recv cannot go to sleep.
     pub to_worker_waiters: AtomicU32,
 
-    // this wouldn't be too difficult to make a generic parameter, but let's hold off still.
-    //
-    // TODO: heikki wanted the response channel to be N * 8192 bytes, aligned to page so that they
-    // could possibly in future be mapped postgres shared buffers.
-    //
+    // rest wouldn't be too difficult to make a generic parameter, but let's hold off still.
+
     // Note: this is repr(c), so the order matters.
     pub to_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; TO_WORKER_LEN]>,
+
+    // TODO: response slots idea to cut down needed memcpys. instead of replying with the full
+    // page, the page could be in one of the slots, and only the signal of "ready" would need to be
+    // transferred over. the worker side could remap slots around to match postgres buffers.
     pub from_worker: ringbuf::SharedRb<u8, [MaybeUninit<u8>; FROM_WORKER_LEN]>,
 }
 
@@ -87,12 +88,13 @@ impl SharedMemPipePtr<Created> {
 
     #[cfg(any(test, feature = "demo"))]
     pub unsafe fn as_joined(&self) -> SharedMemPipePtr<Joined> {
-        // this is easier to debug with only one debugger
+        // this is easier to debug with only one debugged process, however it needs to be dropped
+        // before the actual ptr it's created from.
         SharedMemPipePtr {
             ptr: self.ptr,
             size: self.size,
-            attempt_drop: false,
-            #[cfg(test)]
+            close_semaphores: false,
+            tombstone_on_drop: false,
             munmap: false,
             _marker: std::marker::PhantomData,
         }
@@ -735,7 +737,7 @@ fn initialize_at(
     std::mem::forget(notify_owner);
     drop(place);
 
-    let res = res.post_initialization::<Created>();
+    let res = res.post_init_created();
 
     res.magic
         .store(0xcafebabe, std::sync::atomic::Ordering::SeqCst);
@@ -761,10 +763,20 @@ pub struct Joined;
 pub struct SharedMemPipePtr<Stage> {
     ptr: Option<NonNull<RawSharedMemPipe>>,
     size: NonZeroUsize,
-    // these fields could be moved to a trait which the stages implement
-    attempt_drop: bool,
-    #[cfg(test)]
+
+    /// In normal operation, the semaphores are eventfd's which get duplicated when launching a new
+    /// child process.
+    ///
+    /// In testing it is useful to leave them be, for example to close them manually.
+    close_semaphores: bool,
+
+    /// Only the owner side should tombstone.
+    tombstone_on_drop: bool,
+
+    /// Normally owner and worker both unmap, however it's unlikely that worker will ever close
+    /// before getting killed.
     munmap: bool,
+
     _marker: std::marker::PhantomData<Stage>,
 }
 
@@ -779,36 +791,47 @@ impl SharedMemPipePtr<MMapped> {
         SharedMemPipePtr {
             ptr: Some(ptr),
             size,
-            attempt_drop: false,
-            #[cfg(test)]
+            // the files are on-stack, so the values might not be initialized
+            close_semaphores: false,
+            tombstone_on_drop: true,
             munmap: true,
             _marker: std::marker::PhantomData,
         }
     }
 
     #[cfg(test)]
-    fn post_mmap_but_no_munmap(ptr: NonNull<RawSharedMemPipe>, size: NonZeroUsize) -> Self {
-        SharedMemPipePtr {
-            ptr: Some(ptr),
-            size,
-            attempt_drop: false,
-            munmap: false,
-            _marker: std::marker::PhantomData,
-        }
+    fn with_munmap_on_drop(mut self, munmap: bool) -> Self {
+        self.munmap = munmap;
+        self
     }
 
     fn ptr(&self) -> NonNull<RawSharedMemPipe> {
         self.ptr.as_ref().unwrap().clone()
     }
 
-    fn post_initialization<T>(mut self) -> SharedMemPipePtr<T> {
+    fn post_init_created(mut self) -> SharedMemPipePtr<Created> {
         let ptr = self.ptr.take();
         let size = self.size;
         let ret = SharedMemPipePtr {
             ptr,
             size,
-            attempt_drop: true,
-            #[cfg(test)]
+            close_semaphores: true,
+            tombstone_on_drop: true,
+            munmap: self.munmap,
+            _marker: std::marker::PhantomData,
+        };
+        std::mem::forget(self);
+        ret
+    }
+
+    fn post_init_joined(mut self) -> SharedMemPipePtr<Joined> {
+        let ptr = self.ptr.take();
+        let size = self.size;
+        let ret = SharedMemPipePtr {
+            ptr,
+            size,
+            close_semaphores: true,
+            tombstone_on_drop: false,
             munmap: self.munmap,
             _marker: std::marker::PhantomData,
         };
@@ -821,7 +844,15 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
     fn drop(&mut self) {
         let _res = {
             if let Some(ptr) = self.ptr.take() {
-                if false && self.attempt_drop {
+                if self.close_semaphores {
+                    let shared = unsafe { ptr.as_ref() };
+
+                    for fd in [shared.notify_worker, shared.notify_owner] {
+                        unsafe { std::fs::File::from_raw_fd(fd) };
+                    }
+                }
+
+                if self.tombstone_on_drop {
                     let shared = unsafe { ptr.as_ref() };
 
                     // FIXME: make sure only the owner does this
@@ -832,26 +863,35 @@ impl<Stage> Drop for SharedMemPipePtr<Stage> {
                     unsafe { std::ptr::drop_in_place(ptr.as_ptr()) };
                 }
 
-                // FIXME: drop the eventfd somehow, is it dup'd or what?
-
-                #[allow(unused)]
-                let do_unmap = true;
-                #[cfg(test)]
                 let do_unmap = self.munmap;
 
-                if false && do_unmap {
-                    // FIXME: both should do this, while the postgres side is very unlikely to do
-                    // this.
+                if do_unmap {
+                    // both should do this, while the postgres side is very unlikely to do
+                    // this, because it's killed before it's time to munmap.
                     unsafe { nix::sys::mman::munmap(ptr.as_ptr().cast(), self.size.get()) }
                 } else {
                     Ok(())
                 }
             } else {
+                // FIXME: unsure how should this happen?
                 Ok(())
             }
         };
         #[cfg(debug_assertions)]
         _res.expect("closing SharedMemPipePtr failed");
+    }
+}
+
+#[cfg(test)]
+impl<Stage> SharedMemPipePtr<Stage> {
+    fn with_close_semaphores_on_drop(mut self, close: bool) -> Self {
+        self.close_semaphores = close;
+        self
+    }
+
+    fn with_tombstone_on_drop(mut self, tombstone: bool) -> Self {
+        self.tombstone_on_drop = tombstone;
+        self
     }
 }
 
@@ -977,24 +1017,28 @@ fn join_initialized_at(
     // It is now initialized, but it happened on a different process
     unsafe { place.assume_init_mut() };
 
-    Ok(res.post_initialization())
+    Ok(res.post_init_joined())
 }
 
-#[cfg(all(test, not_now))]
+#[cfg(all(test))]
 mod tests {
+    use std::os::unix::io::AsRawFd;
     use std::sync::atomic::Ordering::SeqCst;
     use std::{mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull};
+
+    use rand::Rng;
 
     use crate::SharedMemPipePtr;
 
     use super::RawSharedMemPipe;
 
     /// This is a test for miri to detect any UB, or valgrind memcheck.
-    ///
-    /// With miri, `parking_lot` simpler mutexes are used.
-    #[cfg(miri)]
+    // #[cfg(miri)]
     #[test]
     fn initialize_at_on_boxed() {
+        // use of seqcst is confusing here, it is not needed for anything
+        let ordering = SeqCst;
+
         let mem = Box::new(MaybeUninit::<RawSharedMemPipe>::uninit());
         let ptr = Box::into_raw(mem);
 
@@ -1004,42 +1048,96 @@ mod tests {
         let size = std::mem::size_of::<RawSharedMemPipe>();
         let size = NonZeroUsize::new(size).unwrap();
 
+        // miri does not yet support the tempfile crate, which always uses a secure mode
+        let mut tempfiles = std::iter::from_fn(|| {
+            let dir = std::env::temp_dir();
+
+            let mut rng = rand::thread_rng();
+
+            const ATTEMPTS: usize = 50;
+
+            for attempt in 0..ATTEMPTS {
+                let last_attempt = attempt == ATTEMPTS - 1;
+
+                let filename = (&mut rng)
+                    .sample_iter(&rand::distributions::Alphanumeric)
+                    .take(8)
+                    .map(|b| b as char)
+                    .collect::<String>();
+                let path = dir.join(filename);
+                match std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&path)
+                {
+                    Ok(f) => {
+                        std::fs::remove_file(&path)
+                            .expect("should had managed to remove just created tempfile");
+                        return Some(Ok(f));
+                    }
+                    Err(e) if !last_attempt && e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        continue
+                    }
+                    Err(other) => return Some(Err(other)),
+                }
+            }
+
+            unreachable!()
+        });
+
+        let file_a = tempfiles
+            .next()
+            .expect("must be able to create two tempfiles")
+            .unwrap();
+        let file_b = tempfiles
+            .next()
+            .expect("must be able to create two tempfiles")
+            .unwrap();
+
+        let expected_fds = (file_a.as_raw_fd(), file_b.as_raw_fd());
+
         // TODO: maybe add Stage::Target = { MaybeUninit<_>, _ }? it is what the types basically
         // do.
         let ready = {
-            let ptr = SharedMemPipePtr::post_mmap_but_no_munmap(ptr.cast(), size);
-            super::initialize_at(ptr).unwrap()
+            let ptr = SharedMemPipePtr::post_mmap(ptr.cast(), size).with_munmap_on_drop(false);
+
+            super::initialize_at(ptr, file_a, file_b).unwrap()
         };
 
         {
-            assert_eq!(0xcafebabe, ready.magic.load(SeqCst));
+            assert_eq!(0xcafe_babe, ready.magic.load(ordering));
+            // field order vs. arg order are not really important, as long as both use them for the
+            // same outcome
+            assert_eq!(expected_fds.0, ready.notify_worker);
+            assert_eq!(expected_fds.1, ready.notify_owner);
         }
 
         // first allowing for initialization then allowing joining already initialized shouldn't
         // cause any more problems, but we might suffer the wait. TODO: make it configurable.
 
         let joined = {
-            let ptr = SharedMemPipePtr::post_mmap_but_no_munmap(ptr.cast(), size);
+            let ptr = SharedMemPipePtr::post_mmap(ptr.cast(), size).with_munmap_on_drop(false);
             super::join_initialized_at(ptr).unwrap()
         };
 
         {
-            assert_eq!(0xcafe_babe, joined.magic.load(SeqCst));
+            assert_eq!(0xcafe_babe, joined.magic.load(ordering));
         }
 
         drop(joined);
 
         {
-            assert_eq!(0xcafe_babe, ready.magic.load(SeqCst));
+            assert_eq!(0xcafe_babe, ready.magic.load(ordering));
         }
 
         drop(ready);
 
-        // the memory is still valid, it hasn't been dropped, the guard will drop it
+        // the memory is still valid, it hasn't been dropped, the _guard will drop it
         {
             let target = ptr.cast::<RawSharedMemPipe>();
             let target = unsafe { target.as_ref() };
-            assert_eq!(0xffff_ffff, target.magic.load(SeqCst));
+            let magic = target.magic.load(ordering);
+            assert_eq!(0xffff_ffff, magic, "0x{magic:08x}");
         }
     }
 
@@ -1051,10 +1149,7 @@ mod tests {
             unsafe { Box::from_raw(self.0) };
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
     use crate::UnparkInOrder;
 
     #[test]

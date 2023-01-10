@@ -1,7 +1,6 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::{collections::HashSet, ffi::OsString, io::BufRead};
 
-use bytes::{Buf, BufMut};
 use rand::{Rng, RngCore};
 use sha2::Digest;
 
@@ -20,6 +19,7 @@ const SPAWN_PROCESS: bool = false;
 /// all of the message is received.
 const INPUT_SIZE: InputSize = InputSize::Fixed(1132);
 
+#[allow(unused)]
 enum InputSize {
     /// Generate the length with an rng
     Random,
@@ -230,7 +230,7 @@ fn as_outer() {
                 0 => {
                     previous_locked_slot.remove(&i);
                 }
-                pid => {
+                _pid => {
                     previous_locked_slot.insert(i);
                 }
             }

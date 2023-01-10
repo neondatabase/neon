@@ -3413,7 +3413,6 @@ dependencies = [
  "bytes",
  "libc",
  "nix 0.26.1",
- "parking_lot",
  "rand",
  "ringbuf",
  "sha2",

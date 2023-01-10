@@ -20,11 +20,14 @@ nix = { version = "0.26.1", features = ["mman", "fs", "event"] }
 libc = { version = "0.2.138" }
 
 bytes = { version = "1", optional = true }
-rand = { version = "0.8.3", optional = true }
 sha2 = { version = "0.10.6", optional = true }
+rand = { version = "0.8.3", optional = true }
 
 [target.'cfg(miri)'.dependencies]
-parking_lot = "0.12.1"
+# none
+
+[dev-dependencies]
+rand = { version = "0.8.3" }
 
 [[bin]]
 name = "producer_consumer"
