@@ -1,6 +1,11 @@
+use std::sync::atomic::Ordering::Relaxed;
 use std::{collections::HashSet, ffi::OsString, io::BufRead};
 
-use shmempipe::{shared::TryLockError, OwnedResponder};
+use bytes::{Buf, BufMut};
+use rand::{Rng, RngCore};
+use sha2::Digest;
+
+use shmempipe::OwnedResponder;
 
 /// Whether the inner will hash the input, and return hash + (8192 - 32) zeroes, or just return all
 /// zeroes.
@@ -8,6 +13,19 @@ const SHA_INPUT: bool = true;
 
 /// Whether or not launch a process or just run the "inner" in a thread, which is nicer to debug.
 const SPAWN_PROCESS: bool = false;
+
+/// What kind of requests to send from the "owner" to the "worker."
+///
+/// There is no logic to the messages, the in-band signalling of the shmempipe is used to make sure
+/// all of the message is received.
+const INPUT_SIZE: InputSize = InputSize::Fixed(1132);
+
+enum InputSize {
+    /// Generate the length with an rng
+    Random,
+    /// This many random bytes
+    Fixed(u32),
+}
 
 fn main() {
     let mut args = std::env::args_os().fuse();
@@ -44,11 +62,6 @@ where
 }
 
 fn inner_respond(mut responder: OwnedResponder) -> ! {
-    #[allow(unused)]
-    use bytes::Buf;
-    #[allow(unused)]
-    use sha2::Digest;
-
     let mut response = vec![0; 8192];
 
     let mut buffer = vec![0; 16 * 1024];
@@ -135,7 +148,6 @@ fn as_outer() {
 
     let mut child: Option<Child> = None;
 
-    let mut previously_died_slots = HashSet::new();
     let mut previous_locked_slot = HashSet::new();
 
     loop {
@@ -214,30 +226,18 @@ fn as_outer() {
 
         // we must not try to lock our own slot
         for (i, slot) in shm.participants.iter().enumerate().skip(1) {
-            let slot = unsafe { std::pin::Pin::new_unchecked(slot) };
-
-            match slot.try_lock() {
-                Ok(_g) => {
-                    if !previously_died_slots.contains(&i) {
-                        // println!("slot#{i} is free, last: {:?}", *g);
-                    }
-                }
-                Err(TryLockError::PreviousOwnerDied(_g)) => {
-                    // println!("slot#{i} had previously died: {:?}", *g);
-                    previously_died_slots.insert(i);
+            match slot.load(Relaxed) {
+                0 => {
                     previous_locked_slot.remove(&i);
                 }
-                Err(TryLockError::WouldBlock) => {
-                    if previously_died_slots.remove(&i) {
-                        // println!("previously died slot#{i} has been reused");
-                    } else if previous_locked_slot.insert(i) {
-                        // println!("slot#{i} is locked");
-                    }
+                pid => {
+                    previous_locked_slot.insert(i);
                 }
             }
         }
 
         if previous_locked_slot.is_empty() {
+            // if the child process or thread is not yet around, sleep a bit
             std::thread::sleep(std::time::Duration::from_millis(500));
             continue;
         }
@@ -256,12 +256,6 @@ fn as_outer() {
             .map(|_| (owned.clone(), reqs.clone()))
             .map(|(owned, reqs)| {
                 std::thread::spawn(move || {
-                    #[allow(unused)]
-                    use bytes::BufMut;
-                    #[allow(unused)]
-                    use rand::{Rng, RngCore};
-                    #[allow(unused)]
-                    use sha2::Digest;
                     let mut req = vec![0; 64 * 1024];
                     let mut rng = rand::thread_rng();
                     rng.fill_bytes(&mut req[..]);
@@ -269,8 +263,10 @@ fn as_outer() {
                     resp.clear();
                     resp.resize(8192, 1);
                     loop {
-                        // let len = rng.sample(&distr);
-                        let len = 1132;
+                        let len = match INPUT_SIZE {
+                            InputSize::Random => rng.sample(&distr),
+                            InputSize::Fixed(fixed) => fixed,
+                        };
 
                         let id = owned.request_response(&req[..len as usize], &mut resp);
 

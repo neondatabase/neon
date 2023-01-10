@@ -765,6 +765,7 @@ pub struct Joined;
 pub struct SharedMemPipePtr<Stage> {
     ptr: Option<NonNull<RawSharedMemPipe>>,
     size: NonZeroUsize,
+    // these fields could be moved to a trait which the stages implement
     attempt_drop: bool,
     #[cfg(test)]
     munmap: bool,
