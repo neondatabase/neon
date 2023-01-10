@@ -6,11 +6,11 @@ use sha2::Digest;
 
 use shmempipe::OwnedResponder;
 
-/// Whether the inner will hash the input, and return hash + (8192 - 32) zeroes, or just return all
+/// Whether the worker will hash the input, and return hash + (8192 - 32) zeroes, or just return all
 /// zeroes.
-const SHA_INPUT: bool = true;
+const SHA_INPUT: bool = false;
 
-/// Whether or not launch a process or just run the "inner" in a thread, which is nicer to debug.
+/// Whether or not launch a process or just run the "worker" in a thread, which is nicer to debug.
 const SPAWN_PROCESS: bool = false;
 
 /// What kind of requests to send from the "owner" to the "worker."
@@ -259,8 +259,12 @@ fn as_outer() {
                     let mut req = vec![0; 64 * 1024];
                     let mut rng = rand::thread_rng();
                     rng.fill_bytes(&mut req[..]);
-                    let mut resp = Vec::new();
-                    resp.clear();
+
+                    // initially fill the response up with ones to differentiate from a situation where we
+                    // didn't read all of the 8192 bytes. this used to be done after every clear,
+                    // however to cut down profiling noise it's only done once.
+                    let mut resp = vec![1u8; 8192];
+
                     resp.resize(8192, 1);
                     loop {
                         let len = match INPUT_SIZE {
@@ -336,11 +340,13 @@ fn as_outer() {
                 c.kill().unwrap();
                 c.wait().unwrap();
             }
-            Some(Child::Thread(_jh)) => todo!("graceful stop"),
+            Some(Child::Thread(_jh)) => {}
             None => {
                 unreachable!();
             }
         }
+
+        break;
     }
 }
 
