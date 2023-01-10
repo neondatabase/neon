@@ -1232,9 +1232,9 @@ class PageserverHttpClient(requests.Session):
 
         params = {}
         if include_non_incremental_logical_size:
-            params["include-non-incremental-logical-size"] = "yes"
+            params["include-non-incremental-logical-size"] = "true"
         if include_timeline_dir_layer_file_size_sum:
-            params["include-timeline-dir-layer-file-size-sum"] = "yes"
+            params["include-timeline-dir-layer-file-size-sum"] = "true"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", params=params
@@ -1276,9 +1276,9 @@ class PageserverHttpClient(requests.Session):
     ) -> Dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
-            params["include-non-incremental-logical-size"] = "yes"
+            params["include-non-incremental-logical-size"] = "true"
         if include_timeline_dir_layer_file_size_sum:
-            params["include-timeline-dir-layer-file-size-sum"] = "yes"
+            params["include-timeline-dir-layer-file-size-sum"] = "true"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
