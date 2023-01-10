@@ -101,6 +101,7 @@ pub struct PostgresRedoManager {
     tenant_id: TenantId,
     conf: &'static PageServerConf,
 
+    // FIXME: this Arc is not needed for anything, unless 'static futures are needed
     pipe: Option<std::sync::Arc<shmempipe::OwnedRequester>>,
     process: Mutex<Option<PostgresRedoProcess>>,
 }
@@ -263,26 +264,11 @@ impl PostgresRedoManager {
             // trying to avoid this mutex does not seem to make a difference in benchmarks
             drop(process_guard);
 
-            let tag_len = 1 + 4 * 4;
-            let ch = 1;
-            let len = 4;
+            // FIXME: building up a single big message could probably be avoided completely by
+            // building up an Iterator<Item = Bytes> instead out of a single allocation used for
+            // multiple "message headers", which could also be completly reserved beforehand.
 
-            let mut buf = Vec::with_capacity(
-                (ch + len + tag_len)
-                    + base_img
-                        .as_ref()
-                        .map(|_| ch + len + tag_len + 8192)
-                        .unwrap_or(0)
-                    + records
-                        .iter()
-                        .map(|(_, rec)| match rec {
-                            NeonWalRecord::Postgres { rec, .. } => rec.len(),
-                            _ => unreachable!(),
-                        })
-                        .map(|rec_len| ch + len + 8 + rec_len)
-                        .sum::<usize>()
-                    + (ch + len + tag_len),
-            );
+            let mut buf = Vec::with_capacity(calculate_msg_size(base_img.as_ref(), records));
 
             build_begin_redo_for_block_msg(buf_tag, &mut buf);
 
@@ -299,6 +285,9 @@ impl PostgresRedoManager {
 
             build_get_page_msg(buf_tag, &mut buf);
 
+            // FIXME: similarly to Iterator<Item = Bytes> we could just give out a FnMut which
+            // would access slices in a `FnMut(&[u8]) -> ControlFlow<usize, ()>` fashion we should
+            // be avoid this one copy here safely.
             let mut b = [0u8; 8192];
 
             pipe.request_response(&buf, &mut b);
@@ -1095,4 +1084,28 @@ fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
     buf.put_u32(len as u32);
     tag.ser_into(buf)
         .expect("serialize BufferTag should always succeed");
+}
+
+fn calculate_msg_size(base_img: Option<&Bytes>, records: &[(Lsn, NeonWalRecord)]) -> usize {
+    // length of the BufferTag
+    let tag_len = 1 + 4 * 4;
+    // the command character, B, P, A, G
+    let ch = 1;
+    // length of the length field
+    let len = 4;
+
+    (ch + len + tag_len)
+        + base_img
+            .as_ref()
+            .map(|_| ch + len + tag_len + 8192)
+            .unwrap_or(0)
+        + records
+            .iter()
+            .map(|(_, rec)| match rec {
+                NeonWalRecord::Postgres { rec, .. } => rec.len(),
+                _ => unreachable!(),
+            })
+            .map(|rec_len| ch + len + 8 + rec_len)
+            .sum::<usize>()
+        + (ch + len + tag_len)
 }
