@@ -333,20 +333,24 @@ fn as_outer() {
             );
         }
 
-        _jhs.into_iter().for_each(|x| x.join().unwrap());
+        // this will be unreachable if the above is loop, or not if it isn't
+        #[allow(unreachable_code)]
+        {
+            _jhs.into_iter().for_each(|x| x.join().unwrap());
 
-        match child {
-            Some(Child::Process(mut c)) => {
-                c.kill().unwrap();
-                c.wait().unwrap();
+            match child {
+                Some(Child::Process(mut c)) => {
+                    c.kill().unwrap();
+                    c.wait().unwrap();
+                }
+                Some(Child::Thread(_jh)) => {}
+                None => {
+                    unreachable!();
+                }
             }
-            Some(Child::Thread(_jh)) => {}
-            None => {
-                unreachable!();
-            }
+
+            break;
         }
-
-        break;
     }
 }
 
