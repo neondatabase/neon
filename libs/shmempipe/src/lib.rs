@@ -273,12 +273,8 @@ impl OwnedRequester {
         let prev = self.next.fetch_add(1, Release);
         assert_eq!(id, prev);
 
-        // contending on this could be avoided by reserving a bit for "wakeup next" for anyone
-        // coming after
         let g = self.consumer.lock().unwrap();
-
         g.waiting.unpark_front(prev.wrapping_add(1));
-
         id
     }
 
