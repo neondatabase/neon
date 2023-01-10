@@ -8,8 +8,8 @@ use std::time::Duration;
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::mgr;
 use crate::tenant::{Tenant, TenantState};
-use crate::tenant_mgr;
 use tracing::*;
 use utils::id::TenantId;
 
@@ -127,7 +127,7 @@ async fn gc_loop(tenant_id: TenantId) {
             } else {
                 // Run gc
                 if gc_horizon > 0 {
-                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false).await
+                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval()).await
                     {
                         sleep_duration = wait_duration;
                         error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);
@@ -155,7 +155,7 @@ async fn wait_for_active_tenant(
     wait: Duration,
 ) -> ControlFlow<(), Arc<Tenant>> {
     let tenant = loop {
-        match tenant_mgr::get_tenant(tenant_id, false).await {
+        match mgr::get_tenant(tenant_id, false).await {
             Ok(tenant) => break tenant,
             Err(e) => {
                 error!("Failed to get a tenant {tenant_id}: {e:#}");

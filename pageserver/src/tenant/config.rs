@@ -30,7 +30,7 @@ pub mod defaults {
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: &str = "100 s";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
-    pub const DEFAULT_PITR_INTERVAL: &str = "30 days";
+    pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
@@ -191,11 +191,10 @@ impl TenantConfOpt {
     }
 }
 
-impl TenantConf {
-    pub fn default() -> TenantConf {
+impl Default for TenantConf {
+    fn default() -> Self {
         use defaults::*;
-
-        TenantConf {
+        Self {
             checkpoint_distance: DEFAULT_CHECKPOINT_DISTANCE,
             checkpoint_timeout: humantime::parse_duration(DEFAULT_CHECKPOINT_TIMEOUT)
                 .expect("cannot parse default checkpoint timeout"),
@@ -217,31 +216,6 @@ impl TenantConf {
                 .expect("cannot parse default walreceiver lagging wal timeout"),
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
-            trace_read_requests: false,
-        }
-    }
-
-    pub fn dummy_conf() -> Self {
-        TenantConf {
-            checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-            checkpoint_timeout: Duration::from_secs(600),
-            compaction_target_size: 4 * 1024 * 1024,
-            compaction_period: Duration::from_secs(10),
-            compaction_threshold: defaults::DEFAULT_COMPACTION_THRESHOLD,
-            gc_horizon: defaults::DEFAULT_GC_HORIZON,
-            gc_period: Duration::from_secs(10),
-            image_creation_threshold: defaults::DEFAULT_IMAGE_CREATION_THRESHOLD,
-            pitr_interval: Duration::from_secs(60 * 60),
-            walreceiver_connect_timeout: humantime::parse_duration(
-                defaults::DEFAULT_WALRECEIVER_CONNECT_TIMEOUT,
-            )
-            .unwrap(),
-            lagging_wal_timeout: humantime::parse_duration(
-                defaults::DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT,
-            )
-            .unwrap(),
-            max_lsn_wal_lag: NonZeroU64::new(defaults::DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
-                .unwrap(),
             trace_read_requests: false,
         }
     }

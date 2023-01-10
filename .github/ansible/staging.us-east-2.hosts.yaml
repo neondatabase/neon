@@ -6,6 +6,8 @@ storage:
     broker_endpoint: http://storage-broker-lb.beta.us-east-2.internal.aws.neon.build:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
+      metric_collection_endpoint: http://console-staging.local/billing/api/v1/usage_events
+      metric_collection_interval: 10min
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
@@ -25,6 +27,8 @@ storage:
           ansible_host: i-0c3e70929edb5d691
         pageserver-1.us-east-2.aws.neon.build:
           ansible_host: i-0565a8b4008aa3f40
+        pageserver-2.us-east-2.aws.neon.build:
+          ansible_host: i-01e31cdf7e970586a
 
     safekeepers:
       hosts:

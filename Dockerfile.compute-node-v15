@@ -170,9 +170,6 @@ RUN cd /usr/local/pgsql/bin && rm ecpg raster2pgsql shp2pgsql pgtopo_export pgto
 # Remove headers that we won't need anymore - we've completed installation of all extensions
 RUN rm -r /usr/local/pgsql/include
 
-# Remove now-useless PGXS src infrastructure
-RUN rm -r /usr/local/pgsql/lib/pgxs/src
-
 # Remove static postgresql libraries - all compilation is finished, so we
 # can now remove these files - they must be included in other binaries by now
 # if they were to be used by other libraries.
@@ -207,7 +204,8 @@ RUN apt update &&  \
         libgeos-c1v5 \
         libgdal28 \
         libproj19 \
-        libprotobuf-c1 && \
+        libprotobuf-c1 \
+        gdb && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 USER postgres

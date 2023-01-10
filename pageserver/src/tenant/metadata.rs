@@ -255,8 +255,7 @@ pub fn save_metadata(
     // fsync the parent directory to ensure the directory entry is durable
     if first_save {
         let timeline_dir = File::open(
-            &path
-                .parent()
+            path.parent()
                 .expect("Metadata should always have a parent dir"),
         )?;
         timeline_dir.sync_all()?;

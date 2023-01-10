@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::{io, result};
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, Context};
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
@@ -130,83 +130,15 @@ impl PageServerNode {
         overrides
     }
 
-    /// Initializes a pageserver node by creating its config with the overrides provided,
-    /// and creating an initial tenant and timeline afterwards.
-    pub fn initialize(
-        &self,
-        create_tenant: Option<TenantId>,
-        initial_timeline_id: Option<TimelineId>,
-        config_overrides: &[&str],
-        pg_version: u32,
-    ) -> anyhow::Result<TimelineId> {
+    /// Initializes a pageserver node by creating its config with the overrides provided.
+    pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
         self.pageserver_init(config_overrides).with_context(|| {
             format!(
                 "Failed to run init for pageserver node {}",
                 self.env.pageserver.id,
             )
-        })?;
-
-        // Then, briefly start it fully to run HTTP commands on it,
-        // to create initial tenant and timeline.
-        // We disable the remote storage, since we stop pageserver right after the timeline creation,
-        // hence most of the uploads will either aborted or not started: no point to start them at all.
-        let disabled_remote_storage_override = "remote_storage={}";
-        let mut pageserver_process = self
-            .start_node(
-                &[disabled_remote_storage_override],
-                // Previous overrides will be taken from the config created before, don't overwrite them.
-                false,
-            )
-            .with_context(|| {
-                format!(
-                    "Failed to start a process for pageserver node {}",
-                    self.env.pageserver.id,
-                )
-            })?;
-
-        let init_result = self
-            .try_init_timeline(create_tenant, initial_timeline_id, pg_version)
-            .context("Failed to create initial tenant and timeline for pageserver");
-        match &init_result {
-            Ok(initial_timeline_id) => {
-                println!("Successfully initialized timeline {initial_timeline_id}")
-            }
-            Err(e) => eprintln!("{e:#}"),
-        }
-        background_process::send_stop_child_process(&pageserver_process)?;
-
-        let exit_code = pageserver_process.wait()?;
-        ensure!(
-            exit_code.success(),
-            format!(
-                "pageserver init failed with exit code {:?}",
-                exit_code.code()
-            )
-        );
-        println!(
-            "Stopped pageserver {} process with pid {}",
-            self.env.pageserver.id,
-            pageserver_process.id(),
-        );
-        init_result
-    }
-
-    fn try_init_timeline(
-        &self,
-        new_tenant_id: Option<TenantId>,
-        new_timeline_id: Option<TimelineId>,
-        pg_version: u32,
-    ) -> anyhow::Result<TimelineId> {
-        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())?;
-        let initial_timeline_info = self.timeline_create(
-            initial_tenant_id,
-            new_timeline_id,
-            None,
-            None,
-            Some(pg_version),
-        )?;
-        Ok(initial_timeline_info.timeline_id)
+        })
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -241,7 +173,7 @@ impl PageServerNode {
         let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
         args.push(Cow::Borrowed("--init"));
 
-        let init_output = Command::new(&self.env.pageserver_bin())
+        let init_output = Command::new(self.env.pageserver_bin())
             .args(args.iter().map(Cow::as_ref))
             .envs(self.pageserver_env_variables()?)
             .output()
@@ -320,7 +252,7 @@ impl PageServerNode {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
-            vec![("ZENITH_AUTH_TOKEN".to_owned(), token)]
+            vec![("NEON_AUTH_TOKEN".to_owned(), token)]
         } else {
             Vec::new()
         })

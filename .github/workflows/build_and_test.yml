@@ -111,6 +111,7 @@ jobs:
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
+
       - name: Run cargo clippy
         run: ./run_clippy.sh
 
@@ -125,6 +126,11 @@ jobs:
         run: |
           cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
           cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+
+      # https://github.com/EmbarkStudios/cargo-deny
+      - name: Check rust licenses/bans/advisories/sources
+        if: ${{ !cancelled() }}
+        run: cargo deny check
 
   build-neon:
     runs-on: [ self-hosted, dev, x64 ]
@@ -177,13 +183,12 @@ jobs:
       # corresponding Cargo.toml files for their descriptions.
       - name: Set env variables
         run: |
+          CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-            CARGO_FEATURES="--features testing"
             CARGO_FLAGS="--locked $CARGO_FEATURES"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
-            CARGO_FEATURES="--features testing,profiling"
             CARGO_FLAGS="--locked --release $CARGO_FEATURES"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
@@ -555,10 +560,14 @@ jobs:
       - name: Kaniko build compute tools
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
-  compute-node-image-v14:
+  compute-node-image:
     runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
     needs: [ tag ]
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ v14, v15 ]
     defaults:
       run:
         shell: sh -eu {0}
@@ -573,32 +582,40 @@ jobs:
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
-      - name: Kaniko build compute node with extensions v14
-        run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}}
+      - name: Kaniko build compute node with extensions
+        run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-${{ matrix.version }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
-  compute-node-image-v15:
+  vm-compute-node-image:
     runs-on: [ self-hosted, dev, x64 ]
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
-    needs: [ tag ]
+    needs: [ tag, compute-node-image ]
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ v14, v15 ]
     defaults:
       run:
         shell: sh -eu {0}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v1 # v3 won't work with kaniko
-        with:
-          submodules: true
-          fetch-depth: 0
+      - name: Downloading latest vm-builder
+        run: |
+          curl -L https://github.com/neondatabase/neonvm/releases/latest/download/vm-builder -o vm-builder
+          chmod +x vm-builder
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Pulling compute-node image
+        run: |
+          docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
-      - name: Kaniko build compute node with extensions v15
-        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-v15 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}}
+      - name: Build vm image
+        run: |
+          ./vm-builder -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+      - name: Pushing vm-compute-node image
+        run: |
+          docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
   test-images:
-    needs: [ tag, neon-image, compute-node-image-v14, compute-node-image-v15, compute-tools-image ]
+    needs: [ tag, neon-image, compute-node-image, compute-tools-image ]
     runs-on: [ self-hosted, dev, x64 ]
 
     steps:
@@ -642,13 +659,13 @@ jobs:
 
   promote-images:
     runs-on: [ self-hosted, dev, x64 ]
-    needs: [ tag, test-images ]
+    needs: [ tag, test-images, vm-compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
       fail-fast: false
       matrix:
-        name: [ neon, compute-node-v14, compute-node-v15, compute-tools ]
+        name: [ neon, compute-node-v14, vm-compute-node-v14, compute-node-v15, vm-compute-node-v15, compute-tools]
 
     steps:
       - name: Promote image to latest
@@ -681,8 +698,14 @@ jobs:
       - name: Pull compute node v14 image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} compute-node-v14
 
+      - name: Pull vm compute node v14 image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
+
       - name: Pull compute node v15 image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} compute-node-v15
+
+      - name: Pull vm compute node v15 image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
 
       - name: Pull rust image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
@@ -695,7 +718,9 @@ jobs:
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
 
       - name: Configure Docker Hub login
         run: |
@@ -712,8 +737,14 @@ jobs:
       - name: Push compute node v14 image to Docker Hub
         run: crane push compute-node-v14 neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
 
+      - name: Push vm compute node v14 image to Docker Hub
+        run: crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
+
       - name: Push compute node v15 image to Docker Hub
         run: crane push compute-node-v15 neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}}
+
+      - name: Push vm compute node v15 image to Docker Hub
+        run: crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
 
       - name: Push rust image to Docker Hub
         run: crane push rust neondatabase/rust:pinned
@@ -726,26 +757,25 @@ jobs:
           crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, dev, x64 ]
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
     outputs:
       matrix-include: ${{ steps.set-matrix.outputs.include }}
     steps:
       - id: set-matrix
         run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "storage_broker_ns": "neon-storage-broker", "storage_broker_config": "staging.neon-storage-broker", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA", "console_api_key_secret": "NEON_STAGING_API_KEY"}'
-            echo "include=[$STAGING]" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+          if [[ "$GITHUB_REF_NAME" == "release" ]]; then
             PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "storage_broker_ns": "neon-storage-broker", "storage_broker_config": "production.neon-storage-broker", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "console_api_key_secret": "NEON_PRODUCTION_API_KEY"}'
             echo "include=[$PRODUCTION]" >> $GITHUB_OUTPUT
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to 'release'"
             exit 1
           fi
 
@@ -756,7 +786,7 @@ jobs:
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
     defaults:
       run:
@@ -764,6 +794,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -800,7 +832,7 @@ jobs:
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
+    needs: [ push-docker-hub, tag, regress-tests ]
     if: |
       (github.ref_name == 'main') &&
       github.event_name != 'workflow_dispatch'
@@ -809,7 +841,9 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        target_region: [ us-east-2 ]
+        target_region: [ eu-west-1, us-east-2 ]
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -881,6 +915,8 @@ jobs:
     strategy:
       matrix:
         target_region: [ us-east-2, us-west-2, eu-central-1, ap-southeast-1 ]
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -912,7 +948,7 @@ jobs:
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
     defaults:
       run:
@@ -920,6 +956,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     env:
       KUBECONFIG: .kubeconfig
     steps:
@@ -945,8 +983,8 @@ jobs:
       - name: Re-deploy proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml       --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
-          helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace neon-proxy --install --atomic -f .github/helm-values/${{ matrix.proxy_config }}.yaml       --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install --atomic -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
@@ -955,7 +993,7 @@ jobs:
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
     defaults:
       run:
@@ -963,6 +1001,8 @@ jobs:
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
+    environment:
+      name: prod-old
     env:
       KUBECONFIG: .kubeconfig
     steps:
@@ -1011,6 +1051,8 @@ jobs:
             target_cluster: dev-eu-west-1-zeta
             deploy_link_proxy: false
             deploy_legacy_scram_proxy: false
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1026,19 +1068,19 @@ jobs:
       - name: Re-deploy scram proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
       - name: Re-deploy link proxy
         if: matrix.deploy_link_proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
       - name: Re-deploy legacy scram proxy
         if: matrix.deploy_legacy_scram_proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-dev-new:
     runs-on: [ self-hosted, dev, x64 ]
@@ -1058,6 +1100,8 @@ jobs:
             target_cluster: dev-us-east-2-beta
           - target_region:  eu-west-1
             target_cluster: dev-eu-west-1-zeta
+    environment:
+      name: dev-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1096,6 +1140,8 @@ jobs:
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1111,7 +1157,7 @@ jobs:
       - name: Re-deploy proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-prod-new:
     runs-on: prod
@@ -1135,6 +1181,8 @@ jobs:
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+    environment:
+      name: prod-${{ matrix.target_region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3

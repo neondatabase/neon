@@ -5,11 +5,11 @@ use fail::fail_point;
 use std::path::Path;
 use tokio::fs;
 
-use super::index::IndexPart;
-use crate::config::PageServerConf;
-use crate::storage_sync::LayerFileMetadata;
+use crate::{config::PageServerConf, tenant::remote_timeline_client::index::IndexPart};
 use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
+
+use super::index::LayerFileMetadata;
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part<'a>(

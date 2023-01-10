@@ -318,14 +318,8 @@ def remote_consistent_lsn(
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
     lsn_str = detail["remote_consistent_lsn"]
-    if lsn_str is None:
-        # No remote information at all. This happens right after creating
-        # a timeline, before any part of it has been uploaded to remote
-        # storage yet.
-        return 0
-    else:
-        assert isinstance(lsn_str, str)
-        return lsn_from_hex(lsn_str)
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
 
 
 def wait_for_upload(
@@ -448,15 +442,15 @@ def add_missing_rels(base_tar, output_tar, log_dir, pg_bin, tmp_pg_port: int):
 
 
 def get_rlsn(pageserver_connstr, tenant_id, timeline_id):
-    conn = psycopg2.connect(pageserver_connstr)
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cmd = f"get_last_record_rlsn {tenant_id} {timeline_id}"
-        cur.execute(cmd)
-        res = cur.fetchone()
-        prev_lsn = res[0]
-        last_lsn = res[1]
-    conn.close()
+    with closing(psycopg2.connect(pageserver_connstr)) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cmd = f"get_last_record_rlsn {tenant_id} {timeline_id}"
+            cur.execute(cmd)
+            res = cur.fetchone()
+            assert res is not None
+            prev_lsn = res[0]
+            last_lsn = res[1]
 
     return last_lsn, prev_lsn
 

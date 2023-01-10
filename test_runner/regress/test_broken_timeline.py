@@ -15,7 +15,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*Failed to load delta layer.*",
+            ".*Failed to reconstruct the page.*",
             ".*could not find data for key.*",
             ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
@@ -87,9 +87,9 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}"
     )
 
-    # Second timeline has no ancestors, only the metadata file and no layer files.
-    # That is checked explicitly in the pageserver, and causes the tenant to be marked
-    # as broken.
+    # Second timeline has no ancestors, only the metadata file and no layer files locally,
+    # and we don't have the remote storage enabled. It is loaded into memory, but getting
+    # the basebackup from it will fail.
     with pytest.raises(
         Exception, match=f"Tenant {tenant2} will not become active. Current state: Broken"
     ) as err:
@@ -97,8 +97,9 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     log.info(f"As expected, compute startup failed for timeline with missing layers: {err}")
 
     # Third timeline will also fail during basebackup, because the layer file is corrupt.
+    # It will fail when we try to read (and reconstruct) a page from it, ergo the error message.
     # (We don't check layer file contents on startup, when loading the timeline)
-    with pytest.raises(Exception, match="Failed to load delta layer") as err:
+    with pytest.raises(Exception, match="Failed to reconstruct the page") as err:
         pg3.start()
     log.info(
         f"As expected, compute startup failed for timeline {tenant3}/{timeline3} with corrupt layers: {err}"

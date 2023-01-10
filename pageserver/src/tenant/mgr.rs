@@ -17,8 +17,8 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::task_mgr::{self, TaskKind};
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{Tenant, TenantState};
-use crate::tenant_config::TenantConfOpt;
 use crate::IGNORED_TENANT_FILE_NAME;
 
 use utils::fs_ext::PathExt;
@@ -196,7 +196,7 @@ pub async fn shutdown_all_tenants() {
         let tenant_id = tenant.tenant_id();
         debug!("shutdown tenant {tenant_id}");
 
-        if let Err(err) = tenant.checkpoint().await {
+        if let Err(err) = tenant.freeze_and_flush().await {
             error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
         }
     }
@@ -216,8 +216,7 @@ pub async fn create_tenant(
         hash_map::Entry::Vacant(v) => {
             // Hold the write_tenants() lock, since all of this is local IO.
             // If this section ever becomes contentious, introduce a new `TenantState::Creating`.
-            let tenant_directory =
-                super::tenant::create_tenant_files(conf, tenant_conf, tenant_id)?;
+            let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id)?;
             let created_tenant =
                 schedule_local_tenant_processing(conf, &tenant_directory, remote_storage)?;
             let crated_tenant_id = created_tenant.tenant_id();
@@ -262,27 +261,6 @@ pub async fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Resul
 }
 
 pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<()> {
-    // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
-    // It is important that we do not take locks here, and do not check whether the timeline exists
-    // because if we hold tenants_state::write_tenants() while awaiting for the tasks to join
-    // we cannot create new timelines and tenants, and that can take quite some time,
-    // it can even become stuck due to a bug making whole pageserver unavailable for some operations
-    // so this is the way how we deal with concurrent delete requests: shutdown everythig, wait for confirmation
-    // and then try to actually remove timeline from inmemory state and this is the point when concurrent requests
-    // will synchronize and either fail with the not found error or succeed
-
-    debug!("waiting for wal receiver to shutdown");
-    task_mgr::shutdown_tasks(
-        Some(TaskKind::WalReceiverManager),
-        Some(tenant_id),
-        Some(timeline_id),
-    )
-    .await;
-    debug!("wal receiver shutdown confirmed");
-
-    info!("waiting for timeline tasks to shutdown");
-    task_mgr::shutdown_tasks(None, Some(tenant_id), Some(timeline_id)).await;
-    info!("timeline task shutdown completed");
     match get_tenant(tenant_id, true).await {
         Ok(tenant) => {
             tenant.delete_timeline(timeline_id).await?;
@@ -452,7 +430,7 @@ where
         Err(e) => {
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
-                Some(tenant) => tenant.set_broken(),
+                Some(tenant) => tenant.set_broken(&e.to_string()),
                 None => warn!("Tenant {tenant_id} got removed from memory"),
             }
             Err(e)
@@ -496,7 +474,7 @@ pub async fn immediate_gc(
         async move {
             fail::fail_point!("immediate_gc_task_pre");
             let result = tenant
-                .gc_iteration(Some(timeline_id), gc_horizon, pitr, true)
+                .gc_iteration(Some(timeline_id), gc_horizon, pitr)
                 .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
@@ -507,6 +485,56 @@ pub async fn immediate_gc(
             }
             Ok(())
         }
+    );
+
+    // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task
+    drop(guard);
+
+    Ok(wait_task_done)
+}
+
+#[cfg(feature = "testing")]
+pub async fn immediate_compact(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<tokio::sync::oneshot::Receiver<anyhow::Result<()>>, ApiError> {
+    let guard = TENANTS.read().await;
+
+    let tenant = guard
+        .get(&tenant_id)
+        .map(Arc::clone)
+        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .map_err(ApiError::NotFound)?;
+
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)?;
+
+    // Run in task_mgr to avoid race with detach operation
+    let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
+    task_mgr::spawn(
+        &tokio::runtime::Handle::current(),
+        TaskKind::Compaction,
+        Some(tenant_id),
+        Some(timeline_id),
+        &format!(
+            "timeline_compact_handler compaction run for tenant {tenant_id} timeline {timeline_id}"
+        ),
+        false,
+        async move {
+            let result = timeline
+                .compact()
+                .instrument(
+                    info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id),
+                )
+                .await;
+
+            match task_done.send(result) {
+                Ok(_) => (),
+                Err(result) => error!("failed to send compaction result: {result:?}"),
+            }
+            Ok(())
+        },
     );
 
     // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task

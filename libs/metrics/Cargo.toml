@@ -2,6 +2,7 @@
 name = "metrics"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency

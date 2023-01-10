@@ -109,6 +109,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
 
     # check that we cannot create branch based on garbage collected data
     with env.pageserver.http_client() as pageserver_http:
+        pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
         gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
         print_gc_result(gc_result)
 

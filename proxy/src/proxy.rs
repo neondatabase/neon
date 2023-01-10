@@ -11,7 +11,7 @@ use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
-use pq_proto::{BeMessage as Be, *};
+use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, info_span, Instrument};
@@ -39,12 +39,7 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes_per_client",
         "Number of bytes sent/received between client and backend.",
-        &[
-            // Received (rx) / sent (tx).
-            "direction",
-            // Proxy can keep calling it `project` internally.
-            "endpoint_id"
-        ]
+        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
     )
     .unwrap()
 });
@@ -87,6 +82,47 @@ pub async fn task_main(
     }
 }
 
+pub async fn handle_ws_client(
+    config: &ProxyConfig,
+    cancel_map: &CancelMap,
+    session_id: uuid::Uuid,
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
+    hostname: Option<String>,
+) -> anyhow::Result<()> {
+    // The `closed` counter will increase when this future is destroyed.
+    NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
+    scopeguard::defer! {
+        NUM_CONNECTIONS_CLOSED_COUNTER.inc();
+    }
+
+    let tls = config.tls_config.as_ref();
+    let hostname = hostname.as_deref();
+
+    // TLS is None here, because the connection is already encrypted.
+    let do_handshake = handshake(stream, None, cancel_map).instrument(info_span!("handshake"));
+    let (mut stream, params) = match do_handshake.await? {
+        Some(x) => x,
+        None => return Ok(()), // it's a cancellation request
+    };
+
+    // Extract credentials which we're going to use for auth.
+    let creds = {
+        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        let result = config
+            .auth_backend
+            .as_ref()
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name, true))
+            .transpose();
+
+        async { result }.or_else(|e| stream.throw_error(e)).await?
+    };
+
+    let client = Client::new(stream, creds, &params, session_id);
+    cancel_map
+        .with_session(|session| client.connect_to_db(session))
+        .await
+}
+
 async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
@@ -113,7 +149,7 @@ async fn handle_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name, false))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
@@ -255,29 +291,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         // Note that we do this only (for the most part) after we've connected
         // to a compute (see above) which performs its own authentication.
         if !auth_result.reported_auth_ok {
-            stream
-                .write_message_noflush(&Be::AuthenticationOk)?
-                .write_message_noflush(&BeParameterStatusMessage::encoding())?;
+            stream.write_message_noflush(&Be::AuthenticationOk)?;
+        }
+
+        // Forward all postgres connection params to the client.
+        // Right now the implementation is very hacky and inefficent (ideally,
+        // we don't need an intermediate hashmap), but at least it should be correct.
+        for (name, value) in &db.params {
+            // TODO: Theoretically, this could result in a big pile of params...
+            stream.write_message_noflush(&Be::ParameterStatus {
+                name: name.as_bytes(),
+                value: value.as_bytes(),
+            })?;
         }
 
         stream
-            .write_message_noflush(&BeMessage::ParameterStatus(
-                BeParameterStatusMessage::ServerVersion(&db.version),
-            ))?
             .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-            .write_message(&BeMessage::ReadyForQuery)
+            .write_message(&Be::ReadyForQuery)
             .await?;
 
-        // TODO: add more identifiers.
-        let metric_id = node.project;
-
-        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx", &metric_id]);
+        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("tx"));
         let mut client = MeasuredStream::new(stream.into_inner(), |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
         });
 
-        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx", &metric_id]);
+        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("rx"));
         let mut db = MeasuredStream::new(db.stream, |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             m_recv.inc_by(cnt as u64);

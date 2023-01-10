@@ -111,6 +111,7 @@ pageserver_connect()
 				PQfinish(pageserver_conn);
 				pageserver_conn = NULL;
 				FreeWaitEventSet(pageserver_conn_wes);
+				pageserver_conn_wes = NULL;
 
 				neon_log(ERROR, "could not complete handshake with pageserver: %s",
 						 msg);
@@ -179,7 +180,10 @@ pageserver_disconnect(void)
 		prefetch_on_ps_disconnect();
 	}
 	if (pageserver_conn_wes != NULL)
+	{
 		FreeWaitEventSet(pageserver_conn_wes);
+		pageserver_conn_wes = NULL;
+	}
 }
 
 static void
@@ -206,7 +210,7 @@ pageserver_send(NeonRequest * request)
 	 */
 	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
-		char	   *msg = PQerrorMessage(pageserver_conn);
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to send page request: %s", msg);
@@ -239,29 +243,33 @@ pageserver_receive(void)
 	PG_TRY();
 	{
 		/* read response */
-		resp_buff.len = call_PQgetCopyData(&resp_buff.data);
-		resp_buff.cursor = 0;
+		int			rc;
 
-		if (resp_buff.len < 0)
+		rc = call_PQgetCopyData(&resp_buff.data);
+		if (rc >= 0)
 		{
-			if (resp_buff.len == -1)
+			resp_buff.len = rc;
+			resp_buff.cursor = 0;
+			resp = nm_unpack_response(&resp_buff);
+			PQfreemem(resp_buff.data);
+
+			if (message_level_is_interesting(PageStoreTrace))
 			{
-				pageserver_disconnect();
-				return NULL;
+				char	   *msg = nm_to_string((NeonMessage *) resp);
+
+				neon_log(PageStoreTrace, "got response: %s", msg);
+				pfree(msg);
 			}
-			else if (resp_buff.len == -2)
-				neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
 		}
-		resp = nm_unpack_response(&resp_buff);
-		PQfreemem(resp_buff.data);
-
-		if (message_level_is_interesting(PageStoreTrace))
+		else if (rc == -1)
 		{
-			char	   *msg = nm_to_string((NeonMessage *) resp);
-
-			neon_log(PageStoreTrace, "got response: %s", msg);
-			pfree(msg);
+			pageserver_disconnect();
+			resp = NULL;
 		}
+		else if (rc == -2)
+			neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
+		else
+			neon_log(ERROR, "unexpected PQgetCopyData return value: %d", rc);
 	}
 	PG_CATCH();
 	{
@@ -420,7 +428,7 @@ pg_init_libpagestore(void)
 							   NULL, NULL, NULL);
 
     DefineCustomStringVariable("neon.safekeeper_token_env",
-                               "the environment variable containing JWT token for authentication with Safekeepers, the convention is to either unset or set to $ZENITH_AUTH_TOKEN",
+                               "the environment variable containing JWT token for authentication with Safekeepers, the convention is to either unset or set to $NEON_AUTH_TOKEN",
                                NULL,
                                &safekeeper_token_env,
                                NULL,
@@ -516,4 +524,5 @@ pg_init_libpagestore(void)
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
 	}
+	lfc_init();
 }

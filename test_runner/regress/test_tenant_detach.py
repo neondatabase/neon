@@ -1,9 +1,13 @@
+import asyncio
+import random
 import time
 from threading import Thread
 
+import asyncpg
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    NeonEnv,
     NeonEnvBuilder,
     PageserverApiException,
     PageserverHttpClient,
@@ -12,6 +16,7 @@ from fixtures.neon_fixtures import (
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_until,
     wait_until_tenant_state,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -24,11 +29,208 @@ def do_gc_target(
     """Hack to unblock main, see https://github.com/neondatabase/neon/issues/2211"""
     try:
         log.info("sending gc http request")
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
     except Exception as e:
         log.error("do_gc failed: %s", e)
     finally:
         log.info("gc http thread returning")
+
+
+# Basic detach and re-attach test
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+def test_tenant_reattach(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_tenant_reattach",
+    )
+
+    # Exercise retry code path by making all uploads and downloads fail for the
+    # first time. The retries print INFO-messages to the log; we will check
+    # that they are present after the test.
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    # create new nenant
+    tenant_id, timeline_id = env.neon_cli.create_tenant()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    with pg.cursor() as cur:
+        cur.execute("CREATE TABLE t(key int primary key, value text)")
+        cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+    # Wait for the all data to be processed by the pageserver and uploaded in remote storage
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
+
+    # Check that we had to retry the uploads
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    )
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    )
+
+    pageserver_http.tenant_detach(tenant_id)
+    pageserver_http.tenant_attach(tenant_id)
+
+    with pg.cursor() as cur:
+        assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
+
+    # Check that we had to retry the downloads
+    assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
+    assert env.pageserver.log_contains(".*download.*failed, will retry.*")
+
+
+num_connections = 10
+num_rows = 100000
+updates_to_perform = 0
+
+updates_started = 0
+updates_finished = 0
+
+
+# Run random UPDATEs on test table. On failure, try again.
+async def update_table(pg_conn: asyncpg.Connection):
+    global updates_started, updates_finished, updates_to_perform
+
+    while updates_started < updates_to_perform or updates_to_perform == 0:
+        updates_started += 1
+        id = random.randrange(1, num_rows)
+
+        # Loop to retry until the UPDATE succeeds
+        while True:
+            try:
+                await pg_conn.fetchrow(f"UPDATE t SET counter = counter + 1 WHERE id = {id}")
+                updates_finished += 1
+                if updates_finished % 1000 == 0:
+                    log.info(f"update {updates_finished} / {updates_to_perform}")
+                break
+            except asyncpg.PostgresError as e:
+                # Received error from Postgres. Log it, sleep a little, and continue
+                log.info(f"UPDATE error: {e}")
+                await asyncio.sleep(0.1)
+
+
+async def sleep_and_reattach(pageserver_http: PageserverHttpClient, tenant_id: TenantId):
+    global updates_started, updates_finished, updates_to_perform
+
+    # Wait until we have performed some updates
+    wait_until(20, 0.5, lambda: updates_finished > 500)
+
+    log.info("Detaching tenant")
+    pageserver_http.tenant_detach(tenant_id)
+    await asyncio.sleep(1)
+    log.info("Re-attaching tenant")
+    pageserver_http.tenant_attach(tenant_id)
+    log.info("Re-attach finished")
+
+    # Continue with 5000 more updates
+    updates_to_perform = updates_started + 5000
+
+
+# async guts of test_tenant_reattach_while_bysy test
+async def reattach_while_busy(
+    env: NeonEnv, pg: Postgres, pageserver_http: PageserverHttpClient, tenant_id: TenantId
+):
+    workers = []
+    for worker_id in range(num_connections):
+        pg_conn = await pg.connect_async()
+        workers.append(asyncio.create_task(update_table(pg_conn)))
+
+    workers.append(asyncio.create_task(sleep_and_reattach(pageserver_http, tenant_id)))
+    await asyncio.gather(*workers)
+
+    assert updates_finished == updates_to_perform
+
+
+# Detach and re-attach tenant, while compute is busy running queries.
+#
+# Some of the queries may fail, in the window that the tenant has been
+# detached but not yet re-attached. But Postgres itself should keep
+# running, and when we retry the queries, they should start working
+# after the attach has finished.
+
+# FIXME:
+#
+# This is pretty unstable at the moment. I've seen it fail with a warning like this:
+#
+# AssertionError: assert not ['2023-01-05T13:09:40.708303Z  WARN remote_upload{tenant=c3fc41f6cf29a7626b90316e3518cd4b timeline=7978246f85faa71ab03...1282b/000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001716699-0000000001736681"\n']
+#
+# (https://neon-github-public-dev.s3.amazonaws.com/reports/pr-3232/debug/3846817847/index.html#suites/f9eba3cfdb71aa6e2b54f6466222829b/470fc62b5db7d7d7/)
+# I believe that failure happened because there is a race condition
+# between detach and starting remote upload tasks:
+#
+# 1. detach_timeline calls task_mgr::shutdown_tasks(), sending shutdown
+#    signal to all in-progress tasks associated with the tenant.
+# 2. Just after shutdown_tasks() has collected the list of tasks,
+#    a new remote-upload task is spawned.
+#
+# See https://github.com/neondatabase/neon/issues/3273
+#
+#
+# I also saw this failure:
+#
+# test_runner/regress/test_tenant_detach.py:194: in test_tenant_reattach_while_busy
+#     asyncio.run(reattach_while_busy(env, pg, pageserver_http, tenant_id))
+# /home/nonroot/.pyenv/versions/3.9.2/lib/python3.9/asyncio/runners.py:44: in run
+#     return loop.run_until_complete(main)
+# /home/nonroot/.pyenv/versions/3.9.2/lib/python3.9/asyncio/base_events.py:642: in run_until_complete
+#     return future.result()
+# test_runner/regress/test_tenant_detach.py:151: in reattach_while_busy
+#     assert updates_finished == updates_to_perform
+# E   assert 5010 == 10010
+# E     +5010
+# E     -10010
+#
+# I don't know what's causing that...
+@pytest.mark.skip(reason="fixme")
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+def test_tenant_reattach_while_busy(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_tenant_reattach_while_busy",
+    )
+    env = neon_env_builder.init_start()
+
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(".*Tenant .* not found in the local state.*")
+    env.pageserver.allowed_errors.append(
+        ".*Tenant .* will not become active\\. Current state: Stopping.*"
+    )
+
+    pageserver_http = env.pageserver.http_client()
+
+    # create new nenant
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        # Create layers aggressively
+        conf={"checkpoint_distance": "100000"}
+    )
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+
+    cur = pg.connect().cursor()
+
+    cur.execute("CREATE TABLE t(id int primary key, counter int)")
+    cur.execute(f"INSERT INTO t SELECT generate_series(1,{num_rows}), 0")
+
+    # Run the test
+    asyncio.run(reattach_while_busy(env, pg, pageserver_http, tenant_id))
+
+    # Verify table contents
+    assert query_scalar(cur, "SELECT count(*) FROM t") == num_rows
+    assert query_scalar(cur, "SELECT sum(counter) FROM t") == updates_to_perform
 
 
 def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
@@ -417,7 +619,7 @@ def test_ignore_while_attaching(
     pageserver_http.tenant_attach(tenant_id)
     # Run ignore on the task, thereby cancelling the attach.
     # XXX This should take priority over attach, i.e., it should cancel the attach task.
-    # But neither the failpoint, nor the proper storage_sync2 download functions,
+    # But neither the failpoint, nor the proper storage_sync download functions,
     # are sensitive to task_mgr::shutdown.
     # This problem is tracked in https://github.com/neondatabase/neon/issues/2996 .
     # So, for now, effectively, this ignore here will block until attach task completes.

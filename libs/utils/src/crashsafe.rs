@@ -157,34 +157,34 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 
         let invalid_dir_path = file_path.join("folder");
-        create_dir_all(&invalid_dir_path).unwrap_err();
+        create_dir_all(invalid_dir_path).unwrap_err();
     }
 
     #[test]
     fn test_path_with_suffix_extension() {
         let p = PathBuf::from("/foo/bar");
         assert_eq!(
-            &path_with_suffix_extension(&p, "temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp").to_string_lossy(),
             "/foo/bar.temp"
         );
         let p = PathBuf::from("/foo/bar");
         assert_eq!(
-            &path_with_suffix_extension(&p, "temp.temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp.temp").to_string_lossy(),
             "/foo/bar.temp.temp"
         );
         let p = PathBuf::from("/foo/bar.baz");
         assert_eq!(
-            &path_with_suffix_extension(&p, "temp.temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp.temp").to_string_lossy(),
             "/foo/bar.baz.temp.temp"
         );
         let p = PathBuf::from("/foo/bar.baz");
         assert_eq!(
-            &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
+            &path_with_suffix_extension(p, ".temp").to_string_lossy(),
             "/foo/bar.baz..temp"
         );
         let p = PathBuf::from("/foo/bar/dir/");
         assert_eq!(
-            &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
+            &path_with_suffix_extension(p, ".temp").to_string_lossy(),
             "/foo/bar/dir..temp"
         );
     }

@@ -7,6 +7,7 @@
 //!
 mod local_fs;
 mod s3_bucket;
+mod simulate_failures;
 
 use std::{
     collections::HashMap,
@@ -24,7 +25,7 @@ use tokio::io;
 use toml_edit::Item;
 use tracing::info;
 
-pub use self::{local_fs::LocalFs, s3_bucket::S3Bucket};
+pub use self::{local_fs::LocalFs, s3_bucket::S3Bucket, simulate_failures::UnreliableWrapper};
 
 /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
 /// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
@@ -77,7 +78,10 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
     /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
     /// so this method doesnt need to.
-    async fn list_prefixes(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>>;
+    async fn list_prefixes(
+        &self,
+        prefix: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -150,6 +154,7 @@ impl std::error::Error for DownloadError {}
 pub enum GenericRemoteStorage {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
+    Unreliable(Arc<UnreliableWrapper>),
 }
 
 impl Deref for GenericRemoteStorage {
@@ -159,25 +164,28 @@ impl Deref for GenericRemoteStorage {
         match self {
             GenericRemoteStorage::LocalFs(local_fs) => local_fs,
             GenericRemoteStorage::AwsS3(s3_bucket) => s3_bucket.as_ref(),
+            GenericRemoteStorage::Unreliable(s) => s.as_ref(),
         }
     }
 }
 
 impl GenericRemoteStorage {
-    pub fn from_config(
-        storage_config: &RemoteStorageConfig,
-    ) -> anyhow::Result<GenericRemoteStorage> {
+    pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => {
                 info!("Using fs root '{}' as a remote storage", root.display());
-                GenericRemoteStorage::LocalFs(LocalFs::new(root.clone())?)
+                Self::LocalFs(LocalFs::new(root.clone())?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
                 info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
-                GenericRemoteStorage::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
+                Self::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
             }
         })
+    }
+
+    pub fn unreliable_wrapper(s: Self, fail_first: u64) -> Self {
+        Self::Unreliable(Arc::new(UnreliableWrapper::new(s, fail_first)))
     }
 
     /// Takes storage object contents and its size and uploads to remote storage,

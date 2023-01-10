@@ -119,16 +119,9 @@ pub trait GenericOptionsSearch {
 impl GenericOptionsSearch for GenericOptions {
     /// Lookup option by name
     fn find(&self, name: &str) -> Option<String> {
-        match &self {
-            Some(ops) => {
-                let op = ops.iter().find(|s| s.name == name);
-                match op {
-                    Some(op) => op.value.clone(),
-                    None => None,
-                }
-            }
-            None => None,
-        }
+        let ops = self.as_ref()?;
+        let op = ops.iter().find(|s| s.name == name)?;
+        op.value.clone()
     }
 }
 
@@ -161,6 +154,14 @@ impl Role {
 }
 
 impl Database {
+    pub fn new(name: PgIdent, owner: PgIdent) -> Self {
+        Self {
+            name,
+            owner,
+            options: None,
+        }
+    }
+
     /// Serialize a list of database parameters into a Postgres-acceptable
     /// string of arguments.
     /// NB: `TEMPLATE` is actually also an identifier, but so far we only need
@@ -219,11 +220,7 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
             &[],
         )?
         .iter()
-        .map(|row| Database {
-            name: row.get("datname"),
-            owner: row.get("owner"),
-            options: None,
-        })
+        .map(|row| Database::new(row.get("datname"), row.get("owner")))
         .collect();
 
     Ok(postgres_dbs)

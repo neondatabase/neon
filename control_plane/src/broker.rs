@@ -17,7 +17,7 @@ pub fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
         "storage_broker",
         &env.base_data_dir,
         &env.storage_broker_bin(),
-        &args,
+        args,
         [],
         background_process::InitialPidFile::Create(&storage_broker_pid_file_path(env)),
         || {

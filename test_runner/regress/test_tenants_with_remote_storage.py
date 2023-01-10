@@ -21,9 +21,10 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     Postgres,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
+    assert_tenant_status,
     available_remote_storages,
     wait_for_last_record_lsn,
+    wait_for_sk_commit_lsn_to_reach_remote_storage,
     wait_for_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -120,6 +121,11 @@ def test_tenants_attached_after_download(
     data_id = 1
     data_secret = "very secret secret"
 
+    # Exercise retry code path by making all uploads and downloads fail for the
+    # first time. The retries print INFO-messages to the log; we will check
+    # that they are present after the test.
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
@@ -158,26 +164,19 @@ def test_tenants_attached_after_download(
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
+    # Check that we had to retry the uploads
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    )
+    assert env.pageserver.log_contains(
+        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    )
+
     ##### Stop the pageserver, erase its layer file to force it being downloaded from S3
     env.postgres.stop_all()
 
-    sk_commit_lsns = [
-        sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn
-        for sk in env.safekeepers
-    ]
-    log.info("wait for pageserver to process all the WAL")
-    wait_for_last_record_lsn(client, tenant_id, timeline_id, max(sk_commit_lsns))
-    log.info("wait for it to reach remote storage")
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-    wait_for_upload(client, tenant_id, timeline_id, max(sk_commit_lsns))
-    log.info("latest safekeeper_commit_lsn reached remote storage")
-
-    detail_before = client.timeline_detail(
-        tenant_id, timeline_id, include_non_incremental_physical_size=True
-    )
-    assert (
-        detail_before["current_physical_size_non_incremental"]
-        == detail_before["current_physical_size"]
+    wait_for_sk_commit_lsn_to_reach_remote_storage(
+        tenant_id, timeline_id, env.safekeepers, env.pageserver
     )
 
     env.pageserver.stop()
@@ -193,13 +192,16 @@ def test_tenants_attached_after_download(
     assert local_layer_deleted, f"Found no local layer files to delete in directory {timeline_dir}"
 
     ##### Start the pageserver, forcing it to download the layer file and load the timeline into memory
+    # FIXME: just starting the pageserver no longer downloads the
+    # layer files. Do we want to force download, or maybe run some
+    # queries, or is it enough that it starts up without layer files?
     env.pageserver.start()
     client = env.pageserver.http_client()
 
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=lambda: assert_tenant_status(client, tenant_id, "Active"),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
@@ -211,11 +213,8 @@ def test_tenants_attached_after_download(
         timeline_id
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
 
-    # Check that the physical size matches after re-downloading
-    detail_after = client.timeline_detail(
-        tenant_id, timeline_id, include_non_incremental_physical_size=True
-    )
-    assert detail_before["current_physical_size"] == detail_after["current_physical_size"]
+    # Check that we had to retry the downloads
+    assert env.pageserver.log_contains(".*download .* succeeded after 1 retries.*")
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
@@ -230,7 +229,7 @@ def test_tenant_upgrades_index_json_from_v0(
         "timeline_layers":[
             "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"
         ],
-        "missing_layers":[],
+        "missing_layers":["This should not fail as its not used anymore"],
         "disk_consistent_lsn":"0/16960E8",
         "metadata_bytes":[]
     }"""
@@ -262,7 +261,6 @@ def test_tenant_upgrades_index_json_from_v0(
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
     pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
-
     env.postgres.stop_all()
     env.pageserver.stop()
 
@@ -275,7 +273,10 @@ def test_tenant_upgrades_index_json_from_v0(
         # keep the deserialized for later inspection
         orig_index_part = json.load(timeline_file)
 
-        v0_index_part = {key: orig_index_part[key] for key in v0_skeleton}
+        v0_index_part = {
+            key: orig_index_part[key]
+            for key in v0_skeleton.keys() - ["missing_layers"]  # pgserver doesn't have it anymore
+        }
 
         timeline_file.seek(0)
         json.dump(v0_index_part, timeline_file)
@@ -287,7 +288,7 @@ def test_tenant_upgrades_index_json_from_v0(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(pageserver_http, tenant_id),
+        func=lambda: assert_tenant_status(pageserver_http, tenant_id, "Active"),
     )
 
     pg = env.postgres.create_start("main")
@@ -307,7 +308,7 @@ def test_tenant_upgrades_index_json_from_v0(
     # make sure the file has been upgraded back to how it started
     index_part = local_fs_index_part(env, tenant_id, timeline_id)
     assert index_part["version"] == orig_index_part["version"]
-    assert index_part["missing_layers"] == orig_index_part["missing_layers"]
+    assert "missing_layers" not in index_part.keys()
 
     # expect one more layer because of the forced checkpoint
     assert len(index_part["timeline_layers"]) == len(orig_index_part["timeline_layers"]) + 1
@@ -394,7 +395,7 @@ def test_tenant_ignores_backup_file(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(pageserver_http, tenant_id),
+        func=lambda: assert_tenant_status(pageserver_http, tenant_id, "Active"),
     )
 
     pg = env.postgres.create_start("main")
@@ -474,14 +475,15 @@ def test_tenant_redownloads_truncated_file_on_startup(
     index_part = local_fs_index_part(env, tenant_id, timeline_id)
     assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
 
-    ##### Start the pageserver, forcing it to download the layer file and load the timeline into memory
+    ## Start the pageserver. It will notice that the file size doesn't match, and
+    ## rename away the local file. It will be re-downloaded when it's needed.
     env.pageserver.start()
     client = env.pageserver.http_client()
 
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=lambda: assert_tenant_status(client, tenant_id, "Active"),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
@@ -492,6 +494,10 @@ def test_tenant_redownloads_truncated_file_on_startup(
     assert retored_timeline["timeline_id"] == str(
         timeline_id
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
+
+    # Request non-incremental logical size. Calculating it needs the layer file that
+    # we corrupted, forcing it to be redownloaded.
+    client.timeline_detail(tenant_id, timeline_id, include_non_incremental_logical_size=True)
 
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
 

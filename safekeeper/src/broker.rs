@@ -66,7 +66,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
 
 /// Subscribe and fetch all the interesting data from the broker.
 async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
-    let mut client = storage_broker::connect(conf.broker_endpoint)?;
+    let mut client = storage_broker::connect(conf.broker_endpoint, conf.broker_keepalive_interval)?;
 
     // TODO: subscribe only to local timelines instead of all
     let request = SubscribeSafekeeperInfoRequest {

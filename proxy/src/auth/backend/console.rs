@@ -1,16 +1,16 @@
 //! Cloud API V2.
 
-use super::{AuthSuccess, ConsoleReqExtra};
+use super::{AuthSuccess, ConsoleReqExtra, NodeInfo};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
+    console::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     error::{io_error, UserFacingError},
     http, sasl, scram,
     stream::PqStream,
 };
 use futures::TryFutureExt;
 use reqwest::StatusCode as HttpStatusCode;
-use serde::Deserialize;
 use std::future::Future;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -136,24 +136,6 @@ impl UserFacingError for WakeComputeError {
     }
 }
 
-/// Console's response which holds client's auth secret.
-#[derive(Deserialize, Debug)]
-struct GetRoleSecret {
-    role_secret: Box<str>,
-}
-
-/// Console's response which holds compute node's `host:port` pair.
-#[derive(Deserialize, Debug)]
-struct WakeCompute {
-    address: Box<str>,
-}
-
-/// Console's error response with human-readable description.
-#[derive(Deserialize, Debug)]
-struct ConsoleError {
-    error: Box<str>,
-}
-
 /// Auth secret which is managed by the cloud.
 pub enum AuthInfo {
     /// Md5 hash of user's password.
@@ -194,7 +176,7 @@ impl<'a> Api<'a> {
     pub(super) async fn handle_user(
         &'a self,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<AuthSuccess<compute::ConnCfg>> {
+    ) -> auth::Result<AuthSuccess<NodeInfo>> {
         handle_user(client, self, Self::get_auth_info, Self::wake_compute).await
     }
 }
@@ -238,7 +220,7 @@ impl Api<'_> {
     }
 
     /// Wake up the compute node and return the corresponding connection info.
-    pub async fn wake_compute(&self) -> Result<compute::ConnCfg, WakeComputeError> {
+    pub async fn wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
             let request = self
@@ -269,7 +251,10 @@ impl Api<'_> {
                 .dbname(self.creds.dbname)
                 .user(self.creds.user);
 
-            Ok(config)
+            Ok(NodeInfo {
+                config,
+                aux: body.aux,
+            })
         }
         .map_err(crate::error::log_error)
         .instrument(info_span!("wake_compute", id = request_id))
@@ -284,11 +269,11 @@ pub(super) async fn handle_user<'a, Endpoint, GetAuthInfo, WakeCompute>(
     endpoint: &'a Endpoint,
     get_auth_info: impl FnOnce(&'a Endpoint) -> GetAuthInfo,
     wake_compute: impl FnOnce(&'a Endpoint) -> WakeCompute,
-) -> auth::Result<AuthSuccess<compute::ConnCfg>>
+) -> auth::Result<AuthSuccess<NodeInfo>>
 where
     Endpoint: AsRef<ClientCredentials<'a>>,
     GetAuthInfo: Future<Output = Result<Option<AuthInfo>, GetAuthInfoError>>,
-    WakeCompute: Future<Output = Result<compute::ConnCfg, WakeComputeError>>,
+    WakeCompute: Future<Output = Result<NodeInfo, WakeComputeError>>,
 {
     let creds = endpoint.as_ref();
 
@@ -325,19 +310,20 @@ where
         }
     };
 
-    let mut config = wake_compute(endpoint).await?;
+    let mut node = wake_compute(endpoint).await?;
     if let Some(keys) = scram_keys {
-        config.auth_keys(tokio_postgres::config::AuthKeys::ScramSha256(keys));
+        use tokio_postgres::config::AuthKeys;
+        node.config.auth_keys(AuthKeys::ScramSha256(keys));
     }
 
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: config,
+        value: node,
     })
 }
 
 /// Parse http response body, taking status code into account.
-async fn parse_body<T: for<'a> Deserialize<'a>>(
+async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     response: reqwest::Response,
 ) -> Result<T, ApiError> {
     let status = response.status();
