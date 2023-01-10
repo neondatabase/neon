@@ -595,13 +595,14 @@ class NeonEnvBuilder:
         # fsync is disabled by default to make the tests go faster
         safekeepers_enable_fsync: bool = False,
         auth_enabled: bool = False,
-        rust_log_override: Optional[str] = None,
+        rust_log_env_var: Optional[str] = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
+        initial_timeline: Optional[TimelineId] = None,
     ):
         self.repo_dir = repo_dir
-        self.rust_log_override = rust_log_override
+        self.rust_log_env_var = rust_log_env_var
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
         self.remote_storage_users = remote_storage_users
@@ -622,6 +623,7 @@ class NeonEnvBuilder:
         self.pg_version = pg_version
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
+        self.initial_timeline = initial_timeline or TimelineId.generate()
 
     def init_configs(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -640,10 +642,10 @@ class NeonEnvBuilder:
         # Prepare the default branch to start the postgres on later.
         # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
         log.info(
-            f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
+            f"Services started, creating initial timeline {env.initial_tenant}/{env.initial_timeline}"
         )
-        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
-        log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
+        env.neon_cli.create_tenant(tenant_id=env.initial_tenant, timeline_id=env.initial_timeline)
+        log.info("Initial timeline created successfully")
 
         return env
 
@@ -888,7 +890,7 @@ class NeonEnv:
 
     def __init__(self, config: NeonEnvBuilder):
         self.repo_dir = config.repo_dir
-        self.rust_log_override = config.rust_log_override
+        self.rust_log_env_var = config.rust_log_env_var
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.mock_s3_server
         self.neon_cli = NeonCli(env=self)
@@ -904,6 +906,7 @@ class NeonEnv:
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
+        self.initial_timeline = config.initial_timeline
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
@@ -1118,6 +1121,80 @@ class PageserverApiException(Exception):
     pass
 
 
+class PageserverLogScope(abc.ABC):
+    log_level: Optional[str]
+    tenant_id: Optional[TenantId]
+    timeline_id: Optional[TimelineId]
+
+    @abc.abstractmethod
+    def to_json(self) -> dict[str, Any]:
+        pass
+
+    def disable(self):
+        self.log_level = None
+
+
+class CustomLogScope(PageserverLogScope):
+    directive: str
+    enabled: bool
+
+    def __init__(self, directive: str, enabled: bool):
+        self.directive = directive
+        self.enabled = enabled
+
+    def __str__(self) -> str:
+        return f"CustomLogScope{{directive: {self.directive}, enabled: {self.enabled}}}"
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "directive": self.directive,
+            "enabled": self.enabled,
+        }
+
+    def disable(self):
+        self.enabled = False
+
+
+class TenantLogScope(PageserverLogScope):
+    tenant_id: TenantId
+
+    def __init__(self, log_level: Optional[str], tenant_id: TenantId):
+        self.log_level = log_level
+        self.tenant_id = tenant_id
+
+    def __str__(self) -> str:
+        return f"TenantLogScope{{log_level: {self.log_level}, tenant_id: {self.tenant_id}}}"
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "log_level": self.log_level if self.log_level else None,
+            "scope": {"kind": "Tenant", "tenant_id": str(self.tenant_id)},
+        }
+
+
+class TimelineLogScope(PageserverLogScope):
+    tenant_id: TenantId
+    timeline_id: TimelineId
+
+    def __init__(self, log_level: Optional[str], tenant_id: TenantId, timeline_id: TimelineId):
+        self.tenant_id = tenant_id
+        self.log_level = log_level
+        self.timeline_id = timeline_id
+
+    def __str__(self) -> str:
+        return f"TimelineLogScope{{log_level: {self.log_level}, tenant_id: {self.tenant_id}, timeline_id: {self.timeline_id}}}"
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "log_level": self.log_level if self.log_level else None,
+            "scope": {
+                "kind": "Timeline",
+                "tenant_id": str(self.tenant_id),
+                "timeline_id": str(self.timeline_id),
+            },
+        }
+
+
 class PageserverHttpClient(requests.Session):
     def __init__(self, port: int, is_testing_enabled_or_skip: Fn, auth_token: Optional[str] = None):
         super().__init__()
@@ -1160,6 +1237,27 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         assert res_json is None
         return res_json
+
+    def current_log_filter(self) -> str:
+        res = self.get(f"http://localhost:{self.port}/v1/log_filter")
+        self.verbose_error(res)
+        log_filter = res.json()
+        assert isinstance(log_filter, str)
+        return log_filter
+
+    def change_log_filter(self, scope: PageserverLogScope):
+        res = self.put(
+            f"http://localhost:{self.port}/v1/log_filter",
+            json=scope.to_json(),
+        )
+        self.verbose_error(res)
+        assert (
+            res.status_code == 201
+        ), f"Expected 201 status code, but got {res.status_code} for scope {scope}"
+
+    def reset_log_filter(self):
+        res = self.post(f"http://localhost:{self.port}/v1/reset_log_filter")
+        self.verbose_error(res)
 
     def tenant_list(self) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
@@ -1635,8 +1733,8 @@ class AbstractNeonCli(abc.ABC):
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
         env_vars["POSTGRES_DISTRIB_DIR"] = str(self.env.pg_distrib_dir)
-        if self.env.rust_log_override is not None:
-            env_vars["RUST_LOG"] = self.env.rust_log_override
+        if self.env.rust_log_env_var is not None:
+            env_vars["RUST_LOG"] = self.env.rust_log_env_var
         for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
             env_vars[extra_env_key] = extra_env_value
 
@@ -2157,6 +2255,17 @@ class NeonPageserver(PgProtocol):
                 return line
 
         return None
+
+    def log_lines(self) -> List[str]:
+        logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
+
+        lines = []
+        while True:
+            line = logfile.readline()
+            if line:
+                lines.append(line)
+            else:
+                return lines
 
 
 def append_pageserver_param_overrides(

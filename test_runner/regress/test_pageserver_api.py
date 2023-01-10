@@ -1,12 +1,17 @@
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
+import pytest
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
+    CustomLogScope,
     NeonEnv,
     NeonEnvBuilder,
     PageserverHttpClient,
+    PageserverLogScope,
+    TenantLogScope,
+    TimelineLogScope,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
@@ -185,3 +190,146 @@ def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilde
 
     with env.pageserver.http_client(auth_token=pageserver_token) as client:
         check_client(client, env.initial_tenant)
+
+
+def pageserver_predefined_scopes() -> List[PageserverLogScope]:
+    return [
+        TenantLogScope("debug", TenantId.generate()),
+        TimelineLogScope("debug", TenantId.generate(), TimelineId.generate()),
+    ]
+
+
+def pageserver_custom_scopes() -> List[PageserverLogScope]:
+    return [CustomLogScope("pageserver=debug", True), CustomLogScope("hyper=debug", True)]
+
+
+@pytest.mark.parametrize(
+    "pageserver_log_scope", pageserver_predefined_scopes() + pageserver_custom_scopes()
+)
+def test_pageserver_logs_toggle_overrides_env_var(
+    neon_env_builder: NeonEnvBuilder, pageserver_log_scope: PageserverLogScope
+):
+    # Disable global logging, including the pageserver one, using an env var
+    neon_env_builder.rust_log_env_var = "error"
+    env = neon_env_builder.init_start()
+    pageserver = env.pageserver
+    pageserver_http = pageserver.http_client()
+    initial_log_filter = pageserver_http.current_log_filter()
+
+    # Ensure that pageserver does not produce logs with such setting
+    pageserver_http.tenant_status(env.initial_tenant)
+    assert (
+        len(pageserver.log_lines()) == 0
+    ), "No err log lines expected, others should be turned off"
+
+    # Make a dynamic override via HTTP api and check that it makes pageserver to produce some logs
+    pageserver_log_scope.tenant_id = env.initial_tenant
+    pageserver_log_scope.timeline_id = env.initial_timeline
+    pageserver_log_scope.log_level = "debug"
+    pageserver_http.change_log_filter(pageserver_log_scope)
+    log_filter_after_update = pageserver_http.current_log_filter()
+    assert (
+        initial_log_filter != log_filter_after_update
+    ), "Turning a filter on should change the log filter"
+    # Query pageserver to produce some logs with the override
+    pageserver_http.tenant_status(env.initial_tenant)
+    pageserver_http.timeline_compact(env.initial_tenant, env.initial_timeline)
+    # Disable the override back
+    pageserver_log_scope.disable()
+    pageserver_http.change_log_filter(pageserver_log_scope)
+    log_filter_after_toggle = pageserver_http.current_log_filter()
+
+    assert (
+        initial_log_filter == log_filter_after_toggle
+    ), "Turning a filter on and off should restore the initial state"
+
+    updated_log_lines = pageserver.log_lines()
+    log_lines_count_after_override = len(updated_log_lines)
+    assert (
+        log_lines_count_after_override > 0
+    ), f"Pageserver should produce logs due to the new override, filter: '{pageserver_http.current_log_filter()}'"
+
+    pageserver_http.tenant_status(env.initial_tenant)
+    pageserver_http.timeline_compact(env.initial_tenant, env.initial_timeline)
+    assert (
+        len(pageserver.log_lines()) == log_lines_count_after_override
+    ), "After override is disabled, no more logs should be produced again"
+
+
+def test_pageserver_logs_restart(neon_env_builder: NeonEnvBuilder):
+    # Disable global logging, including the pageserver one, using an env var
+    neon_env_builder.rust_log_env_var = "error"
+    env = neon_env_builder.init_start()
+    pageserver = env.pageserver
+    pageserver_http = pageserver.http_client()
+    initial_log_filter = pageserver_http.current_log_filter()
+
+    current_log_filter = initial_log_filter
+    for pageserver_log_scope in pageserver_predefined_scopes():
+        pageserver_log_scope.tenant_id = env.initial_tenant
+        pageserver_log_scope.timeline_id = env.initial_timeline
+        pageserver_log_scope.log_level = "debug"
+
+        pageserver_http.change_log_filter(pageserver_log_scope)
+        new_filter = pageserver_http.current_log_filter()
+        assert new_filter != current_log_filter, "New filter should appear after the toggle"
+        current_log_filter = new_filter
+
+    # Make a dynamic override via HTTP api and check that it makes pageserver to produce some logs
+    pageserver_http.tenant_status(env.initial_tenant)
+    pageserver_http.timeline_compact(env.initial_tenant, env.initial_timeline)
+    env.pageserver.stop()
+
+    updated_log_lines = pageserver.log_lines()
+    log_lines_count_after_override = len(updated_log_lines)
+    assert (
+        log_lines_count_after_override > 0
+    ), f"Pageserver should produce logs due to the new override, filter: '{current_log_filter}'"
+
+    env.pageserver.start()
+    pageserver_http.tenant_status(env.initial_tenant)
+    pageserver_http.timeline_compact(env.initial_tenant, env.initial_timeline)
+    assert (
+        initial_log_filter == pageserver_http.current_log_filter()
+    ), "Pageserver log filter should get back to default after a restart"
+    assert (
+        len(pageserver.log_lines()) == log_lines_count_after_override
+    ), "After pageserver restart, no more log overrides should produce debug logs"
+
+
+def test_pageserver_logs_reset(neon_env_builder: NeonEnvBuilder):
+    # Disable global logging, including the pageserver one, using an env var
+    neon_env_builder.rust_log_env_var = "error"
+    env = neon_env_builder.init_start()
+    pageserver = env.pageserver
+    pageserver_http = pageserver.http_client()
+    initial_log_filter = pageserver_http.current_log_filter()
+
+    current_log_filter = initial_log_filter
+    for pageserver_log_scope in pageserver_custom_scopes():
+        pageserver_log_scope.tenant_id = env.initial_tenant
+        pageserver_log_scope.timeline_id = env.initial_timeline
+        pageserver_log_scope.log_level = "debug"
+
+        pageserver_http.change_log_filter(pageserver_log_scope)
+        new_filter = pageserver_http.current_log_filter()
+        assert new_filter != current_log_filter, "New filter should appear after the toggle"
+        current_log_filter = new_filter
+
+    pageserver_http.tenant_status(env.initial_tenant)
+    pageserver_http.timeline_compact(env.initial_tenant, env.initial_timeline)
+    pageserver_http.reset_log_filter()
+    updated_log_lines = pageserver.log_lines()
+    log_lines_count_after_override = len(updated_log_lines)
+    assert (
+        log_lines_count_after_override > 0
+    ), f"Pageserver should produce logs due to the new override, filter: '{current_log_filter}'"
+
+    pageserver_http.tenant_status(env.initial_tenant)
+    pageserver_http.timeline_compact(env.initial_tenant, env.initial_timeline)
+    assert (
+        initial_log_filter == pageserver_http.current_log_filter()
+    ), "Pageserver log filter should get back to default after a reset"
+    assert (
+        len(pageserver.log_lines()) == log_lines_count_after_override
+    ), "After pageserver restart, no more log overrides should produce debug logs"

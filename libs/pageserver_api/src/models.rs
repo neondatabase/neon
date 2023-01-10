@@ -10,12 +10,59 @@ use serde_with::{serde_as, DisplayFromStr};
 use utils::{
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
+    logging::{Directive, Level},
     lsn::Lsn,
 };
 
 use crate::reltag::RelTag;
 use anyhow::bail;
 use bytes::{BufMut, Bytes, BytesMut};
+
+/// A way to change pageserver's log level in runtime.
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChangeLogLevelRequest {
+    /// Arbitrary [`Directive`] string, in format `target[span{field=value}]=level`.
+    /// E.g. `error`, `pageserver=debug`, `[{tenant=98d670ab7bee6f0051494306a1ab888f}]=warn`
+    ///
+    /// Note that you cannot have `,` in a [`Directive`], so `error,pageserver=debug` is not a valid directive.
+    Custom {
+        #[serde_as(as = "DisplayFromStr")]
+        directive: Directive,
+        /// `true` value applies the log level, `false` value removes it (if applied before)
+        enabled: bool,
+    },
+    /// A few pageserver-specific log filters, able to expande into [`Directive`].
+    Predefined {
+        /// `Some` value applies the log level, `None` value removes it (if applied before)
+        #[serde_as(as = "Option<DisplayFromStr>")]
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        log_level: Option<Level>,
+        /// A scope of the log level to apply to.
+        scope: Scope,
+    },
+}
+
+/// A scope in the pageserver, having the same log level.
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum Scope {
+    /// Try to filter all logs with certain tenant_id field value span fields.
+    Tenant {
+        #[serde_as(as = "DisplayFromStr")]
+        tenant_id: TenantId,
+    },
+    /// Try to filter all logs with certain timeline_id in their span fields.
+    Timeline {
+        #[serde_as(as = "DisplayFromStr")]
+        tenant_id: TenantId,
+        #[serde_as(as = "DisplayFromStr")]
+        timeline_id: TimelineId,
+    },
+}
 
 /// A state of a tenant in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

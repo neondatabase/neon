@@ -326,7 +326,7 @@ def check_neon_works(
 
     # TODO: replace with NeonEnvBuilder / NeonEnv
     config: Any = type("NeonEnvStub", (object,), {})
-    config.rust_log_override = None
+    config.rust_log_env_var = None
     config.repo_dir = repo_dir
     config.pg_version = pg_version
     config.initial_tenant = snapshot_config["default_tenant_id"]

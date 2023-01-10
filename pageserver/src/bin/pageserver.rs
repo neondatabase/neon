@@ -211,7 +211,7 @@ fn start_pageserver(
     conf: &'static PageServerConf,
 ) -> anyhow::Result<()> {
     // Initialize logging
-    logging::init(conf.log_format)?;
+    let reload_handle = logging::init(conf.log_format);
 
     // Print version and launch timestamp to the log,
     // and expose them as prometheus metrics.
@@ -321,9 +321,10 @@ fn start_pageserver(
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, launch_ts, auth.clone(), remote_storage)?
-            .build()
-            .map_err(|err| anyhow!(err))?;
+        let router =
+            http::make_router(conf, launch_ts, auth.clone(), remote_storage, reload_handle)?
+                .build()
+                .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)

@@ -126,7 +126,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    logging::init(LogFormat::from_config(&args.log_format)?)?;
+    logging::init(LogFormat::from_config(&args.log_format)?);
     info!("version: {GIT_VERSION}");
 
     let args_workdir = &args.datadir;

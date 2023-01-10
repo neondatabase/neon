@@ -429,7 +429,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    logging::init(LogFormat::from_config(&args.log_format)?)?;
+    logging::init(LogFormat::from_config(&args.log_format)?);
     info!("version: {GIT_VERSION}");
     ::metrics::set_build_info_metric(GIT_VERSION);
 
