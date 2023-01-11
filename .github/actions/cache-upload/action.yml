@@ -26,7 +26,7 @@ runs:
         ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst
         OVERRIDE: ${{ inputs.override }}
         FOLDER: ${{ inputs.folder }}
-        BUCKET: github-neon-dev
+        BUCKET: neon-github-dev
       run: |
         FILENAME=$(basename $ARCHIVE)
         
