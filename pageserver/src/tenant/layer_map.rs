@@ -324,13 +324,14 @@ where
         for (change_key, change_val) in version.delta_coverage.range(start..end) {
             // If there's a relevant delta in this part, add 1 and recurse down
             if let Some(val) = current_val {
-                if val.get_lsn_range().end.0 >= lsn.start.0 {
+                if val.get_lsn_range().end > lsn.start {
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
-                    let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr)?;
-
-                    max_stacked_deltas =
-                        std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
+                    if !kr.is_empty() {
+                        let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr)?;
+                        max_stacked_deltas =
+                            std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
+                    }
                 }
             }
 
@@ -340,17 +341,94 @@ where
 
         // Consider the last part
         if let Some(val) = current_val {
-            if val.get_lsn_range().end.0 >= lsn.start.0 {
+            if val.get_lsn_range().end > lsn.start {
                 let kr = Key::from_i128(current_key)..Key::from_i128(end);
                 let lr = lsn.start..val.get_lsn_range().start;
-                let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr)?;
 
-                max_stacked_deltas =
-                    std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
+                if !kr.is_empty() {
+                    let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr)?;
+                    max_stacked_deltas =
+                        std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
+                }
             }
         }
 
         Ok(max_stacked_deltas)
+    }
+
+    /// Count how many layers we need to visit for given key-lsn pair.
+    ///
+    /// Used as a helper for correctness checks only. Performance not critical.
+    pub fn get_difficulty(&self, lsn: Lsn, key: Key) -> usize {
+        match self.search(key, lsn) {
+            Some(search_result) => {
+                if search_result.layer.is_incremental() {
+                    1 + self.get_difficulty(search_result.lsn_floor, key)
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        }
+    }
+
+    /// Used for correctness checking. Results are expected to be identical to
+    /// self.get_difficulty_map. Assumes self.search is correct.
+    pub fn get_difficulty_map_bruteforce(
+        &self,
+        lsn: Lsn,
+        partitioning: &KeyPartitioning,
+    ) -> Vec<usize> {
+        // Looking at the difficulty as a function of key, it could only increase
+        // when a delta layer starts or an image layer ends. Therefore it's sufficient
+        // to check the difficulties at:
+        // - the key.start for each non-empty part range
+        // - the key.start for each delta
+        // - the key.end for each image
+        let keys_iter: Box<dyn Iterator<Item = Key>> = {
+            let mut keys: Vec<Key> = self
+                .iter_historic_layers()
+                .map(|layer| {
+                    if layer.is_incremental() {
+                        layer.get_key_range().start
+                    } else {
+                        layer.get_key_range().end
+                    }
+                })
+                .collect();
+            keys.sort();
+            Box::new(keys.into_iter())
+        };
+        let mut keys_iter = keys_iter.peekable();
+
+        // Iter the partition and keys together and query all the necessary
+        // keys, computing the max difficulty for each part.
+        partitioning
+            .parts
+            .iter()
+            .map(|part| {
+                let mut difficulty = 0;
+                // Partition ranges are assumed to be sorted and disjoint
+                // TODO assert it
+                for range in &part.ranges {
+                    if !range.is_empty() {
+                        difficulty =
+                            std::cmp::max(difficulty, self.get_difficulty(lsn, range.start));
+                    }
+                    while let Some(key) = keys_iter.peek() {
+                        if key >= &range.end {
+                            break;
+                        }
+                        let key = keys_iter.next().unwrap();
+                        if key < range.start {
+                            continue;
+                        }
+                        difficulty = std::cmp::max(difficulty, self.get_difficulty(lsn, key));
+                    }
+                }
+                difficulty
+            })
+            .collect()
     }
 
     /// For each part of a keyspace partitioning, return the maximum number of layers

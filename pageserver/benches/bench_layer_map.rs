@@ -150,8 +150,6 @@ fn bench_from_captest_env(c: &mut Criterion) {
 // Benchmark using metadata extracted from a real project that was taknig
 // too long processing layer map queries.
 fn bench_from_real_project(c: &mut Criterion) {
-    // TODO consider compressing this file
-
     // Init layer map
     let now = Instant::now();
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
@@ -167,6 +165,36 @@ fn bench_from_real_project(c: &mut Criterion) {
         .max()
         .unwrap();
     let partitioning = uniform_key_partitioning(&layer_map, latest_lsn);
+
+    // Check correctness of get_difficulty_map
+    // TODO put this in a dedicated test outside of this mod
+    {
+        println!("running correctness check");
+
+        let now = Instant::now();
+        let result_bruteforce = layer_map.get_difficulty_map_bruteforce(latest_lsn, &partitioning);
+        assert!(result_bruteforce.len() == partitioning.parts.len());
+        println!("Finished bruteforce in {:?}", now.elapsed());
+
+        let now = Instant::now();
+        let result_fast = layer_map.get_difficulty_map(latest_lsn, &partitioning);
+        assert!(result_fast.len() == partitioning.parts.len());
+        println!("Finished fast in {:?}", now.elapsed());
+
+        // Assert results are equal. Manually iterate for easier debugging.
+        //
+        // TODO The difficulty numbers are in the 50-80 range. That's pretty bad.
+        //      We should be monitoring it in prod.
+        let zip = std::iter::zip(
+            &partitioning.parts,
+            std::iter::zip(result_bruteforce, result_fast),
+        );
+        for (_part, (bruteforce, fast)) in zip {
+            assert_eq!(bruteforce, fast);
+        }
+
+        println!("No issues found");
+    }
 
     // Define and name the benchmark function
     let mut group = c.benchmark_group("real_map");
