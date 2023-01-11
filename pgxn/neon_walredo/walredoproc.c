@@ -334,7 +334,7 @@ WalRedoMain(int argc, char *argv[])
 				// against the capacity, but the used length.
 				enlargeStringInfo(&input_message, next_frame);
 
-				if input_message.maxlen != old_len {
+				if (input_message.maxlen != old_len) {
 					// CEREMONIAL: we use these pointers as &mut [u8] over at rust, which is not allowed with uninit memory
 					memset(input_message.data, 0, input_message.maxlen);
 				}
