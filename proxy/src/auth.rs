@@ -3,6 +3,11 @@
 pub mod backend;
 pub use backend::{BackendType, ConsoleReqExtra};
 
+/// Re-export caches from [`backend`].
+pub mod caches {
+    pub use super::backend::{ApiCaches, NodeInfoCache};
+}
+
 mod credentials;
 pub use credentials::ClientCredentials;
 

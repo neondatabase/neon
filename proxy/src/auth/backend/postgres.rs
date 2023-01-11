@@ -2,7 +2,7 @@
 
 use super::{
     console::{self, AuthInfo, GetAuthInfoError, WakeComputeError},
-    AuthSuccess, NodeInfo,
+    AuthSuccess, CachedNodeInfo, NodeInfo,
 };
 use crate::{
     auth::{self, ClientCredentials},
@@ -35,8 +35,7 @@ impl From<tokio_postgres::Error> for console::ApiError {
     }
 }
 
-#[must_use]
-pub(super) struct Api<'a> {
+pub struct Api<'a> {
     endpoint: &'a ApiUrl,
     creds: &'a ClientCredentials<'a>,
 }
@@ -49,15 +48,15 @@ impl<'a> AsRef<ClientCredentials<'a>> for Api<'a> {
 
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
-    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
+    pub fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
         Self { endpoint, creds }
     }
 
     /// Authenticate the existing user or throw an error.
-    pub(super) async fn handle_user(
+    pub async fn handle_user(
         &'a self,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<AuthSuccess<NodeInfo>> {
+    ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         // We reuse user handling logic from a production module.
         console::handle_user(client, self, Self::get_auth_info, Self::wake_compute).await
     }
@@ -103,7 +102,7 @@ impl Api<'_> {
     }
 
     /// We don't need to wake anything locally, so we just return the connection info.
-    pub async fn wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
+    pub async fn wake_compute(&self) -> Result<CachedNodeInfo, WakeComputeError> {
         let mut config = compute::ConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
@@ -111,10 +110,12 @@ impl Api<'_> {
             .dbname(self.creds.dbname)
             .user(self.creds.user);
 
-        Ok(NodeInfo {
+        let node = NodeInfo {
             config,
             aux: Default::default(),
-        })
+        };
+
+        Ok(CachedNodeInfo::uncached(node))
     }
 }
 

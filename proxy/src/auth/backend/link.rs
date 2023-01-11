@@ -80,14 +80,14 @@ pub async fn handle_user(
         .user(&db_info.user);
 
     if let Some(password) = db_info.password {
-        config.password(password);
+        config.password(password.as_ref());
     }
 
     Ok(AuthSuccess {
         reported_auth_ok: true,
         value: NodeInfo {
             config,
-            aux: db_info.aux,
+            aux: db_info.aux.into(),
         },
     })
 }

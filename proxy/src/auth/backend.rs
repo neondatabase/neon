@@ -8,13 +8,14 @@ pub use console::{GetAuthInfoError, WakeComputeError};
 
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
+    cache::{timed_lru, TimedLru},
     compute,
     console::messages::MetricsAuxInfo,
     http, mgmt, stream, url,
     waiters::{self, Waiter, Waiters},
 };
 use once_cell::sync::Lazy;
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
@@ -128,22 +129,51 @@ pub struct AuthSuccess<T> {
     pub value: T,
 }
 
-/// Info for establishing a connection to a compute node.
-/// This is what we get after auth succeeded, but not before!
-pub struct NodeInfo {
-    /// Compute node connection params.
-    pub config: compute::ConnCfg,
-    /// Labels for proxy's metrics.
-    pub aux: MetricsAuxInfo,
+impl<T> AuthSuccess<T> {
+    /// Very similar to [`std::option::Option::map`].
+    /// Maps [`AuthSuccess<T>`] to [`AuthSuccess<R>`] by applying
+    /// a function to a contained value.
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> AuthSuccess<R> {
+        AuthSuccess {
+            reported_auth_ok: self.reported_auth_ok,
+            value: f(self.value),
+        }
+    }
 }
 
-impl BackendType<'_, ClientCredentials<'_>> {
+/// Info for establishing a connection to a compute node.
+/// This is what we get after auth succeeded, but not before!
+#[derive(Clone)]
+pub struct NodeInfo {
+    /// Compute node connection params.
+    /// It's sad that we have to clone this, but this will improve
+    /// once we migrate to a bespoke connection logic.
+    pub config: compute::ConnCfg,
+
+    /// Labels for proxy's metrics.
+    pub aux: Arc<MetricsAuxInfo>,
+}
+
+pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
+pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
+
+/// Various caches for [`console`].
+pub struct ApiCaches {
+    /// Cache for the `wake_compute` API method.
+    pub node_info: NodeInfoCache,
+}
+
+// TODO: get rid of explicit lifetimes in this block (there's a bug in rustc).
+// Read more: https://github.com/rust-lang/rust/issues/99190
+// Alleged fix: https://github.com/rust-lang/rust/pull/89056
+impl<'l> BackendType<'l, ClientCredentials<'_>> {
     /// Do something special if user didn't provide the `project` parameter.
-    async fn try_password_hack(
-        &mut self,
-        extra: &ConsoleReqExtra<'_>,
-        client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<Option<AuthSuccess<NodeInfo>>> {
+    async fn try_password_hack<'a>(
+        &'a mut self,
+        caches: &'static ApiCaches,
+        extra: &'a ConsoleReqExtra<'a>,
+        client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+    ) -> auth::Result<Option<AuthSuccess<CachedNodeInfo>>> {
         use BackendType::*;
 
         // If there's no project so far, that entails that client doesn't
@@ -184,17 +214,17 @@ impl BackendType<'_, ClientCredentials<'_>> {
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());
-                let node = console::Api::new(endpoint, extra, &creds)
+                let node = console::Api::new(endpoint, extra, &creds, caches)
                     .wake_compute()
                     .await?;
 
                 (node, payload)
             }
+            // This is a hack to allow cleartext password in secure connections (wss).
             Console(endpoint, creds) if creds.use_cleartext_password_flow => {
-                // This is a hack to allow cleartext password in secure connections (wss).
                 let payload = fetch_plaintext_password(client).await?;
                 let creds = creds.as_ref();
-                let node = console::Api::new(endpoint, extra, &creds)
+                let node = console::Api::new(endpoint, extra, &creds, caches)
                     .wake_compute()
                     .await?;
 
@@ -220,16 +250,17 @@ impl BackendType<'_, ClientCredentials<'_>> {
     }
 
     /// Authenticate the client via the requested backend, possibly using credentials.
-    pub async fn authenticate(
+    pub async fn authenticate<'a>(
         mut self,
-        extra: &ConsoleReqExtra<'_>,
-        client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<AuthSuccess<NodeInfo>> {
+        caches: &'static ApiCaches,
+        extra: &'a ConsoleReqExtra<'a>,
+        client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+    ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         use BackendType::*;
 
         // Handle cases when `project` is missing in `creds`.
         // TODO: type safety: return `creds` with irrefutable `project`.
-        if let Some(res) = self.try_password_hack(extra, client).await? {
+        if let Some(res) = self.try_password_hack(caches, extra, client).await? {
             info!("user successfully authenticated (using the password hack)");
             return Ok(res);
         }
@@ -243,7 +274,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 );
 
                 assert!(creds.project.is_some());
-                console::Api::new(&endpoint, extra, &creds)
+                console::Api::new(&endpoint, extra, &creds, caches)
                     .handle_user(client)
                     .await?
             }
@@ -258,7 +289,10 @@ impl BackendType<'_, ClientCredentials<'_>> {
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
                 info!("performing link authentication");
-                link::handle_user(&url, client).await?
+
+                link::handle_user(&url, client)
+                    .await?
+                    .map(CachedNodeInfo::uncached)
             }
         };
 

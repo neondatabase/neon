@@ -42,6 +42,7 @@ pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 /// A config for establishing a connection to compute node.
 /// Eventually, `tokio_postgres` will be replaced with something better.
 /// Newtype allows us to implement methods on top of it.
+#[derive(Clone)]
 #[repr(transparent)]
 pub struct ConnCfg(Box<tokio_postgres::Config>);
 
@@ -137,7 +138,7 @@ pub struct PostgresConnection {
 impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub async fn connect(
-        mut self,
+        &mut self,
         params: &StartupMessageParams,
     ) -> Result<(PostgresConnection, CancelClosure), ConnectionError> {
         if let Some(options) = params.options_raw() {

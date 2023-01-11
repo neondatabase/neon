@@ -33,6 +33,7 @@ impl UserFacingError for ClientCredsParseError {}
 pub struct ClientCredentials<'a> {
     pub user: &'a str,
     pub dbname: &'a str,
+    // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<Cow<'a, str>>,
     /// If `True`, we'll use the old cleartext password flow. This is used for
     /// websocket connections, which want to minimize the number of round trips.

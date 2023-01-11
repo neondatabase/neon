@@ -9,50 +9,51 @@ anyhow.workspace = true
 atty.workspace = true
 base64.workspace = true
 bstr.workspace = true
-bytes = {workspace = true, features = ['serde'] }
-clap.workspace = true
+bytes = { workspace = true, features = ["serde"] }
 chrono.workspace = true
+clap.workspace = true
 consumption_metrics.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hashbrown.workspace = true
+hashlink.workspace = true
 hex.workspace = true
 hmac.workspace = true
-hyper.workspace = true
+hostname.workspace = true
+humantime.workspace = true
 hyper-tungstenite.workspace = true
+hyper.workspace = true
 itertools.workspace = true
 md5.workspace = true
+metrics.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 pin-project-lite.workspace = true
+pq_proto.workspace = true
+prometheus.workspace = true
 rand.workspace = true
 regex.workspace = true
-reqwest = { workspace = true, features = [ "json" ] }
+reqwest = { workspace = true, features = ["json"] }
 routerify.workspace = true
-rustls.workspace = true
 rustls-pemfile.workspace = true
+rustls.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tls-listener.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
-tls-listener.workspace = true
-tracing.workspace = true
+tokio.workspace = true
 tracing-subscriber.workspace = true
+tracing.workspace = true
 url.workspace = true
+utils.workspace = true
 uuid.workspace = true
 webpki-roots.workspace = true
 x509-parser.workspace = true
-metrics.workspace = true
-pq_proto.workspace = true
-utils.workspace = true
-prometheus.workspace = true
-humantime.workspace = true
-hostname.workspace = true
 
 workspace_hack.workspace = true
 

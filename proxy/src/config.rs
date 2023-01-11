@@ -5,7 +5,8 @@ use std::sync::Arc;
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, ()>,
-    pub metric_collection_config: Option<MetricCollectionConfig>,
+    pub metric_collection: Option<MetricCollectionConfig>,
+    pub api_caches: auth::caches::ApiCaches,
 }
 
 pub struct MetricCollectionConfig {

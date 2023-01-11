@@ -83,7 +83,7 @@ pub async fn task_main(
 }
 
 pub async fn handle_ws_client(
-    config: &ProxyConfig,
+    config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
     stream: impl AsyncRead + AsyncWrite + Unpin + Send,
@@ -117,14 +117,14 @@ pub async fn handle_ws_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
+    let client = Client::new(stream, creds, &params, session_id, &config.api_caches);
     cancel_map
         .with_session(|session| client.connect_to_db(session))
         .await
 }
 
 async fn handle_client(
-    config: &ProxyConfig,
+    config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
     stream: impl AsyncRead + AsyncWrite + Unpin + Send,
@@ -155,7 +155,7 @@ async fn handle_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
+    let client = Client::new(stream, creds, &params, session_id, &config.api_caches);
     cancel_map
         .with_session(|session| client.connect_to_db(session))
         .await
@@ -236,6 +236,8 @@ struct Client<'a, S> {
     params: &'a StartupMessageParams,
     /// Unique connection ID.
     session_id: uuid::Uuid,
+    /// Varous caches for the cloud API responses.
+    caches: &'static auth::caches::ApiCaches,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -245,11 +247,13 @@ impl<'a, S> Client<'a, S> {
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
+        caches: &'static auth::caches::ApiCaches,
     ) -> Self {
         Self {
             stream,
             creds,
             params,
+            caches,
             session_id,
         }
     }
@@ -263,6 +267,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             creds,
             params,
             session_id,
+            caches,
         } = self;
 
         let extra = auth::ConsoleReqExtra {
@@ -272,18 +277,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
 
         let auth_result = async {
             // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds.authenticate(&extra, &mut stream).await;
+            let res = creds.authenticate(caches, &extra, &mut stream).await;
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
         .instrument(info_span!("auth"))
         .await?;
 
-        let node = auth_result.value;
+        let mut node = auth_result.value;
         let (db, cancel_closure) = node
             .config
             .connect(params)
             .or_else(|e| stream.throw_error(e))
-            .await?;
+            .await
+            .map_err(|e| {
+                // Invalidate the cache entry if we failed to connect.
+                node.invalidate();
+                e
+            })?;
 
         let cancel_key_data = session.enable_query_cancellation(cancel_closure);
 

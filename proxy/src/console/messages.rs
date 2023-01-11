@@ -63,13 +63,13 @@ impl KickSession<'_> {
 /// Compute node connection params.
 #[derive(Deserialize)]
 pub struct DatabaseInfo {
-    pub host: String,
+    pub host: Box<str>,
     pub port: u16,
-    pub dbname: String,
-    pub user: String,
+    pub dbname: Box<str>,
+    pub user: Box<str>,
     /// Console always provides a password, but it might
     /// be inconvenient for debug with local PG instance.
-    pub password: Option<String>,
+    pub password: Option<Box<str>>,
     pub aux: MetricsAuxInfo,
 }
 

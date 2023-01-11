@@ -1,6 +1,6 @@
 //! Cloud API V2.
 
-use super::{AuthSuccess, ConsoleReqExtra, NodeInfo};
+use super::{ApiCaches, AuthSuccess, CachedNodeInfo, ConsoleReqExtra, NodeInfo};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
@@ -145,11 +145,13 @@ pub enum AuthInfo {
     Scram(scram::ServerSecret),
 }
 
-#[must_use]
-pub(super) struct Api<'a> {
+pub struct Api<'a> {
     endpoint: &'a http::Endpoint,
     extra: &'a ConsoleReqExtra<'a>,
     creds: &'a ClientCredentials<'a>,
+
+    /// For simplicity, caches should live forever.
+    caches: &'static ApiCaches,
 }
 
 impl<'a> AsRef<ClientCredentials<'a>> for Api<'a> {
@@ -160,23 +162,25 @@ impl<'a> AsRef<ClientCredentials<'a>> for Api<'a> {
 
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
-    pub(super) fn new(
+    pub fn new(
         endpoint: &'a http::Endpoint,
         extra: &'a ConsoleReqExtra<'a>,
         creds: &'a ClientCredentials,
+        caches: &'static ApiCaches,
     ) -> Self {
         Self {
             endpoint,
             extra,
             creds,
+            caches,
         }
     }
 
     /// Authenticate the existing user or throw an error.
-    pub(super) async fn handle_user(
+    pub async fn handle_user(
         &'a self,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<AuthSuccess<NodeInfo>> {
+    ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         handle_user(client, self, Self::get_auth_info, Self::wake_compute).await
     }
 }
@@ -219,8 +223,8 @@ impl Api<'_> {
         .await
     }
 
-    /// Wake up the compute node and return the corresponding connection info.
-    pub async fn wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
+    async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
+        let project = self.creds.project().expect("impossible");
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
             let request = self
@@ -230,7 +234,7 @@ impl Api<'_> {
                 .query(&[("session_id", self.extra.session_id)])
                 .query(&[
                     ("application_name", self.extra.application_name),
-                    ("project", Some(self.creds.project().expect("impossible"))),
+                    ("project", Some(project)),
                 ])
                 .build()?;
 
@@ -251,14 +255,30 @@ impl Api<'_> {
                 .dbname(self.creds.dbname)
                 .user(self.creds.user);
 
-            Ok(NodeInfo {
+            let node = NodeInfo {
                 config,
-                aux: body.aux,
-            })
+                aux: body.aux.into(),
+            };
+
+            Ok(node)
         }
         .map_err(crate::error::log_error)
         .instrument(info_span!("wake_compute", id = request_id))
         .await
+    }
+
+    /// Wake up the compute node and return the corresponding connection info.
+    pub async fn wake_compute(&self) -> Result<CachedNodeInfo, WakeComputeError> {
+        // Wake-up might not be needed if the node is still alive.
+        let key = self.creds.project().expect("impossible");
+        if let Some(cached) = self.caches.node_info.get(key) {
+            return Ok(cached);
+        }
+
+        let node = self.do_wake_compute().await?;
+        let (_, cached) = self.caches.node_info.insert(key.into(), node);
+
+        Ok(cached)
     }
 }
 
@@ -269,11 +289,11 @@ pub(super) async fn handle_user<'a, Endpoint, GetAuthInfo, WakeCompute>(
     endpoint: &'a Endpoint,
     get_auth_info: impl FnOnce(&'a Endpoint) -> GetAuthInfo,
     wake_compute: impl FnOnce(&'a Endpoint) -> WakeCompute,
-) -> auth::Result<AuthSuccess<NodeInfo>>
+) -> auth::Result<AuthSuccess<CachedNodeInfo>>
 where
     Endpoint: AsRef<ClientCredentials<'a>>,
     GetAuthInfo: Future<Output = Result<Option<AuthInfo>, GetAuthInfoError>>,
-    WakeCompute: Future<Output = Result<NodeInfo, WakeComputeError>>,
+    WakeCompute: Future<Output = Result<CachedNodeInfo, WakeComputeError>>,
 {
     let creds = endpoint.as_ref();
 
