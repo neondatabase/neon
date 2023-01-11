@@ -1,26 +1,31 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use super::latest_layer_map::LatestLayerMap;
+use super::layer_coverage::LayerCoverageTuple;
 
-pub struct PersistentLayerMap<Value> {
-    /// The latest-only solution
-    head: LatestLayerMap<Value>,
+/// Efficiently queryable layer coverage for each LSN.
+///
+/// Allows answering layer map queries very efficiently,
+/// but doesn't allow retroactive insertion, which is
+/// sometimes necessary. See BufferedHistoricLayerCoverage.
+pub struct HistoricLayerCoverage<Value> {
+    /// The latest state
+    head: LayerCoverageTuple<Value>,
 
     /// All previous states
-    historic: BTreeMap<u64, LatestLayerMap<Value>>,
+    historic: BTreeMap<u64, LayerCoverageTuple<Value>>,
 }
 
-impl<T: Clone> Default for PersistentLayerMap<T> {
+impl<T: Clone> Default for HistoricLayerCoverage<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Value: Clone> PersistentLayerMap<Value> {
+impl<Value: Clone> HistoricLayerCoverage<Value> {
     pub fn new() -> Self {
         Self {
-            head: LatestLayerMap::default(),
+            head: LayerCoverageTuple::default(),
             historic: BTreeMap::default(),
         }
     }
@@ -56,7 +61,7 @@ impl<Value: Clone> PersistentLayerMap<Value> {
         self.historic.insert(lsn.start, self.head.clone());
     }
 
-    pub fn get_version(self: &Self, lsn: u64) -> Option<&LatestLayerMap<Value>> {
+    pub fn get_version(self: &Self, lsn: u64) -> Option<&LayerCoverageTuple<Value>> {
         match self.historic.range(..=lsn).rev().next() {
             Some((_, v)) => Some(v),
             None => None,
@@ -79,7 +84,7 @@ impl<Value: Clone> PersistentLayerMap<Value> {
 /// All layers in this test have height 1.
 #[test]
 fn test_persistent_simple() {
-    let mut map = PersistentLayerMap::<String>::new();
+    let mut map = HistoricLayerCoverage::<String>::new();
     map.insert(0..5, 100..101, "Layer 1".to_string(), true);
     map.insert(3..9, 110..111, "Layer 2".to_string(), true);
     map.insert(5..6, 120..121, "Layer 3".to_string(), true);
@@ -105,7 +110,7 @@ fn test_persistent_simple() {
 /// Cover simple off-by-one edge cases
 #[test]
 fn test_off_by_one() {
-    let mut map = PersistentLayerMap::<String>::new();
+    let mut map = HistoricLayerCoverage::<String>::new();
     map.insert(3..5, 100..110, "Layer 1".to_string(), true);
 
     // Check different LSNs
@@ -127,7 +132,7 @@ fn test_off_by_one() {
 /// Cover edge cases where layers begin or end on the same key
 #[test]
 fn test_key_collision() {
-    let mut map = PersistentLayerMap::<String>::new();
+    let mut map = HistoricLayerCoverage::<String>::new();
 
     map.insert(3..5, 100..110, "Layer 10".to_string(), true);
     map.insert(5..8, 100..110, "Layer 11".to_string(), true);
@@ -172,7 +177,7 @@ fn test_key_collision() {
 /// Test when rectangles have nontrivial height and possibly overlap
 #[test]
 fn test_persistent_overlapping() {
-    let mut map = PersistentLayerMap::<String>::new();
+    let mut map = HistoricLayerCoverage::<String>::new();
 
     // Add 3 key-disjoint layers with varying LSN ranges
     map.insert(1..2, 100..200, "Layer 1".to_string(), true);
@@ -219,7 +224,7 @@ fn test_persistent_overlapping() {
     assert_eq!(version.image_coverage.query(8), Some("Layer 6".to_string()));
 }
 
-/// Wrapper for PersistentLayerMap that allows us to hack around the lack
+/// Wrapper for HistoricLayerCoverage that allows us to hack around the lack
 /// of support for retroactive insertion by rebuilding the map since the
 /// change.
 ///
@@ -238,9 +243,9 @@ fn test_persistent_overlapping() {
 ///
 /// See this for more on persistent and retroactive techniques:
 /// https://www.youtube.com/watch?v=WqCWghETNDc&t=581s
-pub struct RetroactiveLayerMap<Value> {
+pub struct BufferedHistoricLayerCoverage<Value> {
     /// A persistent layer map that we rebuild when we need to retroactively update
-    map: PersistentLayerMap<Value>,
+    historic_coverage: HistoricLayerCoverage<Value>,
 
     /// We buffer insertion into the PersistentLayerMap to decrease the number of rebuilds.
     ///
@@ -254,7 +259,7 @@ pub struct RetroactiveLayerMap<Value> {
     layers: BTreeMap<(u64, u64, i128, i128, bool), Value>,
 }
 
-impl<T: std::fmt::Debug> std::fmt::Debug for RetroactiveLayerMap<T> {
+impl<T: std::fmt::Debug> std::fmt::Debug for BufferedHistoricLayerCoverage<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RetroactiveLayerMap")
             .field("buffer", &self.buffer)
@@ -263,16 +268,16 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RetroactiveLayerMap<T> {
     }
 }
 
-impl<T: Clone> Default for RetroactiveLayerMap<T> {
+impl<T: Clone> Default for BufferedHistoricLayerCoverage<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Value: Clone> RetroactiveLayerMap<Value> {
+impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     pub fn new() -> Self {
         Self {
-            map: PersistentLayerMap::<Value>::new(),
+            historic_coverage: HistoricLayerCoverage::<Value>::new(),
             buffer: BTreeMap::new(),
             layers: BTreeMap::new(),
         }
@@ -324,21 +329,17 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
         });
 
         // Rebuild
-        self.map.trim(&rebuild_since);
+        self.historic_coverage.trim(&rebuild_since);
         for ((lsn_start, lsn_end, key_start, key_end, is_image), layer) in
             self.layers.range((rebuild_since, 0, 0, 0, false)..)
         {
-            self.map.insert(
+            self.historic_coverage.insert(
                 *key_start..*key_end,
                 *lsn_start..*lsn_end,
                 layer.clone(),
                 *is_image,
             );
         }
-    }
-
-    pub fn clear(self: &mut Self) {
-        self.map.trim(&0);
     }
 
     /// Iterate all the layers
@@ -354,7 +355,7 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
 
     /// Return a reference to a queryable map, assuming all updates
     /// have already been processed using self.rebuild()
-    pub fn get(self: &Self) -> anyhow::Result<&PersistentLayerMap<Value>> {
+    pub fn get(self: &Self) -> anyhow::Result<&HistoricLayerCoverage<Value>> {
         // NOTE we error here instead of implicitly rebuilding because
         //      rebuilding is somewhat expensive.
         // TODO maybe implicitly rebuild and log/sentry an error?
@@ -362,13 +363,13 @@ impl<Value: Clone> RetroactiveLayerMap<Value> {
             anyhow::bail!("rebuild required")
         }
 
-        Ok(&self.map)
+        Ok(&self.historic_coverage)
     }
 }
 
 #[test]
 fn test_retroactive_regression_1() {
-    let mut map = RetroactiveLayerMap::new();
+    let mut map = BufferedHistoricLayerCoverage::new();
 
     map.insert(
         0..21267647932558653966460912964485513215,
@@ -388,7 +389,7 @@ fn test_retroactive_regression_1() {
 
 #[test]
 fn test_retroactive_simple() {
-    let mut map = RetroactiveLayerMap::new();
+    let mut map = BufferedHistoricLayerCoverage::new();
 
     // Append some images in increasing LSN order
     map.insert(0..5, 100..101, "Image 1".to_string(), true);

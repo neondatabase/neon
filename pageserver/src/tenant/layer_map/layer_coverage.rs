@@ -16,6 +16,10 @@ pub struct LayerCoverage<Value> {
     /// For every change in coverage (as we sweep the key space)
     /// we store (lsn.end, value).
     ///
+    /// We use an immutable/persistent tree so that we can keep historic
+    /// versions of this coverage without cloning the whole thing and
+    /// incurring quadratic memory cost. See HistoricLayerCoverage.
+    ///
     /// We use the Sync version of the map because we want Self to
     /// be Sync. Using nonsync might be faster, if we can work with
     /// that.
@@ -129,6 +133,30 @@ impl<Value: Clone> LayerCoverage<Value> {
     pub fn clone(self: &Self) -> Self {
         Self {
             nodes: self.nodes.clone(),
+        }
+    }
+}
+
+/// Image and delta coverage at a specific LSN.
+pub struct LayerCoverageTuple<Value> {
+    pub image_coverage: LayerCoverage<Value>,
+    pub delta_coverage: LayerCoverage<Value>,
+}
+
+impl<T: Clone> Default for LayerCoverageTuple<T> {
+    fn default() -> Self {
+        Self {
+            image_coverage: LayerCoverage::default(),
+            delta_coverage: LayerCoverage::default(),
+        }
+    }
+}
+
+impl<Value: Clone> LayerCoverageTuple<Value> {
+    pub fn clone(self: &Self) -> Self {
+        Self {
+            image_coverage: self.image_coverage.clone(),
+            delta_coverage: self.delta_coverage.clone(),
         }
     }
 }

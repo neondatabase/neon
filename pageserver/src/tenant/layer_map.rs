@@ -10,6 +10,9 @@
 //! corresponding files are written to disk.
 //!
 
+mod historic_layer_coverage;
+mod layer_coverage;
+
 use crate::keyspace::KeyPartitioning;
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
@@ -21,7 +24,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use utils::lsn::Lsn;
 
-use super::bst_layer_map::RetroactiveLayerMap;
+use historic_layer_coverage::BufferedHistoricLayerCoverage;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -47,7 +50,7 @@ pub struct LayerMap<L: ?Sized> {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// Index of the historic layers optimized for search
-    index: RetroactiveLayerMap<Arc<L>>,
+    historic: BufferedHistoricLayerCoverage<Arc<L>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
@@ -61,7 +64,7 @@ impl<L: ?Sized> Default for LayerMap<L> {
             next_open_layer_at: None,
             frozen_layers: VecDeque::default(),
             l0_delta_layers: Vec::default(),
-            index: RetroactiveLayerMap::default(),
+            historic: BufferedHistoricLayerCoverage::default(),
         }
     }
 }
@@ -91,7 +94,7 @@ where
     /// 'open' and 'frozen' layers!
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
-        let version = self.index.get().unwrap().get_version(end_lsn.0 - 1)?;
+        let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
         let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
 
@@ -138,7 +141,7 @@ where
     pub fn insert_historic(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
-        self.index.insert(
+        self.historic.insert(
             kr.start.to_i128()..kr.end.to_i128(),
             lr.start.0..lr.end.0,
             Arc::clone(&layer),
@@ -154,7 +157,7 @@ where
 
     /// Must be called after a batch of insert_historic calls, before querying
     pub fn rebuild_index(&mut self) {
-        self.index.rebuild();
+        self.historic.rebuild();
     }
 
     ///
@@ -165,7 +168,7 @@ where
     pub fn remove_historic(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
-        self.index.remove(
+        self.historic.remove(
             kr.start.to_i128()..kr.end.to_i128(),
             lr.start.0..lr.end.0,
             !layer.is_incremental(),
@@ -196,7 +199,7 @@ where
             return Ok(true);
         }
 
-        let version = match self.index.get().unwrap().get_version(lsn.end.0) {
+        let version = match self.historic.get().unwrap().get_version(lsn.end.0) {
             Some(v) => v,
             None => return Ok(false),
         };
@@ -225,7 +228,7 @@ where
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
-        self.index.iter()
+        self.historic.iter()
     }
 
     ///
@@ -241,7 +244,7 @@ where
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<L>>)>> {
-        let version = match self.index.get().unwrap().get_version(lsn.0 - 1) {
+        let version = match self.historic.get().unwrap().get_version(lsn.0 - 1) {
             Some(v) => v,
             None => return Ok(vec![]),
         };
@@ -283,7 +286,7 @@ where
             return Ok(0);
         }
 
-        let version = match self.index.get().unwrap().get_version(lsn.end.0 - 1) {
+        let version = match self.historic.get().unwrap().get_version(lsn.end.0 - 1) {
             Some(v) => v,
             None => return Ok(0),
         };
