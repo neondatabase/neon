@@ -80,15 +80,32 @@ where
     L: ?Sized + Layer,
 {
     ///
-    /// Find the latest layer that covers the given 'key', with lsn <
-    /// 'end_lsn'.
+    /// Find the latest layer (by lsn.end) that covers the given
+    /// 'key', with lsn.start < 'end_lsn'.
     ///
-    /// Returns the layer, if any, and an 'lsn_floor' value that
-    /// indicates which portion of the layer the caller should
-    /// check. 'lsn_floor' is normally the start-LSN of the layer, but
-    /// can be greater if there is an overlapping layer that might
-    /// contain the version, even if it's missing from the returned
-    /// layer.
+    /// The caller of this function is the page reconstruction
+    /// algorithm looking for the next relevant delta layer, or
+    /// the terminal image layer. The caller will pass the lsn_floor
+    /// value as end_lsn in the next call to search.
+    ///
+    /// If there's an image layer exactly below the given end_lsn,
+    /// search should return that layer regardless if there are
+    /// overlapping deltas.
+    ///
+    /// If the latest layer is a delta and there is an overlapping
+    /// image with it below, the lsn_floor returned should be right
+    /// above that image so we don't skip it in the search. Otherwise
+    /// the lsn_floor returned should be the bottom of the delta layer
+    /// because we should make as much progress down the lsn axis
+    /// as possible. It's fine if this way we skip some overlapping
+    /// deltas, because the delta we returned would contain the same
+    /// wal content.
+    ///
+    /// TODO: This API is convoluted and inefficient. If the caller
+    /// makes N search calls, we'll end up finding the same latest
+    /// image layer N times. We should either cache the latest image
+    /// layer result, or simplify the api to `get_latest_image` and
+    /// `get_latest_delta`, and only call `get_latest_image` once.
     ///
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
