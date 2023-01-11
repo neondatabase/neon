@@ -30,6 +30,10 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         }
     }
 
+    /// Add a layer
+    ///
+    /// Panics if new layer has older lsn.start than an existing layer.
+    /// See BufferedHistoricLayerCoverage for a more general insertion method.
     pub fn insert(
         self: &mut Self,
         key: Range<i128>,
@@ -61,6 +65,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         self.historic.insert(lsn.start, self.head.clone());
     }
 
+    /// Query at a particular LSN
     pub fn get_version(self: &Self, lsn: u64) -> Option<&LayerCoverageTuple<Value>> {
         match self.historic.range(..=lsn).rev().next() {
             Some((_, v)) => Some(v),
@@ -68,6 +73,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         }
     }
 
+    /// Remove all entries after a certain LSN
     pub fn trim(self: &mut Self, begin: &u64) {
         self.historic.split_off(begin);
         self.head = self
