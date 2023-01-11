@@ -21,12 +21,8 @@ pub mod shared;
 const TO_WORKER_LEN: usize = 32 * 4096;
 const FROM_WORKER_LEN: usize = 4 * 4096;
 
-/// Whether or not to put the `request_response` function to sleep while waiting for the response
-/// written by `write_all`.
-///
-/// Not using it should lead to busier waiting, and faster operation, but it only helps with more
-/// than 1 thread cases.
-const USE_EVENTFD_ON_RESPONSE: bool = false;
+// Calibrated to be around 100us which was the original busy-wait tactic.
+const YIELDS_BEFORE_WAIT: usize = 750;
 
 /// Input/output over a shared memory "pipe" which attempts to be faster than using standard input
 /// and output with inter-process communication.
@@ -342,7 +338,6 @@ impl OwnedRequester {
         drop(g);
 
         // as part of the first write, make sure that the worker is woken up.
-        // FIXME: remove if the first one seems to work better
         if might_wait
             && self
                 .ptr
@@ -363,28 +358,16 @@ impl OwnedRequester {
 
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_owner) };
 
-        if USE_EVENTFD_ON_RESPONSE {
-            sem.wait();
-        }
-
         self.ptr.owner_active.store(true, Release);
 
         let mut read = 0;
         let mut div = 0;
         // let mut spin = SpinWait::default();
 
-        let started_at = std::time::Instant::now();
         loop {
             let n = c.pop_slice(&mut resp[read..]);
 
             read += n;
-
-            // div += 1;
-
-            // if div == 100_000 {
-            //     // when using the eventfd this printout should never happen.
-            //     println!("owner: 100k attempts and read {read} bytes, last {n}");
-            // }
 
             if read == resp.len() {
                 break;
@@ -394,21 +377,12 @@ impl OwnedRequester {
                 std::thread::yield_now();
                 div += 1;
 
-                if div == 1024 && !USE_EVENTFD_ON_RESPONSE {
+                if div == YIELDS_BEFORE_WAIT {
                     div = 0;
-                    let elapsed = started_at.elapsed();
-
-                    if elapsed.subsec_micros() > 100 {
-                        self.ptr.owner_active.store(false, Release);
-                        sem.wait();
-                    }
+                    self.ptr.owner_active.store(false, Release);
+                    sem.wait();
                 }
             }
-
-            // if n != 0 {
-            //     spin.reset();
-            // }
-            // spin.spin();
         }
     }
 }
@@ -516,8 +490,6 @@ impl OwnedResponder {
 
         self.ptr.worker_active.store(true, Relaxed);
 
-        let started_at = std::time::Instant::now();
-
         loop {
             let n = c.pop_slice(&mut buf[read..]);
 
@@ -535,28 +507,28 @@ impl OwnedResponder {
                         .compare_exchange(false, true, Relaxed, Relaxed)
                         .is_ok()
                 {
+                    // FIXME: it's unknown if this is needed, but if it's needed it prevents a
+                    // deadlock
                     let sem =
                         unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_owner) };
                     sem.post();
-                    // this can happen only ... when?
+                    // this can happen only once per loop
                     woken_up = true;
                 }
 
                 div += 1;
 
-                if div == 1024 {
+                if div == YIELDS_BEFORE_WAIT {
                     div = 0;
 
-                    let elapsed = started_at.elapsed();
-
-                    if elapsed.subsec_micros() > 100 {
-                        // go to sleep, which is few microseconds costlier
-                        // FIXME: should probably be an if instead of while
-                        while self.ptr.to_worker_waiters.load(Acquire) == 0 {
-                            self.ptr.worker_active.store(false, Relaxed);
-                            sem.wait();
-                            waited = true;
-                        }
+                    // FIXME: should probably be an if instead of while
+                    //
+                    // surprisingly majority of performance gains come from busy waiting
+                    // between the requests, the reads and writes from the queue are instant.
+                    while self.ptr.to_worker_waiters.load(Acquire) == 0 {
+                        self.ptr.worker_active.store(false, Relaxed);
+                        sem.wait();
+                        waited = true;
                     }
                 }
             } else if n != 0 {
@@ -580,12 +552,11 @@ impl OwnedResponder {
             buf = &buf[n..];
 
             if buf.is_empty() {
-                if USE_EVENTFD_ON_RESPONSE
-                    || self
-                        .ptr
-                        .owner_active
-                        .compare_exchange(false, true, Relaxed, Relaxed)
-                        .is_ok()
+                if self
+                    .ptr
+                    .owner_active
+                    .compare_exchange(false, true, Relaxed, Relaxed)
+                    .is_ok()
                 {
                     sem.post();
                 }
