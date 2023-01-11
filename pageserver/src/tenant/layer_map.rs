@@ -263,7 +263,9 @@ where
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<L>>)>> {
-        let version = match self.historic.get().unwrap().get_version(lsn.0 - 1) {
+        // TODO I'm 80% sure the lsn bound is inclusive. Double-check that
+        //      and document it. Do the same for image_layer_exists and count_deltas
+        let version = match self.historic.get().unwrap().get_version(lsn.0) {
             Some(v) => v,
             None => return Ok(vec![]),
         };

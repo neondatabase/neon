@@ -65,7 +65,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         self.historic.insert(lsn.start, self.head.clone());
     }
 
-    /// Query at a particular LSN
+    /// Query at a particular LSN, inclusive
     pub fn get_version(self: &Self, lsn: u64) -> Option<&LayerCoverageTuple<Value>> {
         match self.historic.range(..=lsn).rev().next() {
             Some((_, v)) => Some(v),
