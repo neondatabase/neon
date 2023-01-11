@@ -546,10 +546,7 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let exists = crate::tenant::with_ondemand_download(|| {
-            timeline.get_rel_exists(req.rel, lsn, req.latest)
-        })
-        .await?;
+        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest).await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
@@ -566,10 +563,7 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let n_blocks = crate::tenant::with_ondemand_download(|| {
-            timeline.get_rel_size(req.rel, lsn, req.latest)
-        })
-        .await?;
+        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest).await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
@@ -586,10 +580,9 @@ impl PageServerHandler {
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
             .await?;
 
-        let total_blocks = crate::tenant::with_ondemand_download(|| {
-            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)
-        })
-        .await?;
+        let total_blocks = timeline
+            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)
+            .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
@@ -615,10 +608,9 @@ impl PageServerHandler {
         }
         */
 
-        let page = crate::tenant::with_ondemand_download(|| {
-            timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)
-        })
-        .await?;
+        let page = timeline
+            .get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)
+            .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
