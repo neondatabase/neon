@@ -5,21 +5,48 @@ inputs:
     description: "Cache key"
     required: true
   path:
-    description: "A directory or file to upload"
+    description: "A directory to upload"
     required: true
   folder:
-    description: "S3 subfolder"
+    description: "s3 subfolder"
     default: cache
     required: false
   override:
-    description: "Allow force upload existing cache"
+    description: "Force override existing cache"
     default: false
     required: false
 
 runs:
   using: "composite"
   steps:
+    - name: Check cache
+      id: check-s3-cache
+      shell: bash -euxo pipefail {0}
+      env:
+        ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst
+        OVERRIDE: ${{ inputs.override }}
+        FOLDER: ${{ inputs.folder }}
+        BUCKET: numuw-prod
+      run: |
+        FILENAME=$(basename $ARCHIVE)
+        
+        S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${FOLDER} | jq -r '.Contents[].Key' | grep ${FILENAME} | tail -1 || true)
+        if [ -z "${S3_KEY}" ]; then
+          echo "no cache hit"
+          echo 'SKIP=false' >> $GITHUB_OUTPUT
+          else
+            if [ "${OVERRIDE}" = "true" ]; then
+              echo "override existing cache"
+              echo 'SKIP=false' >> $GITHUB_OUTPUT
+            else
+              echo "cache exists, skipping upload"
+              echo 'SKIP=true' >> $GITHUB_OUTPUT
+          fi
+        fi
+
     - name: Prepare cache
+      id: prepare-s3-cache
+      if: ${{ steps.check-s3-cache.outputs.SKIP == 'false' }}
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
@@ -48,6 +75,8 @@ runs:
         time /bin/tar --posix --use-compress-program zstdmt -cf ${ARCHIVE} --exclude manifest.txt --exclude ignore.txt -P -C ${GITHUB_WORKSPACE} --files-from manifest.txt
 
     - name: Upload cache
+      id: upload-s3-cache
+      if: ${{ steps.check-s3-cache.outputs.SKIP == 'false' }}
       shell: bash -euxo pipefail {0}
       env:
         ARCHIVE: /tmp/uploads/${{ inputs.key }}.tar.zst

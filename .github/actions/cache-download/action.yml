@@ -5,11 +5,11 @@ inputs:
     description: "Cache key"
     required: true
   path:
-    description: "A directory to put cache into"
+    description: "A directory to restore cache to"
     default: "."
     required: false
   folder:
-    description: "S3 subfolder"
+    description: "s3 subfolder"
     default: cache
     required: false
 
