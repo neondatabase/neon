@@ -305,7 +305,7 @@ WalRedoMain(int argc, char *argv[])
 	MemoryContextSwitchTo(MessageContext);
 	initStringInfo(&input_message);
 
-	if (shmempipe != NULL)
+	/*if (shmempipe != NULL)
 	{
 		// with shmempipe we can take a different approach, which is to buffer
 		// the whole message, and then just bump the pointer through, before
@@ -381,6 +381,7 @@ WalRedoMain(int argc, char *argv[])
 			}
 		}
 	}
+	*/
 
 	for (;;)
 	{

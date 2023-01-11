@@ -110,7 +110,7 @@ impl SharedMemPipePtr<Joined> {
 
         Some(OwnedResponder {
             ptr: self,
-            remaining: None,
+            // remaining: None,
         })
     }
 }
@@ -323,6 +323,7 @@ impl OwnedRequester {
             spin.spin();
         };
 
+        /*
         let len = req.len();
 
         // framing doesn't require us to manage state, as we always send both
@@ -333,6 +334,7 @@ impl OwnedRequester {
         // using the postponed version here between the two pushes most definitely leads to
         // corruption, also it can trigger a debug_assert! within ringbuf
         send(&frame_len);
+        */
         send(req);
 
         drop(g);
@@ -379,6 +381,18 @@ impl OwnedRequester {
 
                 if div == YIELDS_BEFORE_WAIT {
                     div = 0;
+                    if self
+                        .ptr
+                        .worker_active
+                        .compare_exchange(false, true, Relaxed, Relaxed)
+                        .is_ok()
+                    {
+                        // just in case, both cannot sleep at the same time
+                        let sem = unsafe {
+                            shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_worker)
+                        };
+                        sem.post();
+                    }
                     self.ptr.owner_active.store(false, Release);
                     sem.wait();
                 }
@@ -391,11 +405,12 @@ impl OwnedRequester {
 #[repr(C)]
 pub struct OwnedResponder {
     /// How long currently received message is, and how much is remaining.
-    remaining: Option<(u32, u32)>,
+    // remaining: Option<(u32, u32)>,
     ptr: SharedMemPipePtr<Joined>,
 }
 
 impl OwnedResponder {
+    /*
     pub fn read_next_frame_len(&mut self) -> Result<u32, u32> {
         match self.remaining.as_mut() {
             Some((_, remaining)) => Err(*remaining),
@@ -408,9 +423,10 @@ impl OwnedResponder {
             }
         }
     }
+    */
 
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
-        if self.remaining.is_none() {
+        /*if self.remaining.is_none() {
             // read the new frame length, as u64 where the extra 4 bytes are used as verification
             // against corruption, which happens with the postponed writer in send_request.
             let mut raw = [0u8; 8];
@@ -428,15 +444,17 @@ impl OwnedResponder {
         if buf.is_empty() {
             return 0;
         }
+        */
 
-        let (_, mut remaining) = self.remaining.unwrap();
+        // let (_, mut remaining) = self.remaining.unwrap();
 
         // recv only up to the next frame length
-        let allowed = buf.len();
-        let buf = &mut buf[..std::cmp::min(allowed, remaining as usize)];
+        // let allowed = buf.len();
+        // let buf = &mut buf[..std::cmp::min(allowed, remaining as usize)];
 
-        let read = self.recv(buf, 0, false);
+        let read = self.recv(buf, 0, true);
 
+        /*
         remaining = remaining
             .checked_sub(
                 u32::try_from(read)
@@ -450,11 +468,13 @@ impl OwnedResponder {
             let (_, rem) = self.remaining.as_mut().unwrap();
             *rem = remaining;
         }
+        */
 
         read
     }
 
     // TODO: call this read_frame or something other
+    /*
     pub fn read_exact(&mut self, buf: &mut [u8]) -> usize {
         // TODO: panics should not be leaked to ffi, it is UB right now but might become abort in
         // future. it is easy to take all common pointer handling out and make that wrapper also
@@ -475,7 +495,7 @@ impl OwnedResponder {
         assert_eq!(read, remaining as usize);
         self.remaining = None;
         read
-    }
+    }*/
 
     fn recv(&mut self, buf: &mut [u8], read_more_than: usize, can_wait: bool) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };

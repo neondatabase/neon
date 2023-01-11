@@ -35,6 +35,7 @@ pub extern "C" fn shmempipe_open_via_env() -> *mut OwnedResponder {
     }
 }
 
+/*
 #[no_mangle]
 pub extern "C" fn shmempipe_read_frame_len(
     resp: *mut OwnedResponder,
@@ -55,6 +56,7 @@ pub extern "C" fn shmempipe_read_frame_len(
         Err(_) => return -2,
     }
 }
+*/
 
 #[no_mangle]
 pub extern "C" fn shmempipe_read(resp: *mut OwnedResponder, buffer: *mut u8, len: u32) -> isize {
@@ -71,6 +73,7 @@ pub extern "C" fn shmempipe_read(resp: *mut OwnedResponder, buffer: *mut u8, len
     ret as isize
 }
 
+/*
 #[no_mangle]
 pub extern "C" fn shmempipe_read_exact(
     resp: *mut OwnedResponder,
@@ -97,6 +100,7 @@ pub extern "C" fn shmempipe_read_exact(
     std::mem::forget(target);
     len as isize
 }
+*/
 
 #[no_mangle]
 pub extern "C" fn shmempipe_write_all(
