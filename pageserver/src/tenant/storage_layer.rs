@@ -109,7 +109,7 @@ pub trait Layer: Send + Sync {
     /// See PageReconstructResult for possible return values. The collected data
     /// is appended to reconstruct_data; the caller should pass an empty struct
     /// on first call, or a struct with a cached older image of the page if one
-    /// is available. If this returns PageReconstructResult::Continue, look up
+    /// is available. If this returns ValueReconstructResult::Continue, look up
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
     fn get_value_reconstruct_data(

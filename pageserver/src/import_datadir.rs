@@ -143,7 +143,7 @@ async fn import_rel(
     // Call put_rel_creation for every segment of the relation,
     // because there is no guarantee about the order in which we are processing segments.
     // ignore "relation already exists" error
-    if let Err(e) = modification.put_rel_creation(rel, nblocks as u32) {
+    if let Err(e) = modification.put_rel_creation(rel, nblocks as u32).await {
         if e.to_string().contains("already exists") {
             debug!("relation {} already exists. we must be extending it", rel);
         } else {
@@ -178,7 +178,7 @@ async fn import_rel(
     //
     // If we process rel segments out of order,
     // put_rel_extend will skip the update.
-    modification.put_rel_extend(rel, blknum)?;
+    modification.put_rel_extend(rel, blknum).await?;
 
     Ok(())
 }
@@ -206,7 +206,9 @@ async fn import_slru(
 
     ensure!(nblocks <= pg_constants::SLRU_PAGES_PER_SEGMENT as usize);
 
-    modification.put_slru_segment_creation(slru, segno, nblocks as u32)?;
+    modification
+        .put_slru_segment_creation(slru, segno, nblocks as u32)
+        .await?;
 
     let mut rpageno = 0;
     loop {
@@ -492,7 +494,7 @@ async fn import_file(
             }
             "pg_filenode.map" => {
                 let bytes = read_all_bytes(reader).await?;
-                modification.put_relmap_file(spcnode, dbnode, bytes)?;
+                modification.put_relmap_file(spcnode, dbnode, bytes).await?;
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
@@ -515,7 +517,7 @@ async fn import_file(
         match file_name.as_ref() {
             "pg_filenode.map" => {
                 let bytes = read_all_bytes(reader).await?;
-                modification.put_relmap_file(spcnode, dbnode, bytes)?;
+                modification.put_relmap_file(spcnode, dbnode, bytes).await?;
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
@@ -545,7 +547,9 @@ async fn import_file(
         let xid = u32::from_str_radix(file_name.as_ref(), 16)?;
 
         let bytes = read_all_bytes(reader).await?;
-        modification.put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))?;
+        modification
+            .put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))
+            .await?;
         debug!("imported twophase file");
     } else if file_path.starts_with("pg_wal") {
         debug!("found wal file in base section. ignore it");

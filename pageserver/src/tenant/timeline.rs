@@ -335,43 +335,6 @@ pub struct WalReceiverInfo {
     pub last_received_msg_ts: u128,
 }
 
-/// Like `?`, but for [`PageReconstructResult`].
-/// Use it to bubble up the `NeedsDownload` and `Error` to the caller.
-///
-/// Once `std::ops::Try` is stabilized, we should use it instead of this macro.
-#[macro_export]
-macro_rules! try_no_ondemand_download {
-    ($result:expr) => {{
-        let result = $result;
-        match result {
-            PageReconstructResult::Success(value) => value,
-            PageReconstructResult::NeedsDownload(timeline, layer) => {
-                return PageReconstructResult::NeedsDownload(timeline, layer);
-            }
-            PageReconstructResult::Error(e) => return PageReconstructResult::Error(e),
-        }
-    }};
-}
-
-/// Replacement for `?` in functions that return [`PageReconstructResult`].
-///
-/// Given an `expr: Result<T, E>`, use `try_page_reconstruct_result!(expr)`
-/// instead of `(expr)?`.
-/// If `expr` is `Ok(v)`, the macro evaluates to `v`.
-/// If `expr` is `Err(e)`, the macro returns `PageReconstructResult::Error(e.into())`.
-///
-/// Once `std::ops::Try` is stabilized, we should use it instead of this macro.
-#[macro_export]
-macro_rules! try_page_reconstruct_result {
-    ($result:expr) => {{
-        let result = $result;
-        match result {
-            Ok(v) => v,
-            Err(e) => return PageReconstructResult::from(e),
-        }
-    }};
-}
-
 ///
 /// Information about how much history needs to be retained, needed by
 /// Garbage Collection.
@@ -401,15 +364,6 @@ pub struct GcInfo {
     pub pitr_cutoff: Lsn,
 }
 
-pub enum PageReconstructResult<T> {
-    Success(T),
-    /// The given RemoteLayer needs to be downloaded and replaced in the timeline's layer map
-    /// for the operation to succeed. Use [`Timeline::download_remote_layer`] to do it, then
-    /// retry the operation that returned this error.
-    NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
-    Error(PageReconstructError),
-}
-
 /// An error happened in a get() operation.
 #[derive(thiserror::Error)]
 pub enum PageReconstructError {
@@ -425,49 +379,6 @@ impl std::fmt::Debug for PageReconstructError {
         match self {
             Self::Other(err) => err.fmt(f),
             Self::WalRedo(err) => err.fmt(f),
-        }
-    }
-}
-
-/// This impl makes it so you can substitute return type
-/// `Result<T, E>` with `PageReconstructError<T>` in functions
-/// and existing `?` will generally continue to work.
-/// The reason why  thanks to
-/// anyhow::Error that `(some error type)ensures that exis
-impl<E, T> From<E> for PageReconstructResult<T>
-where
-    E: Into<PageReconstructError>,
-{
-    fn from(e: E) -> Self {
-        Self::Error(e.into())
-    }
-}
-
-impl<T> PageReconstructResult<T> {
-    /// Treat the need for on-demand download as an error.
-    ///
-    /// **Avoid this function in new code** if you can help it,
-    /// as on-demand download will become the norm in the future,
-    /// especially once we implement layer file eviction.
-    ///
-    /// If you are in an async function, use [`with_ondemand_download`]
-    /// to do the download right here.
-    ///
-    /// If you are in a sync function, change its return type from
-    /// `Result<T, E>` to `PageReconstructResult<T>` and bubble up
-    /// the non-success cases of `PageReconstructResult<T>` to the caller.
-    /// This gives them a chance to do the download and retry.
-    /// Consider using [`try_no_ondemand_download`] for convenience.
-    ///
-    /// For more background, read the comment on [`with_ondemand_download`].
-    pub fn no_ondemand_download(self) -> anyhow::Result<T> {
-        match self {
-            PageReconstructResult::Success(value) => Ok(value),
-            // TODO print more info about the timeline
-            PageReconstructResult::NeedsDownload(_, _) => anyhow::bail!("Layer needs downloading"),
-            PageReconstructResult::Error(e) => {
-                Err(anyhow::Error::new(e).context("Failed to reconstruct the page"))
-            }
         }
     }
 }
@@ -493,15 +404,19 @@ impl Timeline {
 
     /// Look up given page version.
     ///
-    /// NOTE: It is considered an error to 'get' a key that doesn't exist. The abstraction
-    /// above this needs to store suitable metadata to track what data exists with
-    /// what keys, in separate metadata entries. If a non-existent key is requested,
-    /// the Repository implementation may incorrectly return a value from an ancestor
-    /// branch, for example, or waste a lot of cycles chasing the non-existing key.
+    /// If a remote layer file is needed, it is downloaded as part of this
+    /// call.
     ///
-    pub fn get(&self, key: Key, lsn: Lsn) -> PageReconstructResult<Bytes> {
+    /// NOTE: It is considered an error to 'get' a key that doesn't exist. The
+    /// abstraction above this needs to store suitable metadata to track what
+    /// data exists with what keys, in separate metadata entries. If a
+    /// non-existent key is requested, we may incorrectly return a value from
+    /// an ancestor branch, for example, or waste a lot of cycles chasing the
+    /// non-existing key.
+    ///
+    pub async fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
         if !lsn.is_valid() {
-            return PageReconstructResult::from(anyhow!("Invalid LSN"));
+            return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
@@ -512,7 +427,7 @@ impl Timeline {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => return PageReconstructResult::Success(cached_img), // exact LSN match, return the image
+                    Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
                     Ordering::Greater => {
                         unreachable!("the returned lsn should never be after the requested lsn")
                     }
@@ -527,16 +442,12 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        try_no_ondemand_download!(self.get_reconstruct_data(key, lsn, &mut reconstruct_state));
+        self.get_reconstruct_data(key, lsn, &mut reconstruct_state)
+            .await?;
 
         self.metrics
             .reconstruct_time_histo
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
-    }
-
-    // Like get(), but if a remote layer file is needed, it is downloaded as part of this call.
-    pub async fn get_download(&self, key: Key, lsn: Lsn) -> anyhow::Result<Bytes> {
-        with_ondemand_download(|| self.get(key, lsn)).await
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -1630,12 +1541,12 @@ impl Timeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
-    fn get_reconstruct_data(
+    async fn get_reconstruct_data(
         &self,
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> PageReconstructResult<()> {
+    ) -> Result<(), PageReconstructError> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -1662,34 +1573,34 @@ impl Timeline {
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
-                ValueReconstructResult::Complete => return PageReconstructResult::Success(()),
+                ValueReconstructResult::Complete => return Ok(()),
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
                         self.metrics.materialized_page_cache_hit_counter.inc_by(1);
-                        return PageReconstructResult::Success(());
+                        return Ok(());
                     }
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
-                        return layer_traversal_error(format!(
+                        return Err(layer_traversal_error(format!(
                             "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
                             key,
                             Lsn(cont_lsn.0 - 1),
                             request_lsn,
                             timeline.ancestor_lsn
-                        ), traversal_path);
+                        ), traversal_path));
                     }
                     prev_lsn = cont_lsn;
                 }
                 ValueReconstructResult::Missing => {
-                    return layer_traversal_error(
+                    return Err(layer_traversal_error(
                         format!(
                             "could not find data for key {} at LSN {}, for request at LSN {}",
                             key, cont_lsn, request_lsn
                         ),
                         traversal_path,
-                    );
+                    ));
                 }
             }
 
@@ -1702,7 +1613,7 @@ impl Timeline {
                 );
                 let ancestor = match timeline.get_ancestor_timeline() {
                     Ok(timeline) => timeline,
-                    Err(e) => return PageReconstructResult::from(e),
+                    Err(e) => return Err(PageReconstructError::from(e)),
                 };
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
@@ -1711,7 +1622,7 @@ impl Timeline {
             }
 
             #[allow(clippy::never_loop)] // see comment at bottom of this loop
-            '_layer_map_search: loop {
+            'layer_map_search: loop {
                 let remote_layer = {
                     let layers = timeline.layers.read().unwrap();
 
@@ -1730,7 +1641,7 @@ impl Timeline {
                                 reconstruct_state,
                             ) {
                                 Ok(result) => result,
-                                Err(e) => return PageReconstructResult::from(e),
+                                Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
                             traversal_path.push((
@@ -1755,7 +1666,7 @@ impl Timeline {
                                 reconstruct_state,
                             ) {
                                 Ok(result) => result,
-                                Err(e) => return PageReconstructResult::from(e),
+                                Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
                             traversal_path.push((
@@ -1788,7 +1699,7 @@ impl Timeline {
                                 reconstruct_state,
                             ) {
                                 Ok(result) => result,
-                                Err(e) => return PageReconstructResult::from(e),
+                                Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
                             traversal_path.push((
@@ -1812,27 +1723,24 @@ impl Timeline {
                         continue 'outer;
                     }
                 };
-                // Indicate to the caller that we need remote_layer replaced with a downloaded
-                // layer in the layer map. The control flow could be a lot simpler, but the point
-                // of this commit is to prepare this function to
-                // 1. become async
-                // 2. do the download right here, using
-                //    ```
-                //    download_remote_layer().await?;
-                //    continue 'layer_map_search;
-                //    ```
-                // For (2), current rustc requires that the layers lock guard is not in scope.
-                // Hence, the complicated control flow.
+                // Download the remote_layer and replace it in the layer map.
+                // For that, we need to release the mutex. Otherwise, we'd deadlock.
+                //
+                // The control flow is so weird here because `drop(layers)` inside
+                // the if stmt above is not enough for current rustc: it requires
+                // that the layers lock guard is not in scope across the download
+                // await point.
                 let remote_layer_as_persistent: Arc<dyn PersistentLayer> =
                     Arc::clone(&remote_layer) as Arc<dyn PersistentLayer>;
-                info!(
-                    "need remote layer {}",
-                    remote_layer_as_persistent.traversal_id()
-                );
-                return PageReconstructResult::NeedsDownload(
-                    Weak::clone(&timeline.myself),
-                    Arc::downgrade(&remote_layer),
-                );
+                let id = remote_layer_as_persistent.traversal_id();
+                info!("need remote layer {id}");
+
+                // The next layer doesn't exist locally. Need to download it.
+                // (The control flow is a bit complicated here because we must drop the 'layers'
+                // lock before awaiting on the Future.)
+                info!("on-demand downloading remote layer {id}");
+                timeline.download_remote_layer(remote_layer).await?;
+                continue 'layer_map_search;
             }
         }
     }
@@ -2270,7 +2178,7 @@ impl Timeline {
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         force: bool,
-    ) -> anyhow::Result<HashMap<LayerFileName, LayerFileMetadata>> {
+    ) -> Result<HashMap<LayerFileName, LayerFileMetadata>, PageReconstructError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
         for partition in partitioning.parts.iter() {
@@ -2286,13 +2194,15 @@ impl Timeline {
                 )?;
 
                 fail_point!("image-layer-writer-fail-before-finish", |_| {
-                    anyhow::bail!("failpoint image-layer-writer-fail-before-finish");
+                    Err(PageReconstructError::Other(anyhow::anyhow!(
+                        "failpoint image-layer-writer-fail-before-finish"
+                    )))
                 });
 
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
-                        let img = match self.get_download(key, lsn).await {
+                        let img = match self.get(key, lsn).await {
                             Ok(img) => img,
                             Err(err) => {
                                 // If we fail to reconstruct a VM or FSM page, we can zero the
@@ -2343,7 +2253,7 @@ impl Timeline {
                 self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
             ))
             .collect::<Vec<_>>();
-        par_fsync::par_fsync(&all_paths)?;
+        par_fsync::par_fsync(&all_paths).context("fsync of newly created layer files")?;
 
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
@@ -2351,7 +2261,10 @@ impl Timeline {
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for l in image_layers {
             let path = l.filename();
-            let metadata = timeline_path.join(path.file_name()).metadata()?;
+            let metadata = timeline_path
+                .join(path.file_name())
+                .metadata()
+                .context("reading metadata of layer file {path}")?;
 
             layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
 
@@ -2752,8 +2665,7 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match with_ondemand_download(|| self.find_lsn_for_timestamp(pitr_timestamp)).await?
-                {
+                match self.find_lsn_for_timestamp(pitr_timestamp).await? {
                     LsnForTimestamp::Present(lsn) => lsn,
                     LsnForTimestamp::Future(lsn) => {
                         // The timestamp is in the future. That sounds impossible,
@@ -3022,7 +2934,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         mut data: ValueReconstructState,
-    ) -> PageReconstructResult<Bytes> {
+    ) -> Result<Bytes, PageReconstructError> {
         // Perform WAL redo if needed
         data.records.reverse();
 
@@ -3034,11 +2946,11 @@ impl Timeline {
                     key,
                     img_lsn
                 );
-                PageReconstructResult::Success(img.clone())
+                Ok(img.clone())
             } else {
-                PageReconstructResult::from(anyhow!(
+                Err(PageReconstructError::from(anyhow!(
                     "base image for {key} at {request_lsn} not found"
-                ))
+                )))
             }
         } else {
             // We need to do WAL redo.
@@ -3046,12 +2958,12 @@ impl Timeline {
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
             if data.img.is_none() && !data.records.first().unwrap().1.will_init() {
-                PageReconstructResult::from(anyhow!(
+                Err(PageReconstructError::from(anyhow!(
                     "Base image for {} at {} not found, but got {} WAL records",
                     key,
                     request_lsn,
                     data.records.len()
-                ))
+                )))
             } else {
                 if data.img.is_some() {
                     trace!(
@@ -3072,7 +2984,7 @@ impl Timeline {
                     .context("Failed to reconstruct a page image:")
                 {
                     Ok(img) => img,
-                    Err(e) => return PageReconstructResult::from(e),
+                    Err(e) => return Err(PageReconstructError::from(e)),
                 };
 
                 if img.len() == page_cache::PAGE_SZ {
@@ -3087,11 +2999,11 @@ impl Timeline {
                         )
                         .context("Materialized page memoization failed")
                     {
-                        return PageReconstructResult::from(e);
+                        return Err(PageReconstructError::from(e));
                     }
                 }
 
-                PageReconstructResult::Success(img)
+                Ok(img)
             }
         }
     }
@@ -3117,7 +3029,7 @@ impl Timeline {
     /// So, the current download attempt will run to completion even if we stop polling.
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%remote_layer.short_id()))]
     pub async fn download_remote_layer(
-        self: Arc<Self>,
+        &self,
         remote_layer: Arc<RemoteLayer>,
     ) -> anyhow::Result<()> {
         let permit = match Arc::clone(&remote_layer.ongoing_download)
@@ -3133,6 +3045,7 @@ impl Timeline {
 
         let (sender, receiver) = tokio::sync::oneshot::channel();
         // Spawn a task so that download does not outlive timeline when we detach tenant / delete timeline.
+        let self_clone = self.myself.upgrade().expect("timeline is gone");
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::RemoteDownloadTask,
@@ -3141,7 +3054,7 @@ impl Timeline {
             &format!("download layer {}", remote_layer.short_id()),
             false,
             async move {
-                let remote_client = self.remote_client.as_ref().unwrap();
+                let remote_client = self_clone.remote_client.as_ref().unwrap();
 
                 // Does retries + exponential back-off internally.
                 // When this fails, don't layer further retry attempts here.
@@ -3152,12 +3065,12 @@ impl Timeline {
                 if let Ok(size) = &result {
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
-                    self.metrics.resident_physical_size_gauge.add(*size);
+                    self_clone.metrics.resident_physical_size_gauge.add(*size);
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let new_layer = remote_layer.create_downloaded_layer(self.conf, *size);
-                    let mut layers = self.layers.write().unwrap();
+                    let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
+                    let mut layers = self_clone.layers.write().unwrap();
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
                         layers.remove_historic(l);
@@ -3254,12 +3167,7 @@ impl Timeline {
             layers
                 .iter_historic_layers()
                 .filter_map(|l| l.downcast_remote_layer())
-                .map({
-                    |l| {
-                        let self_clone = Arc::clone(self);
-                        self_clone.download_remote_layer(l)
-                    }
-                })
+                .map(|l| self.download_remote_layer(l))
                 .collect()
         };
 
@@ -3321,101 +3229,15 @@ impl Timeline {
     }
 }
 
-/// Helper function to deal with [`PageReconstructResult`].
-///
-/// Takes a sync closure that returns a [`PageReconstructResult`].
-/// If it is [`PageReconstructResult::NeedsDownload`],
-/// do the download and retry the closure.
-///
-/// ### Background
-///
-/// This is a crutch to make on-demand downloads efficient in
-/// our async-sync-async sandwich codebase. Some context:
-///
-/// - The code that does the downloads uses async Rust.
-/// - The code that initiates download is many levels of sync Rust.
-/// - The sync code must wait for the download to finish to
-///   make further progress.
-/// - The sync code is invoked directly from async functions upstack.
-///
-/// Example (there are also much worse ones where the sandwich is taller)
-///
-///   async handle_get_page_at_lsn_request        page_service.rs
-///     sync get_rel_page_at_lsn                  timeline.rs
-///       sync timeline.get                       timeline.rs
-///         sync get_reconstruct_data             timeline.rs
-///           async download_remote_layer         timeline.rs
-///
-/// It is not possible to Timeline::download_remote_layer().await within
-/// get_reconstruct_data, so instead, we return [`PageReconstructResult::NeedsDownload`]
-/// which contains references to the [`Timeline`] and [`RemoteLayer`].
-/// We bubble that error upstack to the async code, which can then call
-/// `Timeline::download_remote_layer().await`.
-/// That is _efficient_ because tokio can use the same OS thread to do
-/// other work while we're waiting for the download.
-///
-/// It is a deliberate decision to use a new result type to communicate
-/// the need for download instead of adding another variant to [`PageReconstructError`].
-/// The reason is that with the latter approach, any place that does
-/// `?` on a `Result<T, PageReconstructError>` will implicitly ignore the
-/// need for download. We want that to be explicit, so that
-/// - the code base becomes greppable for places that don't do a download
-/// - future code changes will need to explicilty address for on-demand download
-///
-/// Alternatives to consider in the future:
-///
-/// - Inside `get_reconstruct_data`, we can std::thread::spawn a thread
-///   and use it to block_on the download_remote_layer future.
-///   That is obviously inefficient as it creates one thread per download.
-/// - Convert everything to async. The problem here is that the sync
-///   functions are used by many other sync functions. So, the scope
-///   creep of such a conversion is tremendous.
-/// - Compromise between the two: implement async functions for each sync
-///   function. Switch over the hot code paths (GetPage()) to use the
-///   async path, so that the hot path doesn't  spawn threads. Other code
-///   paths would remain sync initially, and get converted to async over time.
-///
-pub async fn with_ondemand_download<F, T>(mut f: F) -> Result<T, anyhow::Error>
-where
-    F: Send + FnMut() -> PageReconstructResult<T>,
-    T: Send,
-{
-    loop {
-        let closure_result = f();
-        match closure_result {
-            PageReconstructResult::NeedsDownload(weak_timeline, weak_remote_layer) => {
-                // if the timeline is gone, it has likely been deleted / tenant detached
-                let tl = weak_timeline.upgrade().context("timeline is gone")?;
-                // if the remote layer got removed, retry the function, it might succeed now
-                let remote_layer = match weak_remote_layer.upgrade() {
-                    None => {
-                        info!("remote layer is gone, retrying closure");
-                        continue;
-                    }
-                    Some(l) => l,
-                };
-                // Does retries internally
-                tl.download_remote_layer(remote_layer).await?;
-                // Download successful, retry the closure
-                continue;
-            }
-            PageReconstructResult::Success(closure_value) => return Ok(closure_value),
-            PageReconstructResult::Error(e) => {
-                return Err(anyhow::Error::new(e).context("Failed to reconstruct the page"))
-            }
-        }
-    }
-}
-
 type TraversalPathItem = (
     ValueReconstructResult,
     Lsn,
-    Box<dyn FnOnce() -> TraversalId>,
+    Box<dyn Send + FnOnce() -> TraversalId>,
 );
 
 /// Helper function for get_reconstruct_data() to add the path of layers traversed
 /// to an error, as anyhow context information.
-fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageReconstructResult<()> {
+fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageReconstructError {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
     let mut msg_iter = path
@@ -3434,7 +3256,7 @@ fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageRecon
 
     // Append all subsequent traversals, and the error message 'msg', as contexts.
     let msg = msg_iter.fold(err, |err, msg| err.context(msg));
-    PageReconstructResult::from(msg)
+    PageReconstructError::from(msg)
 }
 
 /// Various functions to mutate the timeline.

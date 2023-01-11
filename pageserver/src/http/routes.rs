@@ -13,7 +13,7 @@ use super::models::{
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{with_ondemand_download, Timeline};
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -75,6 +75,15 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
     check_permission_with(request, |claims| {
         crate::auth::check_permission(claims, tenant_id)
     })
+}
+
+fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
+    match err {
+        PageReconstructError::Other(err) => ApiError::InternalServerError(err),
+        PageReconstructError::WalRedo(err) => {
+            ApiError::InternalServerError(anyhow::Error::new(err))
+        }
+    }
 }
 
 // Helper function to construct a TimelineInfo struct for a timeline
@@ -298,9 +307,10 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
         .map_err(ApiError::NotFound)?;
-    let result = with_ondemand_download(|| timeline.find_lsn_for_timestamp(timestamp_pg))
+    let result = timeline
+        .find_lsn_for_timestamp(timestamp_pg)
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(apierror_from_prerror)?;
 
     let result = match result {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),

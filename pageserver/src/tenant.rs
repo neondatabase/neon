@@ -92,7 +92,7 @@ mod timeline;
 
 pub mod size;
 
-pub use timeline::{with_ondemand_download, PageReconstructError, PageReconstructResult, Timeline};
+pub use timeline::{PageReconstructError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -2816,15 +2816,15 @@ mod tests {
         drop(writer);
 
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x10)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x10)).await?,
             TEST_IMG("foo at 0x10")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x1f)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x1f)).await?,
             TEST_IMG("foo at 0x10")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x20)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x20)).await?,
             TEST_IMG("foo at 0x20")
         );
 
@@ -2903,15 +2903,15 @@ mod tests {
 
         // Check page contents on both branches
         assert_eq!(
-            from_utf8(&tline.get(TEST_KEY_A, Lsn(0x40)).no_ondemand_download()?)?,
+            from_utf8(&tline.get(TEST_KEY_A, Lsn(0x40)).await?)?,
             "foo at 0x40"
         );
         assert_eq!(
-            from_utf8(&newtline.get(TEST_KEY_A, Lsn(0x40)).no_ondemand_download()?)?,
+            from_utf8(&newtline.get(TEST_KEY_A, Lsn(0x40)).await?)?,
             "bar at 0x40"
         );
         assert_eq!(
-            from_utf8(&newtline.get(TEST_KEY_B, Lsn(0x40)).no_ondemand_download()?)?,
+            from_utf8(&newtline.get(TEST_KEY_B, Lsn(0x40)).await?)?,
             "foobar at 0x20"
         );
 
@@ -3070,10 +3070,7 @@ mod tests {
         tenant
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
             .await?;
-        assert!(newtline
-            .get(*TEST_KEY, Lsn(0x25))
-            .no_ondemand_download()
-            .is_ok());
+        assert!(newtline.get(*TEST_KEY, Lsn(0x25)).await.is_ok());
 
         Ok(())
     }
@@ -3103,7 +3100,7 @@ mod tests {
 
         // Check that the data is still accessible on the branch.
         assert_eq!(
-            newtline.get(*TEST_KEY, Lsn(0x50)).no_ondemand_download()?,
+            newtline.get(*TEST_KEY, Lsn(0x50)).await?,
             TEST_IMG(&format!("foo at {}", Lsn(0x40)))
         );
 
@@ -3251,23 +3248,23 @@ mod tests {
         tline.compact().await?;
 
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x10)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x10)).await?,
             TEST_IMG("foo at 0x10")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x1f)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x1f)).await?,
             TEST_IMG("foo at 0x10")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x20)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x20)).await?,
             TEST_IMG("foo at 0x20")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x30)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x30)).await?,
             TEST_IMG("foo at 0x30")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x40)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x40)).await?,
             TEST_IMG("foo at 0x40")
         );
 
@@ -3377,7 +3374,7 @@ mod tests {
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, lsn).no_ondemand_download()?,
+                    tline.get(test_key, lsn).await?,
                     TEST_IMG(&format!("{} at {}", blknum, last_lsn))
                 );
             }
@@ -3463,7 +3460,7 @@ mod tests {
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, lsn).no_ondemand_download()?,
+                    tline.get(test_key, lsn).await?,
                     TEST_IMG(&format!("{} at {}", blknum, last_lsn))
                 );
             }
@@ -3538,7 +3535,7 @@ mod tests {
                 println!("checking [{idx}][{blknum}] at {lsn}");
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, *lsn).no_ondemand_download()?,
+                    tline.get(test_key, *lsn).await?,
                     TEST_IMG(&format!("{idx} {blknum} at {lsn}"))
                 );
             }
