@@ -7,3 +7,5 @@ license = "Apache-2.0"
 
 [dependencies]
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+log = { version = "0.4", features = ["std", "serde"] }
+anyhow = "1.0.68"
