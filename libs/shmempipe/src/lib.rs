@@ -9,8 +9,8 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::FromRawFd;
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use nix::sys::mman::{MapFlags, ProtFlags};
 
@@ -26,7 +26,7 @@ const FROM_WORKER_LEN: usize = 4 * 4096;
 ///
 /// Not using it should lead to busier waiting, and faster operation, but it only helps with more
 /// than 1 thread cases.
-const USE_EVENTFD_ON_RESPONSE: bool = true;
+const USE_EVENTFD_ON_RESPONSE: bool = false;
 
 /// Input/output over a shared memory "pipe" which attempts to be faster than using standard input
 /// and output with inter-process communication.
@@ -45,8 +45,12 @@ pub struct RawSharedMemPipe {
     /// Eventfd used in semaphore mode, used to wakeup the request reader (walredoproc.c)
     pub notify_worker: i32,
 
+    pub worker_active: AtomicBool,
+
     /// Eventfd used in semaphore mode, used to wakeup the response reader
     pub notify_owner: i32,
+
+    pub owner_active: AtomicBool,
 
     /// The processes participating in this.
     ///
@@ -116,7 +120,7 @@ impl SharedMemPipePtr<Joined> {
 }
 
 pub struct OwnedRequester {
-    producer: std::sync::Mutex<u32>,
+    producer: std::sync::Mutex<(u32, Option<std::time::Instant>)>,
     consumer: std::sync::Mutex<Wakeup>,
     /// id of the next thread to receive response. Waiting is managed through parking_lot.
     next: AtomicU32,
@@ -277,6 +281,8 @@ impl OwnedRequester {
 
         let g = self.consumer.lock().unwrap();
         g.waiting.unpark_front(prev.wrapping_add(1));
+        drop(g);
+
         id
     }
 
@@ -289,8 +295,8 @@ impl OwnedRequester {
         // this will be decremented by `write_all` on each response
         let mut might_wait = self.ptr.to_worker_waiters.fetch_add(1, Release) == 0;
 
-        let id = *g;
-        *g = g.wrapping_add(1);
+        let id = g.0;
+        g.0 = g.0.wrapping_add(1);
 
         // Safety: we are only one creating producers for to_worker
         let mut p = unsafe { ringbuf::Producer::new(&self.ptr.to_worker) };
@@ -304,7 +310,13 @@ impl OwnedRequester {
             if req.is_empty() {
                 break;
             } else if n == 0 {
-                if might_wait {
+                if might_wait
+                    && self
+                        .ptr
+                        .worker_active
+                        .compare_exchange(false, true, Relaxed, Relaxed)
+                        .is_ok()
+                {
                     sem.post();
                     might_wait = false;
                 }
@@ -331,7 +343,13 @@ impl OwnedRequester {
 
         // as part of the first write, make sure that the worker is woken up.
         // FIXME: remove if the first one seems to work better
-        if might_wait {
+        if might_wait
+            && self
+                .ptr
+                .worker_active
+                .compare_exchange(false, true, Relaxed, Relaxed)
+                .is_ok()
+        {
             sem.post();
         }
 
@@ -349,30 +367,48 @@ impl OwnedRequester {
             sem.wait();
         }
 
+        self.ptr.owner_active.store(true, Release);
+
         let mut read = 0;
         let mut div = 0;
-        let mut spin = SpinWait::default();
+        // let mut spin = SpinWait::default();
 
+        let started_at = std::time::Instant::now();
         loop {
             let n = c.pop_slice(&mut resp[read..]);
 
             read += n;
-            div += 1;
 
-            if div == 100_000 {
-                // when using the eventfd this printout should never happen.
-                println!("owner: 100k attempts and read {read} bytes, last {n}");
-            }
+            // div += 1;
+
+            // if div == 100_000 {
+            //     // when using the eventfd this printout should never happen.
+            //     println!("owner: 100k attempts and read {read} bytes, last {n}");
+            // }
 
             if read == resp.len() {
                 break;
             }
 
-            if n != 0 {
-                spin.reset();
+            if read == 0 {
+                std::thread::yield_now();
+                div += 1;
+
+                if div == 1024 && !USE_EVENTFD_ON_RESPONSE {
+                    div = 0;
+                    let elapsed = started_at.elapsed();
+
+                    if elapsed.subsec_micros() > 100 {
+                        self.ptr.owner_active.store(false, Release);
+                        sem.wait();
+                    }
+                }
             }
 
-            spin.spin();
+            // if n != 0 {
+            //     spin.reset();
+            // }
+            // spin.spin();
         }
     }
 }
@@ -476,24 +512,52 @@ impl OwnedResponder {
         let mut div = 0;
         let mut spin = SpinWait::default();
 
+        let mut woken_up = false;
+
+        self.ptr.worker_active.store(true, Relaxed);
+
+        let started_at = std::time::Instant::now();
+
         loop {
             let n = c.pop_slice(&mut buf[read..]);
 
             read += n;
-            div += 1;
-
-            if div == 100_000 {
-                println!("worker: after 100k attempts, have read {read} bytes");
-            }
 
             if read > read_more_than {
                 // interestingly this sleeps the most, probably while the response is being read.
                 return read;
-            } else if !waited && can_wait {
-                // go to sleep, which is few microseconds costlier
-                while self.ptr.to_worker_waiters.load(Acquire) == 0 {
-                    sem.wait();
-                    waited = true;
+            } else if read == 0 && !waited && can_wait {
+                // make sure the other side is not waiting on semaphore
+                if !woken_up
+                    && self
+                        .ptr
+                        .owner_active
+                        .compare_exchange(false, true, Relaxed, Relaxed)
+                        .is_ok()
+                {
+                    let sem =
+                        unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_owner) };
+                    sem.post();
+                    // this can happen only ... when?
+                    woken_up = true;
+                }
+
+                div += 1;
+
+                if div == 1024 {
+                    div = 0;
+
+                    let elapsed = started_at.elapsed();
+
+                    if elapsed.subsec_micros() > 100 {
+                        // go to sleep, which is few microseconds costlier
+                        // FIXME: should probably be an if instead of while
+                        while self.ptr.to_worker_waiters.load(Acquire) == 0 {
+                            self.ptr.worker_active.store(false, Relaxed);
+                            sem.wait();
+                            waited = true;
+                        }
+                    }
                 }
             } else if n != 0 {
                 spin.reset();
@@ -516,7 +580,13 @@ impl OwnedResponder {
             buf = &buf[n..];
 
             if buf.is_empty() {
-                if USE_EVENTFD_ON_RESPONSE {
+                if USE_EVENTFD_ON_RESPONSE
+                    || self
+                        .ptr
+                        .owner_active
+                        .compare_exchange(false, true, Relaxed, Relaxed)
+                        .is_ok()
+                {
                     sem.post();
                 }
 
@@ -686,10 +756,22 @@ fn initialize_at(
     }
 
     {
+        let active = uninit_field!(worker_active);
+        active.write(AtomicBool::new(false));
+        unsafe { active.assume_init_mut() };
+    }
+
+    {
         let fd = uninit_field!(notify_owner);
         fd.write(notify_owner.as_raw_fd());
         unsafe { fd.assume_init_mut() };
         // the file is forgotten if the init completes
+    }
+
+    {
+        let active = uninit_field!(owner_active);
+        active.write(AtomicBool::new(false));
+        unsafe { active.assume_init_mut() };
     }
 
     {
