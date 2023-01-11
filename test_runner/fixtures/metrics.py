@@ -57,6 +57,7 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_io_operations_seconds_count",
     "pageserver_io_operations_seconds_sum",
     "pageserver_last_record_lsn",
+    "pageserver_broken_tenant_count",
     "pageserver_materialized_cache_hits_total",
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",

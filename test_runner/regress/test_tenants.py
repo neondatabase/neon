@@ -274,9 +274,19 @@ def test_pageserver_with_empty_tenants(
     assert len(tenants) == 2
 
     [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
+    ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+    tid_metric_filter = {"tenant_id": str(tenant_without_timelines_dir)}
+    tenant_broken_count = int(
+        ps_metrics.query_one("pageserver_broken_tenant_count_total", filter=tid_metric_filter).value
+    )
+
     assert (
         broken_tenant["state"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
+
+    assert (
+        tenant_broken_count == 1
+    ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
     assert (
