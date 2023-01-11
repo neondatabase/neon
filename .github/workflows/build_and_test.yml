@@ -97,17 +97,6 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Restore cargo deps cache
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          key: v1-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
@@ -421,16 +410,12 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Restore cargo deps cache
-        id: cache_cargo
-        uses: actions/cache@v3
+      - name: Download rust cache (s3 cache)
+        uses: ./.github/actions/cache-download
         with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          key: |
+            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-cache-main
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
