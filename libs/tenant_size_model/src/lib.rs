@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use anyhow::Context;
-use log::info;
 
 /// Pricing model or history size builder.
 ///
