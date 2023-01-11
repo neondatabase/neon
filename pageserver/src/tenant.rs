@@ -48,7 +48,7 @@ use self::remote_timeline_client::RemoteTimelineClient;
 use crate::config::PageServerConf;
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
+use crate::metrics::{remove_tenant_metrics, BROKEN_TENANT_COUNT, STORAGE_TIME};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
@@ -1524,6 +1524,10 @@ impl Tenant {
                     *current_state = TenantState::Broken;
                 }
             }
+            BROKEN_TENANT_COUNT
+                .get_metric_with_label_values(&[&self.tenant_id.to_string()])
+                .unwrap()
+                .inc();
         });
     }
 

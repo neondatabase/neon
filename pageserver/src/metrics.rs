@@ -287,6 +287,15 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
+pub static BROKEN_TENANT_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_broken_tenant_count",
+        "Number of broken tenant",
+        &["tenant_id"],
+    )
+    .expect("Failed to register broken_tenant_task_events metric")
+});
+
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
@@ -476,6 +485,7 @@ impl Drop for TimelineMetrics {
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = BROKEN_TENANT_COUNT.remove_label_values(&[tenant_id]);
 
         for op in STORAGE_TIME_OPERATIONS {
             let _ = STORAGE_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
