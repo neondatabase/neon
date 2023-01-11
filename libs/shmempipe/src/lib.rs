@@ -238,8 +238,11 @@ impl OwnedRequester {
         ]
     }
 
-    #[inline(never)]
-    pub fn request_response(&self, req: &[u8], resp: &mut [u8]) -> u32 {
+    pub fn request_response<R: Iterator<Item = P>, P: AsRef<[u8]>>(
+        &self,
+        req: R,
+        resp: &mut [u8],
+    ) -> u32 {
         // Overview:
         // - `self.producer` creates an order amongst competing request_response callers (id).
         // - the same token (id) is used to find some order with `self.consumer` to read the
@@ -282,7 +285,7 @@ impl OwnedRequester {
         id
     }
 
-    fn send_request(&self, req: &[u8]) -> u32 {
+    fn send_request<R: Iterator<Item = P>, P: AsRef<[u8]>>(&self, req: R) -> u32 {
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_worker) };
 
         // this will be contended if there's anyone else interested in writing
@@ -299,7 +302,7 @@ impl OwnedRequester {
 
         let mut spin = SpinWait::default();
 
-        let mut send = |mut req| loop {
+        let mut send = |mut req: &_| loop {
             let n = p.push_slice(req);
             req = &req[n..];
 
@@ -335,7 +338,10 @@ impl OwnedRequester {
         // corruption, also it can trigger a debug_assert! within ringbuf
         send(&frame_len);
         */
-        send(req);
+        for sliceable in req {
+            let slice = sliceable.as_ref();
+            send(slice);
+        }
 
         drop(g);
 
@@ -364,7 +370,6 @@ impl OwnedRequester {
 
         let mut read = 0;
         let mut div = 0;
-        // let mut spin = SpinWait::default();
 
         loop {
             let n = c.pop_slice(&mut resp[read..]);
@@ -375,6 +380,8 @@ impl OwnedRequester {
                 break;
             }
 
+            // the case of read > 0 and looping shouldn't happen as long as the queue size is
+            // larger or equal to one response page (8192).
             if read == 0 {
                 std::thread::yield_now();
                 div += 1;

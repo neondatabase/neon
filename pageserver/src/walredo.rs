@@ -264,35 +264,61 @@ impl PostgresRedoManager {
             // trying to avoid this mutex does not seem to make a difference in benchmarks
             drop(process_guard);
 
-            // FIXME: building up a single big message could probably be avoided completely by
-            // building up an Iterator<Item = Bytes> instead out of a single allocation used for
-            // multiple "message headers", which could also be completly reserved beforehand.
+            let mut headers =
+                BytesMut::with_capacity(calculate_header_size(base_img.is_some(), records.len()));
 
-            let mut buf = Vec::with_capacity(calculate_msg_size(base_img.as_ref(), records));
+            let mut messages = Vec::with_capacity(
+                1 + if base_img.is_some() { 2 } else { 0 } + records.len() * 2 + 1,
+            );
 
-            build_begin_redo_for_block_msg(buf_tag, &mut buf);
+            messages.push({
+                headers.put_u8(b'B');
+                headers.put_u32(4 + 1 + 4 * 4);
+                {
+                    let mut w = (&mut headers).writer();
+                    buf_tag.ser_into(&mut w).unwrap();
+                }
+                headers.split().freeze()
+            });
 
             if let Some(page) = base_img {
-                build_push_page_msg(buf_tag, &page, &mut buf);
+                headers.put_u8(b'P');
+                headers.put_u32(4 + 1 + 4 * 4 + 8192);
+                {
+                    let mut w = (&mut headers).writer();
+                    buf_tag.ser_into(&mut w).unwrap();
+                }
+                messages.push(headers.split().freeze());
+                messages.push(page);
             }
 
             records.iter().for_each(|(endlsn, rec)| match rec {
                 NeonWalRecord::Postgres { rec, .. } => {
-                    build_apply_record_msg(*endlsn, rec, &mut buf)
+                    let len = 4 + 8 + rec.len();
+
+                    headers.put_u8(b'A');
+                    headers.put_u32(len as u32);
+                    headers.put_u64(endlsn.0);
+                    messages.push(headers.split().freeze());
+                    messages.push(rec.clone());
                 }
                 _ => unreachable!(),
             });
 
-            build_get_page_msg(buf_tag, &mut buf);
+            messages.push({
+                let len = 4 + 1 + 4 * 4;
+                headers.put_u8(b'G');
+                headers.put_u32(len);
+                {
+                    let mut w = (&mut headers).writer();
+                    buf_tag.ser_into(&mut w).unwrap();
+                }
+                headers.split().freeze()
+            });
 
-            // FIXME: similarly to Iterator<Item = Bytes> we could just give out a FnMut which
-            // would access slices in a `FnMut(&[u8]) -> ControlFlow<usize, ()>` fashion we should
-            // be avoid this one copy here safely.
-            let mut b = [0u8; 8192];
-
-            pipe.request_response(&buf, &mut b);
-
-            return Ok(Bytes::copy_from_slice(&b));
+            let mut b = BytesMut::zeroed(8192);
+            pipe.request_response(messages.into_iter(), &mut b[..8192]);
+            return Ok(b.freeze());
         }
 
         let process = process_guard.as_mut().unwrap();
@@ -1107,5 +1133,16 @@ fn calculate_msg_size(base_img: Option<&Bytes>, records: &[(Lsn, NeonWalRecord)]
             })
             .map(|rec_len| ch + len + 8 + rec_len)
             .sum::<usize>()
+        + (ch + len + tag_len)
+}
+
+fn calculate_header_size(base_img: bool, records: usize) -> usize {
+    let tag_len = 1 + 4 * 4;
+    let ch = 1;
+    let len = 4;
+
+    (ch + len + tag_len)
+        + if base_img { ch + len + tag_len } else { 0 }
+        + records * (ch + len + 8)
         + (ch + len + tag_len)
 }
