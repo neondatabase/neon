@@ -360,6 +360,10 @@ where
     /// result for the entire partitioning at once allows this function to be more
     /// efficient, and further optimization is possible by using iterators instead,
     /// to allow early return.
+    ///
+    /// TODO actually use this method instead of count_deltas. Currently we only use
+    ///      it for benchmarks. It's a drop-in replacement, but it would be good to
+    ///      add early return to this method first so we don't make perf worse.
     pub fn get_difficulty_map(&self, lsn: Lsn, partitioning: &KeyPartitioning) -> Vec<usize> {
         // TODO This is a naive implementation. Perf improvements to do:
         // 1. Instead of calling self.image_coverage and self.count_deltas,
