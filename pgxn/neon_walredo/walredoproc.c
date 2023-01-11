@@ -327,13 +327,17 @@ WalRedoMain(int argc, char *argv[])
 			}
 			else
 			{
+				uint32_t old_len = input_message.maxlen;
+
 				// because of resetStringInfo, len == 0, so we can safely use
 				// next_frame as the target size, because it is not calculated
 				// against the capacity, but the used length.
 				enlargeStringInfo(&input_message, next_frame);
 
-				// we use these pointers as &mut [u8] over at rust, which is not allowed with uninit memory
-				memset(input_message.data, 0, input_message.maxlen);
+				if input_message.maxlen != old_len {
+					// CEREMONIAL: we use these pointers as &mut [u8] over at rust, which is not allowed with uninit memory
+					memset(input_message.data, 0, input_message.maxlen);
+				}
 
 				assert(input_message.maxlen >= next_frame);
 				ssize_t read = shmempipe_read_exact(shmempipe, input_message.data, next_frame);

@@ -84,7 +84,15 @@ pub extern "C" fn shmempipe_read_exact(
         return 0;
     }
     let mut target = unsafe { Box::from_raw(resp) };
+
+    // FIXME: this should be &mut [MaybeUninit<u8>; len] to get rid of the ceremonial memset on the
+    // C side -- however we have no real way to *assume* it's usable as [u8] ... best would
+    // probably to instead use this as a vec with capacity=len and len=0, then this would be safe.
+    //
+    // however then we'd have to worry about how to make this sure not to allocate...
+    // std::io::ReadBuf would be the best bet, but that is unstable.
     let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len as usize) };
+
     target.read_exact(buffer);
     std::mem::forget(target);
     len as isize
