@@ -207,7 +207,9 @@ where
         NUM_ONDISK_LAYERS.dec();
     }
 
-    /// Is there a newer image layer for given key- and LSN-range?
+    /// Is there a newer image layer for given key- and LSN-range? Or a set
+    /// of image layers within the specified lsn range that cover the entire
+    /// specified key range?
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
