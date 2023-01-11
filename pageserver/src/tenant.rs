@@ -1525,8 +1525,7 @@ impl Tenant {
                 }
             }
             BROKEN_TENANT_COUNT
-                .get_metric_with_label_values(&[&self.tenant_id.to_string()])
-                .unwrap()
+                .with_label_values(&[&self.tenant_id.to_string()])
                 .inc();
         });
     }
