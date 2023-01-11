@@ -336,6 +336,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                     pageserver::consumption_metrics::collect_metrics(
                         metric_collection_endpoint,
                         conf.metric_collection_interval,
+                        conf.synthetic_size_calculation_interval,
                         conf.id,
                     )
                     .instrument(info_span!("metrics_collection"))

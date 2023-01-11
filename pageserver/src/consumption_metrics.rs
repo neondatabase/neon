@@ -10,6 +10,9 @@ use utils::id::NodeId;
 use utils::id::TimelineId;
 
 use crate::task_mgr;
+use crate::task_mgr::TaskKind;
+use crate::task_mgr::BACKGROUND_RUNTIME;
+
 use crate::tenant::mgr;
 use pageserver_api::models::TenantState;
 use utils::id::TenantId;
@@ -142,11 +145,28 @@ struct EventChunk<'a> {
 pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
     metric_collection_interval: Duration,
+    synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(metric_collection_interval);
 
     info!("starting collect_metrics");
+
+    // spin up background worker that caclulates tenant sizes
+    task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
+        TaskKind::CalculateSyntheticSize,
+        None,
+        None,
+        "synthetic size calculation",
+        true,
+        async move {
+            calculate_synthetic_size_worker(synthetic_size_calculation_interval)
+                .instrument(info_span!("synthetic_size_worker"))
+                .await?;
+            Ok(())
+        },
+    );
 
     // define client here to reuse it for all requests
     let client = reqwest::Client::new();
@@ -252,6 +272,16 @@ pub async fn collect_metrics_task(
         ));
 
         // TODO add SyntheticStorageSize metric
+        let tenant_synthetic_size = tenant.calculate_synthetic_size().await?;
+        info!("tenant_synthetic_size: {}", tenant_synthetic_size);
+        current_metrics.push((
+            ConsumptionMetricsKey {
+                tenant_id,
+                timeline_id: None,
+                metric: ConsumptionMetricKind::SyntheticStorageSize,
+            },
+            tenant_synthetic_size,
+        ));
     }
 
     // Filter metrics
@@ -261,7 +291,7 @@ pub async fn collect_metrics_task(
     });
 
     if current_metrics.is_empty() {
-        trace!("no new metrics to send");
+        info!("no new metrics to send");
         return Ok(());
     }
 
@@ -321,4 +351,38 @@ pub async fn collect_metrics_task(
     }
 
     Ok(())
+}
+
+/// Caclculate synthetic size for each active tenant
+pub async fn calculate_synthetic_size_worker(
+    synthetic_size_calculation_interval: Duration,
+) -> anyhow::Result<()> {
+    info!("starting calculate_synthetic_size_worker");
+
+    let mut ticker = tokio::time::interval(synthetic_size_calculation_interval);
+
+    loop {
+        tokio::select! {
+            _ = task_mgr::shutdown_watcher() => {
+                info!("calculate_synthetic_size_worker received cancellation request");
+                return Ok(());
+            },
+        _ = ticker.tick() => {
+
+                let tenants = mgr::list_tenants().await;
+                // iterate through list of Active tenants and collect metrics
+                for (tenant_id, tenant_state) in tenants {
+
+                    if tenant_state != TenantState::Active {
+                        continue;
+                    }
+
+                let tenant = mgr::get_tenant(tenant_id, true).await?;
+                info!("spawn calculate_synthetic_size for tenant {}", tenant_id);
+                tenant.calculate_synthetic_size().await?;
+
+                }
+            }
+        }
+    }
 }

@@ -59,6 +59,8 @@ pub mod defaults {
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
+    pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
+
     ///
     /// Default built-in configuration file.
     ///
@@ -83,6 +85,7 @@ pub mod defaults {
 #concurrent_tenant_size_logical_size_queries = '{DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES}'
 
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
+#synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
 
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -152,6 +155,7 @@ pub struct PageServerConf {
     // How often to collect metrics and send them to the metrics endpoint.
     pub metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
+    pub synthetic_size_calculation_interval: Duration,
 
     pub test_remote_failures: u64,
 }
@@ -215,6 +219,7 @@ struct PageServerConfigBuilder {
 
     metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
+    synthetic_size_calculation_interval: BuilderValue<Duration>,
 
     test_remote_failures: BuilderValue<u64>,
 }
@@ -255,6 +260,10 @@ impl Default for PageServerConfigBuilder {
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
             .expect("cannot parse default metric collection interval")),
+            synthetic_size_calculation_interval: Set(humantime::parse_duration(
+                DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL,
+            )
+            .expect("cannot parse default synthetic size calculation interval")),
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
 
             test_remote_failures: Set(0),
@@ -342,6 +351,14 @@ impl PageServerConfigBuilder {
         self.metric_collection_endpoint = BuilderValue::Set(metric_collection_endpoint)
     }
 
+    pub fn synthetic_size_calculation_interval(
+        &mut self,
+        synthetic_size_calculation_interval: Duration,
+    ) {
+        self.synthetic_size_calculation_interval =
+            BuilderValue::Set(synthetic_size_calculation_interval)
+    }
+
     pub fn test_remote_failures(&mut self, fail_first: u64) {
         self.test_remote_failures = BuilderValue::Set(fail_first);
     }
@@ -399,6 +416,9 @@ impl PageServerConfigBuilder {
             metric_collection_endpoint: self
                 .metric_collection_endpoint
                 .ok_or(anyhow!("missing metric_collection_endpoint"))?,
+            synthetic_size_calculation_interval: self
+                .synthetic_size_calculation_interval
+                .ok_or(anyhow!("missing synthetic_size_calculation_interval"))?,
             test_remote_failures: self
                 .test_remote_failures
                 .ok_or(anyhow!("missing test_remote_failuers"))?,
@@ -577,7 +597,8 @@ impl PageServerConf {
                     let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
                     builder.metric_collection_endpoint(Some(endpoint));
                 },
-
+                "synthetic_size_calculation_interval" =>
+                    builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
@@ -701,6 +722,7 @@ impl PageServerConf {
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
             metric_collection_interval: Duration::from_secs(60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+            synthetic_size_calculation_interval: Duration::from_secs(60),
             test_remote_failures: 0,
         }
     }
@@ -834,6 +856,7 @@ id = 10
 
 metric_collection_interval = '222 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
+synthetic_size_calculation_interval = '333 s'
 log_format = 'json'
 
 "#;
@@ -880,6 +903,9 @@ log_format = 'json'
                     defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
                 )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+                synthetic_size_calculation_interval: humantime::parse_duration(
+                    defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
+                )?,
                 test_remote_failures: 0,
             },
             "Correct defaults should be used when no config values are provided"
@@ -926,6 +952,7 @@ log_format = 'json'
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 metric_collection_interval: Duration::from_secs(222),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
+                synthetic_size_calculation_interval: Duration::from_secs(333),
                 test_remote_failures: 0,
             },
             "Should be able to parse all basic config values correctly"

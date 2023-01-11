@@ -2359,6 +2359,25 @@ impl Tenant {
 
         size::gather_inputs(self, logical_sizes_at_once, &mut shared_cache).await
     }
+
+    /// Calculate synthetic tenant size
+    /// This is periodically called by background worker
+    ///
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
+    pub async fn calculate_synthetic_size(&self) -> anyhow::Result<u64> {
+        let inputs = self.gather_size_inputs().await?;
+
+        let size = inputs
+            .calculate()
+            .unwrap_or_else(|e| panic!("err {}, inputs {:?}", e, inputs)); // FIXME this panic is debug only.
+
+        info!(
+            "calculate_synthetic_size for tenant {} size: {}",
+            self.tenant_id, size,
+        );
+
+        Ok(size)
+    }
 }
 
 fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
