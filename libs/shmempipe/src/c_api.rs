@@ -93,7 +93,7 @@ pub extern "C" fn shmempipe_read_exact(
 #[no_mangle]
 pub extern "C" fn shmempipe_write_all(
     resp: *mut OwnedResponder,
-    buffer: *mut u8,
+    buffer: *const u8,
     len: u32,
 ) -> isize {
     if resp.is_null() || buffer.is_null() {
@@ -103,7 +103,7 @@ pub extern "C" fn shmempipe_write_all(
         return 0;
     }
     let mut target = unsafe { Box::from_raw(resp) };
-    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len as usize) };
+    let buffer = unsafe { std::slice::from_raw_parts(buffer, len as usize) };
     let ret = target.write_all(buffer);
     std::mem::forget(target);
     ret as isize
