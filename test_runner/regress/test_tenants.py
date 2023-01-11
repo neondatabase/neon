@@ -288,6 +288,8 @@ def test_pageserver_with_empty_tenants(
         tenant_broken_count == 1
     ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"
 
+    assert env.pageserver.log_contains(".*Setting tenant as Broken state, reason:.*")
+
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
     assert (
         loaded_tenant["state"] == "Active"
