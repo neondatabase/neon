@@ -13,7 +13,7 @@ use std::convert::Infallible;
 use std::future::ready;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 use tls_listener::TlsListener;
 
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
@@ -104,10 +104,9 @@ impl AsyncRead for WebSocketRW {
             return Poll::Ready(Ok(()));
         }
 
-        let inner_buf = match self.as_mut().poll_fill_buf(cx) {
-            Poll::Ready(Ok(buf)) => buf,
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Pending => return Poll::Pending,
+        let inner_buf = match ready!(self.as_mut().poll_fill_buf(cx)) {
+            Ok(buf) => buf,
+            Err(err) => return Poll::Ready(Err(err)),
         };
         let len = std::cmp::min(inner_buf.len(), buf.remaining());
         buf.put_slice(&inner_buf[..len]);
@@ -124,8 +123,8 @@ impl AsyncBufRead for WebSocketRW {
                 let buf = self.project().chunk.as_ref().unwrap().chunk();
                 return Poll::Ready(Ok(buf));
             } else {
-                match self.as_mut().project().stream.poll_next(cx) {
-                    Poll::Ready(Some(Ok(message))) => match message {
+                match ready!(self.as_mut().project().stream.poll_next(cx)) {
+                    Some(Ok(message)) => match message {
                         Message::Text(_) => {}
                         Message::Binary(chunk) => {
                             *self.as_mut().project().chunk = Some(Bytes::from(chunk));
@@ -142,9 +141,8 @@ impl AsyncBufRead for WebSocketRW {
                             unreachable!();
                         }
                     },
-                    Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(ws_err_into(err))),
-                    Poll::Ready(None) => return Poll::Ready(Ok(&[])),
-                    Poll::Pending => return Poll::Pending,
+                    Some(Err(err)) => return Poll::Ready(Err(ws_err_into(err))),
+                    None => return Poll::Ready(Ok(&[])),
                 }
             }
         }

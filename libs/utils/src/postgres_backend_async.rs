@@ -7,12 +7,12 @@ use crate::postgres_backend::AuthType;
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use pq_proto::{BeMessage, ConnectionError, FeMessage, FeStartupPacket, SQLSTATE_INTERNAL_ERROR};
-use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
+use std::{future::Future, task::ready};
 use tracing::{debug, error, info, trace};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -253,12 +253,9 @@ impl PostgresBackend {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         while self.buf_out.has_remaining() {
-            match Pin::new(&mut self.stream).poll_write(cx, self.buf_out.chunk()) {
-                Poll::Ready(Ok(bytes_written)) => {
-                    self.buf_out.advance(bytes_written);
-                }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Pending => return Poll::Pending,
+            match ready!(Pin::new(&mut self.stream).poll_write(cx, self.buf_out.chunk())) {
+                Ok(bytes_written) => self.buf_out.advance(bytes_written),
+                Err(err) => return Poll::Ready(Err(err)),
             }
         }
         Poll::Ready(Ok(()))
@@ -573,10 +570,9 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         // It's not strictly required to flush between each message, but makes it easier
         // to view in wireshark, and usually the messages that the callers write are
         // decently-sized anyway.
-        match this.pgb.poll_write_buf(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Pending => return Poll::Pending,
+        match ready!(this.pgb.poll_write_buf(cx)) {
+            Ok(()) => {}
+            Err(err) => return Poll::Ready(Err(err)),
         }
 
         // CopyData
@@ -593,10 +589,9 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
-        match this.pgb.poll_write_buf(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Pending => return Poll::Pending,
+        match ready!(this.pgb.poll_write_buf(cx)) {
+            Ok(()) => {}
+            Err(err) => return Poll::Ready(Err(err)),
         }
         this.pgb.poll_flush(cx)
     }
@@ -605,10 +600,9 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
-        match this.pgb.poll_write_buf(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Pending => return Poll::Pending,
+        match ready!(this.pgb.poll_write_buf(cx)) {
+            Ok(()) => {}
+            Err(err) => return Poll::Ready(Err(err)),
         }
         this.pgb.poll_flush(cx)
     }
