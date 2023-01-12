@@ -38,6 +38,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
@@ -139,6 +141,7 @@ pub struct Tenant {
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
+    cached_synthetic_tenant_size: Arc<AtomicU64>,
 }
 
 /// A timeline with some of its files on disk, being initialized.
@@ -1722,6 +1725,7 @@ impl Tenant {
             remote_storage,
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
+            cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -2361,22 +2365,21 @@ impl Tenant {
     }
 
     /// Calculate synthetic tenant size
-    /// This is periodically called by background worker
-    ///
+    /// This is periodically called by background worker.
+    /// result is cached in tenant struct
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     pub async fn calculate_synthetic_size(&self) -> anyhow::Result<u64> {
         let inputs = self.gather_size_inputs().await?;
 
-        let size = inputs
-            .calculate()
-            .unwrap_or_else(|e| panic!("err {}, inputs {:?}", e, inputs)); // FIXME this panic is debug only.
+        let size = inputs.calculate()?;
 
-        info!(
-            "calculate_synthetic_size for tenant {} size: {}",
-            self.tenant_id, size,
-        );
+        self.cached_synthetic_tenant_size
+            .store(size, Ordering::Relaxed);
 
         Ok(size)
+    }
+    pub fn get_cached_synthetic_size(&self) -> u64 {
+        self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
     }
 }
 
