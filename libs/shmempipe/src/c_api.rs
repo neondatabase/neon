@@ -35,29 +35,6 @@ pub extern "C" fn shmempipe_open_via_env() -> *mut OwnedResponder {
     }
 }
 
-/*
-#[no_mangle]
-pub extern "C" fn shmempipe_read_frame_len(
-    resp: *mut OwnedResponder,
-    len: *mut u32,
-) -> libc::c_int {
-    if resp.is_null() || len.is_null() {
-        return -1;
-    }
-
-    let mut target = unsafe { Box::from_raw(resp) };
-    let res = target.read_next_frame_len();
-    std::mem::forget(target);
-    match res {
-        Ok(frame_len) => {
-            unsafe { len.write(frame_len) };
-            0
-        }
-        Err(_) => return -2,
-    }
-}
-*/
-
 #[no_mangle]
 pub extern "C" fn shmempipe_read(resp: *mut OwnedResponder, buffer: *mut u8, len: u32) -> isize {
     if resp.is_null() || buffer.is_null() {
@@ -72,35 +49,6 @@ pub extern "C" fn shmempipe_read(resp: *mut OwnedResponder, buffer: *mut u8, len
     std::mem::forget(target);
     ret as isize
 }
-
-/*
-#[no_mangle]
-pub extern "C" fn shmempipe_read_exact(
-    resp: *mut OwnedResponder,
-    buffer: *mut u8,
-    len: u32,
-) -> isize {
-    if resp.is_null() || buffer.is_null() {
-        return -1;
-    }
-    if len == 0 {
-        return 0;
-    }
-    let mut target = unsafe { Box::from_raw(resp) };
-
-    // FIXME: this should be &mut [MaybeUninit<u8>; len] to get rid of the ceremonial memset on the
-    // C side -- however we have no real way to *assume* it's usable as [u8] ... best would
-    // probably to instead use this as a vec with capacity=len and len=0, then this would be safe.
-    //
-    // however then we'd have to worry about how to make this sure not to allocate...
-    // std::io::ReadBuf would be the best bet, but that is unstable.
-    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, len as usize) };
-
-    target.read_exact(buffer);
-    std::mem::forget(target);
-    len as isize
-}
-*/
 
 #[no_mangle]
 pub extern "C" fn shmempipe_write_all(

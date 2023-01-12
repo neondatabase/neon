@@ -326,18 +326,6 @@ impl OwnedRequester {
             spin.spin();
         };
 
-        /*
-        let len = req.len();
-
-        // framing doesn't require us to manage state, as we always send both
-        let frame_len = u64::try_from(len)
-            .expect("message cannot be more than 4GB")
-            .to_ne_bytes();
-
-        // using the postponed version here between the two pushes most definitely leads to
-        // corruption, also it can trigger a debug_assert! within ringbuf
-        send(&frame_len);
-        */
         for sliceable in req {
             let slice = sliceable.as_ref();
             send(slice);
@@ -417,92 +405,9 @@ pub struct OwnedResponder {
 }
 
 impl OwnedResponder {
-    /*
-    pub fn read_next_frame_len(&mut self) -> Result<u32, u32> {
-        match self.remaining.as_mut() {
-            Some((_, remaining)) => Err(*remaining),
-            None => {
-                // well, reading to empty does seem wrong
-                assert_eq!(self.read(&mut [][..]), 0);
-                let (len, remaining) = self.remaining.as_ref().unwrap();
-                assert_eq!(len, remaining);
-                return Ok(*remaining);
-            }
-        }
-    }
-    */
-
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
-        /*if self.remaining.is_none() {
-            // read the new frame length, as u64 where the extra 4 bytes are used as verification
-            // against corruption, which happens with the postponed writer in send_request.
-            let mut raw = [0u8; 8];
-            assert_eq!(self.recv(&mut raw, 7, true), 8);
-
-            assert_eq!(&raw[4..], &[0, 0, 0, 0], "read: {raw:?}");
-
-            let len = u64::from_ne_bytes(raw);
-            let len = u32::try_from(len).unwrap();
-
-            // store it as frame size, remaining size
-            self.remaining = Some((len, len));
-        }
-
-        if buf.is_empty() {
-            return 0;
-        }
-        */
-
-        // let (_, mut remaining) = self.remaining.unwrap();
-
-        // recv only up to the next frame length
-        // let allowed = buf.len();
-        // let buf = &mut buf[..std::cmp::min(allowed, remaining as usize)];
-
-        let read = self.recv(buf, 0, true);
-
-        /*
-        remaining = remaining
-            .checked_sub(
-                u32::try_from(read)
-                    .expect("should had read at most remaining, not overflowing u32"),
-            )
-            .expect("should not have read more than remaining");
-
-        if remaining == 0 {
-            self.remaining = None;
-        } else {
-            let (_, rem) = self.remaining.as_mut().unwrap();
-            *rem = remaining;
-        }
-        */
-
-        read
+        self.recv(buf, 0, true)
     }
-
-    // TODO: call this read_frame or something other
-    /*
-    pub fn read_exact(&mut self, buf: &mut [u8]) -> usize {
-        // TODO: panics should not be leaked to ffi, it is UB right now but might become abort in
-        // future. it is easy to take all common pointer handling out and make that wrapper also
-        // catch_unwind, then abort.
-        let remaining = match self.remaining.as_ref() {
-            Some((_, remaining)) => *remaining,
-            None => unreachable!("cannot panic here but the frame length should be known"),
-        };
-
-        assert!(remaining as usize <= buf.len());
-
-        let read = self.recv(
-            &mut buf[..remaining as usize],
-            remaining as usize - 1,
-            false,
-        );
-
-        assert_eq!(read, remaining as usize);
-        self.remaining = None;
-        read
-    }*/
 
     fn recv(&mut self, buf: &mut [u8], read_more_than: usize, can_wait: bool) -> usize {
         let mut c = unsafe { ringbuf::Consumer::new(&self.ptr.to_worker) };
