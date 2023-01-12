@@ -5,9 +5,10 @@ edition.workspace = true
 license = "Apache-2.0"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_with = "2.0"
-const_format = "0.2.21"
+serde.workspace = true
+serde_with.workspace = true
+const_format.workspace = true
 
-utils = { path = "../utils" }
-workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+utils.workspace = true
+
+workspace_hack.workspace = true
