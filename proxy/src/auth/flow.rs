@@ -37,6 +37,17 @@ impl AuthMethod for PasswordHack {
     }
 }
 
+/// Use clear-text password auth called `password` in docs
+/// <https://www.postgresql.org/docs/current/auth-password.html>
+pub struct CleartextPassword;
+
+impl AuthMethod for CleartextPassword {
+    #[inline(always)]
+    fn first_message(&self) -> BeMessage<'_> {
+        Be::AuthenticationCleartextPassword
+    }
+}
+
 /// This wrapper for [`PqStream`] performs client authentication.
 #[must_use]
 pub struct AuthFlow<'a, Stream, State> {
@@ -86,10 +97,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
     }
 }
 
+impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
+    /// Perform user authentication. Raise an error in case authentication failed.
+    pub async fn authenticate(self) -> super::Result<Vec<u8>> {
+        let msg = self.stream.read_password_message().await?;
+        let password = msg
+            .strip_suffix(&[0])
+            .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
+
+        Ok(password.to_vec())
+    }
+}
+
 /// Stream wrapper for handling [SCRAM](crate::scram) auth.
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     /// Perform user authentication. Raise an error in case authentication failed.
-    pub async fn authenticate(self) -> super::Result<scram::ScramKey> {
+    pub async fn authenticate(self) -> super::Result<sasl::Outcome<scram::ScramKey>> {
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
         let sasl = sasl::FirstMessage::parse(&msg)
@@ -101,10 +124,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         }
 
         let secret = self.state.0;
-        let key = sasl::SaslStream::new(self.stream, sasl.message)
+        let outcome = sasl::SaslStream::new(self.stream, sasl.message)
             .authenticate(scram::Exchange::new(secret, rand::random, None))
             .await?;
 
-        Ok(key)
+        Ok(outcome)
     }
 }

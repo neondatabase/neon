@@ -64,12 +64,12 @@ impl<'a> Exchange<'a> {
 impl sasl::Mechanism for Exchange<'_> {
     type Output = super::ScramKey;
 
-    fn exchange(mut self, input: &str) -> sasl::Result<(sasl::Step<Self, Self::Output>, String)> {
+    fn exchange(mut self, input: &str) -> sasl::Result<sasl::Step<Self, Self::Output>> {
         use {sasl::Step::*, ExchangeState::*};
         match &self.state {
             Initial => {
-                let client_first_message =
-                    ClientFirstMessage::parse(input).ok_or(SaslError::BadClientMessage)?;
+                let client_first_message = ClientFirstMessage::parse(input)
+                    .ok_or(SaslError::BadClientMessage("invalid client-first-message"))?;
 
                 let server_first_message = client_first_message.build_server_first_message(
                     &(self.nonce)(),
@@ -84,15 +84,15 @@ impl sasl::Mechanism for Exchange<'_> {
                     server_first_message,
                 };
 
-                Ok((Continue(self), msg))
+                Ok(Continue(self, msg))
             }
             SaltSent {
                 cbind_flag,
                 client_first_message_bare,
                 server_first_message,
             } => {
-                let client_final_message =
-                    ClientFinalMessage::parse(input).ok_or(SaslError::BadClientMessage)?;
+                let client_final_message = ClientFinalMessage::parse(input)
+                    .ok_or(SaslError::BadClientMessage("invalid client-final-message"))?;
 
                 let channel_binding = cbind_flag.encode(|_| {
                     self.cert_digest
@@ -106,9 +106,7 @@ impl sasl::Mechanism for Exchange<'_> {
                 }
 
                 if client_final_message.nonce != server_first_message.nonce() {
-                    return Err(SaslError::AuthenticationFailed(
-                        "combined nonce doesn't match",
-                    ));
+                    return Err(SaslError::BadClientMessage("combined nonce doesn't match"));
                 }
 
                 let signature_builder = SignatureBuilder {
@@ -121,14 +119,15 @@ impl sasl::Mechanism for Exchange<'_> {
                     .build(&self.secret.stored_key)
                     .derive_client_key(&client_final_message.proof);
 
-                if client_key.sha256() != self.secret.stored_key {
-                    return Err(SaslError::AuthenticationFailed("password doesn't match"));
+                // Auth fails either if keys don't match or it's pre-determined to fail.
+                if client_key.sha256() != self.secret.stored_key || self.secret.doomed {
+                    return Ok(Failure("password doesn't match"));
                 }
 
                 let msg = client_final_message
                     .build_server_final_message(signature_builder, &self.secret.server_key);
 
-                Ok((Authenticated(client_key), msg))
+                Ok(Success(client_key, msg))
             }
         }
     }

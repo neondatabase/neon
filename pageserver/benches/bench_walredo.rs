@@ -84,7 +84,7 @@ fn add_multithreaded_walredo_requesters(
 
                             barrier.wait();
 
-                            execute_all(input, &*manager).unwrap();
+                            execute_all(input, &manager).unwrap();
 
                             barrier.wait();
                         }
@@ -431,7 +431,7 @@ fn pg_record(will_init: bool, bytes: &'static [u8]) -> NeonWalRecord {
 struct Request {
     key: Key,
     lsn: Lsn,
-    base_img: Option<Bytes>,
+    base_img: Option<(Lsn, Bytes)>,
     records: Vec<(Lsn, NeonWalRecord)>,
     pg_version: u32,
 }

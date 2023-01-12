@@ -5,12 +5,12 @@ inputs:
   api_key:
     desctiption: 'Neon API key'
     required: true
-  environment:
-    desctiption: 'dev (aka captest) or staging'
-    required: true
   project_id:
     desctiption: 'ID of the Project to create Branch in'
     required: true
+  api_host:
+    desctiption: 'Neon API host'
+    default: console.stage.neon.tech
 outputs:
   dsn:
     description: 'Created Branch DSN (for main database)'
@@ -22,27 +22,6 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Parse Input
-      id: parse-input
-      shell: bash -euxo pipefail {0}
-      run: |
-        case "${ENVIRONMENT}" in
-          dev)
-            API_HOST=console.dev.neon.tech
-            ;;
-          staging)
-            API_HOST=console.stage.neon.tech
-            ;;
-          *)
-            echo 2>&1 "Unknown environment=${ENVIRONMENT}. Allowed 'dev' or 'staging' only"
-            exit 1
-            ;;
-        esac
-
-        echo "api_host=${API_HOST}" >> $GITHUB_OUTPUT
-      env:
-        ENVIRONMENT: ${{ inputs.environment }}
-
     - name: Create New Branch
       id: create-branch
       shell: bash -euxo pipefail {0}
@@ -56,7 +35,12 @@ runs:
             --data "{
               \"branch\": {
                 \"name\": \"Created by actions/neon-branch-create; GITHUB_RUN_ID=${GITHUB_RUN_ID} at $(date +%s)\"
-              }
+              },
+              \"endpoints\": [
+                {
+                  \"type\": \"read_write\"
+                }
+              ]
             }")
 
           if [ -z "${branch}" ]; then
@@ -84,8 +68,8 @@ runs:
         host=$(echo $branch | jq --raw-output '.endpoints[0].host')
         echo "host=${host}" >> $GITHUB_OUTPUT
       env:
+        API_HOST: ${{ inputs.api_host }}
         API_KEY: ${{ inputs.api_key }}
-        API_HOST: ${{ steps.parse-input.outputs.api_host }}
         PROJECT_ID: ${{ inputs.project_id }}
 
     - name: Get Role name
@@ -103,8 +87,8 @@ runs:
         role_name=$(echo $roles | jq --raw-output '.roles[] | select(.protected == false) | .name')
         echo "role_name=${role_name}" >> $GITHUB_OUTPUT
       env:
+        API_HOST: ${{ inputs.api_host }}
         API_KEY: ${{ inputs.api_key }}
-        API_HOST: ${{ steps.parse-input.outputs.api_host }}
         PROJECT_ID: ${{ inputs.project_id }}
         BRANCH_ID: ${{ steps.create-branch.outputs.branch_id }}
 
@@ -146,8 +130,8 @@ runs:
         echo "::add-mask::${dsn}"
         echo "dsn=${dsn}" >> $GITHUB_OUTPUT
       env:
+        API_HOST: ${{ inputs.api_host }}
         API_KEY: ${{ inputs.api_key }}
-        API_HOST: ${{ steps.parse-input.outputs.api_host }}
         PROJECT_ID: ${{ inputs.project_id }}
         BRANCH_ID: ${{ steps.create-branch.outputs.branch_id }}
         ROLE_NAME: ${{ steps.role-name.outputs.role_name }}

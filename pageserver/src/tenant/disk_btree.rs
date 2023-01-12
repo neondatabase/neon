@@ -139,7 +139,7 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
         off += keys_len as u64;
 
         let values_off = off as usize;
-        let values_len = num_children as usize * VALUE_SZ as usize;
+        let values_len = num_children as usize * VALUE_SZ;
         //off += values_len as u64;
 
         let prefix = &buf[prefix_off..prefix_off + prefix_len as usize];
@@ -177,7 +177,7 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
         while low < high {
             let mid = low + size / 2;
 
-            let key_off = mid as usize * self.suffix_len as usize;
+            let key_off = mid * self.suffix_len as usize;
             let suffix = &self.keys[key_off..key_off + self.suffix_len as usize];
             // Does this match?
             keybuf[self.prefix_len as usize..].copy_from_slice(suffix);
@@ -328,7 +328,7 @@ where
             while idx < node.num_children as usize {
                 let suffix = &node.keys[key_off..key_off + suffix_len];
                 keybuf[prefix_len..].copy_from_slice(suffix);
-                let value = node.value(idx as usize);
+                let value = node.value(idx);
                 #[allow(clippy::collapsible_if)]
                 if node.level == 0 {
                     // leaf
@@ -368,7 +368,7 @@ where
                 key_off -= suffix_len;
                 let suffix = &node.keys[key_off..key_off + suffix_len];
                 keybuf[prefix_len..].copy_from_slice(suffix);
-                let value = node.value(idx as usize);
+                let value = node.value(idx);
                 #[allow(clippy::collapsible_if)]
                 if node.level == 0 {
                     // leaf
@@ -629,7 +629,7 @@ impl<const L: usize> BuildNode<L> {
         self.keys.extend(&key[self.prefix.len()..]);
         self.values.extend(value.0);
 
-        assert!(self.keys.len() == self.num_children as usize * self.suffix_len as usize);
+        assert!(self.keys.len() == self.num_children as usize * self.suffix_len);
         assert!(self.values.len() == self.num_children as usize * VALUE_SZ);
 
         self.size += self.suffix_len + VALUE_SZ;
@@ -674,7 +674,7 @@ impl<const L: usize> BuildNode<L> {
         self.size -= prefix_len * self.num_children as usize;
         self.size += prefix_len;
 
-        assert!(self.keys.len() == self.num_children as usize * self.suffix_len as usize);
+        assert!(self.keys.len() == self.num_children as usize * self.suffix_len);
         assert!(self.values.len() == self.num_children as usize * VALUE_SZ);
 
         true
@@ -684,7 +684,7 @@ impl<const L: usize> BuildNode<L> {
     /// Serialize the node to on-disk format.
     ///
     fn pack(&self) -> Bytes {
-        assert!(self.keys.len() == self.num_children as usize * self.suffix_len as usize);
+        assert!(self.keys.len() == self.num_children as usize * self.suffix_len);
         assert!(self.values.len() == self.num_children as usize * VALUE_SZ);
         assert!(self.num_children > 0);
 
@@ -940,7 +940,7 @@ mod tests {
             let t = -(f64::ln(u));
             let key_int = (t * 1000000.0) as u128;
 
-            all_data.insert(key_int as u128, idx as u64);
+            all_data.insert(key_int, idx as u64);
         }
 
         // Build a tree from it

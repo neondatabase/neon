@@ -333,7 +333,7 @@ impl CheckPoint {
 // We need this segment to start compute node.
 //
 pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, SerializeError> {
-    let mut seg_buf = BytesMut::with_capacity(WAL_SEGMENT_SIZE as usize);
+    let mut seg_buf = BytesMut::with_capacity(WAL_SEGMENT_SIZE);
 
     let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, WAL_SEGMENT_SIZE);
     let hdr = XLogLongPageHeaderData {
@@ -574,7 +574,7 @@ mod tests {
 
         // Rename file to partial to actually find last valid lsn, then rename it back.
         fs::rename(
-            cfg.wal_dir().join(&last_segment),
+            cfg.wal_dir().join(last_segment),
             cfg.wal_dir().join(format!("{}.partial", last_segment)),
         )
         .unwrap();

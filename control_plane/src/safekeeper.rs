@@ -131,13 +131,8 @@ impl SafekeeperNode {
             args.push("--no-sync");
         }
 
-        let comma_separated_endpoints = self.env.etcd_broker.comma_separated_endpoints();
-        if !comma_separated_endpoints.is_empty() {
-            args.extend(["--broker-endpoints", &comma_separated_endpoints]);
-        }
-        if let Some(prefix) = self.env.etcd_broker.broker_etcd_prefix.as_deref() {
-            args.extend(["--broker-etcd-prefix", prefix]);
-        }
+        let broker_endpoint = format!("{}", self.env.broker.client_url());
+        args.extend(["--broker-endpoint", &broker_endpoint]);
 
         let mut backup_threads = String::new();
         if let Some(threads) = self.conf.backup_threads {

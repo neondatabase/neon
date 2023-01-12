@@ -1,6 +1,7 @@
 mod auth;
 pub mod basebackup;
 pub mod config;
+pub mod consumption_metrics;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
@@ -8,15 +9,9 @@ pub(crate) mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
-pub mod profiling;
 pub mod repository;
-pub mod storage_sync2;
-pub use storage_sync2 as storage_sync;
 pub mod task_mgr;
 pub mod tenant;
-pub mod tenant_config;
-pub mod tenant_mgr;
-pub mod tenant_tasks;
 pub mod trace;
 pub mod virtual_file;
 pub mod walingest;
@@ -26,9 +21,8 @@ pub mod walredo;
 
 use std::path::Path;
 
-use tracing::info;
-
 use crate::task_mgr::TaskKind;
+use tracing::info;
 
 /// Current storage format version
 ///
@@ -47,15 +41,6 @@ pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
-/// Config for the Repository checkpointer
-#[derive(Debug, Clone, Copy)]
-pub enum CheckpointConfig {
-    // Flush all in-memory data
-    Flush,
-    // Flush all in-memory data and reconstruct all page images
-    Forced,
-}
-
 pub async fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
@@ -66,7 +51,7 @@ pub async fn shutdown_pageserver(exit_code: i32) {
 
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
-    tenant_mgr::shutdown_all_tenants().await;
+    tenant::mgr::shutdown_all_tenants().await;
 
     // Stop syncing with remote storage.
     //
@@ -99,7 +84,7 @@ async fn exponential_backoff(n: u32, base_increment: f64, max_seconds: f64) {
     }
 }
 
-fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
+pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
     if n == 0 {
         0.0
     } else {
@@ -124,6 +109,13 @@ pub const TEMP_FILE_SUFFIX: &str = "___temp";
 /// the timeline directory and the marker file are both removed.
 /// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
 pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
+
+/// A marker file to prevent pageserver from loading a certain tenant on restart.
+/// Different from [`TIMELINE_UNINIT_MARK_SUFFIX`] due to semantics of the corresponding
+/// `ignore` management API command, that expects the ignored tenant to be properly loaded
+/// into pageserver's memory before being ignored.
+/// Full path: `tenants/<tenant_id>/___ignored_tenant`.
+pub const IGNORED_TENANT_FILE_NAME: &str = "___ignored_tenant";
 
 pub fn is_temporary(path: &Path) -> bool {
     match path.file_name() {

@@ -425,7 +425,7 @@ impl Collector for TimelineCollector {
                 .set(tli.num_computes as i64);
             self.acceptor_term
                 .with_label_values(labels)
-                .set(tli.persisted_state.acceptor_state.term as u64);
+                .set(tli.persisted_state.acceptor_state.term);
             self.written_wal_bytes
                 .with_label_values(labels)
                 .set(tli.wal_storage.write_wal_bytes);

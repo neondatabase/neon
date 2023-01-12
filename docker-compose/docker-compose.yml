@@ -1,29 +1,6 @@
 version: '3'
 
 services:
-  etcd:
-    restart: always
-    image: quay.io/coreos/etcd:v3.5.4
-    ports:
-      - 2379:2379
-      - 2380:2380
-    environment:
-      # This signifficantly speeds up etcd and we anyway don't data persistency there.
-      ETCD_UNSAFE_NO_FSYNC: "1"
-    command:
-      - "etcd"
-      - "--auto-compaction-mode=revision"
-      - "--auto-compaction-retention=1"
-      - "--name=etcd-cluster"
-      - "--initial-cluster-state=new"
-      - "--initial-cluster-token=etcd-cluster-1"
-      - "--initial-cluster=etcd-cluster=http://etcd:2380"
-      - "--initial-advertise-peer-urls=http://etcd:2380"
-      - "--advertise-client-urls=http://etcd:2379"
-      - "--listen-client-urls=http://0.0.0.0:2379"
-      - "--listen-peer-urls=http://0.0.0.0:2380"
-      - "--quota-backend-bytes=134217728" # 128 MB
-
   minio:
     restart: always
     image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z
@@ -56,7 +33,7 @@ services:
     restart: always
     image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
     environment:
-      - BROKER_ENDPOINT='http://etcd:2379'
+      - BROKER_ENDPOINT='http://storage_broker:50051'
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
@@ -68,7 +45,7 @@ services:
       - "-c"
     command:
       - "/usr/local/bin/pageserver -D /data/.neon/
-                                   -c \"broker_endpoints=[$$BROKER_ENDPOINT]\"
+                                   -c \"broker_endpoint=$$BROKER_ENDPOINT\"
                                    -c \"listen_pg_addr='0.0.0.0:6400'\"
                                    -c \"listen_http_addr='0.0.0.0:9898'\"
                                    -c \"remote_storage={endpoint='http://minio:9000',
@@ -76,7 +53,7 @@ services:
                                                         bucket_region='eu-north-1',
                                                         prefix_in_bucket='/pageserver/'}\""
     depends_on:
-      - etcd
+      - storage_broker
       - minio_create_buckets
 
   safekeeper1:
@@ -85,7 +62,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper1:5454
       - SAFEKEEPER_ID=1
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
@@ -99,14 +76,14 @@ services:
       - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
                     --listen-http='0.0.0.0:7676'
                     --id=$$SAFEKEEPER_ID
-                    --broker-endpoints=$$BROKER_ENDPOINT
+                    --broker-endpoint=$$BROKER_ENDPOINT
                     -D /data
                     --remote-storage=\"{endpoint='http://minio:9000',
                                         bucket_name='neon',
                                         bucket_region='eu-north-1',
                                         prefix_in_bucket='/safekeeper/'}\""
     depends_on:
-      - etcd
+      - storage_broker
       - minio_create_buckets
 
   safekeeper2:
@@ -115,7 +92,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper2:5454
       - SAFEKEEPER_ID=2
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
@@ -129,14 +106,14 @@ services:
       - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
                     --listen-http='0.0.0.0:7676'
                     --id=$$SAFEKEEPER_ID
-                    --broker-endpoints=$$BROKER_ENDPOINT
+                    --broker-endpoint=$$BROKER_ENDPOINT
                     -D /data
                     --remote-storage=\"{endpoint='http://minio:9000',
                                         bucket_name='neon',
                                         bucket_region='eu-north-1',
                                         prefix_in_bucket='/safekeeper/'}\""
     depends_on:
-      - etcd
+      - storage_broker
       - minio_create_buckets
 
   safekeeper3:
@@ -145,7 +122,7 @@ services:
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper3:5454
       - SAFEKEEPER_ID=3
-      - BROKER_ENDPOINT=http://etcd:2379
+      - BROKER_ENDPOINT=http://storage_broker:50051
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
@@ -159,15 +136,24 @@ services:
       - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
                     --listen-http='0.0.0.0:7676'
                     --id=$$SAFEKEEPER_ID
-                    --broker-endpoints=$$BROKER_ENDPOINT
+                    --broker-endpoint=$$BROKER_ENDPOINT
                     -D /data
                     --remote-storage=\"{endpoint='http://minio:9000',
                                         bucket_name='neon',
                                         bucket_region='eu-north-1',
                                         prefix_in_bucket='/safekeeper/'}\""
     depends_on:
-      - etcd
+      - storage_broker
       - minio_create_buckets
+
+  storage_broker:
+    restart: always
+    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
+    ports:
+      - 50051:50051
+    command:
+      - "storage_broker"
+      - "--listen-addr=0.0.0.0:50051"
 
   compute:
     restart: always

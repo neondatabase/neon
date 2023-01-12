@@ -8,7 +8,9 @@ pub use console::{GetAuthInfoError, WakeComputeError};
 
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
-    compute, http, mgmt, stream, url,
+    compute,
+    console::messages::MetricsAuxInfo,
+    http, mgmt, stream, url,
     waiters::{self, Waiter, Waiters},
 };
 use once_cell::sync::Lazy;
@@ -126,25 +128,13 @@ pub struct AuthSuccess<T> {
     pub value: T,
 }
 
-impl<T> AuthSuccess<T> {
-    /// Very similar to [`std::option::Option::map`].
-    /// Maps [`AuthSuccess<T>`] to [`AuthSuccess<R>`] by applying
-    /// a function to a contained value.
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> AuthSuccess<R> {
-        AuthSuccess {
-            reported_auth_ok: self.reported_auth_ok,
-            value: f(self.value),
-        }
-    }
-}
-
 /// Info for establishing a connection to a compute node.
 /// This is what we get after auth succeeded, but not before!
 pub struct NodeInfo {
-    /// Project from [`auth::ClientCredentials`].
-    pub project: String,
     /// Compute node connection params.
     pub config: compute::ConnCfg,
+    /// Labels for proxy's metrics.
+    pub aux: MetricsAuxInfo,
 }
 
 impl BackendType<'_, ClientCredentials<'_>> {
@@ -159,7 +149,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
         // If there's no project so far, that entails that client doesn't
         // support SNI or other means of passing the project name.
         // We now expect to see a very specific payload in the place of password.
-        let fetch_magic_payload = async {
+        let fetch_magic_payload = |client| async {
             warn!("project name not specified, resorting to the password hack auth flow");
             let payload = AuthFlow::new(client)
                 .begin(auth::PasswordHack)
@@ -171,38 +161,61 @@ impl BackendType<'_, ClientCredentials<'_>> {
             auth::Result::Ok(payload)
         };
 
+        // If we want to use cleartext password flow, we can read the password
+        // from the client and pretend that it's a magic payload (PasswordHack hack).
+        let fetch_plaintext_password = |client| async {
+            info!("using cleartext password flow");
+            let payload = AuthFlow::new(client)
+                .begin(auth::CleartextPassword)
+                .await?
+                .authenticate()
+                .await?;
+
+            auth::Result::Ok(auth::password_hack::PasswordHackPayload {
+                project: String::new(),
+                password: payload,
+            })
+        };
+
         // TODO: find a proper way to merge those very similar blocks.
-        let (mut config, payload) = match self {
+        let (mut node, payload) = match self {
             Console(endpoint, creds) if creds.project.is_none() => {
-                let payload = fetch_magic_payload.await?;
+                let payload = fetch_magic_payload(client).await?;
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());
-                let config = console::Api::new(endpoint, extra, &creds)
+                let node = console::Api::new(endpoint, extra, &creds)
                     .wake_compute()
                     .await?;
 
-                (config, payload)
+                (node, payload)
+            }
+            Console(endpoint, creds) if creds.use_cleartext_password_flow => {
+                // This is a hack to allow cleartext password in secure connections (wss).
+                let payload = fetch_plaintext_password(client).await?;
+                let creds = creds.as_ref();
+                let node = console::Api::new(endpoint, extra, &creds)
+                    .wake_compute()
+                    .await?;
+
+                (node, payload)
             }
             Postgres(endpoint, creds) if creds.project.is_none() => {
-                let payload = fetch_magic_payload.await?;
+                let payload = fetch_magic_payload(client).await?;
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());
-                let config = postgres::Api::new(endpoint, &creds).wake_compute().await?;
+                let node = postgres::Api::new(endpoint, &creds).wake_compute().await?;
 
-                (config, payload)
+                (node, payload)
             }
             _ => return Ok(None),
         };
 
-        config.password(payload.password);
+        node.config.password(payload.password);
         Ok(Some(AuthSuccess {
             reported_auth_ok: false,
-            value: NodeInfo {
-                project: payload.project,
-                config,
-            },
+            value: node,
         }))
     }
 
@@ -233,10 +246,6 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 console::Api::new(&endpoint, extra, &creds)
                     .handle_user(client)
                     .await?
-                    .map(|config| NodeInfo {
-                        project: creds.project.unwrap().into_owned(),
-                        config,
-                    })
             }
             Postgres(endpoint, creds) => {
                 info!("performing mock authentication using a local postgres instance");
@@ -245,10 +254,6 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 postgres::Api::new(&endpoint, &creds)
                     .handle_user(client)
                     .await?
-                    .map(|config| NodeInfo {
-                        project: creds.project.unwrap().into_owned(),
-                        config,
-                    })
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {

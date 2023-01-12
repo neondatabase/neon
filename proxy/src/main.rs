@@ -8,6 +8,7 @@ mod auth;
 mod cancellation;
 mod compute;
 mod config;
+mod console;
 mod error;
 mod http;
 mod mgmt;
@@ -28,6 +29,7 @@ use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use tracing::info;
 use utils::project_git_version;
+use utils::sentry_init::{init_sentry, release_name};
 
 project_git_version!(GIT_VERSION);
 
@@ -44,6 +46,9 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(atty::is(atty::Stream::Stdout))
         .with_target(false)
         .init();
+
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(release_name!(), &[]);
 
     let arg_matches = cli().get_matches();
 
@@ -105,12 +110,23 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
-    let tasks = [
+    let mut tasks = vec![
         tokio::spawn(http::server::task_main(http_listener)),
         tokio::spawn(proxy::task_main(config, proxy_listener)),
         tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
-    ]
-    .map(flatten_err);
+    ];
+
+    if let Some(wss_address) = arg_matches.get_one::<String>("wss") {
+        let wss_address: SocketAddr = wss_address.parse()?;
+        info!("Starting wss on {}", wss_address);
+        let wss_listener = TcpListener::bind(wss_address).await?;
+        tasks.push(tokio::spawn(http::websocket::task_main(
+            wss_listener,
+            config,
+        )));
+    }
+
+    let tasks = tasks.into_iter().map(flatten_err);
 
     set_build_info_metric(GIT_VERSION);
     // This will block until all tasks have completed.
@@ -149,6 +165,11 @@ fn cli() -> clap::Command {
                 .long("http")
                 .help("listen for incoming http connections (metrics, etc) on ip:port")
                 .default_value("127.0.0.1:7001"),
+        )
+        .arg(
+            Arg::new("wss")
+                .long("wss")
+                .help("listen for incoming wss connections on ip:port"),
         )
         .arg(
             Arg::new("uri")

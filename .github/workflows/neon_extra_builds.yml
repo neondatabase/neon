@@ -1,0 +1,128 @@
+name: Check neon with extra platform builds
+
+on:
+  push:
+    branches:
+    - main
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  # Allow only one workflow per any non-`main` branch.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  COPT: '-Werror'
+
+jobs:
+  check-macos-build:
+    timeout-minutes: 90
+    runs-on: macos-latest
+
+    env:
+      # Use release build only, to have less debug info around
+      # Hence keeping target/ (and general cache size) smaller
+      BUILD_TYPE: release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Install macOS postgres dependencies
+        run: brew install flex bison openssl protobuf
+
+      - name: Set pg 14 revision for caching
+        id: pg_v14_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
+
+      - name: Set pg 15 revision for caching
+        id: pg_v15_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
+
+      - name: Cache postgres v14 build
+        id: cache_pg_14
+        uses: actions/cache@v3
+        with:
+          path: pg_install/v14
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Cache postgres v15 build
+        id: cache_pg_15
+        uses: actions/cache@v3
+        with:
+          path: pg_install/v15
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Set extra env for macOS
+        run: |
+          echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
+          echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
+
+      - name: Cache cargo deps
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            !~/.cargo/registry/src
+            ~/.cargo/git
+            target
+          key: v1-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+
+      - name: Build postgres v14
+        if: steps.cache_pg_14.outputs.cache-hit != 'true'
+        run: make postgres-v14 -j$(nproc)
+
+      - name: Build postgres v15
+        if: steps.cache_pg_15.outputs.cache-hit != 'true'
+        run: make postgres-v15 -j$(nproc)
+
+      - name: Build neon extensions
+        run: make neon-pg-ext -j$(nproc)
+
+      - name: Run cargo build
+        run: cargo build --all --release
+
+      - name: Check that no warnings are produced
+        run: ./run_clippy.sh
+
+  gather-rust-build-stats:
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+
+    env:
+      BUILD_TYPE: release
+      # build with incremental compilation produce partial results
+      # so do not attempt to cache this build, also disable the incremental compilation
+      CARGO_INCREMENTAL: 0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Install Ubuntu postgres dependencies
+        run: |
+          sudo apt update
+          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev libssl-dev protobuf-compiler
+
+      # Some of our rust modules use FFI and need those to be checked
+      - name: Get postgres headers
+        run: make postgres-headers -j$(nproc)
+
+      - name: Produce the build stats
+        run: cargo build --all --release --timings
+
+      - name: Upload the build stats
+        uses: actions/upload-artifact@v3
+        with:
+          name: neon-${{ runner.os }}-release-build-stats
+          path: ./target/cargo-timings/

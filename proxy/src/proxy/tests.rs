@@ -1,6 +1,6 @@
 ///! A group of high-level tests for connection establishing logic and auth.
 use super::*;
-use crate::{auth, scram};
+use crate::{auth, sasl, scram};
 use async_trait::async_trait;
 use rstest::rstest;
 use tokio_postgres::config::SslMode;
@@ -100,8 +100,7 @@ impl Scram {
     }
 
     fn mock(user: &str) -> Self {
-        let salt = rand::random::<[u8; 32]>();
-        Scram(scram::ServerSecret::mock(user, &salt))
+        Scram(scram::ServerSecret::mock(user, rand::random()))
     }
 }
 
@@ -111,13 +110,17 @@ impl TestAuth for Scram {
         self,
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
-        auth::AuthFlow::new(stream)
+        let outcome = auth::AuthFlow::new(stream)
             .begin(auth::Scram(&self.0))
             .await?
             .authenticate()
             .await?;
 
-        Ok(())
+        use sasl::Outcome::*;
+        match outcome {
+            Success(_) => Ok(()),
+            Failure(reason) => bail!("autentication failed with an error: {reason}"),
+        }
     }
 }
 
@@ -136,8 +139,8 @@ async fn dummy_proxy(
 
     stream
         .write_message_noflush(&Be::AuthenticationOk)?
-        .write_message_noflush(&BeParameterStatusMessage::encoding())?
-        .write_message(&BeMessage::ReadyForQuery)
+        .write_message_noflush(&Be::CLIENT_ENCODING)?
+        .write_message(&Be::ReadyForQuery)
         .await?;
 
     Ok(())

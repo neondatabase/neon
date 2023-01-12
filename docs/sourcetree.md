@@ -45,9 +45,9 @@ and create new databases and accounts (control plane API in our case).
 
 Integration tests, written in Python using the `pytest` framework.
 
-`/vendor/postgres-v14`:
+`/vendor/postgres-v14` and `/vendor/postgres-v15`:
 
-PostgreSQL source tree, with the modifications needed for Neon.
+PostgreSQL source tree per version, with the modifications needed for Neon.
 
 `/pgxn/neon`:
 

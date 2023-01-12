@@ -1,12 +1,13 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::path::PathBuf;
+use std::process::{Child, Command};
 use std::{io, result};
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, Context};
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
@@ -96,13 +97,8 @@ impl PageServerNode {
         }
     }
 
-    pub fn initialize(
-        &self,
-        create_tenant: Option<TenantId>,
-        initial_timeline_id: Option<TimelineId>,
-        config_overrides: &[&str],
-        pg_version: u32,
-    ) -> anyhow::Result<TimelineId> {
+    // pageserver conf overrides defined by neon_local configuration.
+    fn neon_local_overrides(&self) -> Vec<String> {
         let id = format!("id={}", self.env.pageserver.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
@@ -117,90 +113,32 @@ impl PageServerNode {
         );
         let listen_pg_addr_param =
             format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
-        let broker_endpoints_param = format!(
-            "broker_endpoints=[{}]",
-            self.env
-                .etcd_broker
-                .broker_endpoints
-                .iter()
-                .map(|url| format!("'{url}'"))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let broker_etcd_prefix_param = self
-            .env
-            .etcd_broker
-            .broker_etcd_prefix
-            .as_ref()
-            .map(|prefix| format!("broker_etcd_prefix='{prefix}'"));
+        let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
-        let mut init_config_overrides = config_overrides.to_vec();
-        init_config_overrides.push(&id);
-        init_config_overrides.push(&pg_distrib_dir_param);
-        init_config_overrides.push(&authg_type_param);
-        init_config_overrides.push(&listen_http_addr_param);
-        init_config_overrides.push(&listen_pg_addr_param);
-        init_config_overrides.push(&broker_endpoints_param);
-
-        if let Some(broker_etcd_prefix_param) = broker_etcd_prefix_param.as_deref() {
-            init_config_overrides.push(broker_etcd_prefix_param);
-        }
+        let mut overrides = vec![
+            id,
+            pg_distrib_dir_param,
+            authg_type_param,
+            listen_http_addr_param,
+            listen_pg_addr_param,
+            broker_endpoint_param,
+        ];
 
         if self.env.pageserver.auth_type != AuthType::Trust {
-            init_config_overrides.push("auth_validation_public_key_path='auth_public_key.pem'");
+            overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
         }
-
-        let mut pageserver_process = self
-            .start_node(&init_config_overrides, &self.env.base_data_dir, true)
-            .with_context(|| {
-                format!(
-                    "Failed to start a process for pageserver {}",
-                    self.env.pageserver.id,
-                )
-            })?;
-
-        let init_result = self
-            .try_init_timeline(create_tenant, initial_timeline_id, pg_version)
-            .context("Failed to create initial tenant and timeline for pageserver");
-        match &init_result {
-            Ok(initial_timeline_id) => {
-                println!("Successfully initialized timeline {initial_timeline_id}")
-            }
-            Err(e) => eprintln!("{e:#}"),
-        }
-        background_process::send_stop_child_process(&pageserver_process)?;
-
-        let exit_code = pageserver_process.wait()?;
-        ensure!(
-            exit_code.success(),
-            format!(
-                "pageserver init failed with exit code {:?}",
-                exit_code.code()
-            )
-        );
-        println!(
-            "Stopped pageserver {} process with pid {}",
-            self.env.pageserver.id,
-            pageserver_process.id(),
-        );
-        init_result
+        overrides
     }
 
-    fn try_init_timeline(
-        &self,
-        new_tenant_id: Option<TenantId>,
-        new_timeline_id: Option<TimelineId>,
-        pg_version: u32,
-    ) -> anyhow::Result<TimelineId> {
-        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())?;
-        let initial_timeline_info = self.timeline_create(
-            initial_tenant_id,
-            new_timeline_id,
-            None,
-            None,
-            Some(pg_version),
-        )?;
-        Ok(initial_timeline_info.timeline_id)
+    /// Initializes a pageserver node by creating its config with the overrides provided.
+    pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        // First, run `pageserver --init` and wait for it to write a config into FS and exit.
+        self.pageserver_init(config_overrides).with_context(|| {
+            format!(
+                "Failed to run init for pageserver node {}",
+                self.env.pageserver.id,
+            )
+        })
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -215,52 +153,73 @@ impl PageServerNode {
     }
 
     pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
-        self.start_node(config_overrides, &self.repo_path(), false)
+        self.start_node(config_overrides, false)
     }
 
-    fn start_node(
-        &self,
-        config_overrides: &[&str],
-        datadir: &Path,
-        update_config: bool,
-    ) -> anyhow::Result<Child> {
-        print!(
-            "Starting pageserver at '{}' in '{}'",
+    fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        let datadir = self.repo_path();
+        let node_id = self.env.pageserver.id;
+        println!(
+            "Initializing pageserver node {} at '{}' in {:?}",
+            node_id,
             self.pg_connection_config.raw_address(),
-            datadir.display()
+            datadir
         );
         io::stdout().flush()?;
 
-        let mut args = vec![
-            "-D",
-            datadir.to_str().with_context(|| {
-                format!("Datadir path {datadir:?} cannot be represented as a unicode string")
-            })?,
-        ];
+        let datadir_path_str = datadir.to_str().with_context(|| {
+            format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
+        })?;
+        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        args.push(Cow::Borrowed("--init"));
 
+        let init_output = Command::new(self.env.pageserver_bin())
+            .args(args.iter().map(Cow::as_ref))
+            .envs(self.pageserver_env_variables()?)
+            .output()
+            .with_context(|| format!("Failed to run pageserver init for node {node_id}"))?;
+
+        anyhow::ensure!(
+            init_output.status.success(),
+            "Pageserver init for node {} did not finish successfully, stdout: {}, stderr: {}",
+            node_id,
+            String::from_utf8_lossy(&init_output.stdout),
+            String::from_utf8_lossy(&init_output.stderr),
+        );
+
+        Ok(())
+    }
+
+    fn start_node(&self, config_overrides: &[&str], update_config: bool) -> anyhow::Result<Child> {
+        let mut overrides = self.neon_local_overrides();
+        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+
+        let datadir = self.repo_path();
+        print!(
+            "Starting pageserver node {} at '{}' in {:?}",
+            self.env.pageserver.id,
+            self.pg_connection_config.raw_address(),
+            datadir
+        );
+        io::stdout().flush()?;
+
+        let datadir_path_str = datadir.to_str().with_context(|| {
+            format!(
+                "Cannot start pageserver node {} in path that has no string representation: {:?}",
+                self.env.pageserver.id, datadir,
+            )
+        })?;
+        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
         if update_config {
-            args.push("--update-config");
+            args.push(Cow::Borrowed("--update-config"));
         }
 
-        for config_override in config_overrides {
-            args.extend(["-c", config_override]);
-        }
-
-        let envs = if self.env.pageserver.auth_type != AuthType::Trust {
-            // Generate a token to connect from the pageserver to a safekeeper
-            let token = self
-                .env
-                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
-            vec![("ZENITH_AUTH_TOKEN".to_owned(), token)]
-        } else {
-            vec![]
-        };
         background_process::start_process(
             "pageserver",
-            datadir,
+            &datadir,
             &self.env.pageserver_bin(),
-            &args,
-            envs,
+            args.iter().map(Cow::as_ref),
+            self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(&self.pid_file()),
             || match self.check_status() {
                 Ok(()) => Ok(true),
@@ -268,6 +227,35 @@ impl PageServerNode {
                 Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
             },
         )
+    }
+
+    fn pageserver_basic_args<'a>(
+        &self,
+        config_overrides: &'a [&'a str],
+        datadir_path_str: &'a str,
+    ) -> Vec<Cow<'a, str>> {
+        let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
+
+        let mut overrides = self.neon_local_overrides();
+        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+        for config_override in overrides {
+            args.push(Cow::Borrowed("-c"));
+            args.push(Cow::Owned(config_override));
+        }
+
+        args
+    }
+
+    fn pageserver_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(if self.env.pageserver.auth_type != AuthType::Trust {
+            // Generate a token to connect from the pageserver to a safekeeper
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+            vec![("NEON_AUTH_TOKEN".to_owned(), token)]
+        } else {
+            Vec::new()
+        })
     }
 
     ///

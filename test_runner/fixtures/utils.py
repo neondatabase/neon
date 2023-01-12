@@ -1,7 +1,6 @@
 import contextlib
 import os
 import re
-import shutil
 import subprocess
 import tarfile
 import time
@@ -72,13 +71,6 @@ def print_gc_result(row: Dict[str, Any]):
             row
         )
     )
-
-
-def etcd_path() -> Path:
-    path_output = shutil.which("etcd")
-    if path_output is None:
-        raise RuntimeError("etcd not found in PATH")
-    return Path(path_output)
 
 
 def query_scalar(cur: cursor, query: str) -> Any:
@@ -156,7 +148,7 @@ def get_scale_for_db(size_mb: int) -> int:
 
 
 ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"flamegraph\.svg|regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html)"
+    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html)"
 )
 
 

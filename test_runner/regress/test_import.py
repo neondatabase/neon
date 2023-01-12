@@ -53,10 +53,10 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     unpacked_base = os.path.join(basebackup_dir, "unpacked-base")
     corrupt_base_tar = os.path.join(unpacked_base, "corrupt-base.tar")
     os.mkdir(unpacked_base, 0o750)
-    subprocess_capture(str(test_output_dir), ["tar", "-xf", base_tar, "-C", unpacked_base])
+    subprocess_capture(test_output_dir, ["tar", "-xf", base_tar, "-C", unpacked_base])
     os.remove(os.path.join(unpacked_base, "global/pg_control"))
     subprocess_capture(
-        str(test_output_dir),
+        test_output_dir,
         ["tar", "-cf", "corrupt-base.tar"] + os.listdir(unpacked_base),
         cwd=unpacked_base,
     )
@@ -306,6 +306,7 @@ def _import(
 
     # Check that gc works
     pageserver_http = env.pageserver.http_client()
+    pageserver_http.timeline_checkpoint(tenant, timeline)
     pageserver_http.timeline_gc(tenant, timeline, 0)
 
     return tar_output_file

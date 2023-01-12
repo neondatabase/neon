@@ -11,11 +11,13 @@ use tokio::time::timeout;
 
 /// An error happened while waiting for a number
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-#[error("SeqWaitError")]
 pub enum SeqWaitError {
     /// The wait timeout was reached
+    #[error("seqwait timeout was reached")]
     Timeout,
+
     /// [`SeqWait::shutdown`] was called
+    #[error("SeqWait::shutdown was called")]
     Shutdown,
 }
 
