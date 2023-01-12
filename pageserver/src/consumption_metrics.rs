@@ -179,7 +179,10 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
-                collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await?;
+                if let Err(err) = collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await
+                {
+                    error!("metrics collection failed: {err:?}");
+                }
             }
         }
     }
@@ -271,9 +274,9 @@ pub async fn collect_metrics_task(
             tenant_remote_size,
         ));
 
-        // TODO add SyntheticStorageSize metric
-        let tenant_synthetic_size = tenant.calculate_synthetic_size().await?;
-        info!("tenant_synthetic_size: {}", tenant_synthetic_size);
+        // Note that this metric is calculated in a separate bgworker
+        // Here we only use cached value, which may lag behind the real latest one
+        let tenant_synthetic_size = tenant.get_cached_synthetic_size();
         current_metrics.push((
             ConsumptionMetricsKey {
                 tenant_id,
@@ -291,7 +294,7 @@ pub async fn collect_metrics_task(
     });
 
     if current_metrics.is_empty() {
-        info!("no new metrics to send");
+        trace!("no new metrics to send");
         return Ok(());
     }
 
@@ -364,7 +367,6 @@ pub async fn calculate_synthetic_size_worker(
     loop {
         tokio::select! {
             _ = task_mgr::shutdown_watcher() => {
-                info!("calculate_synthetic_size_worker received cancellation request");
                 return Ok(());
             },
         _ = ticker.tick() => {
@@ -377,9 +379,17 @@ pub async fn calculate_synthetic_size_worker(
                         continue;
                     }
 
-                let tenant = mgr::get_tenant(tenant_id, true).await?;
-                info!("spawn calculate_synthetic_size for tenant {}", tenant_id);
-                tenant.calculate_synthetic_size().await?;
+                    match mgr::get_tenant(tenant_id, true).await
+                    {
+                        Ok(tenant) => {
+                            if let Err(e) = tenant.calculate_synthetic_size().await {
+                                error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
+                            }
+                        },
+                        Err(err) => {
+                            error!("tenant {} is not found: {err:?}", tenant_id);
+                        }
+                    }
 
                 }
             }

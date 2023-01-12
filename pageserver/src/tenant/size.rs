@@ -44,24 +44,17 @@ struct TimelineInputs {
     next_gc_cutoff: Lsn,
 }
 
-// Adjust BracnchFrom sorting so that we always process ancestor
-// before descendants.
+// Adjust BranchFrom sorting so that we always process ancestor
+// before descendants. This is needed to correctly calculate size of
+// descendant timelines.
 //
-// i.e. if we have following order
-// Update { lsn: 0/0, command: BranchFrom(None), timeline_id: 1 },
-// Update { lsn: 0/169AD58, command: Update(25387008), timeline_id: 1 },
-// Update { lsn: 0/169AD58, command: BranchFrom(Some(2)), timeline_id: 3 },
-// Update { lsn: 0/169AD58, command: BranchFrom(Some(1)), timeline_id: 2 },
+// Note that we may have multiple BranchFroms at the same LSN, so we
+// need to sort them in the tree order.
 //
-// last two lines must be reordered to
-// Update { lsn: 0/169AD58, command: BranchFrom(Some(1)), timeline_id: 2 },
-// Update { lsn: 0/169AD58, command: BranchFrom(Some(2)), timeline_id: 3 },
-//
+// see updates_sort_with_branches_at_same_lsn test below
+
 fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update>> {
     let mut sorted_updates = Vec::with_capacity(updates.len());
-
-    info!("Sorting updates in tree order {:?}", updates);
-
     let mut known_timelineids = HashSet::new();
     let mut i = 0;
     while i < updates.len() {
@@ -79,7 +72,6 @@ fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update
                     continue;
                 }
                 None => {
-                    // root timeline, branches from None
                     known_timelineids.insert(curr_upd.timeline_id);
                     sorted_updates.push(*curr_upd);
                     i += 1;
@@ -93,8 +85,6 @@ fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update
             // we have not processed ancestor yet.
             // there is a chance that it is at the same Lsn
             if !known_timelineids.contains(&parent_id) {
-                info!("Found possibly orphan branch {:?}", curr_upd);
-
                 let mut curr_lsn_branchfroms: HashMap<TimelineId, Vec<(TimelineId, usize)>> =
                     HashMap::new();
 
@@ -110,12 +100,9 @@ fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update
                             {
                                 // we have not processed ancestor yet
                                 // store it for later
-                                curr_lsn_branchfroms
-                                    .entry(lookahead_parent_id)
-                                    .and_modify(|e| {
-                                        e.push((lookahead_upd.timeline_id, j));
-                                    })
-                                    .or_insert_with(|| vec![(lookahead_upd.timeline_id, j)]);
+                                let es =
+                                    curr_lsn_branchfroms.entry(lookahead_parent_id).or_default();
+                                es.push((lookahead_upd.timeline_id, j));
                             }
                             _ => {
                                 // we have already processed ancestor
@@ -149,7 +136,11 @@ fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update
                 }
 
                 if !curr_lsn_branchfroms.is_empty() {
-                    anyhow::bail!("orphan branch detected in BranchFroms");
+                    // orphans are expected to be rare and transient between tenant reloads
+                    // for example, an broken ancestor without the child branch being broken.
+                    anyhow::bail!(
+                        "orphan branch(es) detected in BranchFroms: {curr_lsn_branchfroms:?}"
+                    );
                 }
             }
 
@@ -161,8 +152,6 @@ fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update
             i += 1;
         }
     }
-
-    info!("Sorting updates in tree order done");
 
     Ok(sorted_updates)
 }
@@ -190,8 +179,6 @@ pub(super) async fn gather_inputs(
     // with joinset, on drop, all of the tasks will just be de-scheduled, which we can use to
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
-
-    info!("start gathering inputs for tenant {}", tenant.tenant_id);
 
     let timelines = tenant
         .refresh_gc_info()
@@ -403,8 +390,6 @@ pub(super) async fn gather_inputs(
         }
     };
 
-    info!("done gathering inputs for tenant {}", tenant.tenant_id);
-
     Ok(ModelInputs {
         updates: sorted_updates,
         retention_period,
@@ -594,4 +579,138 @@ fn verify_size_for_multiple_branches() {
     let inputs: ModelInputs = serde_json::from_str(doc).unwrap();
 
     assert_eq!(inputs.calculate().unwrap(), 36_409_872);
+}
+
+#[test]
+fn updates_sort_with_branches_at_same_lsn() {
+    use std::str::FromStr;
+    use Command::{BranchFrom, EndOfBranch};
+
+    macro_rules! lsn {
+        ($e:expr) => {
+            Lsn::from_str($e).unwrap()
+        };
+    }
+
+    let ids = [
+        TimelineId::from_str("00000000000000000000000000000000").unwrap(),
+        TimelineId::from_str("11111111111111111111111111111111").unwrap(),
+        TimelineId::from_str("22222222222222222222222222222222").unwrap(),
+        TimelineId::from_str("33333333333333333333333333333333").unwrap(),
+        TimelineId::from_str("44444444444444444444444444444444").unwrap(),
+    ];
+
+    // issue https://github.com/neondatabase/neon/issues/3179
+    let commands = vec![
+        Update {
+            lsn: lsn!("0/0"),
+            command: BranchFrom(None),
+            timeline_id: ids[0],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: Command::Update(25387008),
+            timeline_id: ids[0],
+        },
+        // next three are wrongly sorted, because
+        // ids[1] is branched from before ids[1] exists
+        // and ids[2] is branched from before ids[2] exists
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[1])),
+            timeline_id: ids[3],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[0])),
+            timeline_id: ids[2],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[2])),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CA85B8"),
+            command: Command::Update(28925952),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CD85B8"),
+            command: Command::Update(29024256),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CD85B8"),
+            command: BranchFrom(Some(ids[1])),
+            timeline_id: ids[4],
+        },
+        Update {
+            lsn: lsn!("0/22DCE70"),
+            command: Command::Update(32546816),
+            timeline_id: ids[3],
+        },
+        Update {
+            lsn: lsn!("0/230CE70"),
+            command: EndOfBranch,
+            timeline_id: ids[3],
+        },
+    ];
+
+    let expected = vec![
+        Update {
+            lsn: lsn!("0/0"),
+            command: BranchFrom(None),
+            timeline_id: ids[0],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: Command::Update(25387008),
+            timeline_id: ids[0],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[0])),
+            timeline_id: ids[2],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[2])),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[1])),
+            timeline_id: ids[3],
+        },
+        Update {
+            lsn: lsn!("0/1CA85B8"),
+            command: Command::Update(28925952),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CD85B8"),
+            command: Command::Update(29024256),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CD85B8"),
+            command: BranchFrom(Some(ids[1])),
+            timeline_id: ids[4],
+        },
+        Update {
+            lsn: lsn!("0/22DCE70"),
+            command: Command::Update(32546816),
+            timeline_id: ids[3],
+        },
+        Update {
+            lsn: lsn!("0/230CE70"),
+            command: EndOfBranch,
+            timeline_id: ids[3],
+        },
+    ];
+
+    let sorted_commands = sort_updates_in_tree_order(commands).unwrap();
+
+    assert_eq!(sorted_commands, expected);
 }
