@@ -752,7 +752,6 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
     let result_receiver = mgr::immediate_compact(tenant_id, timeline_id)
         .await
         .context("spawn compaction task")
-        .and_then(|timeline| timeline.try_upgrade_timeline_arc())
         .map_err(ApiError::InternalServerError)?;
 
     let result: anyhow::Result<()> = result_receiver
