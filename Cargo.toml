@@ -12,6 +12,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
+license = "Apache-2.0"
 
 ## All dependency versions, used in the project, grouped in some arbitrary order.
 [workspace.dependencies]
@@ -120,8 +121,8 @@ walkdir = "2.3.2"
 log = "0.4"
 env_logger = "0.10"
 
-# TODO fork this and use similar `rev` hash 
-amplify_num = { git = "https://github.com/hlinnaka/rust-amplify.git", branch = "unsigned-int-perf" }
+## TODO switch when the new release is made
+amplify_num = { git = "https://github.com/rust-amplify/rust-amplify.git", tag = "v4.0.0-beta.1" }
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }

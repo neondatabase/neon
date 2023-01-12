@@ -40,7 +40,7 @@ dependencies = [
 [[package]]
 name = "amplify_num"
 version = "0.4.1"
-source = "git+https://github.com/hlinnaka/rust-amplify.git?branch=unsigned-int-perf#bd49b737c2e6e623ab8e9ba5ceaed5712d3a3940"
+source = "git+https://github.com/rust-amplify/rust-amplify.git?tag=v4.0.0-beta.1#3ad006cf2804e1862ec7725a7684a493f3023523"
 
 [[package]]
 name = "android_system_properties"
