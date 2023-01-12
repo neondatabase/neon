@@ -2626,9 +2626,11 @@ where
 #[cfg(test)]
 pub mod harness {
     use bytes::{Bytes, BytesMut};
+    use once_cell::sync::OnceCell;
     use std::sync::Arc;
     use std::{fs, path::PathBuf};
     use tempfile::TempDir;
+    use utils::logging;
     use utils::lsn::Lsn;
 
     use crate::{
@@ -2694,6 +2696,10 @@ pub mod harness {
 
     impl TenantHarness {
         pub fn new() -> anyhow::Result<Self> {
+            LOG_HANDLE.get_or_init(|| {
+                logging::init(logging::LogFormat::Test).expect("Failed to init test logging")
+            });
+
             let temp_repo_dir = tempfile::tempdir()?;
             // `TempDir` uses a randomly generated subdirectory of a system tmp dir,
             // so far it's enough to take care of concurrently running tests.
