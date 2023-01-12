@@ -2263,13 +2263,15 @@ impl Timeline {
                 // are some delta layers *later* than current 'lsn', if more WAL was processed and flushed
                 // after we read last_record_lsn, which is passed here in the 'lsn' argument.
                 if img_lsn < lsn {
-                    let num_deltas = layers.count_deltas(&img_range, &(img_lsn..lsn))?;
+                    let threshold = self.get_image_creation_threshold();
+                    let num_deltas = layers.count_deltas(
+                        &img_range, &(img_lsn..lsn), Some(threshold))?;
 
                     debug!(
                         "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
                         img_range.start, img_range.end, num_deltas, img_lsn, lsn
                     );
-                    if num_deltas >= self.get_image_creation_threshold() {
+                    if num_deltas >= threshold {
                         return Ok(true);
                     }
                 }

@@ -294,16 +294,20 @@ where
     }
 
     /// Count the height of the tallest stack of deltas in this 2d region.
+    ///
+    /// If `limit` is provided we don't try to count above that number.
+    ///
     /// This number is used to compute the largest number of deltas that
     /// we'll need to visit for any page reconstruction in this region.
     /// We use this heuristic to decide whether to create an image layer.
-    pub fn count_deltas(&self, key: &Range<Key>, lsn: &Range<Lsn>) -> Result<usize> {
+    pub fn count_deltas(
+        &self, key: &Range<Key>, lsn: &Range<Lsn>, limit: Option<usize>) -> Result<usize> {
         // We get the delta coverage of the region, and for each part of the coverage
         // we recurse right underneath the delta. The recursion depth is limited by
         // the largest result this function could return, which is in practice between
         // 3 and 10 (since we usually try to create an image when the number gets larger).
 
-        if lsn.is_empty() || key.is_empty() {
+        if lsn.is_empty() || key.is_empty() || limit == Some(0) {
             return Ok(0);
         }
 
@@ -328,7 +332,8 @@ where
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
-                        let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr)?;
+                        let new_limit = limit.map(|l| l - 1);
+                        let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit)?;
                         max_stacked_deltas =
                             std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
                     }
@@ -346,7 +351,8 @@ where
                 let lr = lsn.start..val.get_lsn_range().start;
 
                 if !kr.is_empty() {
-                    let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr)?;
+                    let new_limit = limit.map(|l| l - 1);
+                    let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit)?;
                     max_stacked_deltas =
                         std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
                 }
@@ -434,29 +440,32 @@ where
     /// For each part of a keyspace partitioning, return the maximum number of layers
     /// that would be needed for page reconstruction in that part at the given LSN.
     ///
+    /// If `limit` is provided we don't try to count above that number.
+    ///
     /// This method is used to decide where to create new image layers. Computing the
     /// result for the entire partitioning at once allows this function to be more
     /// efficient, and further optimization is possible by using iterators instead,
     /// to allow early return.
     ///
     /// TODO actually use this method instead of count_deltas. Currently we only use
-    ///      it for benchmarks. It's a drop-in replacement, but it would be good to
-    ///      add early return to this method first so we don't make perf worse.
-    pub fn get_difficulty_map(&self, lsn: Lsn, partitioning: &KeyPartitioning) -> Vec<usize> {
+    ///      it for benchmarks.
+    pub fn get_difficulty_map(
+        &self, lsn: Lsn, partitioning: &KeyPartitioning, limit: Option<usize>) -> Vec<usize> {
         // TODO This is a naive implementation. Perf improvements to do:
         // 1. Instead of calling self.image_coverage and self.count_deltas,
         //    iterate the image and delta coverage only once.
-        // 2. Implement early return when the difficulty exceeds a threshold.
         partitioning
             .parts
             .iter()
             .map(|part| {
                 let mut difficulty = 0;
                 for range in &part.ranges {
+                    if limit == Some(difficulty) {break;}
                     for (img_range, last_img) in self
                         .image_coverage(range, lsn)
                         .expect("why would this err?")
                     {
+                        if limit == Some(difficulty) {break;}
                         let img_lsn = if let Some(last_img) = last_img {
                             last_img.get_lsn_range().end
                         } else {
@@ -465,7 +474,7 @@ where
 
                         if img_lsn < lsn {
                             let num_deltas = self
-                                .count_deltas(&img_range, &(img_lsn..lsn))
+                                .count_deltas(&img_range, &(img_lsn..lsn), limit)
                                 .expect("why would this err lol?");
                             difficulty = std::cmp::max(difficulty, num_deltas);
                         }

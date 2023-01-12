@@ -177,7 +177,7 @@ fn bench_from_real_project(c: &mut Criterion) {
         println!("Finished bruteforce in {:?}", now.elapsed());
 
         let now = Instant::now();
-        let result_fast = layer_map.get_difficulty_map(latest_lsn, &partitioning);
+        let result_fast = layer_map.get_difficulty_map(latest_lsn, &partitioning, None);
         assert!(result_fast.len() == partitioning.parts.len());
         println!("Finished fast in {:?}", now.elapsed());
 
@@ -207,7 +207,7 @@ fn bench_from_real_project(c: &mut Criterion) {
     });
     group.bench_function("get_difficulty_map", |b| {
         b.iter(|| {
-            layer_map.get_difficulty_map(latest_lsn, &partitioning);
+            layer_map.get_difficulty_map(latest_lsn, &partitioning, Some(3));
         });
     });
     group.finish();
