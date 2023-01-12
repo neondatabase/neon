@@ -16,7 +16,7 @@
 //! unless the pageserver is configured without remote storage.
 //!
 //! We allocate the client instance in [Timeline][`crate::tenant::Timeline`], i.e.,
-//! either in [`crate::tenant_mgr`] during startup or when creating a new
+//! either in [`crate::tenant::mgr`] during startup or when creating a new
 //! timeline.
 //! However, the client does not become ready for use until we've initialized its upload queue:
 //!
@@ -756,7 +756,7 @@ impl RemoteTimelineClient {
             // Note: We only check for the shutdown requests between retries, so
             // if a shutdown request arrives while we're busy uploading, in the
             // upload::upload:*() call below, we will wait not exit until it has
-            // finisheed. We probably could cancel the upload by simply dropping
+            // finished. We probably could cancel the upload by simply dropping
             // the Future, but we're not 100% sure if the remote storage library
             // is cancellation safe, so we don't dare to do that. Hopefully, the
             // upload finishes or times out soon enough.

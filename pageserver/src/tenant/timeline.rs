@@ -193,22 +193,29 @@ pub struct Timeline {
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
-/// Calculation consists of two parts:
-/// 1.  Initial size calculation. That might take a long time, because it requires
-/// reading all layers containing relation sizes up to the `initial_part_end`.
+///
+/// Calculation consists of two stages:
+///
+/// 1. Initial size calculation. That might take a long time, because it requires
+/// reading all layers containing relation sizes at `initial_part_end`.
+///
 /// 2. Collecting an incremental part and adding that to the initial size.
 /// Increments are appended on walreceiver writing new timeline data,
 /// which result in increase or decrease of the logical size.
 struct LogicalSize {
-    /// Size, potentially slow to compute, derived from all layers located locally on this node's FS.
-    /// Might require reading multiple layers, and even ancestor's layers, to collect the size.
+    /// Size, potentially slow to compute. Calculating this might require reading multiple
+    /// layers, and even ancestor's layers.
     ///
-    /// NOTE: initial size is not a constant and will change between restarts.
+    /// NOTE: size at a given LSN is constant, but after a restart we will calculate
+    /// the initial size at a different LSN.
     initial_logical_size: OnceCell<u64>,
+
     /// Semaphore to track ongoing calculation of `initial_logical_size`.
     initial_size_computation: Arc<tokio::sync::Semaphore>,
+
     /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
     initial_part_end: Option<Lsn>,
+
     /// All other size changes after startup, combined together.
     ///
     /// Size shouldn't ever be negative, but this is signed for two reasons:
@@ -370,6 +377,7 @@ pub enum PageReconstructError {
     #[error(transparent)]
     Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
 
+    /// An error happened replaying WAL records
     #[error(transparent)]
     WalRedo(#[from] crate::walredo::WalRedoError),
 }
@@ -1422,7 +1430,8 @@ impl Timeline {
 
     /// Calculate the logical size of the database at the latest LSN.
     ///
-    /// NOTE: counted incrementally, includes ancestors, this can be a slow operation.
+    /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
+    /// especially if we need to download remote layers.
     async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
@@ -2942,9 +2951,10 @@ impl Timeline {
         if data.records.is_empty() {
             if let Some((img_lsn, img)) = &data.img {
                 trace!(
-                    "found page image for key {} at {}, no WAL redo required",
+                    "found page image for key {} at {}, no WAL redo required, req LSN {}",
                     key,
-                    img_lsn
+                    img_lsn,
+                    request_lsn,
                 );
                 Ok(img.clone())
             } else {
