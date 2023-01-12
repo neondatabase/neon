@@ -68,12 +68,12 @@ pub(super) async fn gather_inputs(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    let timelines = tenant
+    let timeline_refs = tenant
         .refresh_gc_info()
         .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
-    if timelines.is_empty() {
+    if timeline_refs.is_empty() {
         // All timelines are below tenant's gc_horizon; alternative would be to use
         // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
         // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
@@ -92,12 +92,12 @@ pub(super) async fn gather_inputs(
     let mut updates = Vec::new();
 
     // record the per timline values used to determine `retention_period`
-    let mut timeline_inputs = HashMap::with_capacity(timelines.len());
+    let mut timeline_inputs = HashMap::with_capacity(timeline_refs.len());
 
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
-    for timeline_ref in timelines {
+    for timeline_ref in timeline_refs {
         let timeline = match timeline_ref.timeline() {
             Ok(tl) => tl,
             Err(e) => {

@@ -1242,7 +1242,7 @@ mod tests {
         let timeline_ref = harness
             .load()
             .await
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
+            .create_empty_timeline_ref(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
             .expect("Failed to create an empty timeline for dummy wal connection manager")
             .initialize()
             .unwrap();

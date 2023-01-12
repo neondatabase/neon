@@ -181,9 +181,9 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     )
     .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await {
-        Ok(Some(new_timeline)) => {
+        Ok(Some(new_timeline_ref)) => {
             // Created. Construct a TimelineInfo for it.
-            let timeline_info = new_timeline.timeline()
+            let timeline_info = new_timeline_ref.timeline()
                 .and_then(|timeline| build_timeline_info_common(&timeline))
                 .map_err(ApiError::InternalServerError)?;
             json_response(StatusCode::CREATED, timeline_info)
@@ -203,10 +203,10 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         let tenant = mgr::get_tenant(tenant_id, true)
             .await
             .map_err(ApiError::NotFound)?;
-        let timelines = tenant.list_timelines();
+        let timeline_refs = tenant.list_timeline_refs();
 
-        let mut response_data = Vec::with_capacity(timelines.len());
-        for timeline_ref in timelines {
+        let mut response_data = Vec::with_capacity(timeline_refs.len());
+        for timeline_ref in timeline_refs {
             let timeline = timeline_ref
                 .timeline()
                 .map_err(ApiError::InternalServerError)?;
@@ -271,7 +271,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             .map_err(ApiError::NotFound)?;
 
         let timeline_ref = tenant
-            .get_timeline(timeline_id)
+            .get_timeline_ref(timeline_id)
             .map_err(ApiError::NotFound)?;
         let timeline = timeline_ref.timeline().map_err(ApiError::NotFound)?;
 
@@ -301,7 +301,7 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
 
     let timeline_ref = mgr::get_tenant(tenant_id, true)
         .await
-        .and_then(|tenant| tenant.get_timeline(timeline_id))
+        .and_then(|tenant| tenant.get_timeline_ref(timeline_id))
         .map_err(ApiError::NotFound)?;
     let timeline = timeline_ref.active_timeline().map_err(ApiError::NotFound)?;
     let result = with_ondemand_download(|| timeline.find_lsn_for_timestamp(timestamp_pg))
@@ -429,7 +429,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
-        for timeline in tenant.list_timelines().iter() {
+        for timeline in tenant.list_timeline_refs().iter() {
             current_physical_size += timeline
                 .timeline()
                 .map_err(ApiError::NotFound)?
@@ -773,7 +773,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         .await
         .map_err(ApiError::NotFound)?;
     let timeline_ref = tenant
-        .get_timeline(timeline_id)
+        .get_timeline_ref(timeline_id)
         .map_err(ApiError::NotFound)?;
     let timeline = timeline_ref.active_timeline().map_err(ApiError::NotFound)?;
     timeline
@@ -799,7 +799,7 @@ async fn timeline_download_remote_layers_handler_post(
         .await
         .map_err(ApiError::NotFound)?;
     let timeline_ref = tenant
-        .get_timeline(timeline_id)
+        .get_timeline_ref(timeline_id)
         .map_err(ApiError::NotFound)?;
     let timeline = timeline_ref.active_timeline().map_err(ApiError::NotFound)?;
     match timeline.spawn_download_all_remote_layers().await {
@@ -819,7 +819,7 @@ async fn timeline_download_remote_layers_handler_get(
         .await
         .map_err(ApiError::NotFound)?;
     let timeline_ref = tenant
-        .get_timeline(timeline_id)
+        .get_timeline_ref(timeline_id)
         .map_err(ApiError::NotFound)?;
     let timeline = timeline_ref.active_timeline().map_err(ApiError::NotFound)?;
     let info = timeline

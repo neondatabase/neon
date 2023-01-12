@@ -35,7 +35,7 @@ use super::Timeline;
 /// while operations that use `&Timeline` are "uninterruptable".
 #[derive(Clone)]
 pub struct TimelineRef {
-    timeline: Weak<Timeline>,
+    timeline_ref: Weak<Timeline>,
     pub id: TenantTimelineId,
 }
 
@@ -51,7 +51,7 @@ impl TimelineRef {
     // Let only Timeline module the ability to create weak references on itself.
     pub(super) fn new(timeline: &Timeline) -> Self {
         Self {
-            timeline: Weak::clone(&timeline.myself),
+            timeline_ref: Weak::clone(&timeline.myself),
             id: TenantTimelineId::new(timeline.tenant_id, timeline.timeline_id),
         }
     }
@@ -61,10 +61,10 @@ impl TimelineRef {
     pub fn timeline(&self) -> anyhow::Result<TimelineGuard<'_>> {
         Ok(TimelineGuard {
             timeline: self
-                .timeline
+                .timeline_ref
                 .upgrade()
                 .with_context(|| format!("Timeline {} is dropped", self.id))?,
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         })
     }
 

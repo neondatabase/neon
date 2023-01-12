@@ -195,7 +195,7 @@ pub async fn collect_metrics_task(
         let mut tenant_resident_size = 0;
 
         // iterate through list of timelines in tenant
-        for timeline_ref in tenant.list_timelines().iter() {
+        for timeline_ref in &tenant.list_timeline_refs() {
             if let Ok(timeline) = timeline_ref.timeline() {
                 // collect per-timeline metrics only for active timelines
                 if timeline.is_active() {

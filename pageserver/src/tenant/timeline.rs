@@ -129,7 +129,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<TimelineRef>,
+    ancestor_ref: Option<TimelineRef>,
     ancestor_lsn: Lsn,
 
     // Metrics
@@ -466,7 +466,7 @@ impl Timeline {
 
     /// Get the ancestor's timeline id
     pub fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
-        self.ancestor_timeline
+        self.ancestor_ref
             .as_ref()
             .map(|ancestor| ancestor.id.timeline_id)
     }
@@ -874,7 +874,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
-        ancestor: Option<TimelineRef>,
+        ancestor_ref: Option<TimelineRef>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -911,7 +911,7 @@ impl Timeline {
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
 
-                ancestor_timeline: ancestor,
+                ancestor_ref,
                 ancestor_lsn: metadata.ancestor_lsn(),
 
                 metrics: TimelineMetrics::new(&tenant_id, &timeline_id),
@@ -1690,7 +1690,7 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                timeline_ref = match timeline.get_ancestor_timeline() {
+                timeline_ref = match timeline.get_ancestor_timeline_ref() {
                     Ok(timeline) => timeline,
                     Err(e) => return PageReconstructResult::from(e),
                 };
@@ -1789,7 +1789,7 @@ impl Timeline {
                             ));
                             continue 'outer;
                         }
-                    } else if timeline.ancestor_timeline.is_some() {
+                    } else if timeline.ancestor_ref.is_some() {
                         // Nothing on this timeline. Traverse to parent
                         result = ValueReconstructResult::Continue;
                         cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
@@ -1836,15 +1836,15 @@ impl Timeline {
         Some((lsn, img))
     }
 
-    fn get_ancestor_timeline(&self) -> anyhow::Result<TimelineRef> {
-        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
+    fn get_ancestor_timeline_ref(&self) -> anyhow::Result<TimelineRef> {
+        let ancestor_ref = self.ancestor_ref.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
                 self.timeline_id,
                 self.get_ancestor_timeline_id(),
             )
         })?;
-        Ok(ancestor.clone())
+        Ok(ancestor_ref.clone())
     }
 
     ///
@@ -2108,7 +2108,7 @@ impl Timeline {
         };
 
         let ancestor_timeline_id = self
-            .ancestor_timeline
+            .ancestor_ref
             .as_ref()
             .map(|ancestor| ancestor.id.timeline_id);
 

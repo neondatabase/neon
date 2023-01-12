@@ -291,7 +291,7 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline_ref = tenant.get_timeline(timeline_id)?;
+        let timeline_ref = tenant.get_timeline_ref(timeline_id)?;
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -380,7 +380,7 @@ impl PageServerHandler {
         // Create empty timeline
         info!("creating new timeline");
         let tenant = get_active_tenant_with_timeout(tenant_id).await?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
+        let timeline_ref = tenant.create_empty_timeline_ref(timeline_id, base_lsn, pg_version)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -398,7 +398,7 @@ impl PageServerHandler {
         pgb.flush().await?;
 
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
-        timeline
+        timeline_ref
             .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
             .await?;
 
@@ -434,7 +434,7 @@ impl PageServerHandler {
 
         let timeline_ref = get_active_tenant_with_timeout(tenant_id)
             .await?
-            .get_timeline(timeline_id)?;
+            .get_timeline_ref(timeline_id)?;
         let timeline = timeline_ref.get_active_timeline_with_timeout().await?;
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
@@ -643,7 +643,7 @@ impl PageServerHandler {
         // check that the timeline exists
         let timeline_ref = get_active_tenant_with_timeout(tenant_id)
             .await?
-            .get_timeline(timeline_id)?;
+            .get_timeline_ref(timeline_id)?;
         let timeline = timeline_ref.get_active_timeline_with_timeout().await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
@@ -803,7 +803,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             self.check_permission(Some(tenant_id))?;
             let timeline_ref = get_active_tenant_with_timeout(tenant_id)
                 .await?
-                .get_timeline(timeline_id)?;
+                .get_timeline_ref(timeline_id)?;
             let timeline = timeline_ref.get_active_timeline_with_timeout().await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();

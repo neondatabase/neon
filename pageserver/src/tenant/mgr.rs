@@ -507,7 +507,7 @@ pub async fn immediate_compact(
         .map_err(ApiError::NotFound)?;
 
     let timeline_ref = tenant
-        .get_timeline(timeline_id)
+        .get_timeline_ref(timeline_id)
         .map_err(ApiError::NotFound)?;
 
     // Run in task_mgr to avoid race with detach operation
