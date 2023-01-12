@@ -344,7 +344,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
             let new_tenant_id = pageserver.tenant_create(initial_tenant_id, tenant_conf)?;
-            println!("tenant {new_tenant_id} successfully created on the pageserver");
+            println!("tenant {new_tenant_id} created, creating initial timeline");
 
             // Create an initial timeline for the new tenant
             let new_timeline_id = parse_timeline_id(create_match)?;

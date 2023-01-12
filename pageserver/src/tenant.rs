@@ -36,7 +36,6 @@ use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -2547,35 +2546,21 @@ fn run_initdb(
     initdb_target_dir: &Path,
     pg_version: u32,
 ) -> anyhow::Result<()> {
-    let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
-    let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
-    info!(
-        "running {} in {}, libdir: {}",
-        initdb_bin_path.display(),
-        initdb_target_dir.display(),
-        initdb_lib_dir.display(),
-    );
+    let pg_bin_dir = conf.pg_bin_dir(pg_version)?;
+    let pg_lib_dir = conf.pg_lib_dir(pg_version)?;
+    info!("running {pg_bin_dir:?} in {initdb_target_dir:?}, libdir: {pg_lib_dir:?}");
 
-    let initdb_output = Command::new(&initdb_bin_path)
-        .args(["-D", &initdb_target_dir.to_string_lossy()])
-        .args(["-U", &conf.superuser])
-        .args(["-E", "utf8"])
-        .arg("--no-instructions")
-        // This is only used for a temporary installation that is deleted shortly after,
-        // so no need to fsync it
-        .arg("--no-sync")
-        .env_clear()
-        .env("LD_LIBRARY_PATH", &initdb_lib_dir)
-        .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
-        .stdout(Stdio::null())
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to execute {} at target dir {}",
-                initdb_bin_path.display(),
-                initdb_target_dir.display()
-            )
-        })?;
+    let initdb_output = postgres_ffi::prepare_initdb_command(
+        &pg_bin_dir,
+        &pg_lib_dir,
+        initdb_target_dir,
+        &conf.superuser,
+    )?
+    .stdout(Stdio::null())
+    .output()
+    .with_context(|| {
+        format!("failed to execute {pg_bin_dir:?} at target dir {initdb_target_dir:?}")
+    })?;
     if !initdb_output.status.success() {
         bail!(
             "initdb failed: '{}'",

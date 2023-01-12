@@ -20,6 +20,7 @@ tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
 nix.workspace = true
+close_fds.workspace = true
 signal-hook.workspace = true
 rand.workspace = true
 jsonwebtoken.workspace = true
