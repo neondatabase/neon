@@ -138,7 +138,7 @@ struct EventChunk<'a> {
     events: &'a [ConsumptionMetric],
 }
 
-/// Main thread that serves metrics collection
+/// Main task that serves metrics collection
 pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
     metric_collection_interval: Duration,
@@ -159,7 +159,10 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
-                collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await?;
+                if let Err(err) = collect_metrics_task(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await {
+                    // Log the error and continue
+                    error!("metrics collection failed: {err:?}");
+                }
             }
         }
     }
