@@ -101,7 +101,7 @@ pub(super) async fn gather_inputs(
         let timeline = match timeline_ref.timeline() {
             Ok(tl) => tl,
             Err(e) => {
-                info!("skipping timeline {}: {:#}", timeline_ref.id, e);
+                info!("skipping timeline {}: {:#}", timeline_ref.id.timeline_id, e);
                 continue; // TODO review: OK to do this here?
             }
         };

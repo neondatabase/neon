@@ -1889,7 +1889,10 @@ impl Tenant {
         for timeline_ref in gc_timelines {
             let timeline = match timeline_ref.timeline() {
                 Err(e) => {
-                    info!("skipping gc on timeline {}: {:#}", timeline_ref.id, e);
+                    info!(
+                        "skipping gc on timeline {}: {:#}",
+                        timeline_ref.id.timeline_id, e
+                    );
                     continue; // TODO review: is it ok to do this here? Should be, because we break below on shutdown request.
                 }
                 Ok(tl) => tl,
