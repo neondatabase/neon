@@ -8,6 +8,7 @@ use strum_macros::{EnumString, EnumVariantNames};
 pub enum LogFormat {
     Plain,
     Json,
+    Test,
 }
 
 impl LogFormat {
@@ -39,6 +40,7 @@ pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
     match log_format {
         LogFormat::Json => base_logger.json().init(),
         LogFormat::Plain => base_logger.init(),
+        LogFormat::Test => base_logger.with_test_writer().init(),
     }
 
     Ok(())
