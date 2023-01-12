@@ -61,7 +61,6 @@ fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update
         let curr_upd = &updates[i];
 
         if let Command::BranchFrom(parent_id) = curr_upd.command {
-            // root timeline, branches from None
             let parent_id = match parent_id {
                 Some(parent_id) if known_timelineids.contains(&parent_id) => {
                     // we have already processed ancestor
