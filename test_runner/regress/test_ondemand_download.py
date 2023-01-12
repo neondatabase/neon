@@ -87,8 +87,22 @@ def test_ondemand_download_large_rel(
     # run checkpoint manually to be sure that data landed in remote storage
     client.timeline_checkpoint(tenant_id, timeline_id)
 
-    # wait until pageserver successfully uploaded a checkpoint to remote storage
+    # wait until pageserver successfully uploaded all the data, and the result
+    # of the compaction, to remote storage
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
+    def assert_queue_empty(file_kind, op_kind):
+        val = client.get_remote_timeline_client_metric(
+            "pageserver_remote_timeline_client_calls_unfinished",
+            tenant_id,
+            timeline_id,
+            file_kind,
+            op_kind,
+        )
+        assert val is not None, "expecting metric to be present"
+        assert int(val) == 0
+    wait_until(60, 0.5, lambda: assert_queue_empty(file_kind="layer", op_kind="upload"))
+    wait_until(60, 0.5, lambda: assert_queue_empty(file_kind="index", op_kind="upload"))
+    wait_until(60, 0.5, lambda: assert_queue_empty(file_kind="layer", op_kind="delete"))
     log.info("uploads have finished")
 
     ##### Stop the first pageserver instance, erase all its data
@@ -112,7 +126,7 @@ def test_ondemand_download_large_rel(
     # relation, so they are likely already downloaded. But the middle of the
     # table should not have been needed by anything yet.
     with pg.cursor() as cur:
-        assert query_scalar(cur, "select count(*) from tbl where id = 500000") == 1
+        assert query_scalar(cur, f"select count(*) from tbl where id = {num_rows}/2") == 1
 
     after_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
     log.info(f"layers downloaded before {before_downloads} and after {after_downloads}")
