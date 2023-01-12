@@ -290,10 +290,10 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 pub static BROKEN_TENANT_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_broken_tenant_count",
-        "Number of broken tenant",
+        "Number of broken tenants",
         &["tenant_id"],
     )
-    .expect("Failed to register broken_tenant_task_events metric")
+    .expect("Failed to register broken_tenant_count metric")
 });
 
 // Metrics collected on WAL redo operations
