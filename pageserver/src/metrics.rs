@@ -287,11 +287,11 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
-pub static BROKEN_TENANT_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub static BROKEN_TENANT_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
         "pageserver_broken_tenant_count",
         "Number of broken tenants",
-        &["tenant_id"],
+        &["tenant_id"]
     )
     .expect("Failed to register broken_tenant_count metric")
 });

@@ -277,7 +277,7 @@ def test_pageserver_with_empty_tenants(
     ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
     tid_metric_filter = {"tenant_id": str(tenant_without_timelines_dir)}
     tenant_broken_count = int(
-        ps_metrics.query_one("pageserver_broken_tenant_count_total", filter=tid_metric_filter).value
+        ps_metrics.query_one("pageserver_broken_tenant_count", filter=tid_metric_filter).value
     )
 
     assert (

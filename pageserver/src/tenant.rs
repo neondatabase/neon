@@ -1485,7 +1485,11 @@ impl Tenant {
                     }
                 }
                 TenantState::Broken => {
-                    info!("Cannot set tenant to Stopping state, it is already in Broken state");
+                    // We either detach or ignore the tenant here so we clear it from the current broken tenants metric
+                    BROKEN_TENANT_COUNT
+                        .with_label_values(&[&self.tenant_id.to_string()])
+                        .dec();
+                    info!("Tenant is already in Broken state, move to Stopping state is ignored except from removing it from the broken tenants counter");
                 }
                 TenantState::Stopping => {
                     // The tenant was detached, or system shutdown was requested, while we were
