@@ -379,15 +379,10 @@ pub async fn calculate_synthetic_size_worker(
                         continue;
                     }
 
-                    match mgr::get_tenant(tenant_id, true).await
+                    if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await
                     {
-                        Ok(tenant) => {
-                            if let Err(e) = tenant.calculate_synthetic_size().await {
-                                error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
-                            }
-                        },
-                        Err(err) => {
-                            error!("tenant {} is not found: {err:?}", tenant_id);
+                        if let Err(e) = tenant.calculate_synthetic_size().await {
+                            error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
                         }
                     }
 
