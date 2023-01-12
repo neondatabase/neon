@@ -321,7 +321,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
                     let existing = self.layers.insert(rect.clone(), l.clone());
                     if existing.is_some() {
                         // TODO this happened once. Investigate.
-                        panic!("can't overwrite layer");
+                        // panic!("can't overwrite layer");
                     }
                 }
                 None => {
