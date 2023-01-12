@@ -52,6 +52,7 @@
 #include "access/xlogdefs.h"
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
+#include "executor/instrument.h"
 #include "pagestore_client.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/autovacuum.h"
@@ -249,11 +250,6 @@ PrefetchState *MyPState;
 			MyPState->n_responses_buffered \
 	) \
 )
-
-int			n_prefetch_hits = 0;
-int			n_prefetch_misses = 0;
-int			n_prefetch_missed_caches = 0;
-int			n_prefetch_dupes = 0;
 
 XLogRecPtr	prefetch_lsn = 0;
 
@@ -770,7 +766,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 		else
 		{
 			/* The buffered request is good enough, return that index */
-			n_prefetch_dupes++;
+			pgBufferUsage.prefetch.duplicates++;
 			return ring_index;
 		}
 	}
@@ -1845,7 +1841,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (slot->effective_request_lsn >= request_lsn)
 		{
 			ring_index = slot->my_ring_index;
-			n_prefetch_hits += 1;
+			pgBufferUsage.prefetch.hits += 1;
 		}
 		else /* the current prefetch LSN is not large enough, so drop the prefetch */
 		{
@@ -1860,7 +1856,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 			}
 			/* drop caches */
 			prefetch_set_unused(slot->my_ring_index);
-			n_prefetch_missed_caches += 1;
+			pgBufferUsage.prefetch.expired += 1;
 			/* make it look like a prefetch cache miss */
 			entry = NULL;
 		}
@@ -1870,7 +1866,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	{
 		if (entry == NULL)
 		{
-			n_prefetch_misses += 1;
+			pgBufferUsage.prefetch.misses += 1;
 
 			ring_index = prefetch_register_buffer(buftag, &request_latest,
 												  &request_lsn);
