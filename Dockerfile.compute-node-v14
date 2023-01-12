@@ -62,8 +62,7 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.1.tar.gz && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_tiger_geocoder.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_sfcgal.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control
 
 #########################################################################################
 #
