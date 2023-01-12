@@ -107,7 +107,7 @@ impl TimelineRef {
 /// By reacquiring the guard periodically, the timeline-accessing processes can stop when the timeline is being shut down.
 pub struct TimelineGuard<'a> {
     timeline: Arc<Timeline>,
-    _phantom: PhantomData<&'a Timeline>,
+    _phantom: PhantomData<&'a ()>,
 }
 
 // All `Timeline::` methods here exist because `Arc<Timeline>` is needed for them to run
