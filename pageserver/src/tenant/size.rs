@@ -52,7 +52,6 @@ struct TimelineInputs {
 // need to sort them in the tree order.
 //
 // see updates_sort_with_branches_at_same_lsn test below
-
 fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update>> {
     let mut sorted_updates = Vec::with_capacity(updates.len());
     let mut known_timelineids = HashSet::new();
@@ -380,6 +379,8 @@ pub(super) async fn gather_inputs(
     // handled by the variant order in `Command`.
     //
     updates.sort_unstable();
+    // And another sort to handle Command::BranchFrom ordering
+    // in case when there are multiple branches at the same LSN.
     let sorted_updates = sort_updates_in_tree_order(updates)?;
 
     let retention_period = match max_cutoff_distance {
