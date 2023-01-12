@@ -595,7 +595,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
             // is Active when this function returns.
             if let res @ Err(_) = tenant.wait_to_become_active().await {
                 // This shouldn't happen because we just created the tenant directory
-                // in tenant_mgr::create_tenant, and there aren't any remote timelines
+                // in tenant::mgr::create_tenant, and there aren't any remote timelines
                 // to load, so, nothing can really fail during load.
                 // Don't do cleanup because we don't know how we got here.
                 // The tenant will likely be in `Broken` state and subsequent

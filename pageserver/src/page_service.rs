@@ -251,7 +251,6 @@ impl PageRequestMetrics {
     }
 }
 
-#[derive(Debug)]
 struct PageServerHandler {
     _conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
@@ -643,7 +642,7 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyOutResponse)?;
         pgb.flush().await?;
 
-        /* Send a tarball of the latest layer on the timeline */
+        // Send a tarball of the latest layer on the timeline
         {
             let mut writer = pgb.copyout_writer();
             basebackup::send_basebackup_tarball(&mut writer, &timeline, lsn, prev_lsn, full_backup)

@@ -612,7 +612,7 @@ impl Tenant {
     #[instrument(skip(self), fields(tenant_id=%self.tenant_id))]
     async fn attach(self: &Arc<Tenant>) -> anyhow::Result<()> {
         // Create directory with marker file to indicate attaching state.
-        // The load_local_tenants() function in tenant_mgr relies on the marker file
+        // The load_local_tenants() function in tenant::mgr relies on the marker file
         // to determine whether a tenant has finished attaching.
         let tenant_dir = self.conf.tenant_path(&self.tenant_id);
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
