@@ -31,6 +31,7 @@ use once_cell::sync::OnceCell;
 use std::future::Future;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 pub use connection_manager::spawn_connection_manager_task;
@@ -76,7 +77,7 @@ pub fn is_broker_client_initialized() -> bool {
 
 /// A handle of an asynchronous task.
 /// The task has a channel that it can use to communicate its lifecycle events in a certain form, see [`TaskEvent`]
-/// and a cancellation channel that it can listen to for earlier interrupts.
+/// and a cancellation token that it can listen to for earlier interrupts.
 ///
 /// Note that the communication happens via the `watch` channel, that does not accumulate the events, replacing the old one with the never one on submission.
 /// That may lead to certain events not being observed by the listener.
@@ -84,7 +85,7 @@ pub fn is_broker_client_initialized() -> bool {
 pub struct TaskHandle<E> {
     join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     events_receiver: watch::Receiver<TaskStateUpdate<E>>,
-    cancellation: watch::Sender<()>,
+    cancellation: CancellationToken,
 }
 
 pub enum TaskEvent<E> {
@@ -102,20 +103,19 @@ pub enum TaskStateUpdate<E> {
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
     pub fn spawn<Fut>(
-        task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, watch::Receiver<()>) -> Fut
-            + Send
-            + 'static,
+        task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, CancellationToken) -> Fut + Send + 'static,
     ) -> Self
     where
         Fut: Future<Output = anyhow::Result<()>> + Send,
         E: Send + Sync + 'static,
     {
-        let (cancellation, cancellation_receiver) = watch::channel(());
+        let cancellation = CancellationToken::new();
         let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
 
+        let cancellation_clone = cancellation.clone();
         let join_handle = WALRECEIVER_RUNTIME.spawn(async move {
             events_sender.send(TaskStateUpdate::Started).ok();
-            task(events_sender, cancellation_receiver).await
+            task(events_sender, cancellation_clone).await
         });
 
         TaskHandle {
@@ -157,7 +157,7 @@ impl<E: Clone> TaskHandle<E> {
     /// Aborts current task, waiting for it to finish.
     pub async fn shutdown(self) {
         if let Some(jh) = self.join_handle {
-            self.cancellation.send(()).ok();
+            self.cancellation.cancel();
             match jh.await {
                 Ok(Ok(())) => debug!("Shutdown success"),
                 Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
