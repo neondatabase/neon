@@ -595,6 +595,8 @@ jobs:
     defaults:
       run:
         shell: sh -eu {0}
+    env:
+      VM_INFORMANT_VERSION: 0.1.1
 
     steps:
       - name: Downloading latest vm-builder
@@ -606,9 +608,22 @@ jobs:
         run: |
           docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
+      - name: Downloading VM informant version ${{ env.VM_INFORMANT_VERSION }}
+        run: |
+          curl -L https://github.com/neondatabase/autoscaling/releases/download/${{ env.VM_INFORMANT_VERSION }}/vm-informant -o vm-informant
+          chmod +x vm-informant
+
+      - name: Adding VM informant to compute-node image
+        run: |
+          ID=$(docker create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}})
+          docker cp vm-informant $ID:/bin/vm-informant
+          docker commit $ID temp-vm-compute-node
+          docker rm -f $ID
+
       - name: Build vm image
         run: |
-          ./vm-builder -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          # note: as of 2023-01-12, vm-builder requires a trailing ":latest" for local images
+          ./vm-builder -src=temp-vm-compute-node:latest -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Pushing vm-compute-node image
         run: |
