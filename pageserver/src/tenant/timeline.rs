@@ -3165,7 +3165,7 @@ impl Timeline {
                 .filter_map(|l| {
                     let remote = Arc::clone(l.as_remote_layer()?);
                     let self_clone = Arc::clone(self);
-                    Some(self_clone.download_remote_layer(remote))
+                    Some(async move { self_clone.download_remote_layer(remote).await })
                 })
                 .collect()
         };
