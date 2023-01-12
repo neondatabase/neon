@@ -490,7 +490,7 @@ impl Timeline {
         ctx: &TimelineRequestContext,
     ) -> Result<u64, PageReconstructError> {
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn, ctx).await.context("read dbdir")?;
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
         let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
 
         let mut total_size: u64 = 0;
