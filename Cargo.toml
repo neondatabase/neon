@@ -120,6 +120,9 @@ walkdir = "2.3.2"
 log = "0.4"
 env_logger = "0.10"
 
+# TODO fork this and use similar `rev` hash 
+amplify_num = { git = "https://github.com/hlinnaka/rust-amplify.git", branch = "unsigned-int-perf" }
+
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }

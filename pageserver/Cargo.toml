@@ -11,7 +11,7 @@ default = []
 testing = ["fail/failpoints"]
 
 [dependencies]
-amplify_num = { git = "https://github.com/hlinnaka/rust-amplify.git", branch = "unsigned-int-perf" }
+amplify_num.workspace = true
 anyhow.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
