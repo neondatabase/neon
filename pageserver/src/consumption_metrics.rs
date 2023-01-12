@@ -197,6 +197,7 @@ pub async fn collect_metrics_task(
         // iterate through list of timelines in tenant
         for timeline in tenant.list_timelines().iter() {
             // collect per-timeline metrics only for active timelines
+            let timeline_ctx = timeline.get_context();
             if timeline.is_active() {
                 let timeline_written_size = u64::from(timeline.get_last_record_lsn());
 
@@ -209,7 +210,8 @@ pub async fn collect_metrics_task(
                     timeline_written_size,
                 ));
 
-                let (timeline_logical_size, is_exact) = timeline.get_current_logical_size()?;
+                let (timeline_logical_size, is_exact) =
+                    timeline.get_current_logical_size(&timeline_ctx)?;
                 // Only send timeline logical size when it is fully calculated.
                 if is_exact {
                     current_metrics.push((

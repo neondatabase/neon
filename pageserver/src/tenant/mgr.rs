@@ -16,6 +16,7 @@ use remote_storage::GenericRemoteStorage;
 use utils::crashsafe;
 
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{Tenant, TenantState};
@@ -234,6 +235,7 @@ pub async fn update_tenant_config(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
     get_tenant(tenant_id, true)
@@ -260,10 +262,15 @@ pub async fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Resul
     }
 }
 
-pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<()> {
+pub async fn delete_timeline(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
     match get_tenant(tenant_id, true).await {
         Ok(tenant) => {
-            tenant.delete_timeline(timeline_id).await?;
+            let tenant_ctx = tenant.get_context();
+            tenant.delete_timeline(timeline_id, &tenant_ctx).await?;
         }
         Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
     }
@@ -473,8 +480,9 @@ pub async fn immediate_gc(
         false,
         async move {
             fail::fail_point!("immediate_gc_task_pre");
+            let tenant_ctx = tenant.get_context();
             let result = tenant
-                .gc_iteration(Some(timeline_id), gc_horizon, pitr)
+                .gc_iteration(Some(timeline_id), gc_horizon, pitr, &tenant_ctx)
                 .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
@@ -509,6 +517,7 @@ pub async fn immediate_compact(
     let timeline = tenant
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
+    let timeline_ctx = timeline.get_context();
 
     // Run in task_mgr to avoid race with detach operation
     let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
@@ -523,7 +532,7 @@ pub async fn immediate_compact(
         false,
         async move {
             let result = timeline
-                .compact()
+                .compact(&timeline_ctx)
                 .instrument(
                     info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id),
                 )

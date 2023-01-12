@@ -43,18 +43,22 @@ use utils::{
 use crate::auth::check_permission;
 use crate::basebackup;
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::mgr;
-use crate::tenant::{Tenant, Timeline};
+use crate::tenant::{Tenant, Timeline, TimelineRequestContext};
 use crate::trace::Tracer;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
-fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + '_ {
+fn copyin_stream<'a>(
+    pgb: &'a mut PostgresBackend,
+    ctx: &'a RequestContext,
+) -> impl Stream<Item = io::Result<Bytes>> + 'a {
     async_stream::try_stream! {
         loop {
             let msg = tokio::select! {
@@ -146,6 +150,8 @@ pub async fn libpq_listener_main(
                 debug!("accepted connection from {}", peer_addr);
                 let local_auth = auth.clone();
 
+                let connection_ctx = RequestContext::new();
+
                 // PageRequestHandler tasks are not associated with any particular
                 // timeline in the task manager. In practice most connections will
                 // only deal with a particular timeline, but we don't know which one
@@ -157,7 +163,7 @@ pub async fn libpq_listener_main(
                     None,
                     "serving compute connection task",
                     false,
-                    page_service_conn_main(conf, local_auth, socket, auth_type),
+                    page_service_conn_main(conf, local_auth, socket, auth_type, connection_ctx),
                 );
             }
             Err(err) => {
@@ -177,6 +183,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<JwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
+    connection_ctx: RequestContext,
 ) -> anyhow::Result<()> {
     // Immediately increment the gauge, then create a job to decrement it on task exit.
     // One of the pros of `defer!` is that this will *most probably*
@@ -191,7 +198,7 @@ async fn page_service_conn_main(
         .set_nodelay(true)
         .context("could not set TCP_NODELAY")?;
 
-    let mut conn_handler = PageServerHandler::new(conf, auth);
+    let mut conn_handler = PageServerHandler::new(conf, auth, connection_ctx);
     let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
 
     let result = pgbackend
@@ -255,20 +262,27 @@ struct PageServerHandler {
     _conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
+
+    connection_ctx: RequestContext,
 }
 
 impl PageServerHandler {
-    pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
+    pub fn new(
+        conf: &'static PageServerConf,
+        auth: Option<Arc<JwtAuth>>,
+        connection_ctx: RequestContext,
+    ) -> Self {
         PageServerHandler {
             _conf: conf,
             auth,
             claims: None,
+            connection_ctx,
         }
     }
 
     #[instrument(skip(self, pgb))]
     async fn handle_pagerequests(
-        &self,
+        &mut self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -278,7 +292,7 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         // Make request tracer if needed
-        let tenant = get_active_tenant_with_timeout(tenant_id).await?;
+        let tenant = get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
             let path = tenant
@@ -291,6 +305,7 @@ impl PageServerHandler {
 
         // Check that the timeline exists
         let timeline = tenant.get_timeline(timeline_id, true)?;
+        let ctx = timeline.get_context();
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -332,19 +347,21 @@ impl PageServerHandler {
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
-                    self.handle_get_rel_exists_request(&timeline, &req).await
+                    self.handle_get_rel_exists_request(&timeline, &req, &ctx)
+                        .await
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.get_rel_size.start_timer();
-                    self.handle_get_nblocks_request(&timeline, &req).await
+                    self.handle_get_nblocks_request(&timeline, &req, &ctx).await
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
-                    self.handle_get_page_at_lsn_request(&timeline, &req).await
+                    self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
+                        .await
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
-                    self.handle_db_size_request(&timeline, &req).await
+                    self.handle_db_size_request(&timeline, &req, &ctx).await
                 }
             };
 
@@ -376,8 +393,10 @@ impl PageServerHandler {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = get_active_tenant_with_timeout(tenant_id).await?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
+        let tenant = get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
+        let tenant_ctx = tenant.get_context();
+        let (timeline, ctx) =
+            tenant.create_empty_timeline(timeline_id, base_lsn, pg_version, &tenant_ctx)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -394,9 +413,9 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
 
-        let mut copyin_stream = Box::pin(copyin_stream(pgb));
+        let mut copyin_stream = Box::pin(copyin_stream(pgb, &ctx));
         timeline
-            .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
+            .import_basebackup_from_tar(&mut copyin_stream, base_lsn, &ctx)
             .await?;
 
         // Drain the rest of the Copy data
@@ -429,7 +448,9 @@ impl PageServerHandler {
     ) -> Result<(), QueryError> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+        let timeline =
+            get_active_timeline_with_timeout(tenant_id, timeline_id, &self.connection_ctx).await?;
+        let ctx = timeline.get_context();
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
             return Err(QueryError::Other(
@@ -444,9 +465,9 @@ impl PageServerHandler {
         info!("importing wal");
         pgb.write_message(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
-        let mut copyin_stream = Box::pin(copyin_stream(pgb));
+        let mut copyin_stream = Box::pin(copyin_stream(pgb, &ctx));
         let mut reader = tokio_util::io::StreamReader::new(&mut copyin_stream);
-        import_wal_from_tar(&timeline, &mut reader, start_lsn, end_lsn).await?;
+        import_wal_from_tar(&timeline, &mut reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
 
         // Drain the rest of the Copy data
@@ -492,6 +513,7 @@ impl PageServerHandler {
         mut lsn: Lsn,
         latest: bool,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
+        ctx: &TimelineRequestContext,
     ) -> anyhow::Result<Lsn> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint
@@ -515,7 +537,7 @@ impl PageServerHandler {
             if lsn <= last_record_lsn {
                 lsn = last_record_lsn;
             } else {
-                timeline.wait_lsn(lsn).await?;
+                timeline.wait_lsn(lsn, ctx).await?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
@@ -525,7 +547,7 @@ impl PageServerHandler {
             if lsn == Lsn(0) {
                 anyhow::bail!("invalid LSN(0) in request");
             }
-            timeline.wait_lsn(lsn).await?;
+            timeline.wait_lsn(lsn, ctx).await?;
         }
         anyhow::ensure!(
             lsn >= **latest_gc_cutoff_lsn,
@@ -535,52 +557,60 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_rel_exists_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
+        ctx: &TimelineRequestContext,
     ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
-            .await?;
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
 
-        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest).await?;
+        let exists = timeline
+            .get_rel_exists(req.rel, lsn, req.latest, ctx)
+            .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
         }))
     }
 
-    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_nblocks_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
+        ctx: &TimelineRequestContext,
     ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
-            .await?;
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest).await?;
+        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest, ctx).await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
         }))
     }
 
-    #[instrument(skip(self, timeline, req), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req, ctx), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
     async fn handle_db_size_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
+        ctx: &TimelineRequestContext,
     ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
-            .await?;
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
 
         let total_blocks = timeline
-            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)
+            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest, ctx)
             .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -589,15 +619,17 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
     async fn handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
+        ctx: &TimelineRequestContext,
     ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
-            .await?;
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
         /*
         // Add a 1s delay to some requests. The delay helps the requests to
         // hit the race condition from github issue #1047 more easily.
@@ -608,7 +640,7 @@ impl PageServerHandler {
         */
 
         let page = timeline
-            .get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)
+            .get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest, ctx)
             .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
@@ -618,7 +650,7 @@ impl PageServerHandler {
 
     #[instrument(skip(self, pgb))]
     async fn handle_basebackup_request(
-        &self,
+        &mut self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -627,12 +659,15 @@ impl PageServerHandler {
         full_backup: bool,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+        let timeline =
+            get_active_timeline_with_timeout(tenant_id, timeline_id, &self.connection_ctx).await?;
+        let ctx = timeline.get_context();
+
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", lsn);
-            timeline.wait_lsn(lsn).await?;
+            timeline.wait_lsn(lsn, &ctx).await?;
             timeline
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;
@@ -645,8 +680,15 @@ impl PageServerHandler {
         // Send a tarball of the latest layer on the timeline
         {
             let mut writer = pgb.copyout_writer();
-            basebackup::send_basebackup_tarball(&mut writer, &timeline, lsn, prev_lsn, full_backup)
-                .await?;
+            basebackup::send_basebackup_tarball(
+                &mut writer,
+                &timeline,
+                lsn,
+                prev_lsn,
+                full_backup,
+                &ctx,
+            )
+            .await?;
         }
 
         pgb.write_message(&BeMessage::CopyDone)?;
@@ -784,7 +826,9 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
-            let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+            let timeline =
+                get_active_timeline_with_timeout(tenant_id, timeline_id, &self.connection_ctx)
+                    .await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
@@ -944,7 +988,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = get_active_tenant_with_timeout(tenant_id).await?;
+            let tenant = get_active_tenant_with_timeout(tenant_id, &self.connection_ctx).await?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
@@ -995,9 +1039,17 @@ impl postgres_backend_async::Handler for PageServerHandler {
 /// If the tenant is Loading, waits for it to become Active, for up to 30 s. That
 /// ensures that queries don't fail immediately after pageserver startup, because
 /// all tenants are still loading.
-async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> anyhow::Result<Arc<Tenant>> {
+async fn get_active_tenant_with_timeout(
+    tenant_id: TenantId,
+    parent_ctx: &RequestContext,
+) -> anyhow::Result<Arc<Tenant>> {
     let tenant = mgr::get_tenant(tenant_id, false).await?;
-    match tokio::time::timeout(Duration::from_secs(30), tenant.wait_to_become_active()).await {
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        tenant.wait_to_become_active(parent_ctx),
+    )
+    .await
+    {
         Ok(wait_result) => wait_result
             // no .context(), the error message is good enough and some tests depend on it
             .map(move |()| tenant),
@@ -1009,8 +1061,9 @@ async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> anyhow::Result<A
 async fn get_active_timeline_with_timeout(
     tenant_id: TenantId,
     timeline_id: TimelineId,
+    ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Timeline>> {
-    get_active_tenant_with_timeout(tenant_id)
+    get_active_tenant_with_timeout(tenant_id, ctx)
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
 }

@@ -65,6 +65,7 @@ async fn compaction_loop(tenant_id: TenantId) {
                     ControlFlow::Continue(tenant) => tenant,
                 },
             };
+            let tenant_ctx = tenant.get_context();
 
             let mut sleep_duration = tenant.get_compaction_period();
             if sleep_duration == Duration::ZERO {
@@ -73,7 +74,7 @@ async fn compaction_loop(tenant_id: TenantId) {
                 sleep_duration = Duration::from_secs(10);
             } else {
                 // Run compaction
-                if let Err(e) = tenant.compaction_iteration().await {
+                if let Err(e) = tenant.compaction_iteration(&tenant_ctx).await {
                     sleep_duration = wait_duration;
                     error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
                 }
@@ -116,6 +117,7 @@ async fn gc_loop(tenant_id: TenantId) {
                     ControlFlow::Continue(tenant) => tenant,
                 },
             };
+            let tenant_ctx = tenant.get_context();
 
             let gc_period = tenant.get_gc_period();
             let gc_horizon = tenant.get_gc_horizon();
@@ -127,7 +129,9 @@ async fn gc_loop(tenant_id: TenantId) {
             } else {
                 // Run gc
                 if gc_horizon > 0 {
-                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval()).await
+                    if let Err(e) = tenant
+                        .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &tenant_ctx)
+                        .await
                     {
                         sleep_duration = wait_duration;
                         error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);

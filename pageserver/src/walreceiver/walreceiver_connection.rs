@@ -27,7 +27,7 @@ use crate::{
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
-    tenant::{Timeline, WalReceiverInfo},
+    tenant::{Timeline, TimelineRequestContext, WalReceiverInfo},
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
@@ -62,6 +62,7 @@ pub async fn handle_walreceiver_connection(
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
     cancellation: CancellationToken,
     connect_timeout: Duration,
+    ctx: TimelineRequestContext,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
@@ -180,7 +181,7 @@ pub async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint).await?;
+    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
 
     while let Some(replication_message) = {
         select! {
@@ -251,7 +252,7 @@ pub async fn handle_walreceiver_connection(
                         ensure!(lsn.is_aligned());
 
                         walingest
-                            .ingest_record(recdata.clone(), lsn, &mut modification, &mut decoded)
+                            .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
                             .await
                             .with_context(|| format!("could not ingest record at {lsn}"))?;
 
@@ -329,7 +330,7 @@ pub async fn handle_walreceiver_connection(
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
             let (timeline_logical_size, _) = timeline
-                .get_current_logical_size()
+                .get_current_logical_size(&ctx)
                 .context("Status update creation failed to get current logical size")?;
             let status_update = ReplicationFeedback {
                 current_timeline_size: timeline_logical_size,

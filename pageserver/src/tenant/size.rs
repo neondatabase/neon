@@ -7,6 +7,7 @@ use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
 
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
+use crate::tenant::{TenantRequestContext, TimelineRequestContext};
 
 use super::Tenant;
 use utils::id::TimelineId;
@@ -63,13 +64,14 @@ pub(super) async fn gather_inputs(
     tenant: &Tenant,
     limit: &Arc<Semaphore>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
+    tenant_ctx: &TenantRequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // with joinset, on drop, all of the tasks will just be de-scheduled, which we can use to
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
     let timelines = tenant
-        .refresh_gc_info()
+        .refresh_gc_info(tenant_ctx)
         .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
@@ -99,6 +101,9 @@ pub(super) async fn gather_inputs(
 
     for timeline in timelines {
         let last_record_lsn = timeline.get_last_record_lsn();
+
+        let ctx = timeline.get_context();
+        let ctx = Arc::new(ctx);
 
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
             // there's a race between the update (holding tenant.gc_lock) and this read but it
@@ -169,19 +174,23 @@ pub(super) async fn gather_inputs(
             timeline_id: timeline.timeline_id,
         });
 
-        for (lsn, _kind) in &interesting_lsns {
-            if let Some(size) = logical_size_cache.get(&(timeline.timeline_id, *lsn)) {
+        for (lsn, _kind) in interesting_lsns.iter() {
+            let lsn = *lsn;
+            if let Some(size) = logical_size_cache.get(&(timeline.timeline_id, lsn)) {
                 updates.push(Update {
-                    lsn: *lsn,
+                    lsn,
                     timeline_id: timeline.timeline_id,
                     command: Command::Update(*size),
                 });
 
-                needed_cache.insert((timeline.timeline_id, *lsn));
+                needed_cache.insert((timeline.timeline_id, lsn));
             } else {
                 let timeline = Arc::clone(&timeline);
                 let parallel_size_calcs = Arc::clone(limit);
-                joinset.spawn(calculate_logical_size(parallel_size_calcs, timeline, *lsn));
+                let ctx_clone = Arc::clone(&ctx);
+                joinset.spawn(async move {
+                    calculate_logical_size(parallel_size_calcs, timeline, lsn, &ctx_clone).await
+                });
             }
         }
 
@@ -365,13 +374,14 @@ async fn calculate_logical_size(
     limit: Arc<tokio::sync::Semaphore>,
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
+    ctx: &TimelineRequestContext,
 ) -> Result<TimelineAtLsnSizeResult, RecvError> {
     let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
-        .expect("global semaphore should not had been closed");
+        .expect("global semaphore should not have been closed");
 
     let size_res = timeline
-        .spawn_ondemand_logical_size_calculation(lsn)
+        .spawn_ondemand_logical_size_calculation(lsn, ctx)
         .await?;
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
 }
