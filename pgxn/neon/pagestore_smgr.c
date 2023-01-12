@@ -287,12 +287,13 @@ compact_prefetch_buffers(void)
 
 	/*
 	 * Here we have established:
-	 * slots < search_ring_index may be unused (not scanned)
-	 * slots >= search_ring_index and <= empty_ring_index are unused
-	 * slots > empty_ring_index are in use, or outside our buffer's range.
+	 *   slots < search_ring_index have an unknown state (not scanned)
+	 *   slots >= search_ring_index and <= empty_ring_index are unused
+	 *   slots > empty_ring_index are in use, or outside our buffer's range.
+	 * ... unless search_ring_index <= ring_last
 	 * 
 	 * Therefore, there is a gap of at least one unused items between
-	 * search_ring_index and empty_ring_index, which grows as we hit
+	 * search_ring_index and empty_ring_index (both inclusive), which grows as we hit
 	 * more unused items while moving backwards through the array.
 	 */
 
@@ -302,6 +303,7 @@ compact_prefetch_buffers(void)
 		PrefetchRequest *target_slot;
 		bool		found;
 
+		/* update search index to an unprocessed entry */
 		search_ring_index--;
 
 		source_slot = GetPrfSlot(search_ring_index);
@@ -309,6 +311,7 @@ compact_prefetch_buffers(void)
 		if (source_slot->status == PRFS_UNUSED)
 			continue;
 
+		/* slot is used -- start moving slot */
 		target_slot = GetPrfSlot(empty_ring_index);
 
 		Assert(source_slot->status == PRFS_RECEIVED);
@@ -328,16 +331,22 @@ compact_prefetch_buffers(void)
 		/* Adjust the location of our known-empty slot */
 		empty_ring_index--;
 
+		/* empty the moved slot */
 		source_slot->status = PRFS_UNUSED;
 		source_slot->buftag = (BufferTag) {0};
 		source_slot->response = NULL;
 		source_slot->my_ring_index = 0;
 		source_slot->effective_request_lsn = 0;
 
+		/* update bookkeeping */
 		n_moved++;
 	}
 
-	if (MyPState->ring_last != empty_ring_index)
+	/*
+	 * Only when we've moved slots we can expect trailing unused slots,
+	 * so only then we clean up trailing unused slots.
+	 */
+	if (n_moved > 0)
 	{
 		prefetch_cleanup_trailing_unused();
 		return true;
