@@ -10,6 +10,9 @@ members = [
     "libs/*",
 ]
 
+[workspace.package]
+edition = "2021"
+
 [profile.release]
 # This is useful for profiling and, to some extent, debug.
 # Besides, debug info should not affect the performance.
