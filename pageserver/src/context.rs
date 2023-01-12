@@ -112,6 +112,13 @@ pub enum DownloadBehavior {
 /// There are many kinds of tasks in the system. Some are associated with a particular
 /// tenant or timeline, while others are global.
 ///
+/// The task kind affects the shutdown sequence on pageserver shutdown and on detach
+/// of an individual tenant. For example, when shutting down the pageserver, we shut
+/// down the LibpqEndpointListeners first, so that we don't accept any more client
+/// connections while we perform the rest of the shutdown duties. See
+/// [`Timeline::graceful_shutdown and`] and [`tenant_mgr::shutdown_pageserver`]
+/// for details.
+///
 /// Note that we don't try to limit how many task of a certain kind can be running
 /// at the same time.
 ///
