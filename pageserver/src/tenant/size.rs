@@ -97,7 +97,15 @@ pub(super) async fn gather_inputs(
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
-    for timeline in timelines {
+    for timeline_ref in timelines {
+        let timeline = match timeline_ref.timeline() {
+            Ok(tl) => tl,
+            Err(e) => {
+                info!("skipping timeline {}: {:#}", timeline_ref.id, e);
+                continue; // TODO review: OK to do this here?
+            }
+        };
+
         let last_record_lsn = timeline.get_last_record_lsn();
 
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {

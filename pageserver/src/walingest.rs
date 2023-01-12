@@ -740,7 +740,6 @@ impl WalIngest {
             },
         )?;
 
-        let timeline_read = self.timeline_ref.timeline()?;
         for xnode in &parsed.xnodes {
             for forknum in MAIN_FORKNUM..=VISIBILITYMAP_FORKNUM {
                 let rel = RelTag {
@@ -749,6 +748,7 @@ impl WalIngest {
                     dbnode: xnode.dbnode,
                     relnode: xnode.relnode,
                 };
+                let timeline_read = self.timeline_ref.timeline()?;
                 let last_lsn = timeline_read.get_last_record_lsn();
                 if with_ondemand_download(|| modification.tline.get_rel_exists(rel, last_lsn, true))
                     .await?

@@ -10,6 +10,7 @@
 //! ensure that no stray instance copies are stored.
 
 use std::{
+    marker::PhantomData,
     ops::Deref,
     sync::{Arc, Weak},
     time::Duration,
@@ -57,12 +58,13 @@ impl TimelineRef {
 
     /// Successfully upgrades to [`TimelineGuard`] if the timeline is in pageserver's memory.
     /// No state checks are made, only timeline liveness itself.
-    pub fn timeline(&self) -> anyhow::Result<TimelineGuard> {
+    pub fn timeline(&self) -> anyhow::Result<TimelineGuard<'_>> {
         Ok(TimelineGuard {
             timeline: self
                 .timeline
                 .upgrade()
                 .with_context(|| format!("Timeline {} is dropped", self.id))?,
+            _phantom: PhantomData::default(),
         })
     }
 
@@ -70,7 +72,7 @@ impl TimelineRef {
     /// has [`TimelineState::Active`] state when upgraded.
     ///
     /// Further state checks are user's responsibility, the active state can change.
-    pub fn active_timeline(&self) -> anyhow::Result<TimelineGuard> {
+    pub fn active_timeline(&self) -> anyhow::Result<TimelineGuard<'_>> {
         let timeline = self.timeline()?;
         anyhow::ensure!(
             timeline.is_active(),
@@ -85,7 +87,7 @@ impl TimelineRef {
     /// Bails if the timeout expires or timeline fails to become active (e.g. gets into end state that never transitions to active).
     ///
     /// Further state checks are user's responsibility, the active state can change.
-    pub async fn get_active_timeline_with_timeout(&self) -> anyhow::Result<TimelineGuard> {
+    pub async fn get_active_timeline_with_timeout(&self) -> anyhow::Result<TimelineGuard<'_>> {
         let timeline = self.timeline()?;
         match tokio::time::timeout(
             ACTIVE_TIMELINE_WAIT_TIMEOUT,
@@ -103,12 +105,13 @@ impl TimelineRef {
 /// A wrapper around `Arc<Timeline>` that prevents it from being dropped fully and allows accessing timeline's methods.
 /// Not intended to be cloned or stored somewhere: use it to access timeline's properties and drop it afterwards.
 /// By reacquiring the guard periodically, the timeline-accessing processes can stop when the timeline is being shut down.
-pub struct TimelineGuard {
+pub struct TimelineGuard<'a> {
     timeline: Arc<Timeline>,
+    _phantom: PhantomData<&'a Timeline>,
 }
 
 // All `Timeline::` methods here exist because `Arc<Timeline>` is needed for them to run
-impl TimelineGuard {
+impl<'a> TimelineGuard<'a> {
     pub fn get_current_logical_size(&self) -> anyhow::Result<(u64, bool)> {
         Timeline::get_current_logical_size(&self.timeline)
     }
@@ -159,7 +162,7 @@ impl TimelineGuard {
     }
 }
 
-impl Deref for TimelineGuard {
+impl<'a> Deref for TimelineGuard<'a> {
     // Avoid exposing `Arc` here, so no `Arc::clone` leaks are possible.
     type Target = Timeline;
 

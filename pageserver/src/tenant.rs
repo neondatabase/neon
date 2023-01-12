@@ -1886,7 +1886,14 @@ impl Tenant {
         //
         // See comments in [`Tenant::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
-        for timeline in gc_timelines {
+        for timeline_ref in gc_timelines {
+            let timeline = match timeline_ref.timeline() {
+                Err(e) => {
+                    info!("skipping gc on timeline {}: {:#}", timeline_ref.id, e);
+                    continue; // TODO review: is it ok to do this here? Should be, because we break below on shutdown request.
+                }
+                Ok(tl) => tl,
+            };
             if task_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
@@ -1905,7 +1912,7 @@ impl Tenant {
     /// [`Tenant::get_gc_horizon`].
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
-    pub async fn refresh_gc_info(&self) -> anyhow::Result<Vec<TimelineGuard>> {
+    pub async fn refresh_gc_info(&self) -> anyhow::Result<Vec<TimelineRef>> {
         // since this method can now be called at different rates than the configured gc loop, it
         // might be that these configuration values get applied faster than what it was previously,
         // since these were only read from the gc task.
@@ -1924,7 +1931,7 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
-    ) -> anyhow::Result<Vec<TimelineGuard>> {
+    ) -> anyhow::Result<Vec<TimelineRef>> {
         // grab mutex to prevent new timelines from being created here.
         let gc_cs = self.gc_cs.lock().await;
 
@@ -1976,10 +1983,11 @@ impl Tenant {
         let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
         for timeline_id in timeline_ids {
             // Timeline is known to be local and loaded.
-            let timeline = self
+            let timeline_ref = self
                 .get_timeline(timeline_id)
-                .with_context(|| format!("Timeline {timeline_id} was not found"))?
-                .timeline()?;
+                .with_context(|| format!("Timeline {timeline_id} was not found"))?;
+
+            let timeline = timeline_ref.timeline()?;
 
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timeline_id) = target_timeline_id {
@@ -1998,7 +2006,7 @@ impl Tenant {
                     .collect();
                 timeline.update_gc_info(branchpoints, cutoff, pitr).await?;
 
-                gc_timelines.push(timeline);
+                gc_timelines.push(timeline_ref);
             }
         }
         drop(gc_cs);
@@ -2030,15 +2038,13 @@ impl Tenant {
         // Step 2 is to avoid initializing the new branch using data removed by past GC iterations
         // or in-queue GC iterations.
 
-        let src_timeline = self
-            .get_timeline(src)
-            .with_context(|| {
-                format!(
-                    "No ancestor {} found for timeline {}/{}",
-                    src, self.tenant_id, dst
-                )
-            })?
-            .timeline()?;
+        let src_timeline_ref = self.get_timeline(src).with_context(|| {
+            format!(
+                "No ancestor {} found for timeline {}/{}",
+                src, self.tenant_id, dst
+            )
+        })?;
+        let src_timeline = src_timeline_ref.timeline()?;
 
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
 
@@ -2922,7 +2928,7 @@ mod tests {
         Ok(())
     }
 
-    async fn make_some_layers(tline: &TimelineGuard, start_lsn: Lsn) -> anyhow::Result<()> {
+    async fn make_some_layers(tline: &TimelineGuard<'_>, start_lsn: Lsn) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {

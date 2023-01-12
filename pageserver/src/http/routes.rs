@@ -79,7 +79,7 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 
 // Helper function to construct a TimelineInfo struct for a timeline
 async fn build_timeline_info(
-    timeline: &TimelineGuard,
+    timeline: &TimelineGuard<'_>,
     include_non_incremental_logical_size: bool,
 ) -> anyhow::Result<TimelineInfo> {
     let mut info = build_timeline_info_common(timeline)?;
@@ -99,7 +99,7 @@ async fn build_timeline_info(
     Ok(info)
 }
 
-fn build_timeline_info_common(timeline: &TimelineGuard) -> anyhow::Result<TimelineInfo> {
+fn build_timeline_info_common(timeline: &TimelineGuard<'_>) -> anyhow::Result<TimelineInfo> {
     let last_record_lsn = timeline.get_last_record_lsn();
     let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
         let guard = timeline.last_received_wal.lock().unwrap();
@@ -270,10 +270,10 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             .await
             .map_err(ApiError::NotFound)?;
 
-        let timeline = tenant
+        let timeline_ref = tenant
             .get_timeline(timeline_id)
-            .and_then(|timeline| timeline.timeline())
             .map_err(ApiError::NotFound)?;
+        let timeline = timeline_ref.timeline().map_err(ApiError::NotFound)?;
 
         let timeline_info = build_timeline_info(&timeline, include_non_incremental_logical_size)
             .await
@@ -299,12 +299,11 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
-    let timeline = mgr::get_tenant(tenant_id, true)
+    let timeline_ref = mgr::get_tenant(tenant_id, true)
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id))
-        .map_err(ApiError::NotFound)?
-        .active_timeline()
         .map_err(ApiError::NotFound)?;
+    let timeline = timeline_ref.active_timeline().map_err(ApiError::NotFound)?;
     let result = with_ondemand_download(|| timeline.find_lsn_for_timestamp(timestamp_pg))
         .await
         .map_err(ApiError::InternalServerError)?;
@@ -773,10 +772,10 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
-    let timeline = tenant
+    let timeline_ref = tenant
         .get_timeline(timeline_id)
-        .and_then(|timeline| timeline.active_timeline())
         .map_err(ApiError::NotFound)?;
+    let timeline = timeline_ref.active_timeline().map_err(ApiError::NotFound)?;
     timeline
         .freeze_and_flush()
         .await
@@ -799,11 +798,10 @@ async fn timeline_download_remote_layers_handler_post(
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
-    let timeline = tenant
+    let timeline_ref = tenant
         .get_timeline(timeline_id)
-        .map_err(ApiError::NotFound)?
-        .active_timeline()
         .map_err(ApiError::NotFound)?;
+    let timeline = timeline_ref.active_timeline().map_err(ApiError::NotFound)?;
     match timeline.spawn_download_all_remote_layers().await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
@@ -820,11 +818,10 @@ async fn timeline_download_remote_layers_handler_get(
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
-    let timeline = tenant
+    let timeline_ref = tenant
         .get_timeline(timeline_id)
-        .map_err(ApiError::NotFound)?
-        .active_timeline()
         .map_err(ApiError::NotFound)?;
+    let timeline = timeline_ref.active_timeline().map_err(ApiError::NotFound)?;
     let info = timeline
         .get_download_all_remote_layers_task_info()
         .context("task never started since last pageserver process start")
