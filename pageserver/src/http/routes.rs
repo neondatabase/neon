@@ -814,6 +814,7 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
         .map_err(ApiError::NotFound)?;
     timeline
         .compact(&ctx)
+        .instrument(info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id))
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -841,6 +842,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         .map_err(ApiError::InternalServerError)?;
     timeline
         .compact(&ctx)
+        .instrument(info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id))
         .await
         .map_err(ApiError::InternalServerError)?;
 
