@@ -84,7 +84,7 @@ fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn
 
 // Construct a partitioning for testing get_difficulty map when we
 // don't have an exact result of `collect_keyspace` to work with.
-fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, lsn: Lsn) -> KeyPartitioning {
+fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, _lsn: Lsn) -> KeyPartitioning {
     let mut parts = Vec::new();
 
     // We add a partition boundary at the start of each image layer,
