@@ -1914,9 +1914,9 @@ class NeonPageserver(PgProtocol):
             ".*Shutdown task error: walreceiver connection handling failure.*",
             ".*wal_connection_manager.*tcp connect error: Connection refused.*",
             ".*query handler for .* failed: Socket IO error: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Postgres connection error.*",
-            ".*serving compute connection task.*exited with error: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Postgres query error.*",
+            ".*connection handler exited with error: Postgres connection error.*",
+            ".*connection handler exited with error: Connection reset by peer.*",
+            ".*connection handler exited with error: Postgres query error.*",
             ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",
             ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
             ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
@@ -1945,6 +1945,7 @@ class NeonPageserver(PgProtocol):
             # Tenant::delete_timeline() can cause any of the four following errors.
             # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
             ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
+            ".*Compaction failed, .* queue is in state Stopped.*",  # similarly for compaction
             ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
             ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs

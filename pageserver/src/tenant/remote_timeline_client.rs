@@ -214,6 +214,7 @@ use anyhow::ensure;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use std::ops::DerefMut;
 use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
@@ -225,12 +226,12 @@ use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::{
     config::PageServerConf,
     task_mgr,
-    task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
     tenant::metadata::TimelineMetadata,
     tenant::upload_queue::{
         UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
     },
+    tenant::TimelineRequestContext,
     {exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS},
 };
 
@@ -313,23 +314,48 @@ impl RemoteTimelineClient {
     /// Initialize the upload queue for a remote storage that already received
     /// an index file upload, i.e., it's not empty.
     /// The given `index_part` must be the one on the remote.
-    pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
+    pub fn init_upload_queue(
+        self: &Arc<Self>,
+        index_part: &IndexPart,
+        upload_ctx: TimelineRequestContext,
+    ) -> anyhow::Result<()> {
+        let cancellation_token = upload_ctx.cancellation_token().clone();
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_with_current_remote_index_part(index_part)?;
+        upload_queue.initialize_with_current_remote_index_part(index_part, upload_ctx)?;
         self.update_remote_physical_size_gauge(Some(index_part));
+        self.spawn_cancellation_watch(cancellation_token);
         Ok(())
     }
 
     /// Initialize the upload queue for the case where the remote storage is empty,
     /// i.e., it doesn't have an `IndexPart`.
     pub fn init_upload_queue_for_empty_remote(
-        &self,
+        self: &Arc<Self>,
         local_metadata: &TimelineMetadata,
+        upload_ctx: TimelineRequestContext,
     ) -> anyhow::Result<()> {
+        let cancellation_token = upload_ctx.cancellation_token().clone();
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_empty_remote(local_metadata)?;
+        upload_queue.initialize_empty_remote(local_metadata, upload_ctx)?;
         self.update_remote_physical_size_gauge(None);
+        self.spawn_cancellation_watch(cancellation_token);
         Ok(())
+    }
+
+    /// Spawn a task that calls `stop` on cancellation. It's important that we
+    /// stop the upload queue promptly, because it holds onto the RequestContext,
+    /// which in turn prevents the Timeline from shutting down.
+    fn spawn_cancellation_watch(self: &Arc<Self>, cancellation_token: CancellationToken) {
+        let self_rc = Arc::clone(self);
+        task_mgr::spawn(
+            self.runtime.handle(),
+            "remote upload queue cancellation watch",
+            false,
+            async move {
+                cancellation_token.cancelled().await;
+                self_rc.stop();
+            },
+        );
     }
 
     pub fn last_uploaded_consistent_lsn(&self) -> Option<Lsn> {
@@ -625,7 +651,10 @@ impl RemoteTimelineClient {
     ///
     /// Wait for all previously scheduled uploads/deletions to complete
     ///
-    pub async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub async fn wait_completion(
+        self: &Arc<Self>,
+        ctx: &TimelineRequestContext,
+    ) -> anyhow::Result<()> {
         let (sender, mut receiver) = tokio::sync::watch::channel(());
         let barrier_op = UploadOp::Barrier(sender);
 
@@ -639,9 +668,16 @@ impl RemoteTimelineClient {
             self.launch_queued_tasks(upload_queue);
         }
 
-        if receiver.changed().await.is_err() {
-            anyhow::bail!("wait_completion aborted because upload queue was stopped");
-        }
+        tokio::select! {
+            result = receiver.changed() => {
+                if result.is_err() {
+                    anyhow::bail!("wait_completion aborted because upload queue was stopped");
+                }
+            },
+            _ = ctx.cancelled() => {
+                anyhow::bail!("request cancelled while waiting on uploads to finish");
+            },
+        };
         Ok(())
     }
 
@@ -719,16 +755,15 @@ impl RemoteTimelineClient {
 
             // Spawn task to perform the task
             let self_rc = Arc::clone(self);
+
+            let cancellation_token = upload_queue.upload_ctx.cancellation_token().clone();
+
             task_mgr::spawn(
                 self.runtime.handle(),
-                TaskKind::RemoteUploadTask,
-                Some(self.tenant_id),
-                Some(self.timeline_id),
                 "remote upload",
                 false,
                 async move {
-                    self_rc.perform_upload_task(task).await;
-                    Ok(())
+                    self_rc.perform_upload_task(task, cancellation_token).await;
                 }
                 .instrument(info_span!(parent: None, "remote_upload", tenant = %self.tenant_id, timeline = %self.timeline_id, upload_task_id = %task_id)),
             );
@@ -748,7 +783,11 @@ impl RemoteTimelineClient {
     /// The task can be shut down, however. That leads to stopping the whole
     /// queue.
     ///
-    async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
+    async fn perform_upload_task(
+        self: &Arc<Self>,
+        task: Arc<UploadTask>,
+        cancellation_token: CancellationToken,
+    ) {
         // Loop to retry until it completes.
         loop {
             // If we're requested to shut down, close up shop and exit.
@@ -760,7 +799,7 @@ impl RemoteTimelineClient {
             // the Future, but we're not 100% sure if the remote storage library
             // is cancellation safe, so we don't dare to do that. Hopefully, the
             // upload finishes or times out soon enough.
-            if task_mgr::is_shutdown_requested() {
+            if cancellation_token.is_cancelled() {
                 info!("upload task cancelled by shutdown request");
                 self.calls_unfinished_metric_end(&task.op);
                 self.stop();
@@ -858,7 +897,7 @@ impl RemoteTimelineClient {
 
                     // sleep until it's time to retry, or we're cancelled
                     tokio::select! {
-                        _ = task_mgr::shutdown_watcher() => { },
+                        _ = cancellation_token.cancelled() => { },
                         _ = exponential_backoff(
                             retries,
                             DEFAULT_BASE_BACKOFF_SECONDS,
@@ -1010,7 +1049,9 @@ impl RemoteTimelineClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::{DownloadBehavior, RequestContext, TaskKind};
     use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
+    use crate::DEFAULT_PG_VERSION;
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
     use std::{collections::HashSet, path::Path};
     use utils::lsn::Lsn;
@@ -1029,7 +1070,7 @@ mod tests {
             Lsn(0),
             // Any version will do
             // but it should be consistent with the one in the tests
-            crate::DEFAULT_PG_VERSION,
+            DEFAULT_PG_VERSION,
         );
 
         // go through serialize + deserialize to fix the header, including checksum
@@ -1064,9 +1105,19 @@ mod tests {
     // Test scheduling
     #[test]
     fn upload_scheduling() -> anyhow::Result<()> {
+        // Use a current-thread runtime in the test
+        let runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+        ));
+        let _entered = runtime.enter();
+
         let harness = TenantHarness::create("upload_scheduling")?;
+        let (tenant, tenant_ctx) = runtime.block_on(harness.load());
+        let (_timeline, timeline_ctx) =
+            tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &tenant_ctx)?;
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
-        std::fs::create_dir_all(&timeline_path)?;
 
         let remote_fs_dir = harness.conf.workdir.join("remote_fs");
         std::fs::create_dir_all(remote_fs_dir)?;
@@ -1083,14 +1134,6 @@ mod tests {
             .unwrap(),
             storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
         };
-
-        // Use a current-thread runtime in the test
-        let runtime = Box::leak(Box::new(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?,
-        ));
-        let _entered = runtime.enter();
 
         // Test outline:
         //
@@ -1127,7 +1170,11 @@ mod tests {
         println!("remote_timeline_dir: {}", remote_timeline_dir.display());
 
         let metadata = dummy_metadata(Lsn(0x10));
-        client.init_upload_queue_for_empty_remote(&metadata)?;
+        let upload_ctx = timeline_ctx.register_another(RequestContext::new(
+            TaskKind::RemoteUploadTask,
+            DownloadBehavior::Error,
+        ));
+        client.init_upload_queue_for_empty_remote(&metadata, upload_ctx)?;
 
         // Create a couple of dummy files,  schedule upload for them
         let content_foo = dummy_contents("foo");
@@ -1167,7 +1214,7 @@ mod tests {
         }
 
         // Wait for the uploads to finish
-        runtime.block_on(client.wait_completion())?;
+        runtime.block_on(client.wait_completion(&timeline_ctx))?;
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();
@@ -1204,7 +1251,7 @@ mod tests {
         assert_remote_files(&["foo", "bar", "index_part.json"], &remote_timeline_dir);
 
         // Finish them
-        runtime.block_on(client.wait_completion())?;
+        runtime.block_on(client.wait_completion(&timeline_ctx))?;
 
         assert_remote_files(&["bar", "baz", "index_part.json"], &remote_timeline_dir);
 

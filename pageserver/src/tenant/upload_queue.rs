@@ -4,6 +4,7 @@ use super::storage_layer::LayerFileName;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::TimelineRequestContext;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
@@ -73,6 +74,13 @@ pub(crate) struct UploadQueueInitialized {
     /// tasks to finish. For example, metadata upload cannot be performed before all
     /// preceding layer file uploads have completed.
     pub(crate) queued_operations: VecDeque<UploadOp>,
+
+    /// Context used for the upload tasks. Note that this is associated with the
+    /// Timeline, so this prevents the Timeline from being shut down. To ensure quick
+    /// shutdown, RemoteTimelineClient spawns a task to wait for cancellation on the
+    /// context and stop the queue. Otherwise we woudn't notice the cancellation
+    /// until next upload attempt.
+    pub(crate) upload_ctx: TimelineRequestContext,
 }
 
 pub(crate) struct UploadQueueStopped {
@@ -83,6 +91,7 @@ impl UploadQueue {
     pub(crate) fn initialize_empty_remote(
         &mut self,
         metadata: &TimelineMetadata,
+        upload_ctx: TimelineRequestContext,
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
@@ -108,6 +117,7 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            upload_ctx,
         };
 
         *self = UploadQueue::Initialized(state);
@@ -117,6 +127,7 @@ impl UploadQueue {
     pub(crate) fn initialize_with_current_remote_index_part(
         &mut self,
         index_part: &IndexPart,
+        upload_ctx: TimelineRequestContext,
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
@@ -153,6 +164,7 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            upload_ctx,
         };
 
         *self = UploadQueue::Initialized(state);

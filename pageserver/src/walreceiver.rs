@@ -103,19 +103,18 @@ pub enum TaskStateUpdate<E> {
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
     pub fn spawn<Fut>(
-        task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, CancellationToken) -> Fut + Send + 'static,
+        task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>) -> Fut + Send + 'static,
+        cancellation: CancellationToken,
     ) -> Self
     where
         Fut: Future<Output = anyhow::Result<()>> + Send,
         E: Send + Sync + 'static,
     {
-        let cancellation = CancellationToken::new();
         let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
 
-        let cancellation_clone = cancellation.clone();
         let join_handle = WALRECEIVER_RUNTIME.spawn(async move {
             events_sender.send(TaskStateUpdate::Started).ok();
-            task(events_sender, cancellation_clone).await
+            task(events_sender).await
         });
 
         TaskHandle {

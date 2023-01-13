@@ -2,6 +2,7 @@ mod auth;
 pub mod basebackup;
 pub mod config;
 pub mod consumption_metrics;
+pub mod context;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
@@ -21,7 +22,6 @@ pub mod walredo;
 
 use std::path::Path;
 
-use crate::task_mgr::TaskKind;
 use tracing::info;
 
 /// Current storage format version
@@ -40,35 +40,6 @@ pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
-
-pub async fn shutdown_pageserver(exit_code: i32) {
-    // Shut down the libpq endpoint task. This prevents new connections from
-    // being accepted.
-    task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None).await;
-
-    // Shut down any page service tasks.
-    task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None).await;
-
-    // Shut down all the tenants. This flushes everything to disk and kills
-    // the checkpoint and GC tasks.
-    tenant::mgr::shutdown_all_tenants().await;
-
-    // Stop syncing with remote storage.
-    //
-    // FIXME: Does this wait for the sync tasks to finish syncing what's queued up?
-    // Should it?
-    task_mgr::shutdown_tasks(Some(TaskKind::RemoteUploadTask), None, None).await;
-
-    // Shut down the HTTP endpoint last, so that you can still check the server's
-    // status while it's shutting down.
-    // FIXME: We should probably stop accepting commands like attach/detach earlier.
-    task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None).await;
-
-    // There should be nothing left, but let's be sure
-    task_mgr::shutdown_tasks(None, None, None).await;
-    info!("Shut down successfully completed");
-    std::process::exit(exit_code);
-}
 
 const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
 const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;

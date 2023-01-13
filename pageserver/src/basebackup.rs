@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, bail, ensure, Context};
+use anyhow::{anyhow, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
 use std::fmt::Write as FmtWrite;
@@ -27,7 +27,8 @@ use tracing::*;
 ///
 use tokio_tar::{Builder, EntryType, Header};
 
-use crate::tenant::Timeline;
+use crate::tenant::TimelineRequestContext;
+use crate::tenant::{PageReconstructError, Timeline};
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
@@ -52,7 +53,8 @@ pub async fn send_basebackup_tarball<'a, W>(
     req_lsn: Option<Lsn>,
     prev_lsn: Option<Lsn>,
     full_backup: bool,
-) -> anyhow::Result<()>
+    ctx: &'a TimelineRequestContext,
+) -> Result<(), PageReconstructError>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
@@ -91,8 +93,10 @@ where
 
     // Consolidate the derived and the provided prev_lsn values
     let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
-        if backup_prev != Lsn(0) {
-            ensure!(backup_prev == provided_prev_lsn);
+        if backup_prev != Lsn(0) && backup_prev != provided_prev_lsn {
+            return Err(PageReconstructError::Other(anyhow!(
+                "prev LSN doesn't match"
+            )));
         }
         provided_prev_lsn
     } else {
@@ -110,6 +114,7 @@ where
         lsn: backup_lsn,
         prev_record_lsn: prev_lsn,
         full_backup,
+        ctx,
     };
     basebackup
         .send_tarball()
@@ -129,13 +134,14 @@ where
     lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
+    ctx: &'a TimelineRequestContext,
 }
 
 impl<'a, W> Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
-    async fn send_tarball(mut self) -> anyhow::Result<()> {
+    async fn send_tarball(mut self) -> Result<(), PageReconstructError> {
         // TODO include checksum
 
         // Create pgdata subdirs structure
@@ -171,45 +177,67 @@ where
             SlruKind::MultiXactOffsets,
             SlruKind::MultiXactMembers,
         ] {
-            for segno in self.timeline.list_slru_segments(kind, self.lsn).await? {
+            for segno in self
+                .timeline
+                .list_slru_segments(kind, self.lsn, self.ctx)
+                .await?
+            {
                 self.add_slru_segment(kind, segno).await?;
             }
         }
 
         // Create tablespace directories
-        for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn).await? {
+        for ((spcnode, dbnode), has_relmap_file) in
+            self.timeline.list_dbdirs(self.lsn, self.ctx).await?
+        {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
             // Gather and send relational files in each database if full backup is requested.
             if self.full_backup {
-                for rel in self.timeline.list_rels(spcnode, dbnode, self.lsn).await? {
+                for rel in self
+                    .timeline
+                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
+                    .await?
+                {
                     self.add_rel(rel).await?;
                 }
             }
         }
-        for xid in self.timeline.list_twophase_files(self.lsn).await? {
+        for xid in self
+            .timeline
+            .list_twophase_files(self.lsn, self.ctx)
+            .await?
+        {
             self.add_twophase_file(xid).await?;
         }
 
         fail_point!("basebackup-before-control-file", |_| {
-            bail!("failpoint basebackup-before-control-file")
+            Err(PageReconstructError::from(anyhow!(
+                "failpoint basebackup-before-control-file"
+            )))
         });
 
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file().await?;
-        self.ar.finish().await?;
+        self.ar.finish().await.context("could not finish tarball")?;
         debug!("all tarred up!");
         Ok(())
     }
 
-    async fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
-        let nblocks = self.timeline.get_rel_size(tag, self.lsn, false).await?;
+    async fn add_rel(&mut self, tag: RelTag) -> Result<(), PageReconstructError> {
+        let nblocks = self
+            .timeline
+            .get_rel_size(tag, self.lsn, false, self.ctx)
+            .await?;
 
         // If the relation is empty, create an empty file
         if nblocks == 0 {
             let file_name = tag.to_segfile_name(0);
             let header = new_tar_header(&file_name, 0)?;
-            self.ar.append(&header, &mut io::empty()).await?;
+            self.ar
+                .append(&header, &mut io::empty())
+                .await
+                .context("could not write empty relfile to tar stream")?;
             return Ok(());
         }
 
@@ -218,19 +246,21 @@ where
         let mut seg = 0;
         while startblk < nblocks {
             let endblk = std::cmp::min(startblk + RELSEG_SIZE, nblocks);
-
             let mut segment_data: Vec<u8> = vec![];
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
+                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false, self.ctx)
                     .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
             let file_name = tag.to_segfile_name(seg as u32);
             let header = new_tar_header(&file_name, segment_data.len() as u64)?;
-            self.ar.append(&header, segment_data.as_slice()).await?;
+            self.ar
+                .append(&header, segment_data.as_slice())
+                .await
+                .context("could not write relfile segment to tar stream")?;
 
             seg += 1;
             startblk = endblk;
@@ -245,14 +275,14 @@ where
     async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
         let nblocks = self
             .timeline
-            .get_slru_segment_size(slru, segno, self.lsn)
+            .get_slru_segment_size(slru, segno, self.lsn, self.ctx)
             .await?;
 
         let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
         for blknum in 0..nblocks {
             let img = self
                 .timeline
-                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)
+                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn, self.ctx)
                 .await?;
 
             if slru == SlruKind::Clog {
@@ -287,7 +317,7 @@ where
         let relmap_img = if has_relmap_file {
             let img = self
                 .timeline
-                .get_relmap_file(spcnode, dbnode, self.lsn)
+                .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
                 .await?;
             ensure!(img.len() == 512);
             Some(img)
@@ -323,7 +353,7 @@ where
             if !has_relmap_file
                 && self
                     .timeline
-                    .list_rels(spcnode, dbnode, self.lsn)
+                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
                     .await?
                     .is_empty()
             {
@@ -356,7 +386,10 @@ where
     // Extract twophase state files
     //
     async fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
-        let img = self.timeline.get_twophase_file(xid, self.lsn).await?;
+        let img = self
+            .timeline
+            .get_twophase_file(xid, self.lsn, self.ctx)
+            .await?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -394,12 +427,12 @@ where
 
         let checkpoint_bytes = self
             .timeline
-            .get_checkpoint(self.lsn)
+            .get_checkpoint(self.lsn, self.ctx)
             .await
             .context("failed to get checkpoint bytes")?;
         let pg_control_bytes = self
             .timeline
-            .get_control_file(self.lsn)
+            .get_control_file(self.lsn, self.ctx)
             .await
             .context("failed get control bytes")?;
 
