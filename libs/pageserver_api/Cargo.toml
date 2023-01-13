@@ -11,7 +11,6 @@ const_format.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
-
 utils.workspace = true
 postgres_ffi.workspace = true
 

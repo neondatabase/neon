@@ -45,7 +45,6 @@ url.workspace = true
 uuid.workspace = true
 webpki-roots.workspace = true
 x509-parser.workspace = true
-
 metrics.workspace = true
 pq_proto.workspace = true
 utils.workspace = true

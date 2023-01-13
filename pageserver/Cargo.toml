@@ -56,7 +56,6 @@ toml_edit.workspace = true
 tracing.workspace = true
 url.workspace = true
 walkdir.workspace = true
-
 metrics.workspace = true
 pageserver_api.workspace = true
 postgres_connection.workspace = true

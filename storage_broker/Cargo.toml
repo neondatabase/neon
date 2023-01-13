@@ -26,7 +26,6 @@ tonic.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-stream.workspace = true
 tracing.workspace = true
-
 metrics.workspace = true
 utils.workspace = true
 

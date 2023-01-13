@@ -17,7 +17,6 @@ log.workspace = true
 memoffset.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-
 utils.workspace = true
 
 workspace_hack.workspace = true

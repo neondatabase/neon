@@ -20,7 +20,6 @@ tar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 url.workspace = true
-
 # Note: Do not directly depend on pageserver or safekeeper; use pageserver_api or safekeeper_api
 # instead, so that recompile times are better.
 pageserver_api.workspace = true
