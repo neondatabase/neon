@@ -196,7 +196,6 @@ jobs:
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
-          echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
 
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
