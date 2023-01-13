@@ -4538,6 +4538,7 @@ dependencies = [
  "futures-util",
  "hashbrown",
  "indexmap",
+ "itertools",
  "libc",
  "log",
  "memchr",

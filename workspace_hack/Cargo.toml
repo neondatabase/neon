@@ -25,6 +25,7 @@ futures-task = { version = "0.3", default-features = false, features = ["alloc",
 futures-util = { version = "0.3", features = ["alloc", "async-await", "async-await-macro", "channel", "futures-channel", "futures-io", "futures-macro", "futures-sink", "io", "memchr", "sink", "slab", "std"] }
 hashbrown = { version = "0.12", features = ["ahash", "inline-more", "raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
+itertools = { version = "0.10", features = ["use_alloc", "use_std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2", features = ["std"] }
@@ -53,6 +54,7 @@ bytes = { version = "1", features = ["serde", "std"] }
 either = { version = "1", features = ["use_std"] }
 hashbrown = { version = "0.12", features = ["ahash", "inline-more", "raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
+itertools = { version = "0.10", features = ["use_alloc", "use_std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2", features = ["std"] }
