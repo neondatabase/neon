@@ -151,7 +151,7 @@ impl Conf {
 fn create_unix_socket_directory() -> anyhow::Result<PathBuf> {
     let current_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .context("Faled to generate random tmp dir name")?
+        .context("random tmp dir name generation")?
         .as_millis();
     let tmp_dir_path = std::env::temp_dir().join(format!("wal_craft_{current_millis}"));
 
