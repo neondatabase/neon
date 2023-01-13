@@ -171,6 +171,9 @@ task_local! {
 ///
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum TaskKind {
+    // Pageserver startup, i.e., `main`
+    Startup,
+
     // libpq listener task. It just accepts connection and spawns a
     // PageRequestHandler task for each connection.
     LibpqEndpointListener,
@@ -200,6 +203,8 @@ pub enum TaskKind {
     // Initial logical size calculation
     InitialLogicalSizeCalculation,
 
+    OndemandLogicalSizeCalculation,
+
     // Task that flushes frozen in-memory layers to disk
     LayerFlushTask,
 
@@ -222,6 +227,12 @@ pub enum TaskKind {
     DownloadAllRemoteLayers,
     // Task that calculates synthetis size for all active tenants
     CalculateSyntheticSize,
+
+    // A request that comes in via the pageserver HTTP API.
+    MgmtRequest,
+
+    #[cfg(test)]
+    UnitTest,
 }
 
 #[derive(Default)]
