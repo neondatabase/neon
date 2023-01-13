@@ -198,42 +198,23 @@ jobs:
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
           echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
 
-      - name: Debug - Check folder structure
-        run: |
-          pwd
-          ls -la
-          du -sh .cargo
-
-#      # Don't include the ~/.cargo/registry/src directory. It contains just
-#      # uncompressed versions of the crates in ~/.cargo/registry/cache
-#      # directory, and it's faster to let 'cargo' to rebuild it from the
-#      # compressed crates.
-#      - name: Cache cargo deps
-#        id: cache_cargo
-#        uses: actions/cache@v3
-#        with:
-#          path: |
-#            ~/.cargo/registry/
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
-#          key: |
-#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
-
-      - name: Download rust cache (s3 cache)
-        uses: ./.github/actions/cache-download
+      # Don't include the ~/.cargo/registry/src directory. It contains just
+      # uncompressed versions of the crates in ~/.cargo/registry/cache
+      # directory, and it's faster to let 'cargo' to rebuild it from the
+      # compressed crates.
+      # remove target/ as the size is too large for GitHub actions cache
+      - name: Cache cargo deps
+        id: cache_cargo
+        uses: actions/cache@v3
         with:
+          path: |
+            ~/.cargo/registry/
+            !~/.cargo/registry/src
+            ~/.cargo/git/
+          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
             v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-cache-main
-
-      - name: Debug - Check folder structure
-        run: |
-          pwd
-          ls -la
-          du -sh .cargo
+            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -316,23 +297,6 @@ jobs:
         with:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: /tmp/neon
-
-      # HOME is overridden for containers - https://github.com/actions/runner/issues/863
-      - name: Debug - Check folder structure
-        run: |
-          pwd
-          ls -la .cargo
-          du -sh .cargo
-
-      - name: Upload rust cache (s3 cache)
-        uses: ./.github/actions/cache-upload
-        with:
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-          path: |
-            .cargo/registry
-            !.cargo/registry/src
-            .cargo/git
-            target
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
