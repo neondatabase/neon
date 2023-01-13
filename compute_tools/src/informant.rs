@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-static VM_INFORMANT_PATH: &str = "/bin/vm-informant";
+const VM_INFORMANT_PATH: &str = "/bin/vm-informant";
 const RESTART_INFORMANT_AFTER_MILLIS: u64 = 5000;
 
 /// Launch a thread to start the VM informant if it's present (and restart, on failure)

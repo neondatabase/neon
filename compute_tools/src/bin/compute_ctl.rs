@@ -18,7 +18,9 @@
 //! - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
 //!   last activity requests.
 //!
-//! If the `vm-informant` binary is present, it will also be started.
+//! If the `vm-informant` binary is present at `/bin/vm-informant`, it will also be started. For VM
+//! compute nodes, `vm-informant` communicates with the VM autoscaling system. It coordinates
+//! downscaling and (eventually) will request immediate upscaling under resource pressure.
 //!
 //! Usage example:
 //! ```sh
