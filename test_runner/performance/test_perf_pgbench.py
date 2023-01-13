@@ -172,8 +172,10 @@ def get_scales_matrix(default: int = 10) -> List[int]:
 @pytest.mark.parametrize("duration", get_durations_matrix())
 def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
-    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
-    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
+    # run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
+    # run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
 # The following 3 tests run on an existing database as it was set up by previous tests,

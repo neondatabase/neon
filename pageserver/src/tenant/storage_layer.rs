@@ -187,6 +187,12 @@ pub trait PersistentLayer: Layer {
     fn file_size(&self) -> Option<u64>;
 }
 
+impl PartialEq for dyn PersistentLayer {
+    fn eq(&self, other: &Self) -> bool {
+        self.filename().eq(&other.filename())
+    }
+}
+
 pub fn downcast_remote_layer(
     layer: &Arc<dyn PersistentLayer>,
 ) -> Option<std::sync::Arc<RemoteLayer>> {
@@ -211,6 +217,12 @@ pub struct LayerDescriptor {
     pub lsn: Range<Lsn>,
     pub is_incremental: bool,
     pub short_id: String,
+}
+
+impl PartialEq for LayerDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.short_id == other.short_id
+    }
 }
 
 impl Layer for LayerDescriptor {

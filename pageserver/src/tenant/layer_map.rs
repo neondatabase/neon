@@ -57,7 +57,7 @@ pub struct LayerMap<L: ?Sized> {
     l0_delta_layers: Vec<Arc<L>>,
 }
 
-impl<L: ?Sized> Default for LayerMap<L> {
+impl<L: ?Sized + PartialEq> Default for LayerMap<L> {
     fn default() -> Self {
         Self {
             open_layer: None,
@@ -77,7 +77,7 @@ pub struct SearchResult<L: ?Sized> {
 
 impl<L> LayerMap<L>
 where
-    L: ?Sized + Layer,
+    L: ?Sized + Layer + PartialEq,
 {
     ///
     /// Find the latest layer (by lsn.end) that covers the given

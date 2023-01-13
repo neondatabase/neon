@@ -69,6 +69,7 @@ utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 rpds = "0.12.0"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+im = "15.1.0"
 
 [dev-dependencies]
 criterion = "0.4"

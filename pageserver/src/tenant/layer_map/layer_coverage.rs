@@ -4,6 +4,7 @@ use std::ops::Range;
 // persistent/immutable BTree. It also runs a bit faster but
 // results are not the same on some tests.
 use rpds::RedBlackTreeMapSync;
+use im::OrdMap;
 
 /// Data structure that can efficiently:
 /// - find the latest layer by lsn.end at a given key
@@ -24,18 +25,21 @@ pub struct LayerCoverage<Value> {
     /// be Sync. Using nonsync might be faster, if we can work with
     /// that.
     nodes: RedBlackTreeMapSync<i128, Option<(u64, Value)>>,
+
+    im: OrdMap<i128, Option<(u64, Value)>>,
 }
 
-impl<T: Clone> Default for LayerCoverage<T> {
+impl<T: Clone + PartialEq> Default for LayerCoverage<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Value: Clone> LayerCoverage<Value> {
+impl<Value: Clone + PartialEq> LayerCoverage<Value> {
     pub fn new() -> Self {
         Self {
             nodes: RedBlackTreeMapSync::default(),
+            im: OrdMap::default(),
         }
     }
 
@@ -49,6 +53,13 @@ impl<Value: Clone> LayerCoverage<Value> {
             None => None,
         };
         self.nodes.insert_mut(key, value);
+
+        let im_value = match self.im.range(..=key).last() {
+            Some((_, Some(v))) => Some(v.clone()),
+            Some((_, None)) => None,
+            None => None,
+        };
+        self.im.insert(key, im_value);
     }
 
     /// Insert a layer.
@@ -93,19 +104,56 @@ impl<Value: Clone> LayerCoverage<Value> {
         for k in to_remove {
             self.nodes.remove_mut(&k);
         }
+
+        let mut to_update = Vec::new();
+        let mut to_remove = Vec::new();
+        let mut prev_covered = false;
+        for (k, node) in self.im.range(key.clone()) {
+            let needs_cover = match node {
+                None => true,
+                Some((h, _)) => h < &lsn.end,
+            };
+            if needs_cover {
+                match prev_covered {
+                    true => to_remove.push(*k),
+                    false => to_update.push(*k),
+                }
+            }
+            prev_covered = needs_cover;
+        }
+        if !prev_covered {
+            to_remove.push(key.end);
+        }
+        for k in to_update {
+            self.im.insert(k, Some((lsn.end, value.clone())));
+        }
+        for k in to_remove {
+            self.im.remove(&k);
+        }
     }
 
     /// Get the latest (by lsn.end) layer at a given key
     ///
     /// Complexity: O(log N)
     pub fn query(&self, key: i128) -> Option<Value> {
-        self.nodes
+        let res = self.nodes
             .range(..=key)
             .rev()
             .next()?
             .1
             .as_ref()
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.clone());
+        let im_res = self.nodes
+            .range(..=key)
+            .rev()
+            .next()?
+            .1
+            .as_ref()
+            .map(|(_, v)| v.clone());
+        if res != im_res {
+            panic!("aha");
+        }
+        res
     }
 
     /// Iterate the changes in layer coverage in a given range. You will likely
@@ -122,6 +170,7 @@ impl<Value: Clone> LayerCoverage<Value> {
     pub fn clone(&self) -> Self {
         Self {
             nodes: self.nodes.clone(),
+            im: self.im.clone(),
         }
     }
 }
@@ -132,7 +181,7 @@ pub struct LayerCoverageTuple<Value> {
     pub delta_coverage: LayerCoverage<Value>,
 }
 
-impl<T: Clone> Default for LayerCoverageTuple<T> {
+impl<T: Clone + PartialEq> Default for LayerCoverageTuple<T> {
     fn default() -> Self {
         Self {
             image_coverage: LayerCoverage::default(),
@@ -141,7 +190,7 @@ impl<T: Clone> Default for LayerCoverageTuple<T> {
     }
 }
 
-impl<Value: Clone> LayerCoverageTuple<Value> {
+impl<Value: Clone + PartialEq> LayerCoverageTuple<Value> {
     pub fn clone(&self) -> Self {
         Self {
             image_coverage: self.image_coverage.clone(),

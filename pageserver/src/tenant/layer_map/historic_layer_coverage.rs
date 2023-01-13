@@ -16,13 +16,13 @@ pub struct HistoricLayerCoverage<Value> {
     historic: BTreeMap<u64, LayerCoverageTuple<Value>>,
 }
 
-impl<T: Clone> Default for HistoricLayerCoverage<T> {
+impl<T: Clone + PartialEq> Default for HistoricLayerCoverage<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Value: Clone> HistoricLayerCoverage<Value> {
+impl<Value: Clone + PartialEq> HistoricLayerCoverage<Value> {
     pub fn new() -> Self {
         Self {
             head: LayerCoverageTuple::default(),
@@ -266,13 +266,13 @@ impl<T: std::fmt::Debug> std::fmt::Debug for BufferedHistoricLayerCoverage<T> {
     }
 }
 
-impl<T: Clone> Default for BufferedHistoricLayerCoverage<T> {
+impl<T: Clone + PartialEq> Default for BufferedHistoricLayerCoverage<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
+impl<Value: Clone + PartialEq> BufferedHistoricLayerCoverage<Value> {
     pub fn new() -> Self {
         Self {
             historic_coverage: HistoricLayerCoverage::<Value>::new(),
