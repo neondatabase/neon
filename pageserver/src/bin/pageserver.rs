@@ -13,6 +13,7 @@ use tracing::*;
 use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
+    context::{DownloadBehavior, RequestContext},
     http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{
@@ -328,6 +329,13 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         );
 
         if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
+            let metrics_ctx = RequestContext::todo_child(
+                TaskKind::MetricsCollection,
+                // This task itself shouldn't download anything.
+                // The actual size calculation does need downloads, and
+                // creates a child context with the right DownloadBehavior.
+                DownloadBehavior::Error,
+            );
             task_mgr::spawn(
                 MGMT_REQUEST_RUNTIME.handle(),
                 TaskKind::MetricsCollection,
@@ -341,6 +349,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                         conf.metric_collection_interval,
                         conf.synthetic_size_calculation_interval,
                         conf.id,
+                        metrics_ctx,
                     )
                     .instrument(info_span!("metrics_collection"))
                     .await?;
@@ -352,17 +361,34 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
-    task_mgr::spawn(
-        COMPUTE_REQUEST_RUNTIME.handle(),
-        TaskKind::LibpqEndpointListener,
-        None,
-        None,
-        "libpq endpoint listener",
-        true,
-        async move {
-            page_service::libpq_listener_main(conf, auth, pageserver_listener, conf.auth_type).await
-        },
-    );
+    {
+        let libpq_ctx = RequestContext::todo_child(
+            TaskKind::LibpqEndpointListener,
+            // listener task shouldn't need to download anything. (We will
+            // create a separate sub-contexts for each connection, with their
+            // own download behavior. This context is used only to listen and
+            // accept connections.)
+            DownloadBehavior::Error,
+        );
+        task_mgr::spawn(
+            COMPUTE_REQUEST_RUNTIME.handle(),
+            TaskKind::LibpqEndpointListener,
+            None,
+            None,
+            "libpq endpoint listener",
+            true,
+            async move {
+                page_service::libpq_listener_main(
+                    conf,
+                    auth,
+                    pageserver_listener,
+                    conf.auth_type,
+                    libpq_ctx,
+                )
+                .await
+            },
+        );
+    }
 
     // All started up! Now just sit and wait for shutdown signal.
     signals.handle(|signal| match signal {

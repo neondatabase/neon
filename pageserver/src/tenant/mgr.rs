@@ -16,6 +16,7 @@ use remote_storage::GenericRemoteStorage;
 use utils::crashsafe;
 
 use crate::config::PageServerConf;
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{Tenant, TenantState};
@@ -42,6 +43,8 @@ pub async fn init_tenant_mgr(
     let mut dir_entries = fs::read_dir(&tenants_dir)
         .await
         .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
+
+    let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
 
     loop {
         match dir_entries.next_entry().await {
@@ -86,6 +89,7 @@ pub async fn init_tenant_mgr(
                         conf,
                         &tenant_dir_path,
                         remote_storage.clone(),
+                        &ctx,
                     ) {
                         Ok(tenant) => {
                             TENANTS.write().await.insert(tenant.tenant_id(), tenant);
@@ -116,6 +120,7 @@ pub fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     remote_storage: Option<GenericRemoteStorage>,
+    ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
         tenant_path.is_dir(),
@@ -150,7 +155,7 @@ pub fn schedule_local_tenant_processing(
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
         if let Some(remote_storage) = remote_storage {
-            Tenant::spawn_attach(conf, tenant_id, remote_storage)
+            Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx)
         } else {
             warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
             Tenant::create_broken_tenant(conf, tenant_id)
@@ -158,7 +163,7 @@ pub fn schedule_local_tenant_processing(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, remote_storage)
+        Tenant::spawn_load(conf, tenant_id, remote_storage, ctx)
     };
     Ok(tenant)
 }
@@ -207,6 +212,7 @@ pub async fn create_tenant(
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
     remote_storage: Option<GenericRemoteStorage>,
+    ctx: &RequestContext,
 ) -> anyhow::Result<Option<Arc<Tenant>>> {
     match TENANTS.write().await.entry(tenant_id) {
         hash_map::Entry::Occupied(_) => {
@@ -218,7 +224,7 @@ pub async fn create_tenant(
             // If this section ever becomes contentious, introduce a new `TenantState::Creating`.
             let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id)?;
             let created_tenant =
-                schedule_local_tenant_processing(conf, &tenant_directory, remote_storage)?;
+                schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
             let crated_tenant_id = created_tenant.tenant_id();
             anyhow::ensure!(
                 tenant_id == crated_tenant_id,
@@ -260,10 +266,14 @@ pub async fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Resul
     }
 }
 
-pub async fn delete_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<()> {
+pub async fn delete_timeline(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
     match get_tenant(tenant_id, true).await {
         Ok(tenant) => {
-            tenant.delete_timeline(timeline_id).await?;
+            tenant.delete_timeline(timeline_id, ctx).await?;
         }
         Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
     }
@@ -291,6 +301,7 @@ pub async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     remote_storage: Option<GenericRemoteStorage>,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     run_if_no_tenant_in_memory(tenant_id, |vacant_entry| {
         let tenant_path = conf.tenant_path(&tenant_id);
@@ -300,7 +311,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, remote_storage)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, remote_storage, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -349,6 +360,7 @@ pub async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     remote_storage: GenericRemoteStorage,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     run_if_no_tenant_in_memory(tenant_id, |vacant_entry| {
         let tenant_path = conf.tenant_path(&tenant_id);
@@ -357,7 +369,7 @@ pub async fn attach_tenant(
             "Cannot attach tenant {tenant_id}, local tenant directory already exists"
         );
 
-        let tenant = Tenant::spawn_attach(conf, tenant_id, remote_storage);
+        let tenant = Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx);
         vacant_entry.insert(tenant);
 
         Ok(())
@@ -449,9 +461,9 @@ pub async fn immediate_gc(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
+    ctx: &RequestContext,
 ) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
     let guard = TENANTS.read().await;
-
     let tenant = guard
         .get(&tenant_id)
         .map(Arc::clone)
@@ -462,7 +474,8 @@ pub async fn immediate_gc(
     // Use tenant's pitr setting
     let pitr = tenant.get_pitr_interval();
 
-    // Run in task_mgr to avoid race with detach operation
+    // Run in task_mgr to avoid race with tenant_detach operation
+    let ctx = ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
     let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
     task_mgr::spawn(
         &tokio::runtime::Handle::current(),
@@ -474,7 +487,7 @@ pub async fn immediate_gc(
         async move {
             fail::fail_point!("immediate_gc_task_pre");
             let result = tenant
-                .gc_iteration(Some(timeline_id), gc_horizon, pitr)
+                .gc_iteration(Some(timeline_id), gc_horizon, pitr, &ctx)
                 .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
@@ -497,6 +510,7 @@ pub async fn immediate_gc(
 pub async fn immediate_compact(
     tenant_id: TenantId,
     timeline_id: TimelineId,
+    ctx: &RequestContext,
 ) -> Result<tokio::sync::oneshot::Receiver<anyhow::Result<()>>, ApiError> {
     let guard = TENANTS.read().await;
 
@@ -510,7 +524,8 @@ pub async fn immediate_compact(
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
 
-    // Run in task_mgr to avoid race with detach operation
+    // Run in task_mgr to avoid race with tenant_detach operation
+    let ctx = ctx.detached_child(TaskKind::Compaction, DownloadBehavior::Download);
     let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
     task_mgr::spawn(
         &tokio::runtime::Handle::current(),
@@ -523,7 +538,7 @@ pub async fn immediate_compact(
         false,
         async move {
             let result = timeline
-                .compact()
+                .compact(&ctx)
                 .instrument(
                     info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id),
                 )
