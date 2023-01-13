@@ -62,6 +62,12 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use crate::{page_cache, storage_sync::index::LayerFileMetadata};
 
+//
+// This constant is limited each L1 layer preduced y compact_level0 to contain 16k relation.
+// 16k - is first user Oid, so it separates system and user relations.
+//#[allow(clippy::unusual_byte_groupings)]
+const MAX_LAYER_KEY_RANGE: i128 = 0x00_00000000_00000000_00004000_00_00000000i128;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
     NotStarted,
@@ -2082,6 +2088,13 @@ impl Timeline {
         // of delta layers, based on the current partitioning.
         //
         // We split the new delta layers on the key dimension. We iterate through the key space, and for each key, check if including the next key to the current output layer we're building would cause the layer to become too large. If so, dump the current output layer and start new one.
+        //
+        // But also limit key range of each partition to avoid mixing of rel/nonrel entries
+        // and system/catalog relations. With current key encoding, frequently updated objects belong to opposite ends of key
+        // dimension range. It means that layers generated after compaction are used to cover all database space.
+        // Which cause image layer generation for the whole database, leading to huge rite amplification.
+        // Catalog tables (like pg_class) are also used to be updated frequently (for example with estimated value of relation rows/size).
+        //
         // It's possible that there is a single key with so many page versions that storing all of them in a single layer file
         // would be too large. In that case, we also split on the LSN dimension.
         //
@@ -2128,6 +2141,7 @@ impl Timeline {
         let mut key_values_total_size = 0u64;
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
+        let mut current_part_start = 0i128;
         for x in all_values_iter {
             let (key, lsn, value) = x?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
@@ -2176,6 +2190,7 @@ impl Timeline {
                     if is_dup_layer
                         || dup_end_lsn.is_valid()
                         || written_size + key_values_total_size > target_file_size
+                        || key.to_i128() - current_part_start > MAX_LAYER_KEY_RANGE
                     {
                         // ... if so, flush previous layer and prepare to write new one
                         new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
@@ -2187,6 +2202,7 @@ impl Timeline {
             }
             if writer.is_none() {
                 // Create writer if not initiaized yet
+                current_part_start = key.to_i128();
                 writer = Some(DeltaLayerWriter::new(
                     self.conf,
                     self.timeline_id,
