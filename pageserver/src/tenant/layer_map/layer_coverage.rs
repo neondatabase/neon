@@ -143,7 +143,7 @@ impl<Value: Clone + PartialEq> LayerCoverage<Value> {
             .1
             .as_ref()
             .map(|(_, v)| v.clone());
-        let im_res = self.nodes
+        let im_res = self.im
             .range(..=key)
             .rev()
             .next()?
@@ -153,7 +153,7 @@ impl<Value: Clone + PartialEq> LayerCoverage<Value> {
         if res != im_res {
             panic!("aha");
         }
-        res
+        im_res
     }
 
     /// Iterate the changes in layer coverage in a given range. You will likely
