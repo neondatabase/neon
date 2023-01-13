@@ -6,7 +6,7 @@
 //! hence WAL receiver needs to react on such events.
 //!
 //! * get a broker subscription, stream data from it to determine that a timeline needs WAL streaming.
-//! For that, it watches specific keys in etcd broker and pulls the relevant data periodically.
+//! For that, it watches specific keys in storage_broker and pulls the relevant data periodically.
 //! The data is produced by safekeepers, that push it periodically and pull it to synchronize between each other.
 //! Without this data, no WAL streaming is possible currently.
 //!
@@ -26,62 +26,58 @@ mod walreceiver_connection;
 use crate::config::PageServerConf;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
 
-use anyhow::{ensure, Context};
-use etcd_broker::Client;
-use itertools::Itertools;
+use anyhow::Context;
 use once_cell::sync::OnceCell;
 use std::future::Future;
+use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
-use url::Url;
 
 pub use connection_manager::spawn_connection_manager_task;
 
-static ETCD_CLIENT: OnceCell<Client> = OnceCell::new();
+static BROKER_CLIENT: OnceCell<BrokerClientChannel> = OnceCell::new();
 
 ///
-/// Initialize the etcd client. This must be called once at page server startup.
+/// Initialize the broker client. This must be called once at page server startup.
 ///
-pub async fn init_etcd_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
-    let etcd_endpoints = conf.broker_endpoints.clone();
-    ensure!(
-        !etcd_endpoints.is_empty(),
-        "Cannot start wal receiver: etcd endpoints are empty"
-    );
+pub async fn init_broker_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
+    let broker_endpoint = conf.broker_endpoint.clone();
 
-    let etcd_client = Client::connect(etcd_endpoints.clone(), None)
-        .await
-        .context("Failed to connect to etcd")?;
+    // Note: we do not attempt connecting here (but validate endpoints sanity).
+    let broker_client =
+        storage_broker::connect(broker_endpoint.clone(), conf.broker_keepalive_interval).context(
+            format!(
+                "Failed to create broker client to {}",
+                &conf.broker_endpoint
+            ),
+        )?;
 
-    // FIXME: Should we still allow the pageserver to start, if etcd
-    // doesn't work? It could still serve GetPage requests, with the
-    // data it has locally and from what it can download from remote
-    // storage
-    if ETCD_CLIENT.set(etcd_client).is_err() {
-        panic!("etcd already initialized");
+    if BROKER_CLIENT.set(broker_client).is_err() {
+        panic!("broker already initialized");
     }
 
     info!(
-        "Initialized etcd client with endpoints: {}",
-        etcd_endpoints.iter().map(Url::to_string).join(", ")
+        "Initialized broker client with endpoints: {}",
+        broker_endpoint
     );
     Ok(())
 }
 
 ///
-/// Get a handle to the etcd client
+/// Get a handle to the broker client
 ///
-pub fn get_etcd_client() -> &'static etcd_broker::Client {
-    ETCD_CLIENT.get().expect("etcd client not initialized")
+pub fn get_broker_client() -> &'static BrokerClientChannel {
+    BROKER_CLIENT.get().expect("broker client not initialized")
 }
 
-pub fn is_etcd_client_initialized() -> bool {
-    ETCD_CLIENT.get().is_some()
+pub fn is_broker_client_initialized() -> bool {
+    BROKER_CLIENT.get().is_some()
 }
 
 /// A handle of an asynchronous task.
 /// The task has a channel that it can use to communicate its lifecycle events in a certain form, see [`TaskEvent`]
-/// and a cancellation channel that it can listen to for earlier interrupts.
+/// and a cancellation token that it can listen to for earlier interrupts.
 ///
 /// Note that the communication happens via the `watch` channel, that does not accumulate the events, replacing the old one with the never one on submission.
 /// That may lead to certain events not being observed by the listener.
@@ -89,7 +85,7 @@ pub fn is_etcd_client_initialized() -> bool {
 pub struct TaskHandle<E> {
     join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     events_receiver: watch::Receiver<TaskStateUpdate<E>>,
-    cancellation: watch::Sender<()>,
+    cancellation: CancellationToken,
 }
 
 pub enum TaskEvent<E> {
@@ -107,20 +103,19 @@ pub enum TaskStateUpdate<E> {
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
     pub fn spawn<Fut>(
-        task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, watch::Receiver<()>) -> Fut
-            + Send
-            + 'static,
+        task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, CancellationToken) -> Fut + Send + 'static,
     ) -> Self
     where
         Fut: Future<Output = anyhow::Result<()>> + Send,
         E: Send + Sync + 'static,
     {
-        let (cancellation, cancellation_receiver) = watch::channel(());
+        let cancellation = CancellationToken::new();
         let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
 
+        let cancellation_clone = cancellation.clone();
         let join_handle = WALRECEIVER_RUNTIME.spawn(async move {
             events_sender.send(TaskStateUpdate::Started).ok();
-            task(events_sender, cancellation_receiver).await
+            task(events_sender, cancellation_clone).await
         });
 
         TaskHandle {
@@ -134,15 +129,21 @@ impl<E: Clone> TaskHandle<E> {
         match self.events_receiver.changed().await {
             Ok(()) => TaskEvent::Update((self.events_receiver.borrow()).clone()),
             Err(_task_channel_part_dropped) => {
-                TaskEvent::End(match self.join_handle.take() {
+                TaskEvent::End(match self.join_handle.as_mut() {
                     Some(jh) => {
                         if !jh.is_finished() {
                             warn!("sender is dropped while join handle is still alive");
                         }
 
-                        jh.await
+                        let res = jh
+                            .await
                             .map_err(|e| anyhow::anyhow!("Failed to join task: {e}"))
-                            .and_then(|x| x)
+                            .and_then(|x| x);
+
+                        // For cancellation-safety, drop join_handle only after successful .await.
+                        self.join_handle = None;
+
+                        res
                     }
                     None => {
                         // Another option is to have an enum, join handle or result and give away the reference to it
@@ -156,7 +157,7 @@ impl<E: Clone> TaskHandle<E> {
     /// Aborts current task, waiting for it to finish.
     pub async fn shutdown(self) {
         if let Some(jh) = self.join_handle {
-            self.cancellation.send(()).ok();
+            self.cancellation.cancel();
             match jh.await {
                 Ok(Ok(())) => debug!("Shutdown success"),
                 Ok(Err(e)) => error!("Shutdown task error: {e:?}"),

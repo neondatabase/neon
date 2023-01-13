@@ -2,7 +2,7 @@
 
 ### Overview
 We use JWT tokens in communication between almost all components (compute, pageserver, safekeeper, CLI) regardless of the protocol used (HTTP/PostgreSQL).
-Etcd currently has no authentication.
+storage_broker currently has no authentication.
 Authentication is optional and is disabled by default for easier debugging.
 It is used in some tests, though.
 Note that we do not cover authentication with `pg.neon.tech` here.
@@ -65,7 +65,7 @@ There is no administrative API except those provided by PostgreSQL.
 
 #### Outgoing connections
 Compute connects to Pageserver for getting pages.
-The connection string is configured by the `neon.pageserver_connstring` PostgreSQL GUC, e.g. `postgresql://no_user:$ZENITH_AUTH_TOKEN@localhost:15028`.
+The connection string is configured by the `neon.pageserver_connstring` PostgreSQL GUC, e.g. `postgresql://no_user:$NEON_AUTH_TOKEN@localhost:15028`.
 The environment variable inside the connection string is substituted with
 the JWT token.
 
@@ -77,14 +77,14 @@ If the GUC is unset, no token is passed.
 
 Note that both tokens can be (and typically are) the same;
 the scope is the tenant and the token is usually passed through the
-`$ZENITH_AUTH_TOKEN` environment variable.
+`$NEON_AUTH_TOKEN` environment variable.
 
 ### Pageserver
 #### Overview
 Pageserver keeps track of multiple tenants, each having multiple timelines.
 For each timeline, it connects to the corresponding Safekeeper.
 Information about "corresponding Safekeeper" is published by Safekeepers
-in the Etcd, but they do not publish access tokens, otherwise what is
+in the storage_broker, but they do not publish access tokens, otherwise what is
 the point of authentication.
 
 Pageserver keeps a connection to some set of Safekeepers, which
@@ -114,7 +114,7 @@ either of three values:
 Pageserver makes a connection to a Safekeeper for each active timeline.
 As Pageserver may want to access any timeline it has on the disk,
 it is given a blanket JWT token to access any data on any Safekeeper.
-This token is passed through an environment variable called `ZENITH_AUTH_TOKEN`
+This token is passed through an environment variable called `NEON_AUTH_TOKEN`
 (non-configurable as of writing this text).
 
 A better way _may be_ to store JWT token for each timeline next to it,

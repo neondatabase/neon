@@ -7,25 +7,26 @@ use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
-use nix::unistd::Pid;
+use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
 use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, profiling, task_mgr,
+    http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{
         BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
     },
-    tenant_mgr, virtual_file,
+    tenant::mgr,
+    virtual_file,
 };
-use remote_storage::GenericRemoteStorage;
 use utils::{
     auth::JwtAuth,
-    lock_file, logging,
+    logging,
     postgres_backend::AuthType,
     project_git_version,
+    sentry_init::{init_sentry, release_name},
     signals::{self, Signal},
     tcp_listener,
 };
@@ -39,8 +40,6 @@ const FEATURES: &[&str] = &[
     "testing",
     #[cfg(feature = "fail/failpoints")]
     "fail/failpoints",
-    #[cfg(feature = "profiling")]
-    "profiling",
 ];
 
 fn version() -> String {
@@ -85,6 +84,9 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(release_name!(), &[("node_id", &conf.id.to_string())]);
+
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
         utils::crashsafe::create_dir_all(conf.tenants_path()).with_context(|| {
@@ -124,7 +126,7 @@ fn initialize_config(
             );
         }
         // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path).with_context(|| {
+        let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
             format!(
                 "Failed to read pageserver config at '{}'",
                 cfg_file_path.display()
@@ -178,7 +180,7 @@ fn initialize_config(
     if update_config {
         info!("Writing pageserver config to '{}'", cfg_file_path.display());
 
-        std::fs::write(&cfg_file_path, toml.to_string()).with_context(|| {
+        std::fs::write(cfg_file_path, toml.to_string()).with_context(|| {
             format!(
                 "Failed to write pageserver config to '{}'",
                 cfg_file_path.display()
@@ -198,8 +200,12 @@ fn initialize_config(
 }
 
 fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
+    // Initialize logging
     logging::init(conf.log_format)?;
+
+    // Print version to the log, and expose it as a prometheus metric too.
     info!("version: {}", version());
+    set_build_info_metric(GIT_VERSION);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -215,55 +221,36 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         )
     }
 
+    // Create and lock PID file. This ensures that there cannot be more than one
+    // pageserver process running at the same time.
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
-    let lock_file = match lock_file::create_lock_file(&lock_file_path, Pid::this().to_string()) {
-        lock_file::LockCreationResult::Created {
-            new_lock_contents,
-            file,
-        } => {
-            info!("Created lock file at {lock_file_path:?} with contenst {new_lock_contents}");
-            file
-        }
-        lock_file::LockCreationResult::AlreadyLocked {
-            existing_lock_contents,
-        } => anyhow::bail!(
-            "Could not lock pid file; pageserver is already running in {:?} with PID {}",
-            conf.workdir,
-            existing_lock_contents
-        ),
-        lock_file::LockCreationResult::CreationFailed(e) => {
-            return Err(e.context(format!("Failed to create lock file at {lock_file_path:?}")))
-        }
-    };
-    // ensure that the lock file is held even if the main thread of the process is panics
-    // we need to release the lock file only when the current process is gone
-    let _ = Box::leak(Box::new(lock_file));
+    let lock_file =
+        utils::pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
+    info!("Claimed pid file at {lock_file_path:?}");
 
-    // TODO: Check that it looks like a valid repository before going further
+    // Ensure that the lock file is held even if the main thread of the process panics.
+    // We need to release the lock file only when the process exits.
+    std::mem::forget(lock_file);
 
-    // bind sockets before daemonizing so we report errors early and do not return until we are listening
-    info!(
-        "Starting pageserver http handler on {}",
-        conf.listen_http_addr
-    );
-    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone())?;
+    // Bind the HTTP and libpq ports early, so that if they are in use by some other
+    // process, we error out early.
+    let http_addr = &conf.listen_http_addr;
+    info!("Starting pageserver http handler on {http_addr}");
+    let http_listener = tcp_listener::bind(http_addr)?;
 
-    info!(
-        "Starting pageserver pg protocol handler on {}",
-        conf.listen_pg_addr
-    );
-    let pageserver_listener = tcp_listener::bind(conf.listen_pg_addr.clone())?;
+    let pg_addr = &conf.listen_pg_addr;
+    info!("Starting pageserver pg protocol handler on {pg_addr}");
+    let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
+    // Install signal handlers
     let signals = signals::install_shutdown_handlers()?;
 
-    // start profiler (if enabled)
-    let profiler_guard = profiling::init_profiler(conf);
+    // Launch broker client
+    WALRECEIVER_RUNTIME.block_on(pageserver::walreceiver::init_broker_client(conf))?;
 
-    WALRECEIVER_RUNTIME.block_on(pageserver::walreceiver::init_etcd_client(conf))?;
-
-    // initialize authentication for incoming connections
+    // Initialize authentication for incoming connections
     let auth = match &conf.auth_type {
-        AuthType::Trust | AuthType::MD5 => None,
+        AuthType::Trust => None,
         AuthType::NeonJWT => {
             // unwrap is ok because check is performed when creating config, so path is set and file exists
             let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
@@ -272,46 +259,54 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
-    match var("ZENITH_AUTH_TOKEN") {
-        Ok(v) => {
+    // TODO: remove ZENITH_AUTH_TOKEN once it's not used anywhere in development/staging/prod configuration.
+    match (var("ZENITH_AUTH_TOKEN"), var("NEON_AUTH_TOKEN")) {
+        (old, Ok(v)) => {
             info!("Loaded JWT token for authentication with Safekeeper");
+            if let Ok(v_old) = old {
+                warn!(
+                    "JWT token for Safekeeper is specified twice, ZENITH_AUTH_TOKEN is deprecated"
+                );
+                if v_old != v {
+                    warn!("JWT token for Safekeeper has two different values, choosing NEON_AUTH_TOKEN");
+                }
+            }
             pageserver::config::SAFEKEEPER_AUTH_TOKEN
                 .set(Arc::new(v))
                 .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
         }
-        Err(VarError::NotPresent) => {
+        (Ok(v), _) => {
+            info!("Loaded JWT token for authentication with Safekeeper");
+            warn!("Please update pageserver configuration: the JWT token should be NEON_AUTH_TOKEN, not ZENITH_AUTH_TOKEN");
+            pageserver::config::SAFEKEEPER_AUTH_TOKEN
+                .set(Arc::new(v))
+                .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
+        }
+        (_, Err(VarError::NotPresent)) => {
             info!("No JWT token for authentication with Safekeeper detected");
         }
-        Err(e) => {
+        (_, Err(e)) => {
             return Err(e).with_context(|| {
-                "Failed to either load to detect non-present ZENITH_AUTH_TOKEN environment variable"
+                "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable"
             })
         }
     };
 
-    let remote_storage = conf
-        .remote_storage_config
-        .as_ref()
-        .map(|storage_config| {
-            GenericRemoteStorage::from_config(conf.workdir.clone(), storage_config)
-        })
-        .transpose()
-        .context("Failed to init generic remote storage")?;
-    {
-        let _rt_guard = BACKGROUND_RUNTIME.enter();
-        tenant_mgr::init_tenant_mgr(conf, remote_storage.clone())?
-    };
+    // Set up remote storage client
+    let remote_storage = create_remote_storage_client(conf)?;
 
-    // Spawn all HTTP related tasks in the MGMT_REQUEST_RUNTIME.
-    // bind before launching separate thread so the error reported before startup exits
+    // Scan the local 'tenants/' directory and start loading the tenants
+    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
 
-    // Create a Service from the router above to handle incoming requests.
+    // Start up the service to handle HTTP mgmt API request. We created the
+    // listener earlier already.
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, auth.clone(), remote_storage)?;
-        let service =
-            utils::http::RouterService::new(router.build().map_err(|err| anyhow!(err))?).unwrap();
+        let router = http::make_router(conf, auth.clone(), remote_storage)?
+            .build()
+            .map_err(|err| anyhow!(err))?;
+        let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown(task_mgr::shutdown_watcher());
@@ -328,10 +323,31 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 Ok(())
             },
         );
+
+        if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
+            task_mgr::spawn(
+                MGMT_REQUEST_RUNTIME.handle(),
+                TaskKind::MetricsCollection,
+                None,
+                None,
+                "consumption metrics collection",
+                true,
+                async move {
+                    pageserver::consumption_metrics::collect_metrics(
+                        metric_collection_endpoint,
+                        conf.metric_collection_interval,
+                        conf.id,
+                    )
+                    .instrument(info_span!("metrics_collection"))
+                    .await?;
+                    Ok(())
+                },
+            );
+        }
     }
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
-    // for each connection.
+    // for each connection. We created the listener earlier already.
     task_mgr::spawn(
         COMPUTE_REQUEST_RUNTIME.handle(),
         TaskKind::LibpqEndpointListener,
@@ -344,8 +360,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         },
     );
 
-    set_build_info_metric(GIT_VERSION);
-
     // All started up! Now just sit and wait for shutdown signal.
     signals.handle(|signal| match signal {
         Signal::Quit => {
@@ -353,7 +367,6 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 "Got {}. Terminating in immediate shutdown mode",
                 signal.name()
             );
-            profiling::exit_profiler(conf, &profiler_guard);
             std::process::exit(111);
         }
 
@@ -362,11 +375,40 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-            profiling::exit_profiler(conf, &profiler_guard);
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
             unreachable!()
         }
     })
+}
+
+fn create_remote_storage_client(
+    conf: &'static PageServerConf,
+) -> anyhow::Result<Option<GenericRemoteStorage>> {
+    let config = if let Some(config) = &conf.remote_storage_config {
+        config
+    } else {
+        // No remote storage configured.
+        return Ok(None);
+    };
+
+    // Create the client
+    let mut remote_storage = GenericRemoteStorage::from_config(config)?;
+
+    // If `test_remote_failures` is non-zero, wrap the client with a
+    // wrapper that simulates failures.
+    if conf.test_remote_failures > 0 {
+        if !cfg!(feature = "testing") {
+            anyhow::bail!("test_remote_failures option is not available because pageserver was compiled without the 'testing' feature");
+        }
+        info!(
+            "Simulating remote failures for first {} attempts of each op",
+            conf.test_remote_failures
+        );
+        remote_storage =
+            GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
+    }
+
+    Ok(Some(remote_storage))
 }
 
 fn cli() -> Command {

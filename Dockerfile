@@ -79,7 +79,7 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
     && /usr/local/bin/pageserver -D /data/.neon/ --init \
        -c "id=1234" \
-       -c "broker_endpoints=['http://etcd:2379']" \
+       -c "broker_endpoint='http://storage_broker:50051'" \
        -c "pg_distrib_dir='/usr/local/'" \
        -c "listen_pg_addr='0.0.0.0:6400'" \
        -c "listen_http_addr='0.0.0.0:9898'"

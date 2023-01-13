@@ -8,11 +8,12 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::Context;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::id::TenantTimelineId;
+use utils::postgres_backend_async::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
@@ -47,7 +48,7 @@ pub struct AppendLogicalMessage {
     pg_version: u32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct AppendResult {
     // safekeeper state after append
     state: SafeKeeperState,
@@ -62,8 +63,8 @@ pub fn handle_json_ctrl(
     spg: &SafekeeperPostgresHandler,
     pgb: &mut PostgresBackend,
     append_request: &AppendLogicalMessage,
-) -> Result<()> {
-    info!("JSON_CTRL request: {:?}", append_request);
+) -> Result<(), QueryError> {
+    info!("JSON_CTRL request: {append_request:?}");
 
     // need to init safekeeper state before AppendRequest
     let tli = prepare_safekeeper(spg.ttid, append_request.pg_version)?;
@@ -78,7 +79,8 @@ pub fn handle_json_ctrl(
         state: tli.get_state().1,
         inserted_wal,
     };
-    let response_data = serde_json::to_vec(&response)?;
+    let response_data = serde_json::to_vec(&response)
+        .with_context(|| format!("Response {response:?} is not a json array"))?;
 
     pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor {
         name: b"json",
@@ -93,7 +95,7 @@ pub fn handle_json_ctrl(
 
 /// Prepare safekeeper to process append requests without crashes,
 /// by sending ProposerGreeting with default server.wal_seg_size.
-fn prepare_safekeeper(ttid: TenantTimelineId, pg_version: u32) -> Result<Arc<Timeline>> {
+fn prepare_safekeeper(ttid: TenantTimelineId, pg_version: u32) -> anyhow::Result<Arc<Timeline>> {
     GlobalTimelines::create(
         ttid,
         ServerInfo {
@@ -106,7 +108,7 @@ fn prepare_safekeeper(ttid: TenantTimelineId, pg_version: u32) -> Result<Arc<Tim
     )
 }
 
-fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> Result<()> {
+fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> anyhow::Result<()> {
     // add new term to existing history
     let history = tli.get_state().1.acceptor_state.term_history;
     let history = history.up_to(lsn.checked_sub(1u64).unwrap());
@@ -125,7 +127,7 @@ fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> Result<()
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct InsertedWAL {
     begin_lsn: Lsn,
     end_lsn: Lsn,
@@ -134,7 +136,10 @@ struct InsertedWAL {
 
 /// Extend local WAL with new LogicalMessage record. To do that,
 /// create AppendRequest with new WAL and pass it to safekeeper.
-fn append_logical_message(tli: &Arc<Timeline>, msg: &AppendLogicalMessage) -> Result<InsertedWAL> {
+fn append_logical_message(
+    tli: &Arc<Timeline>,
+    msg: &AppendLogicalMessage,
+) -> anyhow::Result<InsertedWAL> {
     let wal_data = encode_logical_message(&msg.lm_prefix, &msg.lm_message);
     let sk_state = tli.get_state().1;
 

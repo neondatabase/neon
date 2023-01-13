@@ -2,14 +2,15 @@
 name = "postgres_connection"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0"
 itertools = "0.10.3"
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "43e6db254a97fdecbce33d8bc0890accfd74495e" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 url = "2.2.2"
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 

@@ -1,6 +1,7 @@
 //! Actual Postgres connection handler to stream WAL to the server.
 
 use std::{
+    error::Error,
     str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -11,13 +12,14 @@ use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
-use postgres::{SimpleQueryMessage, SimpleQueryRow};
+use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::v14::xlog_utils::normalize_lsn;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
@@ -32,10 +34,10 @@ use crate::{
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
-use utils::lsn::Lsn;
+use utils::{lsn::Lsn, postgres_backend_async::is_expected_io_error};
 
 /// Status of the connection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct WalConnectionStatus {
     /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
     pub is_connected: bool,
@@ -58,7 +60,7 @@ pub async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
-    mut cancellation: watch::Receiver<()>,
+    cancellation: CancellationToken,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
@@ -68,10 +70,17 @@ pub async fn handle_walreceiver_connection(
         let mut config = wal_source_connconf.to_tokio_postgres_config();
         config.application_name("pageserver");
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
-        time::timeout(connect_timeout, config.connect(postgres::NoTls))
-            .await
-            .context("Timed out while waiting for walreceiver connection to open")?
-            .context("Failed to open walreceiver connection")?
+        match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
+            Ok(Ok(client_and_conn)) => client_and_conn,
+            Ok(Err(conn_err)) => {
+                let expected_error = ignore_expected_errors(conn_err)?;
+                info!("DB connection stream finished: {expected_error}");
+                return Ok(());
+            }
+            Err(elapsed) => anyhow::bail!(
+                "Timed out while waiting {elapsed} for walreceiver connection to open"
+            ),
+        }
     };
 
     info!("connected!");
@@ -83,14 +92,14 @@ pub async fn handle_walreceiver_connection(
         streaming_lsn: None,
         commit_lsn: None,
     };
-    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
         return Ok(());
     }
 
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
-    let mut connection_cancellation = cancellation.clone();
+    let connection_cancellation = cancellation.clone();
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverConnection,
@@ -103,15 +112,13 @@ pub async fn handle_walreceiver_connection(
                 connection_result = connection => match connection_result{
                     Ok(()) => info!("Walreceiver db connection closed"),
                     Err(connection_error) => {
-                        if connection_error.is_closed() {
-                            info!("Connection closed regularly: {connection_error}")
-                        } else {
-                            warn!("Connection aborted: {connection_error}")
+                        if let Err(e) = ignore_expected_errors(connection_error) {
+                            warn!("Connection aborted: {e:#}")
                         }
                     }
                 },
 
-                _ = connection_cancellation.changed() => info!("Connection cancelled"),
+                _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
             }
             Ok(())
         },
@@ -135,7 +142,7 @@ pub async fn handle_walreceiver_connection(
     connection_status.latest_connection_update = Utc::now().naive_utc();
     connection_status.latest_wal_update = Utc::now().naive_utc();
     connection_status.commit_lsn = Some(end_of_wal);
-    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+    if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
         return Ok(());
     }
@@ -173,18 +180,26 @@ pub async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint)?;
+    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint).await?;
 
     while let Some(replication_message) = {
         select! {
-            _ = cancellation.changed() => {
+            _ = cancellation.cancelled() => {
                 info!("walreceiver interrupted");
                 None
             }
             replication_message = physical_stream.next() => replication_message,
         }
     } {
-        let replication_message = replication_message?;
+        let replication_message = match replication_message {
+            Ok(message) => message,
+            Err(replication_error) => {
+                let expected_error = ignore_expected_errors(replication_error)?;
+                info!("Replication stream finished: {expected_error}");
+                return Ok(());
+            }
+        };
+
         let now = Utc::now().naive_utc();
         let last_rec_lsn_before_msg = last_rec_lsn;
 
@@ -207,7 +222,7 @@ pub async fn handle_walreceiver_connection(
             }
             &_ => {}
         };
-        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone())) {
+        if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
             warn!("Wal connection event listener dropped, aborting the connection: {e}");
             return Ok(());
         }
@@ -236,8 +251,9 @@ pub async fn handle_walreceiver_connection(
                         ensure!(lsn.is_aligned());
 
                         walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded)
-                            .context("could not ingest record at {lsn}")?;
+                            .ingest_record(recdata.clone(), lsn, &mut modification, &mut decoded)
+                            .await
+                            .with_context(|| format!("could not ingest record at {lsn}"))?;
 
                         fail_point!("walreceiver-after-ingest");
 
@@ -273,8 +289,7 @@ pub async fn handle_walreceiver_connection(
         if !connection_status.has_processed_wal && last_rec_lsn > last_rec_lsn_before_msg {
             // We have successfully processed at least one WAL record.
             connection_status.has_processed_wal = true;
-            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status.clone()))
-            {
+            if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
                 warn!("Wal connection event listener dropped, aborting the connection: {e}");
                 return Ok(());
             }
@@ -313,10 +328,11 @@ pub async fn handle_walreceiver_connection(
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
+            let (timeline_logical_size, _) = timeline
+                .get_current_logical_size()
+                .context("Status update creation failed to get current logical size")?;
             let status_update = ReplicationFeedback {
-                current_timeline_size: timeline
-                    .get_current_logical_size()
-                    .context("Status update creation failed to get current logical size")?,
+                current_timeline_size: timeline_logical_size,
                 ps_writelsn: write_lsn,
                 ps_flushlsn: flush_lsn,
                 ps_applylsn: apply_lsn,
@@ -385,4 +401,33 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
     } else {
         Err(IdentifyError.into())
     }
+}
+
+/// We don't want to report connectivity problems as real errors towards connection manager because
+/// 1. they happen frequently enough to make server logs hard to read and
+/// 2. the connection manager can retry other safekeeper.
+///
+/// If this function returns `Ok(pg_error)`, it's such an error.
+/// The caller should log it at info level and then report to connection manager that we're done handling this connection.
+/// Connection manager will then handle reconnections.
+///
+/// If this function returns an `Err()`, the caller can bubble it up using `?`.
+/// The connection manager will log the error at ERROR level.
+fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres::Error> {
+    if pg_error.is_closed()
+        || pg_error
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .map(is_expected_io_error)
+            .unwrap_or(false)
+    {
+        return Ok(pg_error);
+    } else if let Some(db_error) = pg_error.as_db_error() {
+        if db_error.code() == &SqlState::CONNECTION_FAILURE
+            && db_error.message().contains("end streaming")
+        {
+            return Ok(pg_error);
+        }
+    }
+    Err(pg_error).context("connection error")
 }

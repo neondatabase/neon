@@ -2,7 +2,7 @@ use crate::error::UserFacingError;
 use anyhow::bail;
 use bytes::BytesMut;
 use pin_project_lite::pin_project;
-use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
+use pq_proto::{BeMessage, ConnectionError, FeMessage, FeStartupPacket};
 use rustls::ServerConfig;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -47,18 +47,13 @@ fn err_connection() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, "connection is lost")
 }
 
-// TODO: change error type of `FeMessage::read_fut`
-fn from_anyhow(e: anyhow::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e.to_string())
-}
-
 impl<S: AsyncRead + Unpin> PqStream<S> {
     /// Receive [`FeStartupPacket`], which is a first packet sent by a client.
     pub async fn read_startup_packet(&mut self) -> io::Result<FeStartupPacket> {
         // TODO: `FeStartupPacket::read_fut` should return `FeStartupPacket`
         let msg = FeStartupPacket::read_fut(&mut self.stream)
             .await
-            .map_err(from_anyhow)?
+            .map_err(ConnectionError::into_io_error)?
             .ok_or_else(err_connection)?;
 
         match msg {
@@ -80,7 +75,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     async fn read_message(&mut self) -> io::Result<FeMessage> {
         FeMessage::read_fut(&mut self.stream)
             .await
-            .map_err(from_anyhow)?
+            .map_err(ConnectionError::into_io_error)?
             .ok_or_else(err_connection)
     }
 }
@@ -109,9 +104,11 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 
     /// Write the error message using [`Self::write_message`], then re-throw it.
     /// Allowing string literals is safe under the assumption they might not contain any runtime info.
+    /// This method exists due to `&str` not implementing `Into<anyhow::Error>`.
     pub async fn throw_error_str<T>(&mut self, error: &'static str) -> anyhow::Result<T> {
-        // This method exists due to `&str` not implementing `Into<anyhow::Error>`
-        self.write_message(&BeMessage::ErrorResponse(error)).await?;
+        tracing::info!("forwarding error to user: {error}");
+        self.write_message(&BeMessage::ErrorResponse(error, None))
+            .await?;
         bail!(error)
     }
 
@@ -122,7 +119,9 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         E: UserFacingError + Into<anyhow::Error>,
     {
         let msg = error.to_string_client();
-        self.write_message(&BeMessage::ErrorResponse(&msg)).await?;
+        tracing::info!("forwarding error to user: {msg}");
+        self.write_message(&BeMessage::ErrorResponse(&msg, None))
+            .await?;
         bail!(error)
     }
 }

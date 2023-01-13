@@ -18,6 +18,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
 from functools import cached_property
+from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
@@ -26,14 +27,24 @@ import asyncpg
 import backoff  # type: ignore
 import boto3
 import jwt
+import prometheus_client
 import psycopg2
 import pytest
 import requests
 from _pytest.config import Config
+from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import Fn, allure_attach_from_dir, etcd_path, get_self_dir, subprocess_capture
+from fixtures.utils import (
+    ATTACHMENT_NAME_REGEX,
+    Fn,
+    allure_attach_from_dir,
+    get_self_dir,
+    subprocess_capture,
+)
+from prometheus_client.parser import text_string_to_metric_families
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -279,21 +290,19 @@ def port_distributor(worker_base_port: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def default_broker(
-    request: FixtureRequest, port_distributor: PortDistributor, top_output_dir: Path
-) -> Iterator[Etcd]:
+    port_distributor: PortDistributor,
+    test_output_dir: Path,
+    neon_binpath: Path,
+) -> Iterator[NeonBroker]:
+    # multiple pytest sessions could get launched in parallel, get them different ports/datadirs
     client_port = port_distributor.get_port()
-    # multiple pytest sessions could get launched in parallel, get them different datadirs
-    etcd_datadir = get_test_output_dir(request, top_output_dir) / f"etcd_datadir_{client_port}"
-    etcd_datadir.mkdir(exist_ok=True, parents=True)
+    broker_logfile = test_output_dir / "repo" / "storage_broker.log"
 
-    broker = Etcd(
-        datadir=str(etcd_datadir), port=client_port, peer_port=port_distributor.get_port()
-    )
+    broker = NeonBroker(logfile=broker_logfile, port=client_port, neon_binpath=neon_binpath)
     yield broker
     broker.stop()
-    allure_attach_from_dir(etcd_datadir)
 
 
 @pytest.fixture(scope="session")
@@ -570,7 +579,7 @@ class NeonEnvBuilder:
         self,
         repo_dir: Path,
         port_distributor: PortDistributor,
-        broker: Etcd,
+        broker: NeonBroker,
         run_id: uuid.UUID,
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
@@ -587,6 +596,8 @@ class NeonEnvBuilder:
         auth_enabled: bool = False,
         rust_log_override: Optional[str] = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
+        preserve_database_files: bool = False,
+        initial_tenant: Optional[TenantId] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -608,19 +619,31 @@ class NeonEnvBuilder:
         self.neon_binpath = neon_binpath
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
+        self.preserve_database_files = preserve_database_files
+        self.initial_tenant = initial_tenant or TenantId.generate()
 
-    def init(self) -> NeonEnv:
+    def init_configs(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
         self.env = NeonEnv(self)
         return self.env
 
     def start(self):
+        assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
     def init_start(self) -> NeonEnv:
-        env = self.init()
+        env = self.init_configs()
         self.start()
+
+        # Prepare the default branch to start the postgres on later.
+        # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
+        log.info(
+            f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
+        )
+        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
+
         return env
 
     def enable_remote_storage(
@@ -715,12 +738,39 @@ class NeonEnvBuilder:
             prefix_in_bucket=self.remote_storage_prefix,
         )
 
+    def cleanup_local_storage(self):
+        if self.preserve_database_files:
+            return
+
+        directories_to_clean: List[Path] = []
+        for test_entry in Path(self.repo_dir).glob("**/*"):
+            if test_entry.is_file():
+                test_file = test_entry
+                if ATTACHMENT_NAME_REGEX.fullmatch(test_file.name):
+                    continue
+                if SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
+                    continue
+                log.debug(f"Removing large database {test_file} file")
+                test_file.unlink()
+            elif test_entry.is_dir():
+                directories_to_clean.append(test_entry)
+
+        for directory_to_clean in reversed(directories_to_clean):
+            if not os.listdir(directory_to_clean):
+                log.debug(f"Removing empty directory {directory_to_clean}")
+                directory_to_clean.rmdir()
+
     def cleanup_remote_storage(self):
         # here wee check for true remote storage, no the local one
         # local cleanup is not needed after test because in ci all env will be destroyed anyway
         if self.remote_storage_prefix is None:
             log.info("no remote storage was set up, skipping cleanup")
             return
+
+        # Making mypy happy with allowing only `S3Storage` further.
+        # `self.remote_storage_prefix` is coupled with `S3Storage` storage type,
+        # so this line effectively a no-op
+        assert isinstance(self.remote_storage, S3Storage)
 
         if self.keep_remote_storage_contents:
             log.info("keep_remote_storage_contents skipping remote storage cleanup")
@@ -737,7 +787,8 @@ class NeonEnvBuilder:
             Prefix=self.remote_storage_prefix,
         )
 
-        objects_to_delete = {"Objects": []}
+        # Using Any because DeleteTypeDef (from boto3-stubs) doesn't fit our case
+        objects_to_delete: Any = {"Objects": []}
         cnt = 0
         for item in pages.search("Contents"):
             # weirdly when nothing is found it returns [None]
@@ -752,16 +803,17 @@ class NeonEnvBuilder:
                     Bucket=self.remote_storage.bucket_name,
                     Delete=objects_to_delete,
                 )
-                objects_to_delete = dict(Objects=[])
+                objects_to_delete = {"Objects": []}
                 cnt += 1
 
         # flush rest
         if len(objects_to_delete["Objects"]):
             self.remote_storage_client.delete_objects(
-                Bucket=self.remote_storage.bucket_name, Delete=objects_to_delete
+                Bucket=self.remote_storage.bucket_name,
+                Delete=objects_to_delete,
             )
 
-        log.info("deleted %s objects from remote storage", cnt)
+        log.info(f"deleted {cnt} objects from remote storage")
 
     def __enter__(self) -> "NeonEnvBuilder":
         return self
@@ -780,7 +832,22 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
 
-            self.cleanup_remote_storage()
+            cleanup_error = None
+            try:
+                self.cleanup_remote_storage()
+            except Exception as e:
+                log.error(f"Error during remote storage cleanup: {e}")
+                cleanup_error = e
+
+            try:
+                self.cleanup_local_storage()
+            except Exception as e:
+                log.error(f"Error during local storage cleanup: {e}")
+                if cleanup_error is not None:
+                    cleanup_error = e
+
+            if cleanup_error is not None:
+                raise cleanup_error
 
             self.env.pageserver.assert_no_errors()
 
@@ -835,20 +902,19 @@ class NeonEnv:
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
-        self.initial_tenant = TenantId.generate()
+        self.initial_tenant = config.initial_tenant
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
             f"""
-            default_tenant_id = '{self.initial_tenant}'
+            default_tenant_id = '{config.initial_tenant}'
         """
         )
 
         toml += textwrap.dedent(
             f"""
-            [etcd_broker]
-            broker_endpoints = ['{self.broker.client_url()}']
-            etcd_binary_path = '{self.broker.binary_path}'
+            [broker]
+            listen_addr = '{self.broker.listen_addr()}'
         """
         )
 
@@ -947,9 +1013,10 @@ class NeonEnv:
 @pytest.fixture(scope=shareable_scope)
 def _shared_simple_env(
     request: FixtureRequest,
+    pytestconfig: Config,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
-    default_broker: Etcd,
+    default_broker: NeonBroker,
     run_id: uuid.UUID,
     top_output_dir: Path,
     neon_binpath: Path,
@@ -963,7 +1030,7 @@ def _shared_simple_env(
 
     if os.environ.get("TEST_SHARED_FIXTURES") is None:
         # Create the environment in the per-test output directory
-        repo_dir = get_test_output_dir(request, top_output_dir) / "repo"
+        repo_dir = get_test_repo_dir(request, top_output_dir)
     else:
         # We're running shared fixtures. Share a single directory.
         repo_dir = top_output_dir / "shared_repo"
@@ -978,6 +1045,7 @@ def _shared_simple_env(
         pg_distrib_dir=pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
+        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
     ) as builder:
         env = builder.init_start()
 
@@ -1004,13 +1072,14 @@ def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
 
 @pytest.fixture(scope="function")
 def neon_env_builder(
+    pytestconfig: Config,
     test_output_dir: str,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: str,
-    default_broker: Etcd,
+    default_broker: NeonBroker,
     run_id: uuid.UUID,
 ) -> Iterator[NeonEnvBuilder]:
     """
@@ -1039,6 +1108,7 @@ def neon_env_builder(
         pg_version=pg_version,
         broker=default_broker,
         run_id=run_id,
+        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
     ) as builder:
         yield builder
 
@@ -1119,6 +1189,14 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach")
         self.verbose_error(res)
 
+    def tenant_load(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load")
+        self.verbose_error(res)
+
+    def tenant_ignore(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/ignore")
+        self.verbose_error(res)
+
     def tenant_status(self, tenant_id: TenantId) -> Dict[Any, Any]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
@@ -1141,8 +1219,22 @@ class PageserverHttpClient(requests.Session):
         # there are no tests for those right now.
         return size
 
-    def timeline_list(self, tenant_id: TenantId) -> List[Dict[str, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline")
+    def timeline_list(
+        self,
+        tenant_id: TenantId,
+        include_non_incremental_logical_size: bool = False,
+        include_timeline_dir_layer_file_size_sum: bool = False,
+    ) -> List[Dict[str, Any]]:
+
+        params = {}
+        if include_non_incremental_logical_size:
+            params["include-non-incremental-logical-size"] = "yes"
+        if include_timeline_dir_layer_file_size_sum:
+            params["include-timeline-dir-layer-file-size-sum"] = "yes"
+
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", params=params
+        )
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
@@ -1176,13 +1268,13 @@ class PageserverHttpClient(requests.Session):
         tenant_id: TenantId,
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
-        include_non_incremental_physical_size: bool = False,
+        include_timeline_dir_layer_file_size_sum: bool = False,
     ) -> Dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "yes"
-        if include_non_incremental_physical_size:
-            params["include-non-incremental-physical-size"] = "yes"
+        if include_timeline_dir_layer_file_size_sum:
+            params["include-timeline-dir-layer-file-size-sum"] = "yes"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
@@ -1257,10 +1349,114 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         assert res_json is None
 
+    def timeline_spawn_download_remote_layers(
+        self, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> dict[str, Any]:
+
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_poll_download_remote_layers_status(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        spawn_response: dict[str, Any],
+        poll_state=None,
+    ) -> None | dict[str, Any]:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+
+        # assumption in this API client here is that nobody else spawns the task
+        assert res_json["task_id"] == spawn_response["task_id"]
+
+        if poll_state is None or res_json["state"] == poll_state:
+            return res_json
+        return None
+
+    def timeline_download_remote_layers(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        errors_ok=False,
+        at_least_one_download=True,
+    ):
+        res = self.timeline_spawn_download_remote_layers(tenant_id, timeline_id)
+        while True:
+            completed = self.timeline_poll_download_remote_layers_status(
+                tenant_id, timeline_id, res, poll_state="Completed"
+            )
+            if not completed:
+                time.sleep(0.1)
+                continue
+            if not errors_ok:
+                assert completed["failed_download_count"] == 0
+            if at_least_one_download:
+                assert completed["successful_download_count"] > 0
+            return completed
+
     def get_metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
         self.verbose_error(res)
         return res.text
+
+    def get_timeline_metric(self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str):
+        raw = self.get_metrics()
+        family: List[prometheus_client.Metric] = list(text_string_to_metric_families(raw))
+        [metric] = [m for m in family if m.name == metric_name]
+        [sample] = [
+            s
+            for s in metric.samples
+            if s.labels["tenant_id"] == str(tenant_id)
+            and s.labels["timeline_id"] == str(timeline_id)
+        ]
+        return sample.value
+
+    def get_remote_timeline_client_metric(
+        self,
+        metric_name: str,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        file_kind: str,
+        op_kind: str,
+    ) -> Optional[float]:
+        metrics = parse_metrics(self.get_metrics(), "pageserver")
+        matches = metrics.query_all(
+            name=metric_name,
+            filter={
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+                "file_kind": str(file_kind),
+                "op_kind": str(op_kind),
+            },
+        )
+        if len(matches) == 0:
+            value = None
+        elif len(matches) == 1:
+            value = matches[0].value
+            assert value is not None
+        else:
+            assert len(matches) < 2, "above filter should uniquely identify metric"
+        return value
+
+    def get_metric_value(self, name: str) -> Optional[str]:
+        metrics = self.get_metrics()
+        relevant = [line for line in metrics.splitlines() if line.startswith(name)]
+        if len(relevant) == 0:
+            log.info(f'could not find metric "{name}"')
+            return None
+        assert len(relevant) == 1
+        return relevant[0].lstrip(name).strip()
 
 
 @dataclass
@@ -1372,6 +1568,7 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
         conf: Optional[Dict[str, str]] = None,
+        set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1380,47 +1577,51 @@ class NeonCli(AbstractNeonCli):
             tenant_id = TenantId.generate()
         if timeline_id is None:
             timeline_id = TimelineId.generate()
-        if conf is None:
-            res = self.raw_cli(
-                [
-                    "tenant",
-                    "create",
-                    "--tenant-id",
-                    str(tenant_id),
-                    "--timeline-id",
-                    str(timeline_id),
-                    "--pg-version",
-                    self.env.pg_version,
-                ]
+
+        args = [
+            "tenant",
+            "create",
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+            "--pg-version",
+            self.env.pg_version,
+        ]
+        if conf is not None:
+            args.extend(
+                chain.from_iterable(
+                    product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
+                )
             )
-        else:
-            res = self.raw_cli(
-                [
-                    "tenant",
-                    "create",
-                    "--tenant-id",
-                    str(tenant_id),
-                    "--timeline-id",
-                    str(timeline_id),
-                    "--pg-version",
-                    self.env.pg_version,
-                ]
-                + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
-            )
+        if set_default:
+            args.append("--set-default")
+
+        res = self.raw_cli(args)
         res.check_returncode()
         return tenant_id, timeline_id
+
+    def set_default(self, tenant_id: TenantId):
+        """
+        Update default tenant for future operations that require tenant_id.
+        """
+        res = self.raw_cli(["tenant", "set-default", "--tenant-id", str(tenant_id)])
+        res.check_returncode()
 
     def config_tenant(self, tenant_id: TenantId, conf: Dict[str, str]):
         """
         Update tenant config.
         """
-        if conf is None:
-            res = self.raw_cli(["tenant", "config", "--tenant-id", str(tenant_id)])
-        else:
-            res = self.raw_cli(
-                ["tenant", "config", "--tenant-id", str(tenant_id)]
-                + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
+
+        args = ["tenant", "config", "--tenant-id", str(tenant_id)]
+        if conf is not None:
+            args.extend(
+                chain.from_iterable(
+                    product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
+                )
             )
+
+        res = self.raw_cli(args)
         res.check_returncode()
 
     def list_tenants(self) -> "subprocess.CompletedProcess[str]":
@@ -1454,36 +1655,6 @@ class NeonCli(AbstractNeonCli):
             created_timeline_id = matches.group("timeline_id")
 
         return TimelineId(str(created_timeline_id))
-
-    def create_root_branch(
-        self,
-        branch_name: str,
-        tenant_id: Optional[TenantId] = None,
-    ):
-        cmd = [
-            "timeline",
-            "create",
-            "--branch-name",
-            branch_name,
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
-            "--pg-version",
-            self.env.pg_version,
-        ]
-
-        res = self.raw_cli(cmd)
-        res.check_returncode()
-
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        if created_timeline_id is None:
-            raise Exception("could not find timeline id after `neon timeline create` invocation")
-        else:
-            return TimelineId(created_timeline_id)
 
     def create_branch(
         self,
@@ -1540,17 +1711,12 @@ class NeonCli(AbstractNeonCli):
     def init(
         self,
         config_toml: str,
-        initial_timeline_id: Optional[TimelineId] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(config_toml)
             tmp.flush()
 
-            cmd = ["init", f"--config={tmp.name}"]
-            if initial_timeline_id:
-                cmd.extend(["--timeline-id", str(initial_timeline_id)])
-
-            cmd.extend(["--pg-version", self.env.pg_version])
+            cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
 
             append_pageserver_param_overrides(
                 params_to_update=cmd,
@@ -1559,7 +1725,12 @@ class NeonCli(AbstractNeonCli):
                 pageserver_config_override=self.env.pageserver.config_override,
             )
 
-            res = self.raw_cli(cmd)
+            s3_env_vars = None
+            if self.env.remote_storage is not None and isinstance(
+                self.env.remote_storage, S3Storage
+            ):
+                s3_env_vars = self.env.remote_storage.access_env_vars()
+            res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
             return res
 
@@ -1682,6 +1853,12 @@ class NeonCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=check_return_code)
 
+    def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
+        return self.raw_cli(["start"], check_return_code=check_return_code)
+
+    def stop(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
+        return self.raw_cli(["stop"], check_return_code=check_return_code)
+
 
 class WalCraft(AbstractNeonCli):
     """
@@ -1735,14 +1912,18 @@ class NeonPageserver(PgProtocol):
             # All tests print these, when starting up or shutting down
             ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
             ".*Shutdown task error: walreceiver connection handling failure.*",
-            ".*Etcd client error: grpc request error: status: Unavailable.*",
-            ".*query handler for .* failed: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Broken pipe.*",
-            ".*Connection aborted: error communicating with the server: Broken pipe.*",
-            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
-            ".*Connection aborted: error communicating with the server: Connection reset by peer.*",
+            ".*wal_connection_manager.*tcp connect error: Connection refused.*",
+            ".*query handler for .* failed: Socket IO error: Connection reset by peer.*",
+            ".*serving compute connection task.*exited with error: Postgres connection error.*",
+            ".*serving compute connection task.*exited with error: Connection reset by peer.*",
+            ".*serving compute connection task.*exited with error: Postgres query error.*",
+            ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",
+            ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
+            ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*end streaming to Some.*",
+            ".*Replication stream finished: db error: ERROR: Socket IO error: end streaming to Some.*",
+            ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
+            ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
             # and streaming start
             ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
@@ -1768,6 +1949,7 @@ class NeonPageserver(PgProtocol):
             ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
+            ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
         ]
 
     def start(
@@ -1811,10 +1993,6 @@ class NeonPageserver(PgProtocol):
         if '"testing"' not in self.version:
             pytest.skip("pageserver was built without 'testing' feature")
 
-    def is_profiling_enabled_or_skip(self):
-        if '"profiling"' not in self.version:
-            pytest.skip("pageserver was built without 'profiling' feature")
-
     def http_client(self, auth_token: Optional[str] = None) -> PageserverHttpClient:
         return PageserverHttpClient(
             port=self.service_port.http,
@@ -1824,7 +2002,6 @@ class NeonPageserver(PgProtocol):
 
     def assert_no_errors(self):
         logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
-
         error_or_warn = re.compile("ERROR|WARN")
         errors = []
         while True:
@@ -1841,6 +2018,28 @@ class NeonPageserver(PgProtocol):
                     errors.append(line)
 
         assert not errors
+
+    def log_contains(self, pattern: str) -> Optional[str]:
+        """Check that the pageserver log contains a line that matches the given regex"""
+        logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
+
+        contains_re = re.compile(pattern)
+
+        # XXX: Our rust logging machinery buffers the messages, so if you
+        # call this function immediately after it's been logged, there is
+        # no guarantee it is already present in the log file. This hasn't
+        # been a problem in practice, our python tests are not fast enough
+        # to hit that race condition.
+        while True:
+            line = logfile.readline()
+            if not line:
+                break
+
+            if contains_re.search(line):
+                # found it!
+                return line
+
+        return None
 
 
 def append_pageserver_param_overrides(
@@ -2081,62 +2280,73 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
+    link_auth_uri: str = "http://dummy-uri"
+
+    class AuthBackend(abc.ABC):
+        """All auth backends must inherit from this class"""
+
+        @property
+        def default_conn_url(self) -> Optional[str]:
+            return None
+
+        @abc.abstractmethod
+        def extra_args(self) -> list[str]:
+            pass
+
+    class Link(AuthBackend):
+        def extra_args(self) -> list[str]:
+            return [
+                # Link auth backend params
+                *["--auth-backend", "link"],
+                *["--uri", NeonProxy.link_auth_uri],
+            ]
+
+    @dataclass(frozen=True)
+    class Postgres(AuthBackend):
+        pg_conn_url: str
+
+        @property
+        def default_conn_url(self) -> Optional[str]:
+            return self.pg_conn_url
+
+        def extra_args(self) -> list[str]:
+            return [
+                # Postgres auth backend params
+                *["--auth-backend", "postgres"],
+                *["--auth-endpoint", self.pg_conn_url],
+            ]
+
     def __init__(
         self,
+        neon_binpath: Path,
         proxy_port: int,
         http_port: int,
         mgmt_port: int,
-        neon_binpath: Path,
-        auth_endpoint=None,
+        auth_backend: NeonProxy.AuthBackend,
     ):
-        super().__init__(dsn=auth_endpoint, port=proxy_port)
-        self.host = "127.0.0.1"
+        host = "127.0.0.1"
+        super().__init__(dsn=auth_backend.default_conn_url, host=host, port=proxy_port)
+
+        self.host = host
         self.http_port = http_port
         self.neon_binpath = neon_binpath
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
-        self.auth_endpoint = auth_endpoint
+        self.auth_backend = auth_backend
         self._popen: Optional[subprocess.Popen[bytes]] = None
-        self.link_auth_uri_prefix = "http://dummy-uri"
 
-    def start(self):
-        """
-        Starts a proxy with option '--auth-backend postgres' and a postgres instance
-        already provided though '--auth-endpoint <postgress-instance>'."
-        """
+    def start(self) -> NeonProxy:
         assert self._popen is None
-        assert self.auth_endpoint is not None
-
-        # Start proxy
         args = [
             str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--mgmt", f"{self.host}:{self.mgmt_port}"],
-            *["--auth-backend", "postgres"],
-            *["--auth-endpoint", self.auth_endpoint],
+            *self.auth_backend.extra_args(),
         ]
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
-
-    def start_with_link_auth(self):
-        """
-        Starts a proxy with option '--auth-backend link' and a dummy authentication link '--uri dummy-auth-link'."
-        """
-        assert self._popen is None
-
-        # Start proxy
-        bin_proxy = str(self.neon_binpath / "proxy")
-        args = [bin_proxy]
-        args.extend(["--http", f"{self.host}:{self.http_port}"])
-        args.extend(["--proxy", f"{self.host}:{self.proxy_port}"])
-        args.extend(["--mgmt", f"{self.host}:{self.mgmt_port}"])
-        args.extend(["--auth-backend", "link"])
-        args.extend(["--uri", self.link_auth_uri_prefix])
-        arg_str = " ".join(args)
-        log.info(f"starting proxy with command line ::: {arg_str}")
-        self._popen = subprocess.Popen(args, stdout=subprocess.PIPE)
-        self._wait_until_ready()
+        return self
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
@@ -2147,7 +2357,7 @@ class NeonProxy(PgProtocol):
         request_result.raise_for_status()
         return request_result.text
 
-    def __enter__(self) -> "NeonProxy":
+    def __enter__(self) -> NeonProxy:
         return self
 
     def __exit__(
@@ -2165,11 +2375,19 @@ class NeonProxy(PgProtocol):
 @pytest.fixture(scope="function")
 def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
+
     http_port = port_distributor.get_port()
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
-    with NeonProxy(proxy_port, http_port, neon_binpath=neon_binpath, mgmt_port=mgmt_port) as proxy:
-        proxy.start_with_link_auth()
+
+    with NeonProxy(
+        neon_binpath=neon_binpath,
+        proxy_port=proxy_port,
+        http_port=http_port,
+        mgmt_port=mgmt_port,
+        auth_backend=NeonProxy.Link(),
+    ) as proxy:
+        proxy.start()
         yield proxy
 
 
@@ -2193,11 +2411,11 @@ def static_proxy(
     http_port = port_distributor.get_port()
 
     with NeonProxy(
+        neon_binpath=neon_binpath,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
-        neon_binpath=neon_binpath,
-        auth_endpoint=auth_endpoint,
+        auth_backend=NeonProxy.Postgres(auth_endpoint),
     ) as proxy:
         proxy.start()
         yield proxy
@@ -2643,51 +2861,36 @@ class SafekeeperHttpClient(requests.Session):
 
 
 @dataclass
-class Etcd:
-    """An object managing etcd instance"""
+class NeonBroker:
+    """An object managing storage_broker instance"""
 
-    datadir: str
+    logfile: Path
     port: int
-    peer_port: int
-    binary_path: Path = field(init=False)
+    neon_binpath: Path
     handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
 
-    def __post_init__(self):
-        self.binary_path = etcd_path()
+    def listen_addr(self):
+        return f"127.0.0.1:{self.port}"
 
     def client_url(self):
-        return f"http://127.0.0.1:{self.port}"
+        return f"http://{self.listen_addr()}"
 
     def check_status(self):
-        with requests.Session() as s:
-            s.mount("http://", requests.adapters.HTTPAdapter(max_retries=1))  # do not retry
-            s.get(f"{self.client_url()}/health").raise_for_status()
+        return True  # TODO
 
     def try_start(self):
         if self.handle is not None:
-            log.debug(f"etcd is already running on port {self.port}")
+            log.debug(f"storage_broker is already running on port {self.port}")
             return
 
-        Path(self.datadir).mkdir(exist_ok=True)
-
-        if not self.binary_path.is_file():
-            raise RuntimeError(f"etcd broker binary '{self.binary_path}' is not a file")
-
-        client_url = self.client_url()
-        log.info(f'Starting etcd to listen incoming connections at "{client_url}"')
-        with open(os.path.join(self.datadir, "etcd.log"), "wb") as log_file:
+        listen_addr = self.listen_addr()
+        log.info(f'starting storage_broker to listen incoming connections at "{listen_addr}"')
+        with open(self.logfile, "wb") as logfile:
             args = [
-                self.binary_path,
-                f"--data-dir={self.datadir}",
-                f"--listen-client-urls={client_url}",
-                f"--advertise-client-urls={client_url}",
-                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}",
-                # Set --quota-backend-bytes to keep the etcd virtual memory
-                # size smaller. Our test etcd clusters are very small.
-                # See https://github.com/etcd-io/etcd/issues/7910
-                "--quota-backend-bytes=100000000",
+                str(self.neon_binpath / "storage_broker"),
+                f"--listen-addr={listen_addr}",
             ]
-            self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
+            self.handle = subprocess.Popen(args, stdout=logfile, stderr=logfile)
 
         # wait for start
         started_at = time.time()
@@ -2697,7 +2900,9 @@ class Etcd:
             except Exception as e:
                 elapsed = time.time() - started_at
                 if elapsed > 5:
-                    raise RuntimeError(f"timed out waiting {elapsed:.0f}s for etcd start: {e}")
+                    raise RuntimeError(
+                        f"timed out waiting {elapsed:.0f}s for storage_broker start: {e}"
+                    )
                 time.sleep(0.5)
             else:
                 break  # success
@@ -2716,6 +2921,24 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     # make mypy happy
     assert isinstance(test_dir, Path)
     return test_dir
+
+
+def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
+    return get_test_output_dir(request, top_output_dir) / "repo"
+
+
+def pytest_addoption(parser: Parser):
+    parser.addoption(
+        "--preserve-database-files",
+        action="store_true",
+        default=False,
+        help="Preserve timeline files after the test suite is over",
+    )
+
+
+SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
+    r"config|metadata|.+\.(?:toml|pid|json|sql)"
+)
 
 
 # This is autouse, so the test output directory always gets created, even
@@ -2880,12 +3103,55 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def assert_no_in_progress_downloads_for_tenant(
-    pageserver_http_client: PageserverHttpClient,
-    tenant: TenantId,
+def wait_until(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns successfully, without exception. Returns the
+    last return value from the function.
+    """
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            res = func()
+        except Exception as e:
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            last_exception = e
+            time.sleep(interval)
+            continue
+        return res
+    raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def wait_while(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns false, or throws an exception.
+    """
+    for i in range(number_of_iterations):
+        try:
+            if not func():
+                return
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            time.sleep(interval)
+            continue
+        except Exception:
+            return
+    raise Exception("timed out while waiting for %s" % func)
+
+
+def assert_tenant_status(
+    pageserver_http_client: PageserverHttpClient, tenant: TenantId, expected_status: str
 ):
     tenant_status = pageserver_http_client.tenant_status(tenant)
-    assert tenant_status["has_in_progress_downloads"] is False, tenant_status
+    log.info(f"tenant_status: {tenant_status}")
+    assert tenant_status["state"] == expected_status, tenant_status
+
+
+def tenant_exists(ps_http: PageserverHttpClient, tenant_id: TenantId):
+    tenants = ps_http.tenant_list()
+    matching = [t for t in tenants if TenantId(t["id"]) == tenant_id]
+    assert len(matching) < 2
+    if len(matching) == 0:
+        return None
+    return matching[0]
 
 
 def remote_consistent_lsn(
@@ -2893,14 +3159,15 @@ def remote_consistent_lsn(
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail["remote_consistent_lsn"]
-    if lsn_str is None:
+    if detail["remote_consistent_lsn"] is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return Lsn(0)
-    assert isinstance(lsn_str, str)
-    return Lsn(lsn_str)
+    else:
+        lsn_str = detail["remote_consistent_lsn"]
+        assert isinstance(lsn_str, str)
+        return Lsn(lsn_str)
 
 
 def wait_for_upload(
@@ -2913,6 +3180,7 @@ def wait_for_upload(
     for i in range(20):
         current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
+            log.info("wait finished")
             return
         log.info(
             "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
@@ -2925,6 +3193,27 @@ def wait_for_upload(
             lsn, current_lsn
         )
     )
+
+
+# Does not use `wait_until` for debugging purposes
+def wait_until_tenant_state(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    expected_state: str,
+    iterations: int,
+) -> bool:
+    for _ in range(iterations):
+        try:
+            tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
+            log.debug(f"Tenant {tenant_id} data: {tenant}")
+            if tenant["state"] == expected_state:
+                return True
+        except Exception as e:
+            log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
+
+        time.sleep(1)
+
+    raise Exception(f"Tenant {tenant_id} did not become {expected_state} in {iterations} seconds")
 
 
 def last_record_lsn(
@@ -2981,3 +3270,34 @@ def fork_at_current_lsn(
     """
     current_lsn = pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
+
+
+def wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    safekeepers: List[Safekeeper],
+    pageserver: NeonPageserver,
+):
+    sk_commit_lsns = [
+        sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn for sk in safekeepers
+    ]
+    lsn = max(sk_commit_lsns)
+    ps_http = pageserver.http_client()
+    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, lsn)
+    return lsn
+
+
+def wait_for_sk_commit_lsn_to_reach_remote_storage(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    safekeepers: List[Safekeeper],
+    pageserver: NeonPageserver,
+):
+    lsn = wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
+        tenant_id, timeline_id, safekeepers, pageserver
+    )
+    ps_http = pageserver.http_client()
+    # force a checkpoint to trigger upload
+    ps_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(ps_http, tenant_id, timeline_id, lsn)
+    return lsn

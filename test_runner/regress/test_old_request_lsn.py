@@ -45,7 +45,7 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     # will cause GetPage requests.
     cur.execute(
         """
-        select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('foo') as tbl_ize
+        select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('foo') as tbl_size
         from pg_settings where name = 'shared_buffers'
     """
     )
@@ -59,6 +59,7 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     # Make a lot of updates on a single row, generating a lot of WAL. Trigger
     # garbage collections so that the page server will remove old page versions.
     for i in range(10):
+        pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
         gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
         print_gc_result(gc_result)
 

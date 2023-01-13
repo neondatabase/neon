@@ -49,6 +49,9 @@ pub enum AuthErrorImpl {
     )]
     MissingProjectName,
 
+    #[error("password authentication failed for user '{0}'")]
+    AuthFailed(Box<str>),
+
     /// Errors produced by e.g. [`crate::stream::PqStream`].
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -61,6 +64,10 @@ pub struct AuthError(Box<AuthErrorImpl>);
 impl AuthError {
     pub fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
         AuthErrorImpl::BadAuthMethod(name.into()).into()
+    }
+
+    pub fn auth_failed(user: impl Into<Box<str>>) -> Self {
+        AuthErrorImpl::AuthFailed(user.into()).into()
     }
 }
 
@@ -78,10 +85,11 @@ impl UserFacingError for AuthError {
             GetAuthInfo(e) => e.to_string_client(),
             WakeCompute(e) => e.to_string_client(),
             Sasl(e) => e.to_string_client(),
+            AuthFailed(_) => self.to_string(),
             BadAuthMethod(_) => self.to_string(),
             MalformedPassword(_) => self.to_string(),
             MissingProjectName => self.to_string(),
-            _ => "Internal error".to_string(),
+            Io(_) => "Internal error".to_string(),
         }
     }
 }

@@ -37,58 +37,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ComputeMetrics"
 
-  /ready:
-    get:
-      deprecated: true
-      tags:
-      - "info"
-      summary: Check whether compute startup process finished successfully
-      description: ""
-      operationId: computeIsReady
-      responses:
-        "200":
-          description: Compute is ready ('true') or not ('false')
-          content:
-            text/plain:
-              schema:
-                type: string
-                example: "true"
-
-  /last_activity:
-    get:
-      deprecated: true
-      tags:
-      - "info"
-      summary: Get timestamp of the last compute activity
-      description: ""
-      operationId: getLastComputeActivityTS
-      responses:
-        "200":
-          description: Timestamp of the last compute activity
-          content:
-            text/plain:
-              schema:
-                type: string
-                example: "2022-10-12T07:20:50.52Z"
-
   /check_writability:
-    get:
-      deprecated: true
-      tags:
-      - "check"
-      summary: Check that we can write new data on this compute
-      description: ""
-      operationId: checkComputeWritabilityDeprecated
-      responses:
-        "200":
-          description: Check result
-          content:
-            text/plain:
-              schema:
-                type: string
-                description: Error text or 'true' if check passed
-                example: "true"
-
     post:
       tags:
       - "check"

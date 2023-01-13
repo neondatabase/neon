@@ -1,16 +1,10 @@
-use defaults::{
-    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
-};
+use storage_broker::Uri;
 //
 use remote_storage::RemoteStorageConfig;
 use std::path::PathBuf;
 use std::time::Duration;
-use url::Url;
 
-use utils::{
-    id::{NodeId, TenantId, TenantTimelineId},
-    logging::LogFormat,
-};
+use utils::id::{NodeId, TenantId, TenantTimelineId};
 
 mod auth;
 pub mod broker;
@@ -30,18 +24,18 @@ pub mod wal_service;
 pub mod wal_storage;
 
 mod timelines_global_map;
+use std::sync::Arc;
 pub use timelines_global_map::GlobalTimelines;
+use utils::auth::JwtAuth;
 
 pub mod defaults {
-    use std::time::Duration;
-
     pub use safekeeper_api::{
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_PG_LISTEN_PORT,
     };
 
     pub const DEFAULT_WAL_BACKUP_RUNTIME_THREADS: usize = 8;
-    pub const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+    pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
 }
 
@@ -54,20 +48,18 @@ pub struct SafeKeeperConf {
     // to the process but different unit tests work on different
     // data directories to avoid clashing with each other.
     pub workdir: PathBuf,
-
-    pub no_sync: bool,
+    pub my_id: NodeId,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
-    pub remote_storage: Option<RemoteStorageConfig>,
-    pub backup_runtime_threads: usize,
-    pub wal_backup_enabled: bool,
-    pub my_id: NodeId,
-    pub broker_endpoints: Vec<Url>,
-    pub broker_etcd_prefix: String,
-    pub auth_validation_public_key_path: Option<PathBuf>,
+    pub no_sync: bool,
+    pub broker_endpoint: Uri,
+    pub broker_keepalive_interval: Duration,
     pub heartbeat_timeout: Duration,
+    pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
-    pub log_format: LogFormat,
+    pub backup_runtime_threads: Option<usize>,
+    pub wal_backup_enabled: bool,
+    pub auth: Option<Arc<JwtAuth>>,
 }
 
 impl SafeKeeperConf {
@@ -81,26 +73,25 @@ impl SafeKeeperConf {
     }
 }
 
-impl Default for SafeKeeperConf {
-    fn default() -> Self {
+impl SafeKeeperConf {
+    #[cfg(test)]
+    fn dummy() -> Self {
         SafeKeeperConf {
-            // Always set to './'. We will chdir into the directory specified on the
-            // command line, so that when the server is running, all paths are relative
-            // to that.
             workdir: PathBuf::from("./"),
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             remote_storage: None,
             my_id: NodeId(0),
-            broker_endpoints: Vec::new(),
-            broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
-            backup_runtime_threads: DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
+            broker_endpoint: storage_broker::DEFAULT_ENDPOINT
+                .parse()
+                .expect("failed to parse default broker endpoint"),
+            broker_keepalive_interval: Duration::from_secs(5),
+            backup_runtime_threads: None,
             wal_backup_enabled: true,
-            auth_validation_public_key_path: None,
-            heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
-            max_offloader_lag_bytes: DEFAULT_MAX_OFFLOADER_LAG_BYTES,
-            log_format: LogFormat::Plain,
+            auth: None,
+            heartbeat_timeout: Duration::new(5, 0),
+            max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
         }
     }
 }

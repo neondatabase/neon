@@ -8,14 +8,14 @@ from typing import Dict, List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, PgBenchInitResult, PgBenchRunResult
-from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.compare_fixtures import PgCompare
 from fixtures.utils import get_scale_for_db
 
 
 @enum.unique
 class PgBenchLoadType(enum.Enum):
     INIT = "init"
-    SIMPLE_UPDATE = "simple_update"
+    SIMPLE_UPDATE = "simple-update"
     SELECT_ONLY = "select-only"
 
 
@@ -94,7 +94,9 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
 
     if workload_type == PgBenchLoadType.INIT:
         # Run initialize
-        init_pgbench(env, ["pgbench", f"-s{scale}", "-i", connstr], password=password)
+        init_pgbench(
+            env, ["pgbench", f"-s{scale}", "-i", "-I", "dtGvp", connstr], password=password
+        )
 
     if workload_type == PgBenchLoadType.SIMPLE_UPDATE:
         # Run simple-update workload
@@ -172,28 +174,6 @@ def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
-
-
-# Run the pgbench tests, and generate a flamegraph from it
-# This requires that the pageserver was built with the 'profiling' feature.
-#
-# TODO: If the profiling is cheap enough, there's no need to run the same test
-# twice, with and without profiling. But for now, run it separately, so that we
-# can see how much overhead the profiling adds.
-@pytest.mark.parametrize("scale", get_scales_matrix())
-@pytest.mark.parametrize("duration", get_durations_matrix())
-def test_pgbench_flamegraph(zenbenchmark, pg_bin, neon_env_builder, scale: int, duration: int):
-    neon_env_builder.pageserver_config_override = """
-profiling="page_requests"
-"""
-    env = neon_env_builder.init_start()
-    env.pageserver.is_profiling_enabled_or_skip()
-    env.neon_cli.create_branch("empty", "main")
-
-    neon_compare = NeonCompare(zenbenchmark, env, pg_bin, "pgbench")
-    run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.INIT)
-    run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
-    run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
 # The following 3 tests run on an existing database as it was set up by previous tests,

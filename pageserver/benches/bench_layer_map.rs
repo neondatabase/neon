@@ -1,10 +1,9 @@
 use anyhow::Result;
-use pageserver::repository::{Key, Value};
-use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
+use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::Layer;
-use pageserver::tenant::storage_layer::ValueReconstructResult;
-use pageserver::tenant::storage_layer::ValueReconstructState;
+use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, ValueReconstructState};
+use pageserver::tenant::storage_layer::{Layer, ValueReconstructResult};
+use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -12,7 +11,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use utils::id::{TenantId, TimelineId};
+use std::time::Instant;
+
 use utils::lsn::Lsn;
 
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -23,14 +23,6 @@ struct DummyDelta {
 }
 
 impl Layer for DummyDelta {
-    fn get_tenant_id(&self) -> TenantId {
-        TenantId::from_str("00000000000000000000000000000000").unwrap()
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        TimelineId::from_str("00000000000000000000000000000000").unwrap()
-    }
-
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -38,15 +30,6 @@ impl Layer for DummyDelta {
     fn get_lsn_range(&self) -> Range<Lsn> {
         self.lsn_range.clone()
     }
-
-    fn filename(&self) -> PathBuf {
-        todo!()
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        todo!()
-    }
-
     fn get_value_reconstruct_data(
         &self,
         _key: Key,
@@ -60,24 +43,12 @@ impl Layer for DummyDelta {
         true
     }
 
-    fn is_in_memory(&self) -> bool {
-        false
-    }
-
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
-        panic!()
-    }
-
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
-        panic!("Not implemented")
-    }
-
-    fn delete(&self) -> Result<()> {
-        panic!()
-    }
-
     fn dump(&self, _verbose: bool) -> Result<()> {
-        todo!()
+        unimplemented!()
+    }
+
+    fn short_id(&self) -> String {
+        unimplemented!()
     }
 }
 
@@ -87,14 +58,6 @@ struct DummyImage {
 }
 
 impl Layer for DummyImage {
-    fn get_tenant_id(&self) -> TenantId {
-        TenantId::from_str("00000000000000000000000000000000").unwrap()
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        TimelineId::from_str("00000000000000000000000000000000").unwrap()
-    }
-
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -102,14 +65,6 @@ impl Layer for DummyImage {
     fn get_lsn_range(&self) -> Range<Lsn> {
         // End-bound is exclusive
         self.lsn..(self.lsn + 1)
-    }
-
-    fn filename(&self) -> PathBuf {
-        todo!()
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        todo!()
     }
 
     fn get_value_reconstruct_data(
@@ -125,29 +80,17 @@ impl Layer for DummyImage {
         false
     }
 
-    fn is_in_memory(&self) -> bool {
-        false
-    }
-
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
-        panic!()
-    }
-
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
-        panic!("Not implemented")
-    }
-
-    fn delete(&self) -> Result<()> {
-        panic!()
-    }
-
     fn dump(&self, _verbose: bool) -> Result<()> {
-        todo!()
+        unimplemented!()
+    }
+
+    fn short_id(&self) -> String {
+        unimplemented!()
     }
 }
 
-fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
-    let mut layer_map = LayerMap::default();
+fn build_layer_map(filename_dump: PathBuf) -> LayerMap<dyn Layer> {
+    let mut layer_map = LayerMap::<dyn Layer>::default();
 
     let mut min_lsn = Lsn(u64::MAX);
     let mut max_lsn = Lsn(0);
@@ -183,7 +126,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
 }
 
 /// Construct a layer map query pattern for benchmarks
-fn uniform_query_pattern(layer_map: &LayerMap) -> Vec<(Key, Lsn)> {
+fn uniform_query_pattern(layer_map: &LayerMap<dyn Layer>) -> Vec<(Key, Lsn)> {
     // For each image layer we query one of the pages contained, at LSN right
     // before the image layer was created. This gives us a somewhat uniform
     // coverage of both the lsn and key space because image layers have
@@ -219,7 +162,7 @@ fn bench_from_captest_env(c: &mut Criterion) {
     c.bench_function("captest_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1).unwrap();
+                layer_map.search(q.0, q.1);
             }
         });
     });
@@ -248,11 +191,59 @@ fn bench_from_real_project(c: &mut Criterion) {
     c.bench_function("real_map_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1).unwrap();
+                layer_map.search(q.0, q.1);
             }
         });
     });
 }
 
-criterion_group!(benches, bench_from_captest_env, bench_from_real_project);
-criterion_main!(benches);
+// Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
+fn bench_sequential(c: &mut Criterion) {
+    let mut layer_map: LayerMap<dyn Layer> = LayerMap::default();
+
+    // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
+    //
+    // TODO This code is pretty slow and runs even if we're only running other
+    //      benchmarks. It needs to be somewhere else, but it's not clear where.
+    //      Putting it inside the `bench_function` closure is not a solution
+    //      because then it runs multiple times during warmup.
+    let now = Instant::now();
+    for i in 0..100_000 {
+        // TODO try inserting a super-wide layer in between every 10 to reflect
+        //      what often happens with L1 layers that include non-rel changes.
+        //      Maybe do that as a separate test.
+        let i32 = (i as u32) % 100;
+        let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
+        let layer = DummyImage {
+            key_range: zero.add(10 * i32)..zero.add(10 * i32 + 1),
+            lsn: Lsn(10 * i),
+        };
+        layer_map.insert_historic(Arc::new(layer));
+    }
+
+    // Manually measure runtime without criterion because criterion
+    // has a minimum sample size of 10 and I don't want to run it 10 times.
+    println!("Finished init in {:?}", now.elapsed());
+
+    // Choose 100 uniformly random queries
+    let rng = &mut StdRng::seed_from_u64(1);
+    let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map)
+        .choose_multiple(rng, 1)
+        .copied()
+        .collect();
+
+    // Define and name the benchmark function
+    c.bench_function("sequential_uniform_queries", |b| {
+        // Run the search queries
+        b.iter(|| {
+            for q in queries.clone().into_iter() {
+                layer_map.search(q.0, q.1);
+            }
+        });
+    });
+}
+
+criterion_group!(group_1, bench_from_captest_env);
+criterion_group!(group_2, bench_from_real_project);
+criterion_group!(group_3, bench_sequential);
+criterion_main!(group_1, group_2, group_3);

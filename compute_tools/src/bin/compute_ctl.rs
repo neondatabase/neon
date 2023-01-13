@@ -105,7 +105,7 @@ fn main() -> Result<()> {
         tenant,
         timeline,
         pageserver_connstr,
-        metrics: ComputeMetrics::new(),
+        metrics: ComputeMetrics::default(),
         state: RwLock::new(ComputeState::new()),
     };
     let compute = Arc::new(compute_state);

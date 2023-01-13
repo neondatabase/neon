@@ -2,6 +2,7 @@
 name = "postgres_ffi"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 rand = "0.8.3"
@@ -21,7 +22,7 @@ workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 
 [dev-dependencies]
 env_logger = "0.9"
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 wal_craft = { path = "wal_craft" }
 
 [build-dependencies]

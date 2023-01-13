@@ -29,7 +29,12 @@ RUN cd postgres && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
     # Install headers
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install && \
-    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install && \
+    # Enable some of contrib extensions
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/intagg.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control
 
 #########################################################################################
 #
@@ -55,7 +60,10 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.1.tar.gz && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_raster.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_tiger_geocoder.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_sfcgal.control
 
 #########################################################################################
 #
@@ -170,9 +178,6 @@ RUN cd /usr/local/pgsql/bin && rm ecpg raster2pgsql shp2pgsql pgtopo_export pgto
 # Remove headers that we won't need anymore - we've completed installation of all extensions
 RUN rm -r /usr/local/pgsql/include
 
-# Remove now-useless PGXS src infrastructure
-RUN rm -r /usr/local/pgsql/lib/pgxs/src
-
 # Remove static postgresql libraries - all compilation is finished, so we
 # can now remove these files - they must be included in other binaries by now
 # if they were to be used by other libraries.
@@ -207,7 +212,8 @@ RUN apt update &&  \
         libgeos-c1v5 \
         libgdal28 \
         libproj19 \
-        libprotobuf-c1 && \
+        libprotobuf-c1 \
+        gdb && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 USER postgres
