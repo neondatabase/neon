@@ -27,6 +27,7 @@ use tracing::*;
 ///
 use tokio_tar::{Builder, EntryType, Header};
 
+use crate::context::RequestContext;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
@@ -52,6 +53,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     req_lsn: Option<Lsn>,
     prev_lsn: Option<Lsn>,
     full_backup: bool,
+    ctx: &'a RequestContext,
 ) -> anyhow::Result<()>
 where
     W: AsyncWrite + Send + Sync + Unpin,
@@ -110,6 +112,7 @@ where
         lsn: backup_lsn,
         prev_record_lsn: prev_lsn,
         full_backup,
+        ctx,
     };
     basebackup
         .send_tarball()
@@ -129,6 +132,7 @@ where
     lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
+    ctx: &'a RequestContext,
 }
 
 impl<'a, W> Basebackup<'a, W>
@@ -171,23 +175,37 @@ where
             SlruKind::MultiXactOffsets,
             SlruKind::MultiXactMembers,
         ] {
-            for segno in self.timeline.list_slru_segments(kind, self.lsn).await? {
+            for segno in self
+                .timeline
+                .list_slru_segments(kind, self.lsn, self.ctx)
+                .await?
+            {
                 self.add_slru_segment(kind, segno).await?;
             }
         }
 
         // Create tablespace directories
-        for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn).await? {
+        for ((spcnode, dbnode), has_relmap_file) in
+            self.timeline.list_dbdirs(self.lsn, self.ctx).await?
+        {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
             // Gather and send relational files in each database if full backup is requested.
             if self.full_backup {
-                for rel in self.timeline.list_rels(spcnode, dbnode, self.lsn).await? {
+                for rel in self
+                    .timeline
+                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
+                    .await?
+                {
                     self.add_rel(rel).await?;
                 }
             }
         }
-        for xid in self.timeline.list_twophase_files(self.lsn).await? {
+        for xid in self
+            .timeline
+            .list_twophase_files(self.lsn, self.ctx)
+            .await?
+        {
             self.add_twophase_file(xid).await?;
         }
 
@@ -203,7 +221,10 @@ where
     }
 
     async fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
-        let nblocks = self.timeline.get_rel_size(tag, self.lsn, false).await?;
+        let nblocks = self
+            .timeline
+            .get_rel_size(tag, self.lsn, false, self.ctx)
+            .await?;
 
         // If the relation is empty, create an empty file
         if nblocks == 0 {
@@ -223,7 +244,7 @@ where
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
+                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false, self.ctx)
                     .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
@@ -245,14 +266,14 @@ where
     async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
         let nblocks = self
             .timeline
-            .get_slru_segment_size(slru, segno, self.lsn)
+            .get_slru_segment_size(slru, segno, self.lsn, self.ctx)
             .await?;
 
         let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
         for blknum in 0..nblocks {
             let img = self
                 .timeline
-                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)
+                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn, self.ctx)
                 .await?;
 
             if slru == SlruKind::Clog {
@@ -287,7 +308,7 @@ where
         let relmap_img = if has_relmap_file {
             let img = self
                 .timeline
-                .get_relmap_file(spcnode, dbnode, self.lsn)
+                .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
                 .await?;
             ensure!(img.len() == 512);
             Some(img)
@@ -323,7 +344,7 @@ where
             if !has_relmap_file
                 && self
                     .timeline
-                    .list_rels(spcnode, dbnode, self.lsn)
+                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
                     .await?
                     .is_empty()
             {
@@ -356,7 +377,10 @@ where
     // Extract twophase state files
     //
     async fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
-        let img = self.timeline.get_twophase_file(xid, self.lsn).await?;
+        let img = self
+            .timeline
+            .get_twophase_file(xid, self.lsn, self.ctx)
+            .await?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -394,12 +418,12 @@ where
 
         let checkpoint_bytes = self
             .timeline
-            .get_checkpoint(self.lsn)
+            .get_checkpoint(self.lsn, self.ctx)
             .await
             .context("failed to get checkpoint bytes")?;
         let pg_control_bytes = self
             .timeline
-            .get_control_file(self.lsn)
+            .get_control_file(self.lsn, self.ctx)
             .await
             .context("failed get control bytes")?;
 

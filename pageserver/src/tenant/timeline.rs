@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
     DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer, LayerFileName,
@@ -377,6 +378,12 @@ pub enum PageReconstructError {
     #[error(transparent)]
     Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
 
+    /// The operation would require downloading a layer that is missing locally.
+    NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
+
+    /// The operation was cancelled
+    Cancelled,
+
     /// An error happened replaying WAL records
     #[error(transparent)]
     WalRedo(#[from] crate::walredo::WalRedoError),
@@ -386,6 +393,19 @@ impl std::fmt::Debug for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
+            Self::NeedsDownload(_tli, _layer) => write!(f, "needs download"),
+            Self::Cancelled => write!(f, "cancelled"),
+            Self::WalRedo(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::fmt::Display for PageReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            Self::Other(err) => err.fmt(f),
+            Self::NeedsDownload(_tli, _layer) => write!(f, "needs download"),
+            Self::Cancelled => write!(f, "cancelled"),
             Self::WalRedo(err) => err.fmt(f),
         }
     }
@@ -422,10 +442,23 @@ impl Timeline {
     /// an ancestor branch, for example, or waste a lot of cycles chasing the
     /// non-existing key.
     ///
-    pub async fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
+    pub async fn get(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
+
+        // XXX: structured stats collection for layer eviction here.
+        trace!(
+            "get page request for {}@{} from task kind {:?}",
+            key,
+            lsn,
+            ctx.task_kind()
+        );
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
@@ -450,7 +483,7 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        self.get_reconstruct_data(key, lsn, &mut reconstruct_state)
+        self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
 
         self.metrics
@@ -513,13 +546,25 @@ impl Timeline {
     /// You should call this before any of the other get_* or list_* functions. Calling
     /// those functions with an LSN that has been processed yet is an error.
     ///
-    pub async fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
+    pub async fn wait_lsn(
+        &self,
+        lsn: Lsn,
+        _ctx: &RequestContext, /* Prepare for use by cancellation */
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(self.is_active(), "Cannot wait for Lsn on inactive timeline");
 
         // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
         anyhow::ensure!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnection),
+            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverManager),
+            "wait_lsn cannot be called in WAL receiver"
+        );
+        anyhow::ensure!(
+            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionHandler),
+            "wait_lsn cannot be called in WAL receiver"
+        );
+        anyhow::ensure!(
+            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionPoller),
             "wait_lsn cannot be called in WAL receiver"
         );
 
@@ -558,7 +603,7 @@ impl Timeline {
         self.flush_frozen_layers_and_wait().await
     }
 
-    pub async fn compact(&self) -> anyhow::Result<()> {
+    pub async fn compact(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
 
         // Last record Lsn could be zero in case the timeline was just created
@@ -616,14 +661,16 @@ impl Timeline {
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
+                ctx,
             )
             .await
         {
             Ok((partitioning, lsn)) => {
                 // 2. Create new image layers for partitions that have been modified
                 // "enough".
-                let layer_paths_to_upload =
-                    self.create_image_layers(&partitioning, lsn, false).await?;
+                let layer_paths_to_upload = self
+                    .create_image_layers(&partitioning, lsn, false, ctx)
+                    .await?;
                 if let Some(remote_client) = &self.remote_client {
                     for (path, layer_metadata) in layer_paths_to_upload {
                         remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
@@ -673,7 +720,10 @@ impl Timeline {
     /// the initial size calculation has not been run (gets triggered on the first size access).
     ///
     /// return size and boolean flag that shows if the size is exact
-    pub fn get_current_logical_size(self: &Arc<Self>) -> anyhow::Result<(u64, bool)> {
+    pub fn get_current_logical_size(
+        self: &Arc<Self>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(u64, bool)> {
         let current_size = self.current_logical_size.current_size()?;
         debug!("Current size: {current_size:?}");
 
@@ -683,7 +733,7 @@ impl Timeline {
             (current_size, self.current_logical_size.initial_part_end)
         {
             is_exact = false;
-            self.try_spawn_size_init_task(init_lsn);
+            self.try_spawn_size_init_task(init_lsn, ctx);
         }
 
         Ok((size, is_exact))
@@ -917,22 +967,25 @@ impl Timeline {
 
         let layer_flush_start_rx = self.layer_flush_start_tx.subscribe();
         let self_clone = Arc::clone(self);
+
         info!("spawning flush loop");
         task_mgr::spawn(
-                    task_mgr::BACKGROUND_RUNTIME.handle(),
-                    task_mgr::TaskKind::LayerFlushTask,
-                    Some(self.tenant_id),
-                    Some(self.timeline_id),
-                    "layer flush task",
-                    false,
-                    async move {
-                         self_clone.flush_loop(layer_flush_start_rx).await;
-                         let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
-                         assert_eq!(*flush_loop_state, FlushLoopState::Running);
-                         *flush_loop_state  = FlushLoopState::Exited;
-                         Ok(()) }
-                    .instrument(info_span!(parent: None, "layer flush task", tenant = %self.tenant_id, timeline = %self.timeline_id))
-                );
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            task_mgr::TaskKind::LayerFlushTask,
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+            "layer flush task",
+            false,
+            async move {
+                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
+                self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
+                let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
+                assert_eq!(*flush_loop_state, FlushLoopState::Running);
+                *flush_loop_state  = FlushLoopState::Exited;
+                Ok(())
+            }
+            .instrument(info_span!(parent: None, "layer flush task", tenant = %self.tenant_id, timeline = %self.timeline_id))
+        );
 
         *flush_loop_state = FlushLoopState::Running;
     }
@@ -963,12 +1016,16 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
         let self_clone = Arc::clone(self);
+        let background_ctx =
+            // XXX: this is a detached_child. Plumb through the ctx from call sites.
+            RequestContext::todo_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
         spawn_connection_manager_task(
             self_clone,
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
             crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
+            background_ctx,
         );
     }
 
@@ -1296,7 +1353,7 @@ impl Timeline {
         Ok(())
     }
 
-    fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn) {
+    fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn, ctx: &RequestContext) {
         let permit = match Arc::clone(&self.current_logical_size.initial_size_computation)
             .try_acquire_owned()
         {
@@ -1312,8 +1369,18 @@ impl Timeline {
             .initial_logical_size
             .get()
             .is_none());
+
+        info!(
+            "spawning logical size computation from context of task kind {:?}",
+            ctx.task_kind()
+        );
         // We need to start the computation task.
+        // It gets a separate context since it will outlive the request that called this function.
         let self_clone = Arc::clone(self);
+        let background_ctx = ctx.detached_child(
+            TaskKind::InitialLogicalSizeCalculation,
+            DownloadBehavior::Download,
+        );
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
@@ -1323,7 +1390,9 @@ impl Timeline {
             false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
-                let calculated_size = match self_clone.logical_size_calculation_task(init_lsn).await
+                let calculated_size = match self_clone
+                    .logical_size_calculation_task(init_lsn, &background_ctx)
+                    .await
                 {
                     Ok(s) => s,
                     Err(CalculateLogicalSizeError::Cancelled) => {
@@ -1358,18 +1427,27 @@ impl Timeline {
     pub fn spawn_ondemand_logical_size_calculation(
         self: &Arc<Self>,
         lsn: Lsn,
+        ctx: RequestContext,
     ) -> oneshot::Receiver<Result<u64, CalculateLogicalSizeError>> {
         let (sender, receiver) = oneshot::channel();
         let self_clone = Arc::clone(self);
+        // XXX if our caller loses interest, i.e., ctx is cancelled,
+        // we should stop the size calculation work and return an error.
+        // That would require restructuring this function's API to
+        // return the result directly, instead of a Receiver for the result.
+        let ctx = ctx.detached_child(
+            TaskKind::OndemandLogicalSizeCalculation,
+            DownloadBehavior::Download,
+        );
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
-            task_mgr::TaskKind::InitialLogicalSizeCalculation,
+            task_mgr::TaskKind::OndemandLogicalSizeCalculation,
             Some(self.tenant_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
             false,
             async move {
-                let res = self_clone.logical_size_calculation_task(lsn).await;
+                let res = self_clone.logical_size_calculation_task(lsn, &ctx).await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
             },
@@ -1381,6 +1459,7 @@ impl Timeline {
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
         init_lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
@@ -1388,12 +1467,13 @@ impl Timeline {
 
         let calculation = async {
             let cancel = cancel.child_token();
+            let ctx = ctx.attached_child();
             tokio::task::spawn_blocking(move || {
                 // Run in a separate thread since this can do a lot of
                 // synchronous file IO without .await inbetween
                 // if there are no RemoteLayers that would require downloading.
                 let h = tokio::runtime::Handle::current();
-                h.block_on(self_calculation.calculate_logical_size(init_lsn, cancel))
+                h.block_on(self_calculation.calculate_logical_size(init_lsn, cancel, &ctx))
             })
             .await
             .context("Failed to spawn calculation result task")?
@@ -1448,10 +1528,11 @@ impl Timeline {
     ///
     /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
     /// especially if we need to download remote layers.
-    async fn calculate_logical_size(
+    pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
         cancel: CancellationToken,
+        ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         info!(
             "Calculating logical size for timeline {} at {}",
@@ -1494,7 +1575,7 @@ impl Timeline {
             self.metrics.logical_size_histo.start_timer()
         };
         let logical_size = self
-            .get_current_logical_size_non_incremental(up_to_lsn, cancel)
+            .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
             .await?;
         debug!("calculated logical size: {logical_size}");
         timer.stop_and_record();
@@ -1571,6 +1652,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> Result<(), PageReconstructError> {
         // Start from the current timeline.
         let mut timeline_owned;
@@ -1758,14 +1840,43 @@ impl Timeline {
                 let remote_layer_as_persistent: Arc<dyn PersistentLayer> =
                     Arc::clone(&remote_layer) as Arc<dyn PersistentLayer>;
                 let id = remote_layer_as_persistent.traversal_id();
-                info!("need remote layer {id}");
+                info!(
+                    "need remote layer {} for task kind {:?}",
+                    id,
+                    ctx.task_kind()
+                );
 
                 // The next layer doesn't exist locally. Need to download it.
                 // (The control flow is a bit complicated here because we must drop the 'layers'
                 // lock before awaiting on the Future.)
-                info!("on-demand downloading remote layer {id}");
-                timeline.download_remote_layer(remote_layer).await?;
-                continue 'layer_map_search;
+                match (
+                    ctx.download_behavior(),
+                    self.conf.ondemand_download_behavior_treat_error_as_warn,
+                ) {
+                    (DownloadBehavior::Download, _) => {
+                        info!(
+                            "on-demand downloading remote layer {id} for task kind {:?}",
+                            ctx.task_kind()
+                        );
+                        timeline.download_remote_layer(remote_layer).await?;
+                        continue 'layer_map_search;
+                    }
+                    (DownloadBehavior::Warn, _) | (DownloadBehavior::Error, true) => {
+                        warn!(
+                            "unexpectedly on-demand downloading remote layer {} for task kind {:?}",
+                            id,
+                            ctx.task_kind()
+                        );
+                        timeline.download_remote_layer(remote_layer).await?;
+                        continue 'layer_map_search;
+                    }
+                    (DownloadBehavior::Error, false) => {
+                        return Err(PageReconstructError::NeedsDownload(
+                            timeline.myself.clone(),
+                            Arc::downgrade(&remote_layer),
+                        ))
+                    }
+                }
             }
         }
     }
@@ -1887,7 +1998,11 @@ impl Timeline {
     }
 
     /// Layer flusher task's main loop.
-    async fn flush_loop(&self, mut layer_flush_start_rx: tokio::sync::watch::Receiver<u64>) {
+    async fn flush_loop(
+        &self,
+        mut layer_flush_start_rx: tokio::sync::watch::Receiver<u64>,
+        ctx: &RequestContext,
+    ) {
         info!("started flush loop");
         loop {
             tokio::select! {
@@ -1908,7 +2023,7 @@ impl Timeline {
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
                 if let Some(layer_to_flush) = layer_to_flush {
-                    if let Err(err) = self.flush_frozen_layer(layer_to_flush).await {
+                    if let Err(err) = self.flush_frozen_layer(layer_to_flush, ctx).await {
                         error!("could not flush frozen layer: {err:?}");
                         break Err(err);
                     }
@@ -1973,8 +2088,12 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip(self, frozen_layer), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
-    async fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> anyhow::Result<()> {
+    #[instrument(skip(self, frozen_layer, ctx), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
+    async fn flush_frozen_layer(
+        &self,
+        frozen_layer: Arc<InMemoryLayer>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
@@ -1982,10 +2101,12 @@ impl Timeline {
         let lsn_range = frozen_layer.get_lsn_range();
         let layer_paths_to_upload =
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
+                // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
+                // require downloading anything during initial import.
                 let (partitioning, _lsn) = self
-                    .repartition(self.initdb_lsn, self.get_compaction_target_size())
+                    .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
                     .await?;
-                self.create_image_layers(&partitioning, self.initdb_lsn, true)
+                self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
                     .await?
             } else {
                 // normal case, write out a L0 delta layer file.
@@ -2136,6 +2257,7 @@ impl Timeline {
         &self,
         lsn: Lsn,
         partition_size: u64,
+        ctx: &RequestContext,
     ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         {
             let partitioning_guard = self.partitioning.lock().unwrap();
@@ -2146,7 +2268,7 @@ impl Timeline {
                 return Ok((partitioning_guard.0.clone(), partitioning_guard.1));
             }
         }
-        let keyspace = self.collect_keyspace(lsn).await?;
+        let keyspace = self.collect_keyspace(lsn, ctx).await?;
         let partitioning = keyspace.partition(partition_size);
 
         let mut partitioning_guard = self.partitioning.lock().unwrap();
@@ -2206,6 +2328,7 @@ impl Timeline {
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         force: bool,
+        ctx: &RequestContext,
     ) -> Result<HashMap<LayerFileName, LayerFileMetadata>, PageReconstructError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
@@ -2230,7 +2353,7 @@ impl Timeline {
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
-                        let img = match self.get(key, lsn).await {
+                        let img = match self.get(key, lsn, ctx).await {
                             Ok(img) => img,
                             Err(err) => {
                                 // If we fail to reconstruct a VM or FSM page, we can zero the
@@ -2685,6 +2808,7 @@ impl Timeline {
         retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
         //
@@ -2697,7 +2821,7 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match self.find_lsn_for_timestamp(pitr_timestamp).await? {
+                match self.find_lsn_for_timestamp(pitr_timestamp, ctx).await? {
                     LsnForTimestamp::Present(lsn) => lsn,
                     LsnForTimestamp::Future(lsn) => {
                         // The timestamp is in the future. That sounds impossible,

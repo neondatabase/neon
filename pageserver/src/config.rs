@@ -158,6 +158,8 @@ pub struct PageServerConf {
     pub synthetic_size_calculation_interval: Duration,
 
     pub test_remote_failures: u64,
+
+    pub ondemand_download_behavior_treat_error_as_warn: bool,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -222,6 +224,8 @@ struct PageServerConfigBuilder {
     synthetic_size_calculation_interval: BuilderValue<Duration>,
 
     test_remote_failures: BuilderValue<u64>,
+
+    ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -267,6 +271,8 @@ impl Default for PageServerConfigBuilder {
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
 
             test_remote_failures: Set(0),
+
+            ondemand_download_behavior_treat_error_as_warn: Set(false),
         }
     }
 }
@@ -363,6 +369,14 @@ impl PageServerConfigBuilder {
         self.test_remote_failures = BuilderValue::Set(fail_first);
     }
 
+    pub fn ondemand_download_behavior_treat_error_as_warn(
+        &mut self,
+        ondemand_download_behavior_treat_error_as_warn: bool,
+    ) {
+        self.ondemand_download_behavior_treat_error_as_warn =
+            BuilderValue::Set(ondemand_download_behavior_treat_error_as_warn);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         Ok(PageServerConf {
             listen_pg_addr: self
@@ -422,6 +436,11 @@ impl PageServerConfigBuilder {
             test_remote_failures: self
                 .test_remote_failures
                 .ok_or(anyhow!("missing test_remote_failuers"))?,
+            ondemand_download_behavior_treat_error_as_warn: self
+                .ondemand_download_behavior_treat_error_as_warn
+                .ok_or(anyhow!(
+                    "missing ondemand_download_behavior_treat_error_as_warn"
+                ))?,
         })
     }
 }
@@ -600,6 +619,7 @@ impl PageServerConf {
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
+                "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -724,6 +744,7 @@ impl PageServerConf {
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
             synthetic_size_calculation_interval: Duration::from_secs(60),
             test_remote_failures: 0,
+            ondemand_download_behavior_treat_error_as_warn: false,
         }
     }
 }
@@ -747,6 +768,11 @@ fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
         bail!("configure option {name} cannot be negative");
     }
     Ok(i as u64)
+}
+
+fn parse_toml_bool(name: &str, item: &Item) -> Result<bool> {
+    item.as_bool()
+        .with_context(|| format!("configure option {name} is not a bool"))
 }
 
 fn parse_toml_duration(name: &str, item: &Item) -> Result<Duration> {
@@ -907,6 +933,7 @@ log_format = 'json'
                     defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
                 )?,
                 test_remote_failures: 0,
+                ondemand_download_behavior_treat_error_as_warn: false,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -954,6 +981,7 @@ log_format = 'json'
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 synthetic_size_calculation_interval: Duration::from_secs(333),
                 test_remote_failures: 0,
+                ondemand_download_behavior_treat_error_as_warn: false,
             },
             "Should be able to parse all basic config values correctly"
         );

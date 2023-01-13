@@ -1010,7 +1010,10 @@ impl RemoteTimelineClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
+    use crate::{
+        tenant::harness::{TenantHarness, TIMELINE_ID},
+        DEFAULT_PG_VERSION,
+    };
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
     use std::{collections::HashSet, path::Path};
     use utils::lsn::Lsn;
@@ -1064,9 +1067,19 @@ mod tests {
     // Test scheduling
     #[test]
     fn upload_scheduling() -> anyhow::Result<()> {
+        // Use a current-thread runtime in the test
+        let runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+        ));
+        let _entered = runtime.enter();
+
         let harness = TenantHarness::create("upload_scheduling")?;
+        let (tenant, ctx) = runtime.block_on(harness.load());
+        let _timeline =
+            tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
-        std::fs::create_dir_all(&timeline_path)?;
 
         let remote_fs_dir = harness.conf.workdir.join("remote_fs");
         std::fs::create_dir_all(remote_fs_dir)?;
@@ -1083,14 +1096,6 @@ mod tests {
             .unwrap(),
             storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
         };
-
-        // Use a current-thread runtime in the test
-        let runtime = Box::leak(Box::new(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?,
-        ));
-        let _entered = runtime.enter();
 
         // Test outline:
         //
