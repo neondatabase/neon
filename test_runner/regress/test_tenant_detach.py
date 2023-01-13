@@ -209,6 +209,7 @@ def test_tenant_reattach_while_busy(
     env.pageserver.allowed_errors.append(
         ".*Tenant .* will not become active\\. Current state: Stopping.*"
     )
+    env.pageserver.allowed_errors.append(".*Tenant .* is not active, state: Stopping.*")
 
     pageserver_http = env.pageserver.http_client()
 
