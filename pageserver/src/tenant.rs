@@ -438,13 +438,16 @@ struct RemoteStartupData {
 
 impl Tenant {
     /// Yet another helper for timeline initialization.
-    /// Contains common part for `load_local_timeline` and `load_remote_timeline`.
+    /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
     ///
-    /// Initializes timeline data in pageserver's memory from scratch and tries to load the local
-    /// timeline files for that timeline.
-    /// If fails, leaves the timeline at `Broken` state, otherwise continues with the remote
-    /// storage sync and schedules the sync tasks, if needed.
-    async fn timeline_init_with_sync(
+    /// - Initializes the Timeline struct and inserts it into the tenant's hash map
+    /// - Scans the local timeline directory for layer files and builds the layer map
+    /// - Downloads remote index file and adds remote files to the layer map
+    /// - Schedules remote upload tasks for any files that are present locally but missing from remote storage.
+    ///
+    /// If the operation fails, the timeline is left in the tenant's hash map in Broken state. On success,
+    /// it is marked as Active.
+    async fn timeline_init_and_sync(
         &self,
         timeline_id: TimelineId,
         remote_client: Option<RemoteTimelineClient>,
@@ -783,7 +786,7 @@ impl Tenant {
         // cannot be older than the local one
         let local_metadata = None;
 
-        self.timeline_init_with_sync(
+        self.timeline_init_and_sync(
             timeline_id,
             Some(remote_client),
             Some(RemoteStartupData {
@@ -1048,7 +1051,7 @@ impl Tenant {
             None => None,
         };
 
-        self.timeline_init_with_sync(
+        self.timeline_init_and_sync(
             timeline_id,
             remote_client,
             remote_startup_data,
