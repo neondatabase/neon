@@ -107,7 +107,6 @@ jobs:
             ~/.cargo/registry/
             !~/.cargo/registry/src
             ~/.cargo/git/
-            target/
           key: v1-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       # Some of our rust modules use FFI and need those to be checked
@@ -428,7 +427,6 @@ jobs:
             ~/.cargo/registry/
             !~/.cargo/registry/src
             ~/.cargo/git/
-            target/
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
