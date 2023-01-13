@@ -441,8 +441,16 @@ struct RemoteStartupData {
 
 impl Tenant {
     /// Yet another helper for timeline initialization.
-    /// Contains common part for `load_local_timeline` and `load_remote_timeline`
-    async fn setup_timeline(
+    /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
+    ///
+    /// - Initializes the Timeline struct and inserts it into the tenant's hash map
+    /// - Scans the local timeline directory for layer files and builds the layer map
+    /// - Downloads remote index file and adds remote files to the layer map
+    /// - Schedules remote upload tasks for any files that are present locally but missing from remote storage.
+    ///
+    /// If the operation fails, the timeline is left in the tenant's hash map in Broken state. On success,
+    /// it is marked as Active.
+    async fn timeline_init_and_sync(
         &self,
         timeline_id: TimelineId,
         remote_client: Option<RemoteTimelineClient>,
@@ -485,10 +493,7 @@ impl Tenant {
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
             // will ingest data which may require looking at the layers which are not yet available locally
             match timeline.initialize_with_lock(&mut timelines_accessor, true, false) {
-                Ok(initialized_timeline) => {
-                    timelines_accessor.insert(timeline_id, initialized_timeline.clone());
-                    Ok(initialized_timeline)
-                }
+                Ok(new_timeline) => new_timeline,
                 Err(e) => {
                     error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
                     // FIXME using None is a hack, it wont hurt, just ugly.
@@ -504,16 +509,14 @@ impl Tenant {
                             None,
                         )
                         .with_context(|| {
-                            format!(
-                            "Failed to crate broken timeline data for {tenant_id}/{timeline_id}"
-                        )
+                            format!("creating broken timeline data for {tenant_id}/{timeline_id}")
                         })?;
                     broken_timeline.set_state(TimelineState::Broken);
                     timelines_accessor.insert(timeline_id, broken_timeline);
-                    Err(e)
+                    return Err(e);
                 }
             }
-        }?;
+        };
 
         if self.remote_storage.is_some() {
             // Reconcile local state with remote storage, downloading anything that's
@@ -786,7 +789,7 @@ impl Tenant {
         // cannot be older than the local one
         let local_metadata = None;
 
-        self.setup_timeline(
+        self.timeline_init_and_sync(
             timeline_id,
             Some(remote_client),
             Some(RemoteStartupData {
@@ -1051,7 +1054,7 @@ impl Tenant {
             None => None,
         };
 
-        self.setup_timeline(
+        self.timeline_init_and_sync(
             timeline_id,
             remote_client,
             remote_startup_data,
