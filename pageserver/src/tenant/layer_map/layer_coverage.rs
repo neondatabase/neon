@@ -1,9 +1,8 @@
 use std::ops::Range;
 
-// TODO the `im` crate has 20x more downloads and also has
-// persistent/immutable BTree. It also runs a bit faster but
-// results are not the same on some tests.
-use rpds::RedBlackTreeMapSync;
+// There's an alternative non-sync crate im-rc that's supposed to be 20%
+// faster. It's not necessary now, but if extra perf is needed that's an option.
+use im::OrdMap;
 
 /// Data structure that can efficiently:
 /// - find the latest layer by lsn.end at a given key
@@ -19,11 +18,7 @@ pub struct LayerCoverage<Value> {
     /// We use an immutable/persistent tree so that we can keep historic
     /// versions of this coverage without cloning the whole thing and
     /// incurring quadratic memory cost. See HistoricLayerCoverage.
-    ///
-    /// We use the Sync version of the map because we want Self to
-    /// be Sync. Using nonsync might be faster, if we can work with
-    /// that.
-    nodes: RedBlackTreeMapSync<i128, Option<(u64, Value)>>,
+    nodes: OrdMap<i128, Option<(u64, Value)>>,
 }
 
 impl<T: Clone> Default for LayerCoverage<T> {
@@ -35,7 +30,7 @@ impl<T: Clone> Default for LayerCoverage<T> {
 impl<Value: Clone> LayerCoverage<Value> {
     pub fn new() -> Self {
         Self {
-            nodes: RedBlackTreeMapSync::default(),
+            nodes: OrdMap::default(),
         }
     }
 
@@ -48,7 +43,7 @@ impl<Value: Clone> LayerCoverage<Value> {
             Some((_, None)) => None,
             None => None,
         };
-        self.nodes.insert_mut(key, value);
+        self.nodes.insert(key, value);
     }
 
     /// Insert a layer.
@@ -88,10 +83,10 @@ impl<Value: Clone> LayerCoverage<Value> {
             to_remove.push(key.end);
         }
         for k in to_update {
-            self.nodes.insert_mut(k, Some((lsn.end, value.clone())));
+            self.nodes.insert(k, Some((lsn.end, value.clone())));
         }
         for k in to_remove {
-            self.nodes.remove_mut(&k);
+            self.nodes.remove(&k);
         }
     }
 
@@ -99,10 +94,16 @@ impl<Value: Clone> LayerCoverage<Value> {
     ///
     /// Complexity: O(log N)
     pub fn query(&self, key: i128) -> Option<Value> {
+
+        // This is cursed. Commenting out these lines makes the code
+        // correct, even though they don't do anything.
+        let k1 = self.nodes.get_prev(&key)?.0;
+        // let k2 = self.nodes.range(..=key).rev().next()?.0;
+        // assert_eq!(k1, k2);
+
         self.nodes
-            .range(..=key)
-            .rev()
-            .next()?
+            // .get_prev(&key)?
+            .range(..=key).rev().next()?
             .1
             .as_ref()
             .map(|(_, v)| v.clone())
