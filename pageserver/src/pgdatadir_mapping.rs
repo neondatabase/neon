@@ -7,6 +7,7 @@
 //! Clarify that)
 //!
 use super::tenant::{PageReconstructError, Timeline};
+use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
 use crate::walrecord::NeonWalRecord;
@@ -97,6 +98,7 @@ impl Timeline {
         blknum: BlockNumber,
         lsn: Lsn,
         latest: bool,
+        ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(anyhow::anyhow!(
@@ -104,7 +106,7 @@ impl Timeline {
             )));
         }
 
-        let nblocks = self.get_rel_size(tag, lsn, latest).await?;
+        let nblocks = self.get_rel_size(tag, lsn, latest, ctx).await?;
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
@@ -114,7 +116,7 @@ impl Timeline {
         }
 
         let key = rel_block_to_key(tag, blknum);
-        self.get(key, lsn).await
+        self.get(key, lsn, ctx).await
     }
 
     // Get size of a database in blocks
@@ -124,13 +126,14 @@ impl Timeline {
         dbnode: Oid,
         lsn: Lsn,
         latest: bool,
+        ctx: &RequestContext,
     ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
 
-        let rels = self.list_rels(spcnode, dbnode, lsn).await?;
+        let rels = self.list_rels(spcnode, dbnode, lsn, ctx).await?;
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, lsn, latest).await?;
+            let n_blocks = self.get_rel_size(rel, lsn, latest, ctx).await?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -142,6 +145,7 @@ impl Timeline {
         tag: RelTag,
         lsn: Lsn,
         latest: bool,
+        ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(anyhow::anyhow!(
@@ -154,7 +158,7 @@ impl Timeline {
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, lsn, latest).await?
+            && !self.get_rel_exists(tag, lsn, latest, ctx).await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -164,7 +168,7 @@ impl Timeline {
         }
 
         let key = rel_size_to_key(tag);
-        let mut buf = self.get(key, lsn).await?;
+        let mut buf = self.get(key, lsn, ctx).await?;
         let nblocks = buf.get_u32_le();
 
         if latest {
@@ -186,6 +190,7 @@ impl Timeline {
         tag: RelTag,
         lsn: Lsn,
         _latest: bool,
+        ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(anyhow::anyhow!(
@@ -199,7 +204,7 @@ impl Timeline {
         }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
-        let buf = self.get(key, lsn).await?;
+        let buf = self.get(key, lsn, ctx).await?;
 
         match RelDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -216,10 +221,11 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<HashSet<RelTag>, PageReconstructError> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
-        let buf = self.get(key, lsn).await?;
+        let buf = self.get(key, lsn, ctx).await?;
 
         match RelDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -244,9 +250,10 @@ impl Timeline {
         segno: u32,
         blknum: BlockNumber,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let key = slru_block_to_key(kind, segno, blknum);
-        self.get(key, lsn).await
+        self.get(key, lsn, ctx).await
     }
 
     /// Get size of an SLRU segment
@@ -255,9 +262,10 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         let key = slru_segment_size_to_key(kind, segno);
-        let mut buf = self.get(key, lsn).await?;
+        let mut buf = self.get(key, lsn, ctx).await?;
         Ok(buf.get_u32_le())
     }
 
@@ -267,10 +275,11 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
-        let buf = self.get(key, lsn).await?;
+        let buf = self.get(key, lsn, ctx).await?;
 
         match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -291,6 +300,7 @@ impl Timeline {
     pub async fn find_lsn_for_timestamp(
         &self,
         search_timestamp: TimestampTz,
+        ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         let min_lsn = *gc_cutoff_lsn_guard;
@@ -313,6 +323,7 @@ impl Timeline {
                     Lsn(mid * 8),
                     &mut found_smaller,
                     &mut found_larger,
+                    ctx,
                 )
                 .await?;
 
@@ -362,14 +373,18 @@ impl Timeline {
         probe_lsn: Lsn,
         found_smaller: &mut bool,
         found_larger: &mut bool,
+        ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
-        for segno in self.list_slru_segments(SlruKind::Clog, probe_lsn).await? {
+        for segno in self
+            .list_slru_segments(SlruKind::Clog, probe_lsn, ctx)
+            .await?
+        {
             let nblocks = self
-                .get_slru_segment_size(SlruKind::Clog, segno, probe_lsn)
+                .get_slru_segment_size(SlruKind::Clog, segno, probe_lsn, ctx)
                 .await?;
             for blknum in (0..nblocks).rev() {
                 let clog_page = self
-                    .get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn)
+                    .get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn, ctx)
                     .await?;
 
                 if clog_page.len() == BLCKSZ as usize + 8 {
@@ -394,11 +409,12 @@ impl Timeline {
         &self,
         kind: SlruKind,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<HashSet<u32>, PageReconstructError> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
-        let buf = self.get(key, lsn).await?;
+        let buf = self.get(key, lsn, ctx).await?;
         match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => Ok(dir.segments),
             Err(e) => Err(PageReconstructError::from(e)),
@@ -410,18 +426,21 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let key = relmap_file_key(spcnode, dbnode);
 
-        self.get(key, lsn).await
+        let buf = self.get(key, lsn, ctx).await?;
+        Ok(buf)
     }
 
     pub async fn list_dbdirs(
         &self,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<HashMap<(Oid, Oid), bool>, PageReconstructError> {
         // fetch directory entry
-        let buf = self.get(DBDIR_KEY, lsn).await?;
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
 
         match DbDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => Ok(dir.dbdirs),
@@ -433,18 +452,20 @@ impl Timeline {
         &self,
         xid: TransactionId,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let key = twophase_file_key(xid);
-        let buf = self.get(key, lsn).await?;
+        let buf = self.get(key, lsn, ctx).await?;
         Ok(buf)
     }
 
     pub async fn list_twophase_files(
         &self,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<HashSet<TransactionId>, PageReconstructError> {
         // fetch directory entry
-        let buf = self.get(TWOPHASEDIR_KEY, lsn).await?;
+        let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
 
         match TwoPhaseDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => Ok(dir.xids),
@@ -452,12 +473,20 @@ impl Timeline {
         }
     }
 
-    pub async fn get_control_file(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
-        self.get(CONTROLFILE_KEY, lsn).await
+    pub async fn get_control_file(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.get(CONTROLFILE_KEY, lsn, ctx).await
     }
 
-    pub async fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
-        self.get(CHECKPOINT_KEY, lsn).await
+    pub async fn get_checkpoint(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
     /// Does the same as get_current_logical_size but counted on demand.
@@ -469,15 +498,16 @@ impl Timeline {
         &self,
         lsn: Lsn,
         cancel: CancellationToken,
+        ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn).await.context("read dbdir")?;
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await.context("read dbdir")?;
         let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
             for rel in self
-                .list_rels(*spcnode, *dbnode, lsn)
+                .list_rels(*spcnode, *dbnode, lsn, ctx)
                 .await
                 .context("list rels")?
             {
@@ -486,7 +516,7 @@ impl Timeline {
                 }
                 let relsize_key = rel_size_to_key(rel);
                 let mut buf = self
-                    .get(relsize_key, lsn)
+                    .get(relsize_key, lsn, ctx)
                     .await
                     .with_context(|| format!("read relation size of {rel:?}"))?;
                 let relsize = buf.get_u32_le();
@@ -501,7 +531,11 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    pub async fn collect_keyspace(&self, lsn: Lsn) -> anyhow::Result<KeySpace> {
+    pub async fn collect_keyspace(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<KeySpace> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -509,7 +543,7 @@ impl Timeline {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn).await?;
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
         let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
@@ -519,14 +553,14 @@ impl Timeline {
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
-                .list_rels(spcnode, dbnode, lsn)
+                .list_rels(spcnode, dbnode, lsn, ctx)
                 .await?
                 .into_iter()
                 .collect();
             rels.sort_unstable();
             for rel in rels {
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self.get(relsize_key, lsn).await?;
+                let mut buf = self.get(relsize_key, lsn, ctx).await?;
                 let relsize = buf.get_u32_le();
 
                 result.add_range(rel_block_to_key(rel, 0)..rel_block_to_key(rel, relsize));
@@ -542,13 +576,13 @@ impl Timeline {
         ] {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
-            let buf = self.get(slrudir_key, lsn).await?;
+            let buf = self.get(slrudir_key, lsn, ctx).await?;
             let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
                 let segsize_key = slru_segment_size_to_key(kind, segno);
-                let mut buf = self.get(segsize_key, lsn).await?;
+                let mut buf = self.get(segsize_key, lsn, ctx).await?;
                 let segsize = buf.get_u32_le();
 
                 result.add_range(
@@ -560,7 +594,7 @@ impl Timeline {
 
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
-        let buf = self.get(TWOPHASEDIR_KEY, lsn).await?;
+        let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
         let twophase_dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
@@ -723,9 +757,10 @@ impl<'a> DatadirModification<'a> {
         spcnode: Oid,
         dbnode: Oid,
         img: Bytes,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory (if it doesn't exist already)
-        let buf = self.get(DBDIR_KEY).await?;
+        let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dbdir = DbDirectory::des(&buf)?;
 
         let r = dbdir.dbdirs.insert((spcnode, dbnode), true);
@@ -755,9 +790,10 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         xid: TransactionId,
         img: Bytes,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory entry
-        let buf = self.get(TWOPHASEDIR_KEY).await?;
+        let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
         if !dir.xids.insert(xid) {
             anyhow::bail!("twophase file for xid {} already exists", xid);
@@ -781,16 +817,21 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
-    pub async fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> anyhow::Result<()> {
+    pub async fn drop_dbdir(
+        &mut self,
+        spcnode: Oid,
+        dbnode: Oid,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         let req_lsn = self.tline.get_last_record_lsn();
 
         let total_blocks = self
             .tline
-            .get_db_size(spcnode, dbnode, req_lsn, true)
+            .get_db_size(spcnode, dbnode, req_lsn, true, ctx)
             .await?;
 
         // Remove entry from dbdir
-        let buf = self.get(DBDIR_KEY).await?;
+        let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dir = DbDirectory::des(&buf)?;
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
@@ -817,11 +858,12 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         rel: RelTag,
         nblocks: BlockNumber,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY).await?)?;
+        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
             // Didn't exist. Update dbdir
@@ -833,7 +875,7 @@ impl<'a> DatadirModification<'a> {
             RelDirectory::default()
         } else {
             // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key).await?)?
+            RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?
         };
 
         // Add the new relation to the rel directory entry, and write it back
@@ -865,13 +907,14 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         rel: RelTag,
         nblocks: BlockNumber,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         let last_lsn = self.tline.get_last_record_lsn();
-        if self.tline.get_rel_exists(rel, last_lsn, true).await? {
+        if self.tline.get_rel_exists(rel, last_lsn, true, ctx).await? {
             let size_key = rel_size_to_key(rel);
             // Fetch the old size first
-            let old_size = self.get(size_key).await?.get_u32_le();
+            let old_size = self.get(size_key, ctx).await?.get_u32_le();
 
             // Update the entry with the new size.
             let buf = nblocks.to_le_bytes();
@@ -895,12 +938,13 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         rel: RelTag,
         nblocks: BlockNumber,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
 
         // Put size
         let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key).await?.get_u32_le();
+        let old_size = self.get(size_key, ctx).await?.get_u32_le();
 
         // only extend relation here. never decrease the size
         if nblocks > old_size {
@@ -916,12 +960,12 @@ impl<'a> DatadirModification<'a> {
     }
 
     /// Drop a relation.
-    pub async fn put_rel_drop(&mut self, rel: RelTag) -> anyhow::Result<()> {
+    pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &RequestContext) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
 
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let buf = self.get(dir_key).await?;
+        let buf = self.get(dir_key, ctx).await?;
         let mut dir = RelDirectory::des(&buf)?;
 
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
@@ -932,7 +976,7 @@ impl<'a> DatadirModification<'a> {
 
         // update logical size
         let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key).await?.get_u32_le();
+        let old_size = self.get(size_key, ctx).await?.get_u32_le();
         self.pending_nblocks -= old_size as i64;
 
         // Remove enty from relation size cache
@@ -949,10 +993,11 @@ impl<'a> DatadirModification<'a> {
         kind: SlruKind,
         segno: u32,
         nblocks: BlockNumber,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory entry
         let dir_key = slru_dir_to_key(kind);
-        let buf = self.get(dir_key).await?;
+        let buf = self.get(dir_key, ctx).await?;
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.insert(segno) {
@@ -988,10 +1033,15 @@ impl<'a> DatadirModification<'a> {
     }
 
     /// This method is used for marking truncated SLRU files
-    pub async fn drop_slru_segment(&mut self, kind: SlruKind, segno: u32) -> anyhow::Result<()> {
+    pub async fn drop_slru_segment(
+        &mut self,
+        kind: SlruKind,
+        segno: u32,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Remove it from the directory entry
         let dir_key = slru_dir_to_key(kind);
-        let buf = self.get(dir_key).await?;
+        let buf = self.get(dir_key, ctx).await?;
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.remove(&segno) {
@@ -1015,9 +1065,13 @@ impl<'a> DatadirModification<'a> {
     }
 
     /// This method is used for marking truncated SLRU files
-    pub async fn drop_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
+    pub async fn drop_twophase_file(
+        &mut self,
+        xid: TransactionId,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Remove it from the directory entry
-        let buf = self.get(TWOPHASEDIR_KEY).await?;
+        let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
 
         if !dir.xids.remove(&xid) {
@@ -1111,7 +1165,7 @@ impl<'a> DatadirModification<'a> {
 
     // Internal helper functions to batch the modifications
 
-    async fn get(&self, key: Key) -> Result<Bytes, PageReconstructError> {
+    async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
         // Have we already updated the same key? Read the pending updated
         // version in that case.
         //
@@ -1132,7 +1186,7 @@ impl<'a> DatadirModification<'a> {
             }
         } else {
             let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
-            self.tline.get(key, lsn).await
+            self.tline.get(key, lsn, ctx).await
         }
     }
 
@@ -1542,10 +1596,11 @@ pub fn create_test_timeline(
     tenant: &crate::tenant::Tenant,
     timeline_id: utils::id::TimelineId,
     pg_version: u32,
+    ctx: &RequestContext,
 ) -> anyhow::Result<std::sync::Arc<Timeline>> {
     let tline = tenant
-        .create_empty_timeline(timeline_id, Lsn(8), pg_version)?
-        .initialize()?;
+        .create_empty_timeline(timeline_id, Lsn(8), pg_version, ctx)?
+        .initialize(ctx)?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;

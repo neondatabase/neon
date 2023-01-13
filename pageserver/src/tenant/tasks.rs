@@ -5,6 +5,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
@@ -52,19 +53,20 @@ async fn compaction_loop(tenant_id: TenantId) {
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+        let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         loop {
             trace!("waking up");
 
             let tenant = tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
                     info!("received cancellation request");
-                    return;
+                return;
                 },
                 tenant_wait_result = wait_for_active_tenant(tenant_id, wait_duration) => match tenant_wait_result {
                     ControlFlow::Break(()) => return,
                     ControlFlow::Continue(tenant) => tenant,
                 },
-            };
+        };
 
             let mut sleep_duration = tenant.get_compaction_period();
             if sleep_duration == Duration::ZERO {
@@ -73,7 +75,7 @@ async fn compaction_loop(tenant_id: TenantId) {
                 sleep_duration = Duration::from_secs(10);
             } else {
                 // Run compaction
-                if let Err(e) = tenant.compaction_iteration().await {
+                if let Err(e) = tenant.compaction_iteration(&ctx).await {
                     sleep_duration = wait_duration;
                     error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
                 }
@@ -103,6 +105,9 @@ async fn gc_loop(tenant_id: TenantId) {
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+        // GC might require downloading, to find the cutoff LSN that corresponds to the
+        // cutoff specified as time.
+        let ctx = RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
         loop {
             trace!("waking up");
 
@@ -127,7 +132,7 @@ async fn gc_loop(tenant_id: TenantId) {
             } else {
                 // Run gc
                 if gc_horizon > 0 {
-                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval()).await
+                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx).await
                     {
                         sleep_duration = wait_duration;
                         error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);

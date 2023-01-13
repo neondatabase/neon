@@ -3,6 +3,7 @@
 //! and push them to a HTTP endpoint.
 //! Cache metrics to send only the updated ones.
 //!
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::mgr;
 use anyhow;
@@ -47,12 +48,15 @@ pub async fn collect_metrics(
     metric_collection_interval: Duration,
     synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
+    ctx: RequestContext,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(metric_collection_interval);
 
     info!("starting collect_metrics");
 
     // spin up background worker that caclulates tenant sizes
+    let worker_ctx =
+        ctx.detached_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::CalculateSyntheticSize,
@@ -61,7 +65,7 @@ pub async fn collect_metrics(
         "synthetic size calculation",
         false,
         async move {
-            calculate_synthetic_size_worker(synthetic_size_calculation_interval)
+            calculate_synthetic_size_worker(synthetic_size_calculation_interval, &worker_ctx)
                 .instrument(info_span!("synthetic_size_worker"))
                 .await?;
             Ok(())
@@ -79,7 +83,7 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
-                if let Err(err) = collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id).await
+                if let Err(err) = collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx).await
                 {
                     error!("metrics collection failed: {err:?}");
                 }
@@ -102,6 +106,7 @@ pub async fn collect_metrics_iteration(
     cached_metrics: &mut HashMap<PageserverConsumptionMetricsKey, u64>,
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, u64)> = Vec::new();
     trace!(
@@ -137,7 +142,7 @@ pub async fn collect_metrics_iteration(
                     timeline_written_size,
                 ));
 
-                let (timeline_logical_size, is_exact) = timeline.get_current_logical_size()?;
+                let (timeline_logical_size, is_exact) = timeline.get_current_logical_size(ctx)?;
                 // Only send timeline logical size when it is fully calculated.
                 if is_exact {
                     current_metrics.push((
@@ -258,6 +263,7 @@ pub async fn collect_metrics_iteration(
 /// Caclculate synthetic size for each active tenant
 pub async fn calculate_synthetic_size_worker(
     synthetic_size_calculation_interval: Duration,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     info!("starting calculate_synthetic_size_worker");
 
@@ -280,7 +286,7 @@ pub async fn calculate_synthetic_size_worker(
 
                     if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await
                     {
-                        if let Err(e) = tenant.calculate_synthetic_size().await {
+                        if let Err(e) = tenant.calculate_synthetic_size(ctx).await {
                             error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
                         }
                     }
