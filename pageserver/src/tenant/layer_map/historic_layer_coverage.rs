@@ -34,13 +34,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
     ///
     /// Panics if new layer has older lsn.start than an existing layer.
     /// See BufferedHistoricLayerCoverage for a more general insertion method.
-    pub fn insert(
-        self: &mut Self,
-        key: Range<i128>,
-        lsn: Range<u64>,
-        value: Value,
-        is_image: bool,
-    ) {
+    pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value, is_image: bool) {
         // It's only a persistent map, not a retroactive one
         if let Some(last_entry) = self.historic.iter().rev().next() {
             let last_lsn = last_entry.0;
@@ -56,9 +50,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         if is_image {
             self.head.image_coverage.insert(key, lsn.clone(), value);
         } else {
-            self.head
-                .delta_coverage
-                .insert(key.clone(), lsn.clone(), value);
+            self.head.delta_coverage.insert(key, lsn.clone(), value);
         }
 
         // Remember history. Clone is O(1)
@@ -66,7 +58,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
     }
 
     /// Query at a particular LSN, inclusive
-    pub fn get_version(self: &Self, lsn: u64) -> Option<&LayerCoverageTuple<Value>> {
+    pub fn get_version(&self, lsn: u64) -> Option<&LayerCoverageTuple<Value>> {
         match self.historic.range(..=lsn).rev().next() {
             Some((_, v)) => Some(v),
             None => None,
@@ -74,7 +66,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
     }
 
     /// Remove all entries after a certain LSN
-    pub fn trim(self: &mut Self, begin: &u64) {
+    pub fn trim(&mut self, begin: &u64) {
         self.historic.split_off(begin);
         self.head = self
             .historic
@@ -289,28 +281,22 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         }
     }
 
-    pub fn insert(
-        self: &mut Self,
-        key: Range<i128>,
-        lsn: Range<u64>,
-        value: Value,
-        is_image: bool,
-    ) {
+    pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value, is_image: bool) {
         self.buffer.insert(
             (lsn.start, lsn.end, key.start, key.end, is_image),
-            Some(value.clone()),
+            Some(value),
         );
     }
 
-    pub fn remove(self: &mut Self, key: Range<i128>, lsn: Range<u64>, is_image: bool) {
+    pub fn remove(&mut self, key: Range<i128>, lsn: Range<u64>, is_image: bool) {
         self.buffer
             .insert((lsn.start, lsn.end, key.start, key.end, is_image), None);
     }
 
-    pub fn rebuild(self: &mut Self) {
+    pub fn rebuild(&mut self) {
         // Find the first LSN that needs to be rebuilt
         let rebuild_since: u64 = match self.buffer.iter().next() {
-            Some(((lsn_start, _, _, _, _), _)) => lsn_start.clone(),
+            Some(((lsn_start, _, _, _, _), _)) => *lsn_start,
             None => return, // No need to rebuild if buffer is empty
         };
 
@@ -318,7 +304,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.buffer.retain(|rect, layer| {
             match layer {
                 Some(l) => {
-                    let existing = self.layers.insert(rect.clone(), l.clone());
+                    let existing = self.layers.insert(*rect, l.clone());
                     if existing.is_some() {
                         // TODO this happened once. Investigate.
                         // panic!("can't overwrite layer");
@@ -349,7 +335,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     }
 
     /// Iterate all the layers
-    pub fn iter(self: &Self) -> impl '_ + Iterator<Item = Value> {
+    pub fn iter(&self) -> impl '_ + Iterator<Item = Value> {
         // NOTE we can actually perform this without rebuilding,
         //      but it's not necessary for now.
         if !self.buffer.is_empty() {
@@ -361,7 +347,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
 
     /// Return a reference to a queryable map, assuming all updates
     /// have already been processed using self.rebuild()
-    pub fn get(self: &Self) -> anyhow::Result<&HistoricLayerCoverage<Value>> {
+    pub fn get(&self) -> anyhow::Result<&HistoricLayerCoverage<Value>> {
         // NOTE we error here instead of implicitly rebuilding because
         //      rebuilding is somewhat expensive.
         // TODO maybe implicitly rebuild and log/sentry an error?

@@ -42,7 +42,7 @@ impl<Value: Clone> LayerCoverage<Value> {
     /// Helper function to subdivide the key range without changing any values
     ///
     /// Complexity: O(log N)
-    fn add_node(self: &mut Self, key: i128) {
+    fn add_node(&mut self, key: i128) {
         let value = match self.nodes.range(..=key).last() {
             Some((_, Some(v))) => Some(v.clone()),
             Some((_, None)) => None,
@@ -54,7 +54,7 @@ impl<Value: Clone> LayerCoverage<Value> {
     /// Insert a layer.
     ///
     /// Complexity: worst case O(N), in practice O(log N). See not in implementation.
-    pub fn insert(self: &mut Self, key: Range<i128>, lsn: Range<u64>, value: Value) {
+    pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value) {
         // NOTE The order of the following lines is important!!
 
         // Add nodes at endpoints
@@ -78,8 +78,8 @@ impl<Value: Clone> LayerCoverage<Value> {
             };
             if needs_cover {
                 match prev_covered {
-                    true => to_remove.push(k.clone()),
-                    false => to_update.push(k.clone()),
+                    true => to_remove.push(*k),
+                    false => to_update.push(*k),
                 }
             }
             prev_covered = needs_cover;
@@ -88,8 +88,7 @@ impl<Value: Clone> LayerCoverage<Value> {
             to_remove.push(key.end);
         }
         for k in to_update {
-            self.nodes
-                .insert_mut(k.clone(), Some((lsn.end.clone(), value.clone())));
+            self.nodes.insert_mut(k, Some((lsn.end, value.clone())));
         }
         for k in to_remove {
             self.nodes.remove_mut(&k);
@@ -99,7 +98,7 @@ impl<Value: Clone> LayerCoverage<Value> {
     /// Get the latest (by lsn.end) layer at a given key
     ///
     /// Complexity: O(log N)
-    pub fn query(self: &Self, key: i128) -> Option<Value> {
+    pub fn query(&self, key: i128) -> Option<Value> {
         self.nodes
             .range(..=key)
             .rev()
@@ -113,24 +112,14 @@ impl<Value: Clone> LayerCoverage<Value> {
     /// want to start with self.query(key.start), and then follow up with self.range
     ///
     /// Complexity: O(log N + result_size)
-    pub fn range(
-        self: &Self,
-        key: Range<i128>,
-    ) -> impl '_ + Iterator<Item = (i128, Option<Value>)> {
+    pub fn range(&self, key: Range<i128>) -> impl '_ + Iterator<Item = (i128, Option<Value>)> {
         self.nodes
             .range(key)
-            .map(|(k, v)| (k.clone(), v.as_ref().map(|x| x.1.clone())))
-    }
-
-    /// Like range, but covers the entire key space
-    pub fn iter(self: &Self) -> impl '_ + Iterator<Item = (i128, Option<Value>)> {
-        self.nodes
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_ref().map(|x| x.1.clone())))
+            .map(|(k, v)| (*k, v.as_ref().map(|x| x.1.clone())))
     }
 
     /// O(1) clone
-    pub fn clone(self: &Self) -> Self {
+    pub fn clone(&self) -> Self {
         Self {
             nodes: self.nodes.clone(),
         }
@@ -153,7 +142,7 @@ impl<T: Clone> Default for LayerCoverageTuple<T> {
 }
 
 impl<Value: Clone> LayerCoverageTuple<Value> {
-    pub fn clone(self: &Self) -> Self {
+    pub fn clone(&self) -> Self {
         Self {
             image_coverage: self.image_coverage.clone(),
             delta_coverage: self.delta_coverage.clone(),

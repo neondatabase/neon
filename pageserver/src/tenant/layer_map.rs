@@ -166,7 +166,7 @@ where
         );
 
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
-            self.l0_delta_layers.push(layer.clone());
+            self.l0_delta_layers.push(layer);
         }
 
         NUM_ONDISK_LAYERS.inc();
@@ -243,7 +243,7 @@ where
             }
         }
 
-        return Ok(true);
+        Ok(true)
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
@@ -275,14 +275,14 @@ where
 
         // Initialize loop variables
         let mut coverage: Vec<(Range<Key>, Option<Arc<L>>)> = vec![];
-        let mut current_key = start.clone();
+        let mut current_key = start;
         let mut current_val = version.image_coverage.query(start);
 
         // Loop through the change events and push intervals
         for (change_key, change_val) in version.image_coverage.range(start..end) {
             let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
             coverage.push((kr, current_val.take()));
-            current_key = change_key.clone();
+            current_key = change_key;
             current_val = change_val.clone();
         }
 
@@ -290,7 +290,7 @@ where
         let kr = Key::from_i128(current_key)..Key::from_i128(end);
         coverage.push((kr, current_val.take()));
 
-        return Ok(coverage);
+        Ok(coverage)
     }
 
     /// Count the height of the tallest stack of deltas in this 2d region.
@@ -301,7 +301,11 @@ where
     /// we'll need to visit for any page reconstruction in this region.
     /// We use this heuristic to decide whether to create an image layer.
     pub fn count_deltas(
-        &self, key: &Range<Key>, lsn: &Range<Lsn>, limit: Option<usize>) -> Result<usize> {
+        &self,
+        key: &Range<Key>,
+        lsn: &Range<Lsn>,
+        limit: Option<usize>,
+    ) -> Result<usize> {
         // We get the delta coverage of the region, and for each part of the coverage
         // we recurse right underneath the delta. The recursion depth is limited by
         // the largest result this function could return, which is in practice between
@@ -321,7 +325,7 @@ where
 
         // Initialize loop variables
         let mut max_stacked_deltas = 0;
-        let mut current_key = start.clone();
+        let mut current_key = start;
         let mut current_val = version.delta_coverage.query(start);
 
         // Loop through the delta coverage and recurse on each part
@@ -333,14 +337,15 @@ where
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
                         let new_limit = limit.map(|l| l - 1);
-                        let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit)?;
+                        let max_stacked_deltas_underneath =
+                            self.count_deltas(&kr, &lr, new_limit)?;
                         max_stacked_deltas =
                             std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
                     }
                 }
             }
 
-            current_key = change_key.clone();
+            current_key = change_key;
             current_val = change_val.clone();
         }
 
@@ -450,7 +455,11 @@ where
     /// TODO actually use this method instead of count_deltas. Currently we only use
     ///      it for benchmarks.
     pub fn get_difficulty_map(
-        &self, lsn: Lsn, partitioning: &KeyPartitioning, limit: Option<usize>) -> Vec<usize> {
+        &self,
+        lsn: Lsn,
+        partitioning: &KeyPartitioning,
+        limit: Option<usize>,
+    ) -> Vec<usize> {
         // TODO This is a naive implementation. Perf improvements to do:
         // 1. Instead of calling self.image_coverage and self.count_deltas,
         //    iterate the image and delta coverage only once.
@@ -460,12 +469,16 @@ where
             .map(|part| {
                 let mut difficulty = 0;
                 for range in &part.ranges {
-                    if limit == Some(difficulty) {break;}
+                    if limit == Some(difficulty) {
+                        break;
+                    }
                     for (img_range, last_img) in self
                         .image_coverage(range, lsn)
                         .expect("why would this err?")
                     {
-                        if limit == Some(difficulty) {break;}
+                        if limit == Some(difficulty) {
+                            break;
+                        }
                         let img_lsn = if let Some(last_img) = last_img {
                             last_img.get_lsn_range().end
                         } else {
@@ -512,20 +525,4 @@ where
         println!("End dump LayerMap");
         Ok(())
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::tenant::storage_layer::LayerDescriptor;
-
-    use super::*;
-
-    #[test]
-    fn test_count_deltas() {
-        let map = LayerMap::<LayerDescriptor>::default();
-
-        // TODO implement
-    }
-
-    // TODO add more
 }
