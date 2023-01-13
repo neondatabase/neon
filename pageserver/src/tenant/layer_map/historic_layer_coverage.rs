@@ -342,7 +342,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
             panic!("rebuild pls")
         }
 
-        self.layers.iter().map(|(_, v)| v.clone())
+        self.layers.values().cloned()
     }
 
     /// Return a reference to a queryable map, assuming all updates
