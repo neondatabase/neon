@@ -330,7 +330,7 @@ impl Layer for DeltaLayer {
         );
         let search_key = DeltaKey::from_key_lsn(&key_range.start, Lsn(0));
         let mut overlaps = false;
-        tree_reader.visit(&search_key.0, VisitDirection::Forwards, |key, value| {
+        tree_reader.visit(&search_key.0, VisitDirection::Forwards, |key, _value| {
             let key = Key::from_slice(&key[..KEY_SIZE]);
             overlaps = key < key_range.end;
             false
