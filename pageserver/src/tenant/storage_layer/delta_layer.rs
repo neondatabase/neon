@@ -30,6 +30,7 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
+use crate::tenant::storage_layer::range_overlaps;
 use crate::tenant::storage_layer::{
     PersistentLayer, ValueReconstructResult, ValueReconstructState,
 };
@@ -313,6 +314,28 @@ impl Layer for DeltaLayer {
         )?;
 
         Ok(())
+    }
+
+    fn overlaps(&self, key_range: &Range<Key>) -> anyhow::Result<bool> {
+        if !range_overlaps(&self.key_range, key_range) {
+            return Ok(false);
+        }
+        // Open the file and lock the metadata in memory
+        let inner = self.load()?;
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            inner.index_start_blk,
+            inner.index_root_blk,
+            file,
+        );
+        let search_key = DeltaKey::from_key_lsn(&key_range.start, Lsn(0));
+        let mut overlaps = false;
+        tree_reader.visit(&search_key.0, VisitDirection::Forwards, |key, value| {
+            let key = Key::from_slice(&key[..KEY_SIZE]);
+            overlaps = key < key_range.end;
+            false
+        })?;
+        Ok(overlaps)
     }
 
     fn get_value_reconstruct_data(

@@ -283,6 +283,11 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
+
+    /// Checks if layer contains any entries belonging to the specified key range
+    fn overlaps(&self, key_range: &Range<Key>) -> Result<bool> {
+        Ok(range_overlaps(&self.get_key_range(), key_range))
+    }
 }
 
 /// Returned by [`Layer::iter`]
@@ -400,6 +405,11 @@ impl Layer for LayerDescriptor {
 
     fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         todo!()
+    }
+
+    /// Checks if layer contains any entries belonging to the specified key range
+    fn overlaps(&self, key_range: &Range<Key>) -> Result<bool> {
+        Ok(range_overlaps(&self.get_key_range(), key_range))
     }
 }
 

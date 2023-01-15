@@ -473,18 +473,21 @@ where
     /// TODO The optimal number should probably be slightly higher than 1, but to
     ///      implement that we need to plumb a lot more context into this function
     ///      than just the current partition_range.
-    pub fn is_reimage_worthy(layer: &L, partition_range: &Range<Key>) -> bool {
+    pub fn is_reimage_worthy(layer: &L, partition_range: &Range<Key>) -> Result<bool> {
+        if !layer.overlaps(key_range)? {
+			return Ok(false);
+		}
         // Case 1
         if !Self::is_l0(layer) {
-            return true;
+            return Ok(true);
         }
 
         // Case 2
         if range_eq(partition_range, &(Key::MIN..Key::MAX)) {
-            return true;
+            return Ok(true);
         }
 
-        false
+        Ok(false)
     }
 
     /// Count the height of the tallest stack of reimage-worthy deltas
@@ -531,7 +534,7 @@ where
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
-                        let base_count = Self::is_reimage_worthy(&val, key) as usize;
+                        let base_count = Self::is_reimage_worthy(&val, key)? as usize;
                         let new_limit = limit.map(|l| l - base_count);
                         let max_stacked_deltas_underneath =
                             self.count_deltas(&kr, &lr, new_limit)?;
@@ -542,7 +545,6 @@ where
                     }
                 }
             }
-
             current_key = change_key;
             current_val = change_val.clone();
         }
@@ -554,7 +556,7 @@ where
                 let lr = lsn.start..val.get_lsn_range().start;
 
                 if !kr.is_empty() {
-                    let base_count = Self::is_reimage_worthy(&val, key) as usize;
+                    let base_count = Self::is_reimage_worthy(&val, key)? as usize;
                     let new_limit = limit.map(|l| l - base_count);
                     let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit)?;
                     max_stacked_deltas = std::cmp::max(
@@ -577,7 +579,7 @@ where
         match self.search(key, lsn) {
             Some(search_result) => {
                 if search_result.layer.is_incremental() {
-                    (Self::is_reimage_worthy(&search_result.layer, partition_range) as usize)
+                    (Self::is_reimage_worthy(&search_result.layer, partition_range)? as usize)
                         + self.get_difficulty(search_result.lsn_floor, key, partition_range)
                 } else {
                     0
