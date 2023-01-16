@@ -17,6 +17,8 @@ use nix::sys::mman::{MapFlags, ProtFlags};
 /// C-api as defined in the `shmempipe.h`
 mod c_api;
 pub mod shared;
+mod sync;
+use sync::UnparkInOrder;
 
 const TO_WORKER_LEN: usize = 32 * 4096;
 const FROM_WORKER_LEN: usize = 4 * 4096;
@@ -128,102 +130,6 @@ struct Wakeup {
     // Move this behind a separate spinlock? or otherwise figure out a way for others proceed while
     // the response reception waits on semaphore.
     waiting: UnparkInOrder,
-}
-
-#[derive(Default, Debug)]
-struct UnparkInOrder(std::collections::BinaryHeap<HeapEntry>);
-
-impl Drop for UnparkInOrder {
-    fn drop(&mut self) {
-        println!("{} capacity", self.0.capacity());
-    }
-}
-
-#[derive(Debug)]
-struct HeapEntry(std::cmp::Reverse<u32>, std::thread::Thread);
-
-impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0 && self.1.id() == other.1.id()
-    }
-}
-
-impl Eq for HeapEntry {}
-
-impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for HeapEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
-    }
-}
-
-impl From<(u32, std::thread::Thread)> for HeapEntry {
-    fn from(value: (u32, std::thread::Thread)) -> Self {
-        HeapEntry(std::cmp::Reverse(value.0), value.1)
-    }
-}
-
-impl UnparkInOrder {
-    fn store_current(&mut self, id: u32) {
-        self.0.push(HeapEntry::from((id, std::thread::current())));
-    }
-
-    fn current_is_front(&self, expected_id: u32) -> bool {
-        let ret = match self.0.peek() {
-            Some(HeapEntry(id, first)) => {
-                let cur = std::thread::current();
-                id.0 == expected_id && cur.id() == first.id()
-            }
-            None => false,
-        };
-        ret
-    }
-
-    fn pop_front(&mut self, expected_id: u32) {
-        use std::collections::binary_heap::PeekMut;
-
-        let cur = std::thread::current();
-        let next = self.0.peek_mut();
-        let next = next.expect("should not be empty because we were just unparked");
-        let t = &next.1;
-        assert_eq!(cur.id(), t.id());
-        assert_eq!(next.0 .0, expected_id);
-
-        PeekMut::<'_, HeapEntry>::pop(next);
-    }
-
-    fn unpark_front(&self, turn: u32) {
-        match self.0.peek() {
-            Some(HeapEntry(id, t)) if id.0 == turn => {
-                t.unpark();
-            }
-            Some(_) | None => {
-                // Not an error, the thread we are hoping to wakeup just hasn't yet arrived to the
-                // parking lot.
-            }
-        }
-    }
-
-    pub(crate) fn park_while<'a, T, F>(
-        mut guard: std::sync::MutexGuard<'a, T>,
-        consumer: &'a std::sync::Mutex<T>,
-        mut cond: F,
-    ) -> std::sync::MutexGuard<'a, T>
-    where
-        F: FnMut(&mut T) -> bool,
-    {
-        while cond(&mut *guard) {
-            drop(guard);
-            std::thread::park();
-            guard = consumer.lock().unwrap();
-        }
-        guard
-    }
 }
 
 impl OwnedRequester {
@@ -1150,23 +1056,5 @@ mod tests {
             // Safety: we never deallocate (might munmap) in tests
             unsafe { Box::from_raw(self.0) };
         }
-    }
-
-    use crate::UnparkInOrder;
-
-    #[test]
-    fn unparks_in_order() {
-        let mut uio = UnparkInOrder::default();
-        uio.store_current(0);
-        assert!(uio.current_is_front(0));
-        uio.pop_front(0);
-        uio.unpark_front(1); // there is no front() right now
-
-        uio.store_current(2);
-        uio.store_current(1);
-        assert!(uio.current_is_front(1));
-        uio.pop_front(1);
-        uio.unpark_front(2); // unparking 2 => ThreadId(11)
-        uio.store_current(3);
     }
 }
