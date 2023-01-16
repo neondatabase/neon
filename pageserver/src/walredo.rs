@@ -630,7 +630,7 @@ impl PostgresRedoProcess {
             fs::remove_dir_all(&datadir).map_err(|e| {
                 Error::new(
                     e.kind(),
-                    format!("Failed to remove old temporary dir {datadir:?}: {e}"),
+                    format!("Old temporary dir {datadir:?} removal failure: {e}"),
                 )
             })?;
         }
