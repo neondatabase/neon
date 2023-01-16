@@ -34,7 +34,8 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/intagg.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control
 
 #########################################################################################
 #
