@@ -82,7 +82,7 @@ fn add_multithreaded_walredo_requesters(
     if threads == 1 {
         b.iter_batched_ref(
             || Some(input_factory()),
-            |input| execute_all(input.take(), &manager),
+            |input| execute_all(input.take(), manager),
             criterion::BatchSize::PerIteration,
         );
     } else {
