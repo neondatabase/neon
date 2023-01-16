@@ -380,11 +380,9 @@ impl OwnedResponder {
                 if div == YIELDS_BEFORE_WAIT {
                     div = 0;
 
-                    // FIXME: should probably be an if instead of while
-                    //
                     // surprisingly majority of performance gains come from busy waiting
                     // between the requests, the reads and writes from the queue are instant.
-                    while self.ptr.to_worker_waiters.load(Acquire) == 0 {
+                    if self.ptr.to_worker_waiters.load(Acquire) == 0 {
                         self.ptr.worker_active.store(false, Relaxed);
                         sem.wait();
                         waited = true;
