@@ -22,6 +22,7 @@ from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
+from urllib.parse import urlparse
 
 import asyncpg
 import backoff  # type: ignore
@@ -2323,6 +2324,8 @@ class NeonProxy(PgProtocol):
         http_port: int,
         mgmt_port: int,
         auth_backend: NeonProxy.AuthBackend,
+        metric_collection_endpoint: Optional[str] = None,
+        metric_collection_interval: Optional[str] = None,
     ):
         host = "127.0.0.1"
         super().__init__(dsn=auth_backend.default_conn_url, host=host, port=proxy_port)
@@ -2333,6 +2336,8 @@ class NeonProxy(PgProtocol):
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
         self.auth_backend = auth_backend
+        self.metric_collection_endpoint = metric_collection_endpoint
+        self.metric_collection_interval = metric_collection_interval
         self._popen: Optional[subprocess.Popen[bytes]] = None
 
     def start(self) -> NeonProxy:
@@ -2344,6 +2349,16 @@ class NeonProxy(PgProtocol):
             *["--mgmt", f"{self.host}:{self.mgmt_port}"],
             *self.auth_backend.extra_args(),
         ]
+
+        if (
+            self.metric_collection_endpoint is not None
+            and self.metric_collection_interval is not None
+        ):
+            args += [
+                *["--metric-collection-endpoint", self.metric_collection_endpoint],
+                *["--metric-collection-interval", self.metric_collection_interval],
+            ]
+
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
         return self
@@ -2356,6 +2371,25 @@ class NeonProxy(PgProtocol):
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
         request_result.raise_for_status()
         return request_result.text
+
+    @staticmethod
+    def get_session_id(uri_prefix, uri_line):
+        assert uri_prefix in uri_line
+
+        url_parts = urlparse(uri_line)
+        psql_session_id = url_parts.path[1:]
+        assert psql_session_id.isalnum(), "session_id should only contain alphanumeric chars"
+
+        return psql_session_id
+
+    @staticmethod
+    async def find_auth_link(link_auth_uri, proc):
+        for _ in range(100):
+            line = (await proc.stderr.readline()).decode("utf-8").strip()
+            log.info(f"psql line: {line}")
+            if link_auth_uri in line:
+                log.info(f"SUCCESS, found auth url: {line}")
+                return line
 
     def __enter__(self) -> NeonProxy:
         return self
@@ -2370,6 +2404,46 @@ class NeonProxy(PgProtocol):
             # NOTE the process will die when we're done with tests anyway, because
             # it's a child process. This is mostly to clean up in between different tests.
             self._popen.kill()
+
+    @staticmethod
+    async def activate_link_auth(
+        local_vanilla_pg, proxy_with_metric_collector, psql_session_id, create_user=True
+    ):
+
+        pg_user = "proxy"
+
+        if create_user:
+            log.info("creating a new user for link auth test")
+            local_vanilla_pg.start()
+            local_vanilla_pg.safe_psql(f"create user {pg_user} with login superuser")
+
+        db_info = json.dumps(
+            {
+                "session_id": psql_session_id,
+                "result": {
+                    "Success": {
+                        "host": local_vanilla_pg.default_options["host"],
+                        "port": local_vanilla_pg.default_options["port"],
+                        "dbname": local_vanilla_pg.default_options["dbname"],
+                        "user": pg_user,
+                        "aux": {
+                            "project_id": "test_project_id",
+                            "endpoint_id": "test_endpoint_id",
+                            "branch_id": "test_branch_id",
+                        },
+                    }
+                },
+            }
+        )
+
+        log.info("sending session activation message")
+        psql = await PSQL(
+            host=proxy_with_metric_collector.host,
+            port=proxy_with_metric_collector.mgmt_port,
+        ).run(db_info)
+        assert psql.stdout is not None
+        out = (await psql.stdout.read()).decode("utf-8").strip()
+        assert out == "ok"
 
 
 @pytest.fixture(scope="function")

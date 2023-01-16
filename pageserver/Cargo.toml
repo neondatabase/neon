@@ -21,6 +21,7 @@ chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
 close_fds.workspace = true
 const_format.workspace = true
+consumption_metrics.workspace = true
 crc32c.workspace = true
 crossbeam-utils.workspace = true
 fail.workspace = true
