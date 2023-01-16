@@ -19,6 +19,10 @@ Also `compute_ctl` spawns two separate service threads:
 - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
   last activity requests.
 
+If the `vm-informant` binary is present at `/bin/vm-informant`, it will also be started. For VM
+compute nodes, `vm-informant` communicates with the VM autoscaling system. It coordinates
+downscaling and (eventually) will request immediate upscaling under resource pressure.
+
 Usage example:
 ```sh
 compute_ctl -D /var/db/postgres/compute \
