@@ -30,33 +30,44 @@ fn redo_scenarios(c: &mut Criterion) {
     let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
     let conf = Box::leak(Box::new(conf));
     let tenant_id = TenantId::generate();
-    // std::fs::create_dir_all(conf.tenant_path(&tenant_id)).unwrap();
-    let mut manager = PostgresRedoManager::new(conf, tenant_id);
-    manager.launch_process(14).unwrap();
+
+    let manager = PostgresRedoManager::new(conf, tenant_id);
 
     let manager = Arc::new(manager);
 
+    tracing::info!("executing first");
+    short().execute(&manager).unwrap();
+    tracing::info!("first executed");
+
     let thread_counts = [1, 2, 4, 8, 16];
 
-    for thread_count in thread_counts {
-        c.bench_with_input(
-            BenchmarkId::new("short-50record", thread_count),
-            &thread_count,
-            |b, thread_count| {
-                add_multithreaded_walredo_requesters(b, *thread_count, &manager, short, 50);
-            },
-        );
-    }
+    let mut group = c.benchmark_group("short");
+    group.sampling_mode(criterion::SamplingMode::Flat);
 
     for thread_count in thread_counts {
-        c.bench_with_input(
-            BenchmarkId::new("medium-10record", thread_count),
+        group.bench_with_input(
+            BenchmarkId::new("short", thread_count),
             &thread_count,
             |b, thread_count| {
-                add_multithreaded_walredo_requesters(b, *thread_count, &manager, medium, 10);
+                add_multithreaded_walredo_requesters(b, *thread_count, &manager, short);
             },
         );
     }
+    drop(group);
+
+    let mut group = c.benchmark_group("medium");
+    group.sampling_mode(criterion::SamplingMode::Flat);
+
+    for thread_count in thread_counts {
+        group.bench_with_input(
+            BenchmarkId::new("medium", thread_count),
+            &thread_count,
+            |b, thread_count| {
+                add_multithreaded_walredo_requesters(b, *thread_count, &manager, medium);
+            },
+        );
+    }
+    drop(group);
 }
 
 /// Sets up `threads` number of requesters to `request_redo`, with the given input.
@@ -65,46 +76,66 @@ fn add_multithreaded_walredo_requesters(
     threads: u32,
     manager: &Arc<PostgresRedoManager>,
     input_factory: fn() -> Request,
-    request_repeats: usize,
 ) {
-    b.iter_batched_ref(
-        || {
-            // barrier for all of the threads, and the benchmarked thread
-            let barrier = Arc::new(Barrier::new(threads as usize + 1));
+    assert_ne!(threads, 0);
 
-            let jhs = (0..threads)
-                .map(|_| {
-                    std::thread::spawn({
-                        let manager = manager.clone();
-                        let barrier = barrier.clone();
-                        move || {
-                            let input = std::iter::repeat(input_factory())
-                                .take(request_repeats)
-                                .collect::<Vec<_>>();
+    if threads == 1 {
+        b.iter_batched_ref(
+            || Some(input_factory()),
+            |input| execute_all(input.take(), manager),
+            criterion::BatchSize::PerIteration,
+        );
+    } else {
+        let (work_tx, work_rx) = std::sync::mpsc::sync_channel(threads as usize);
 
-                            barrier.wait();
+        let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
 
-                            execute_all(input, &manager).unwrap();
+        let barrier = Arc::new(Barrier::new(threads as usize + 1));
 
-                            barrier.wait();
+        let jhs = (0..threads)
+            .map(|_| {
+                std::thread::spawn({
+                    let manager = manager.clone();
+                    let barrier = barrier.clone();
+                    let work_rx = work_rx.clone();
+                    move || loop {
+                        // queue up and wait if we want to go another round
+                        if work_rx.lock().unwrap().recv().is_err() {
+                            break;
                         }
-                    })
+
+                        let input = Some(input_factory());
+
+                        barrier.wait();
+
+                        execute_all(input, &manager).unwrap();
+
+                        barrier.wait();
+                    }
                 })
-                .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
 
-            (barrier, JoinOnDrop(jhs))
-        },
-        |input| {
-            let barrier = &input.0;
+        let _jhs = JoinOnDrop(jhs);
 
-            // start the work
-            barrier.wait();
+        b.iter_batched(
+            || {
+                for _ in 0..threads {
+                    work_tx.send(()).unwrap()
+                }
+            },
+            |()| {
+                // start the work
+                barrier.wait();
 
-            // wait for work to complete
-            barrier.wait();
-        },
-        criterion::BatchSize::PerIteration,
-    );
+                // wait for work to complete
+                barrier.wait();
+            },
+            criterion::BatchSize::PerIteration,
+        );
+
+        drop(work_tx);
+    }
 }
 
 struct JoinOnDrop(Vec<std::thread::JoinHandle<()>>);
@@ -121,7 +152,10 @@ impl Drop for JoinOnDrop {
     }
 }
 
-fn execute_all(input: Vec<Request>, manager: &PostgresRedoManager) -> Result<(), WalRedoError> {
+fn execute_all<I>(input: I, manager: &PostgresRedoManager) -> Result<(), WalRedoError>
+where
+    I: IntoIterator<Item = Request>,
+{
     // just fire all requests as fast as possible
     input.into_iter().try_for_each(|req| {
         let page = req.execute(manager)?;
@@ -143,6 +177,7 @@ macro_rules! lsn {
     }};
 }
 
+/// Short payload, 1132 bytes.
 // pg_records are copypasted from log, where they are put with Debug impl of Bytes, which uses \0
 // for null bytes.
 #[allow(clippy::octal_escapes)]
@@ -172,6 +207,7 @@ fn short() -> Request {
     }
 }
 
+/// Medium sized payload, serializes as 26393 bytes.
 // see [`short`]
 #[allow(clippy::octal_escapes)]
 fn medium() -> Request {
