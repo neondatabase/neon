@@ -240,8 +240,7 @@ fn cli() -> clap::Command {
         .arg(
             Arg::new("metric-collection-interval")
                 .long("metric-collection-interval")
-                .help("metric collection interval")
-                .default_value("1 min"),
+                .help("metric collection interval"),
         )
 }
 
