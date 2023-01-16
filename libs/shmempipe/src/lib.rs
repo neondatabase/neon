@@ -216,14 +216,14 @@ impl OwnedRequester {
 
         let mut spin = SpinWait::default();
 
-        let mut send = |mut req: &_| loop {
+        let mut send = |mut req: &_, might_wait: &mut bool| loop {
             let n = p.push_slice(req);
             req = &req[n..];
 
             if req.is_empty() {
                 break;
             } else if n == 0 {
-                if might_wait
+                if *might_wait
                     && self
                         .ptr
                         .worker_active
@@ -231,7 +231,7 @@ impl OwnedRequester {
                         .is_ok()
                 {
                     sem.post();
-                    might_wait = false;
+                    *might_wait = false;
                 }
             } else if n != 0 {
                 spin.reset();
@@ -242,7 +242,20 @@ impl OwnedRequester {
 
         for sliceable in request {
             let slice = sliceable.as_ref();
-            send(slice);
+            send(slice, &mut might_wait);
+
+            // kick the other side off as early as possible this applies to first thread writing
+            // messages only, since the `to_worker_waiters` will inhibit waiting.
+            if might_wait
+                && self
+                    .ptr
+                    .worker_active
+                    .compare_exchange(false, true, Relaxed, Relaxed)
+                    .is_ok()
+            {
+                sem.post();
+                might_wait = false;
+            }
         }
 
         drop(g);
