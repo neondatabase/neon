@@ -16,7 +16,7 @@ from fixtures.utils import subprocess_capture
         "python/asyncpg",
         "python/pg8000",
         pytest.param(
-            "swift/PostgresClientKit",  # See https://github.com/neondatabase/neon/pull/2008#discussion_r911896592
+            "swift/PostgresClientKitExample",  # See https://github.com/neondatabase/neon/pull/2008#discussion_r911896592
             marks=pytest.mark.xfail(reason="Neither SNI nor parameters is supported"),
         ),
         "typescript/postgresql-client",
