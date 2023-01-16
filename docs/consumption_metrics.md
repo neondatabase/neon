@@ -77,8 +77,8 @@ It is a combination of the time, node_id and a random number.
 
 #### Configuration
 The endpoint and the collection interval can be passed as command line arguments for proxy:
-`metric_collection_endpoint` defaults to None, which means that metric collection is disabled by default.
-`metric_collection_interval` defaults to 10min
+`metric_collection_endpoint` no default, which means that metric collection is disabled by default.
+`metric_collection_interval` no default
 
 #### Metrics
 
