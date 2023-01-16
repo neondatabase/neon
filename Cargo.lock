@@ -877,7 +877,7 @@ dependencies = [
  "clap 4.0.32",
  "comfy-table",
  "git-version",
- "nix 0.25.1",
+ "nix",
  "once_cell",
  "pageserver_api",
  "postgres",
@@ -2068,20 +2068,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nix"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46a58d1d356c6597d08cde02c2f09d785b09e28711837b1ed667dc652c08a694"
-dependencies = [
- "bitflags",
- "cfg-if",
- "libc",
- "memoffset 0.7.1",
- "pin-utils",
- "static_assertions",
-]
-
-[[package]]
 name = "nom"
 version = "7.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2255,7 +2241,7 @@ dependencies = [
  "hyper",
  "itertools",
  "metrics",
- "nix 0.25.1",
+ "nix",
  "num-traits",
  "once_cell",
  "pageserver_api",
@@ -3108,7 +3094,7 @@ dependencies = [
  "humantime",
  "hyper",
  "metrics",
- "nix 0.25.1",
+ "nix",
  "once_cell",
  "parking_lot",
  "postgres",
@@ -3412,7 +3398,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "libc",
- "nix 0.26.1",
+ "nix",
  "rand",
  "ringbuf",
  "sha2",
@@ -4255,7 +4241,7 @@ dependencies = [
  "hyper",
  "jsonwebtoken",
  "metrics",
- "nix 0.25.1",
+ "nix",
  "once_cell",
  "pq_proto",
  "rand",
