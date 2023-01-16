@@ -238,11 +238,11 @@ impl OwnedRequester {
         ]
     }
 
-    pub fn request_response<R: Iterator<Item = P>, P: AsRef<[u8]>>(
-        &self,
-        req: R,
-        resp: &mut [u8],
-    ) -> u32 {
+    pub fn request_response<Request>(&self, req: Request, resp: &mut [u8]) -> u32
+    where
+        Request: Iterator,
+        Request::Item: AsRef<[u8]>,
+    {
         // Overview:
         // - `self.producer` creates an order amongst competing request_response callers (id).
         // - the same token (id) is used to find some order with `self.consumer` to read the
@@ -285,13 +285,21 @@ impl OwnedRequester {
         id
     }
 
-    fn send_request<R: Iterator<Item = P>, P: AsRef<[u8]>>(&self, req: R) -> u32 {
+    fn send_request<Request>(&self, request: Request) -> u32
+    where
+        Request: Iterator,
+        Request::Item: AsRef<[u8]>,
+    {
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_worker) };
 
         // this will be contended if there's anyone else interested in writing
         let mut g = self.producer.lock().unwrap();
 
-        // this will be decremented by `write_all` on each response
+        // this will be decremented by `write_all` on each response.
+        //
+        // however, it might be worthwhile to move it to some guard type of arrangment which would
+        // keep the the postgres side spinning loop going when PostgresRedoManager might have more
+        // records to process between the batches.
         let mut might_wait = self.ptr.to_worker_waiters.fetch_add(1, Release) == 0;
 
         let id = g.0;
@@ -326,7 +334,7 @@ impl OwnedRequester {
             spin.spin();
         };
 
-        for sliceable in req {
+        for sliceable in request {
             let slice = sliceable.as_ref();
             send(slice);
         }

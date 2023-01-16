@@ -264,12 +264,16 @@ impl PostgresRedoManager {
             // trying to avoid this mutex does not seem to make a difference in benchmarks
             drop(process_guard);
 
+            // instead of producing a single large message, chunk the message to avoid pageserver
+            // side memcopies but also allow possibly busy-looping postgres process to make
+            // progress sooner.
+
             let mut headers =
                 BytesMut::with_capacity(calculate_header_size(base_img.is_some(), records.len()));
 
-            let mut messages = Vec::with_capacity(
-                1 + if base_img.is_some() { 2 } else { 0 } + records.len() * 2 + 1,
-            );
+            let messages = 1 + if base_img.is_some() { 2 } else { 0 } + records.len() * 2 + 1;
+
+            let mut messages = Vec::with_capacity(messages);
 
             messages.push({
                 headers.put_u8(b'B');
@@ -858,7 +862,8 @@ impl PostgresRedoProcess {
             // Most requests start with a before-image with BLCKSZ bytes, followed by
             // by some other WAL records. Start with a buffer that can hold that
             // comfortably.
-            let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
+            let mut writebuf: Vec<u8> =
+                Vec::with_capacity(calculate_msg_size(base_img.as_ref(), records));
             build_begin_redo_for_block_msg(tag, &mut writebuf);
             if let Some(img) = base_img {
                 build_push_page_msg(tag, &img, &mut writebuf);
@@ -1121,10 +1126,7 @@ fn calculate_msg_size(base_img: Option<&Bytes>, records: &[(Lsn, NeonWalRecord)]
     let len = 4;
 
     (ch + len + tag_len)
-        + base_img
-            .as_ref()
-            .map(|_| ch + len + tag_len + 8192)
-            .unwrap_or(0)
+        + base_img.map(|_| ch + len + tag_len + 8192).unwrap_or(0)
         + records
             .iter()
             .map(|(_, rec)| match rec {
