@@ -466,7 +466,7 @@ impl Timeline {
             Ok(_) => Ok(()),
             Err(e) => {
                 // Bootstrap failed, cancel timeline and remove timeline directory.
-                self.cancel();
+                self.cancel(shared_state);
 
                 if let Err(fs_err) = std::fs::remove_dir_all(&self.timeline_dir) {
                     warn!(
@@ -487,20 +487,23 @@ impl Timeline {
         shared_state: &mut MutexGuard<SharedState>,
     ) -> Result<(bool, bool)> {
         let was_active = shared_state.active;
-        self.cancel();
+        self.cancel(shared_state);
         let dir_existed = delete_dir(&self.timeline_dir)?;
         Ok((dir_existed, was_active))
     }
 
     /// Cancel timeline to prevent further usage. Background tasks will stop
     /// eventually after receiving cancellation signal.
-    fn cancel(&self) {
-        info!("Timeline {} is cancelled", self.ttid);
+    fn cancel(&self, shared_state: &mut MutexGuard<SharedState>) {
+        info!("timeline {} is cancelled", self.ttid);
         let _ = self.cancellation_tx.send(true);
         let res = self.wal_backup_launcher_tx.blocking_send(self.ttid);
         if let Err(e) = res {
             error!("Failed to send stop signal to wal_backup_launcher: {}", e);
         }
+        // Close associated FDs. Nobody will be able to touch timeline data once
+        // it is cancelled, so WAL storage won't be opened again.
+        shared_state.sk.wal_store.close();
     }
 
     /// Returns if timeline is cancelled.
@@ -537,10 +540,6 @@ impl Timeline {
     /// De-register compute connection, shutting down timeline activity if
     /// pageserver doesn't need catchup.
     pub fn on_compute_disconnect(&self) -> Result<()> {
-        if self.is_cancelled() {
-            bail!(TimelineError::Cancelled(self.ttid));
-        }
-
         let is_wal_backup_action_pending: bool;
         {
             let mut shared_state = self.write_shared_state();
