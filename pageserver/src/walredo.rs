@@ -607,8 +607,6 @@ impl PostgresRedoProcess {
                 format!("incorrect pg_lib_dir path: {e:#}"),
             )
         })?;
-
-        info!("running initdb in {datadir:?}");
         let initdb = postgres_ffi::prepare_initdb_command(
             &pg_bin_dir_path,
             &pg_lib_dir_path,

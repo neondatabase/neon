@@ -67,10 +67,6 @@ impl Conf {
     }
 
     pub fn initdb(&self) -> anyhow::Result<()> {
-        info!(
-            "Running initdb in {:?} with user \"postgres\"",
-            self.datadir
-        );
         let output = super::prepare_initdb_command(
             &self.pg_bin_dir()?,
             &self.pg_lib_dir()?,

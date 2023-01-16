@@ -14,6 +14,8 @@ use std::process::Command;
 
 use anyhow::Context;
 use bytes::Bytes;
+use log::info;
+
 use utils::bin_ser::SerializeError;
 use utils::fs_ext::CloseFileDescriptors;
 use utils::lsn::Lsn;
@@ -204,6 +206,8 @@ pub fn prepare_initdb_command(
     target_dir: &Path,
     user: &str,
 ) -> anyhow::Result<Command> {
+    let initdb_bin = pg_bin_dir.join("initdb");
+    info!("running {initdb_bin:?} in {target_dir:?}, libdir: {pg_lib_dir:?}");
     // Do not remove the existing directory, it might be used by some other process.
     anyhow::ensure!(
         !target_dir.exists(),
@@ -213,12 +217,11 @@ pub fn prepare_initdb_command(
         .parent()
         .context("Cannot run initdb on a root directory")?;
     if !target_parent.exists() {
-        std::fs::create_dir_all(target_parent).with_context(|| {
-            format!("Failed to create parent directory {target_parent:?} for initdb target dir")
-        })?;
+        std::fs::create_dir_all(target_parent)
+            .with_context(|| format!("initdb target dir parent {target_parent:?} creation"))?;
     }
 
-    let mut command = Command::new(pg_bin_dir.join("initdb"));
+    let mut command = Command::new(initdb_bin);
     command
         .arg("-D")
         .arg(target_dir)

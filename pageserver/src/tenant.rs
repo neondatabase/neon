@@ -2548,8 +2548,6 @@ fn run_initdb(
 ) -> anyhow::Result<()> {
     let pg_bin_dir = conf.pg_bin_dir(pg_version)?;
     let pg_lib_dir = conf.pg_lib_dir(pg_version)?;
-    info!("running {pg_bin_dir:?} in {initdb_target_dir:?}, libdir: {pg_lib_dir:?}");
-
     let initdb_output = postgres_ffi::prepare_initdb_command(
         &pg_bin_dir,
         &pg_lib_dir,
@@ -2557,10 +2555,7 @@ fn run_initdb(
         &conf.superuser,
     )?
     .stdout(Stdio::null())
-    .output()
-    .with_context(|| {
-        format!("failed to execute {pg_bin_dir:?} at target dir {initdb_target_dir:?}")
-    })?;
+    .output()?;
     if !initdb_output.status.success() {
         bail!(
             "initdb failed: '{}'",
