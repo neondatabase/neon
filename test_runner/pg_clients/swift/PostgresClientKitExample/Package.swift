@@ -1,4 +1,4 @@
-// swift-tools-version:5.6
+// swift-tools-version:5.7
 import PackageDescription
 
 let package = Package(
@@ -6,11 +6,11 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/codewinsdotcom/PostgresClientKit.git",
-            revision: "v1.4.3"
+            revision: "v1.5.0"
         )
     ],
     targets: [
-        .target(
+        .executableTarget(
             name: "PostgresClientKitExample",
             dependencies: [ "PostgresClientKit" ])
     ]
