@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use nix::sys::mman::{MapFlags, ProtFlags};
 
+use bytes::Bytes;
+
 /// C-api as defined in the `shmempipe.h`
 mod c_api;
 pub mod shared;
@@ -144,11 +146,7 @@ impl OwnedRequester {
         ]
     }
 
-    pub fn request_response<Request>(&self, req: Request, resp: &mut [u8]) -> u32
-    where
-        Request: Iterator,
-        Request::Item: AsRef<[u8]>,
-    {
+    pub fn request_response(&self, req: &[Bytes], resp: &mut [u8]) -> u32 {
         // Overview:
         // - `self.producer` creates an order amongst competing request_response callers (id).
         // - the same token (id) is used to find some order with `self.consumer` to read the
@@ -191,11 +189,7 @@ impl OwnedRequester {
         id
     }
 
-    fn send_request<Request>(&self, request: Request) -> u32
-    where
-        Request: Iterator,
-        Request::Item: AsRef<[u8]>,
-    {
+    fn send_request(&self, request: &[Bytes]) -> u32 {
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_worker) };
 
         // this will be contended if there's anyone else interested in writing
@@ -241,7 +235,7 @@ impl OwnedRequester {
         };
 
         for sliceable in request {
-            let slice = sliceable.as_ref();
+            let slice: &[u8] = sliceable.as_ref();
             send(slice, &mut might_wait);
 
             // kick the other side off as early as possible this applies to first thread writing

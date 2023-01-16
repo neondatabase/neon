@@ -321,7 +321,7 @@ impl PostgresRedoManager {
             });
 
             let mut b = BytesMut::zeroed(8192);
-            pipe.request_response(messages.into_iter(), &mut b[..8192]);
+            pipe.request_response(&messages, &mut b[..8192]);
             return Ok(b.freeze());
         }
 
