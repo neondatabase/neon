@@ -116,6 +116,10 @@ impl<E: Clone> TaskHandle<E> {
         let join_handle = WALRECEIVER_RUNTIME.spawn(async move {
             events_sender.send(TaskStateUpdate::Started).ok();
             task(events_sender, cancellation_clone).await
+            // events_sender is dropped at some point during the .await above.
+            // But the task is still running on WALRECEIVER_RUNTIME.
+            // That is the window when `!jh.is_finished()`
+            // is true inside `fn next_task_event()` below.
         });
 
         TaskHandle {
@@ -132,7 +136,23 @@ impl<E: Clone> TaskHandle<E> {
                 TaskEvent::End(match self.join_handle.as_mut() {
                     Some(jh) => {
                         if !jh.is_finished() {
-                            warn!("sender is dropped while join handle is still alive");
+                            // Barring any implementation errors in this module, we can
+                            // only arrive here while the task that executes the future
+                            // passed to `Self::spawn()` is still execution. Cf the comment
+                            // in Self::spawn().
+                            //
+                            // This was logging at warning level in earlier versions, presumably
+                            // to leave some breadcrumbs in case we had an implementation
+                            // error that would would make us get stuck in `jh.await`.
+                            //
+                            // There hasn't been such a bug so far.
+                            // But in a busy system, e.g., during pageserver restart,
+                            // we arrive here often enough that the warning-level logs
+                            // became a distraction.
+                            // So, tone them down to info-level.
+                            //
+                            // XXX: rewrite this module to eliminate the race condition.
+                            info!("sender is dropped while join handle is still alive");
                         }
 
                         let res = jh
