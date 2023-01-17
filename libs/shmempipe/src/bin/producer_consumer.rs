@@ -19,6 +19,11 @@ const SPAWN_PROCESS: bool = false;
 /// all of the message is received.
 const INPUT_SIZE: InputSize = InputSize::Fixed(1132);
 
+const REQUESTER_THREADS: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(4) {
+    Some(n) => n,
+    None => panic!("configuration error"),
+};
+
 #[allow(unused)]
 enum InputSize {
     /// Generate the length with an rng
@@ -269,7 +274,7 @@ fn as_outer() {
 
         let reqs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        let _jhs = (0..1)
+        let _jhs = (0..REQUESTER_THREADS.get())
             .map(|_| (owned.clone(), reqs.clone()))
             .map(|(owned, reqs)| {
                 std::thread::spawn(move || {
