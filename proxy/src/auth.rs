@@ -42,9 +42,9 @@ pub enum AuthErrorImpl {
     MalformedPassword(&'static str),
 
     #[error(
-        "Project ID is not specified. \
+        "Endpoint ID is not specified. \
         Either please upgrade the postgres client library (libpq) for SNI support \
-        or pass the project ID (first part of the domain name) as a parameter: '?options=project%3D<project-id>'. \
+        or pass the endpoint ID (first part of the domain name) as a parameter: '?options=project%3D<endpoint-id>'. \
         See more at https://neon.tech/sni"
     )]
     MissingProjectName,

@@ -6,6 +6,8 @@ storage:
     broker_endpoint: http://storage-broker-lb.delta.us-east-2.internal.aws.neon.tech:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
+      metric_collection_endpoint: http://console-release.local/billing/api/v1/usage_events
+      metric_collection_interval: 10min
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
@@ -34,4 +36,4 @@ storage:
           ansible_host:  i-06d113fb73bfddeb0
         safekeeper-2.us-east-2.aws.neon.tech:
           ansible_host:  i-09f66c8e04afff2e8
-          
+

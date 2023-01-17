@@ -11,6 +11,7 @@ mod config;
 mod console;
 mod error;
 mod http;
+mod metrics;
 mod mgmt;
 mod parse;
 mod proxy;
@@ -20,14 +21,14 @@ mod stream;
 mod url;
 mod waiters;
 
+use ::metrics::set_build_info_metric;
 use anyhow::{bail, Context};
 use clap::{self, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
-use metrics::set_build_info_metric;
 use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
-use tracing::info;
+use tracing::{info, info_span, Instrument};
 use utils::project_git_version;
 use utils::sentry_init::{init_sentry, release_name};
 
@@ -65,6 +66,22 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_address: SocketAddr = arg_matches.get_one::<String>("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.get_one::<String>("http").unwrap().parse()?;
 
+    let metric_collection_config = match
+    (
+        arg_matches.get_one::<String>("metric-collection-endpoint"),
+        arg_matches.get_one::<String>("metric-collection-interval"),
+    ) {
+
+        (Some(endpoint), Some(interval)) => {
+            Some(config::MetricCollectionConfig {
+                endpoint: endpoint.parse()?,
+                interval: humantime::parse_duration(interval)?,
+            })
+        }
+        (None, None) => None,
+        _ => bail!("either both or neither metric-collection-endpoint and metric-collection-interval must be specified"),
+    };
+
     let auth_backend = match arg_matches
         .get_one::<String>("auth-backend")
         .unwrap()
@@ -95,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
+        metric_collection_config,
     }));
 
     info!("Version: {GIT_VERSION}");
@@ -124,6 +142,21 @@ async fn main() -> anyhow::Result<()> {
             wss_listener,
             config,
         )));
+    }
+
+    if let Some(metric_collection_config) = &config.metric_collection_config {
+        let hostname = hostname::get()?
+            .into_string()
+            .map_err(|e| anyhow::anyhow!("failed to get hostname {e:?}"))?;
+
+        tasks.push(tokio::spawn(
+            metrics::collect_metrics(
+                &metric_collection_config.endpoint,
+                metric_collection_config.interval,
+                hostname,
+            )
+            .instrument(info_span!("collect_metrics")),
+        ));
     }
 
     let tasks = tasks.into_iter().map(flatten_err);
@@ -198,6 +231,16 @@ fn cli() -> clap::Command {
                 .long("tls-cert")
                 .alias("ssl-cert") // backwards compatibility
                 .help("path to TLS cert for client postgres connections"),
+        )
+        .arg(
+            Arg::new("metric-collection-endpoint")
+                .long("metric-collection-endpoint")
+                .help("metric collection HTTP endpoint"),
+        )
+        .arg(
+            Arg::new("metric-collection-interval")
+                .long("metric-collection-interval")
+                .help("metric collection interval"),
         )
 }
 

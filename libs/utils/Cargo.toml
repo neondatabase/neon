@@ -1,48 +1,49 @@
 [package]
 name = "utils"
 version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-sentry = { version = "0.29.0", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
-async-trait = "0.1"
-anyhow = "1.0"
-bincode = "1.3"
-bytes = "1.0.1"
-hyper = { version = "0.14.7", features = ["full"] }
-routerify = "3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1"
-thiserror = "1.0"
-tokio = { version = "1.17", features = ["macros"]}
-tokio-rustls = "0.23"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-nix = "0.25"
-signal-hook = "0.3.10"
-rand = "0.8.3"
-jsonwebtoken = "8"
-hex = { version = "0.4.3", features = ["serde"] }
-rustls = "0.20.2"
-rustls-split = "0.3.0"
-git-version = "0.3.5"
-serde_with = "2.0"
-once_cell = "1.13.0"
-strum = "0.24"
-strum_macros = "0.24"
+sentry.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
+bytes.workspace = true
+hyper = { workspace = true, features = ["full"] }
+routerify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }
+nix.workspace = true
+signal-hook.workspace = true
+rand.workspace = true
+jsonwebtoken.workspace = true
+hex = { workspace = true, features = ["serde"] }
+rustls.workspace = true
+rustls-split.workspace = true
+git-version.workspace = true
+serde_with.workspace = true
+once_cell.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 
-metrics = { path = "../metrics" }
-pq_proto = { path = "../pq_proto" }
-workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+metrics.workspace = true
+pq_proto.workspace = true
+
+workspace_hack.workspace = true
 
 [dev-dependencies]
-byteorder = "1.4.3"
-bytes = "1.0.1"
-hex-literal = "0.3"
-tempfile = "3.2"
-criterion = "0.4"
-rustls-pemfile = "1"
+byteorder.workspace = true
+bytes.workspace = true
+hex-literal.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+rustls-pemfile.workspace = true
 
 [[bench]]
 name = "benchmarks"

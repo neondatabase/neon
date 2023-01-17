@@ -392,7 +392,12 @@ def test_download_remote_layers_api(
 
     # issue downloads that we know will fail
     info = client.timeline_download_remote_layers(
-        tenant_id, timeline_id, errors_ok=True, at_least_one_download=False
+        tenant_id,
+        timeline_id,
+        # allow some concurrency to unveil potential concurrency bugs
+        max_concurrent_downloads=10,
+        errors_ok=True,
+        at_least_one_download=False,
     )
     log.info(f"info={info}")
     assert info["state"] == "Completed"
@@ -413,7 +418,13 @@ def test_download_remote_layers_api(
 
     ##### Retry, this time without failpoints
     client.configure_failpoints(("remote-storage-download-pre-rename", "off"))
-    info = client.timeline_download_remote_layers(tenant_id, timeline_id, errors_ok=False)
+    info = client.timeline_download_remote_layers(
+        tenant_id,
+        timeline_id,
+        # allow some concurrency to unveil potential concurrency bugs
+        max_concurrent_downloads=10,
+        errors_ok=False,
+    )
     log.info(f"info={info}")
 
     assert info["state"] == "Completed"

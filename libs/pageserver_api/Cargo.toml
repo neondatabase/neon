@@ -1,17 +1,17 @@
 [package]
 name = "pageserver_api"
 version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_with = "2.0"
-const_format = "0.2.21"
-anyhow = { version = "1.0", features = ["backtrace"] }
-bytes = "1.0.1"
-byteorder = "1.4.3"
+serde.workspace = true
+serde_with.workspace = true
+const_format.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+byteorder.workspace = true
+utils.workspace = true
+postgres_ffi.workspace = true
 
-utils = { path = "../utils" }
-postgres_ffi = { path = "../postgres_ffi" }
-workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+workspace_hack.workspace = true

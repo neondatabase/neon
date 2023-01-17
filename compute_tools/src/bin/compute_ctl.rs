@@ -18,6 +18,10 @@
 //! - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
 //!   last activity requests.
 //!
+//! If the `vm-informant` binary is present at `/bin/vm-informant`, it will also be started. For VM
+//! compute nodes, `vm-informant` communicates with the VM autoscaling system. It coordinates
+//! downscaling and (eventually) will request immediate upscaling under resource pressure.
+//!
 //! Usage example:
 //! ```sh
 //! compute_ctl -D /var/db/postgres/compute \
@@ -40,6 +44,7 @@ use log::{error, info};
 
 use compute_tools::compute::{ComputeMetrics, ComputeNode, ComputeState, ComputeStatus};
 use compute_tools::http::api::launch_http_server;
+use compute_tools::informant::spawn_vm_informant_if_present;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
@@ -114,6 +119,8 @@ fn main() -> Result<()> {
     // requests, while configuration is still in progress.
     let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
+    // Also spawn the thread responsible for handling the VM informant -- if it's present
+    let _vm_informant_handle = spawn_vm_informant_if_present().expect("cannot launch VM informant");
 
     // Run compute (Postgres) and hang waiting on it.
     match compute.prepare_and_run() {

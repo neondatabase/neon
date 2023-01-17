@@ -83,7 +83,7 @@ async fn compaction_loop(tenant_id: TenantId) {
             tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
                     info!("received cancellation request during idling");
-                    break ;
+                    break;
                 },
                 _ = tokio::time::sleep(sleep_duration) => {},
             }

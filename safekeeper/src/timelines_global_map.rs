@@ -279,7 +279,9 @@ impl GlobalTimelines {
                 let (dir_existed, was_active) = timeline.delete_from_disk(&mut shared_state)?;
 
                 // Remove timeline from the map.
-                TIMELINES_STATE.lock().unwrap().timelines.remove(ttid);
+                // FIXME: re-enable it once we fix the issue with recreation of deleted timelines
+                // https://github.com/neondatabase/neon/issues/3146
+                // TIMELINES_STATE.lock().unwrap().timelines.remove(ttid);
 
                 Ok(TimelineDeleteForceResult {
                     dir_existed,
@@ -346,15 +348,16 @@ impl GlobalTimelines {
                 .tenant_dir(tenant_id),
         )?;
 
-        let tlis_after_delete = Self::get_all_for_tenant(*tenant_id);
-        if !tlis_after_delete.is_empty() {
-            // Some timelines were created while we were deleting them, returning error
-            // to the caller, so it can retry later.
-            bail!(
-                "failed to delete all timelines for tenant {}: some timelines were created while we were deleting them",
-                tenant_id
-            );
-        }
+        // FIXME: we temporarily disabled removing timelines from the map, see `delete_force`
+        // let tlis_after_delete = Self::get_all_for_tenant(*tenant_id);
+        // if !tlis_after_delete.is_empty() {
+        //     // Some timelines were created while we were deleting them, returning error
+        //     // to the caller, so it can retry later.
+        //     bail!(
+        //         "failed to delete all timelines for tenant {}: some timelines were created while we were deleting them",
+        //         tenant_id
+        //     );
+        // }
 
         Ok(deleted)
     }

@@ -16,7 +16,7 @@ do {
         configuration.user = user
     }
     if let password = env["NEON_PASSWORD"] {
-        configuration.credential = .scramSHA256(password: password)
+        configuration.credential = .cleartextPassword(password: password)
     }
 
     let connection = try PostgresClientKit.Connection(configuration: configuration)
