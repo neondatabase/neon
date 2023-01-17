@@ -38,7 +38,7 @@ fn scenario_2() -> (Vec<Segment>, SegmentSize) {
     }
 
     // Branch
-    storage.branch("main", "child");
+    storage.branch("main", "child").unwrap();
     storage.update("child", 1_000);
 
     // More updates on parent
@@ -63,7 +63,7 @@ fn scenario_3() -> (Vec<Segment>, SegmentSize) {
     }
 
     // Branch
-    storage.branch("main", "child");
+    storage.branch("main", "child").unwrap();
     storage.update("child", 1_000);
 
     // More updates on parent
@@ -90,7 +90,7 @@ fn scenario_4() -> (Vec<Segment>, SegmentSize) {
     }
 
     // Branch
-    storage.branch("main", "child");
+    storage.branch("main", "child").unwrap();
     storage.update("child", 1_000);
 
     // More updates on parent
@@ -106,10 +106,10 @@ fn scenario_4() -> (Vec<Segment>, SegmentSize) {
 fn scenario_5() -> (Vec<Segment>, SegmentSize) {
     let mut storage = Storage::new("a");
     storage.insert("a", 5000);
-    storage.branch("a", "b");
+    storage.branch("a", "b").unwrap();
     storage.update("b", 4000);
     storage.update("a", 2000);
-    storage.branch("a", "c");
+    storage.branch("a", "c").unwrap();
     storage.insert("c", 4000);
     storage.insert("a", 2000);
 
@@ -133,12 +133,12 @@ fn scenario_6() -> (Vec<Segment>, SegmentSize) {
 
     let mut storage = Storage::new(None);
 
-    storage.branch(&None, branches[0]); // at 0
+    storage.branch(&None, branches[0]).unwrap(); // at 0
     storage.modify_branch(&branches[0], NO_OP, 108951064, 43696128); // at 108951064
-    storage.branch(&branches[0], branches[1]); // at 108951064
+    storage.branch(&branches[0], branches[1]).unwrap(); // at 108951064
     storage.modify_branch(&branches[1], NO_OP, 15560408, -1851392); // at 124511472
     storage.modify_branch(&branches[0], NO_OP, 174464360, -1531904); // at 283415424
-    storage.branch(&branches[0], branches[2]); // at 283415424
+    storage.branch(&branches[0], branches[2]).unwrap(); // at 283415424
     storage.modify_branch(&branches[2], NO_OP, 15906192, 8192); // at 299321616
     storage.modify_branch(&branches[0], NO_OP, 18909976, 32768); // at 302325400
 

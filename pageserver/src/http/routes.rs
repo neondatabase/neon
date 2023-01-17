@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
+use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -13,7 +14,7 @@ use super::models::{
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{with_ondemand_download, Timeline};
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -75,6 +76,15 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
     check_permission_with(request, |claims| {
         crate::auth::check_permission(claims, tenant_id)
     })
+}
+
+fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
+    match err {
+        PageReconstructError::Other(err) => ApiError::InternalServerError(err),
+        PageReconstructError::WalRedo(err) => {
+            ApiError::InternalServerError(anyhow::Error::new(err))
+        }
+    }
 }
 
 // Helper function to construct a TimelineInfo struct for a timeline
@@ -298,9 +308,10 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
         .map_err(ApiError::NotFound)?;
-    let result = with_ondemand_download(|| timeline.find_lsn_for_timestamp(timestamp_pg))
+    let result = timeline
+        .find_lsn_for_timestamp(timestamp_pg)
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(apierror_from_prerror)?;
 
     let result = match result {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),
@@ -585,7 +596,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
             // is Active when this function returns.
             if let res @ Err(_) = tenant.wait_to_become_active().await {
                 // This shouldn't happen because we just created the tenant directory
-                // in tenant_mgr::create_tenant, and there aren't any remote timelines
+                // in tenant::mgr::create_tenant, and there aren't any remote timelines
                 // to load, so, nothing can really fail during load.
                 // Don't do cleanup because we don't know how we got here.
                 // The tenant will likely be in `Broken` state and subsequent
@@ -778,10 +789,11 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
 }
 
 async fn timeline_download_remote_layers_handler_post(
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let body: DownloadRemoteLayersTaskSpawnRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
     let tenant = mgr::get_tenant(tenant_id, true)
@@ -790,7 +802,7 @@ async fn timeline_download_remote_layers_handler_post(
     let timeline = tenant
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
-    match timeline.spawn_download_all_remote_layers().await {
+    match timeline.spawn_download_all_remote_layers(body).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
     }

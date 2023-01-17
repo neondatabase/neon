@@ -52,6 +52,7 @@
 #include "access/xlogdefs.h"
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
+#include "executor/instrument.h"
 #include "pagestore_client.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/autovacuum.h"
@@ -250,11 +251,6 @@ PrefetchState *MyPState;
 	) \
 )
 
-int			n_prefetch_hits = 0;
-int			n_prefetch_misses = 0;
-int			n_prefetch_missed_caches = 0;
-int			n_prefetch_dupes = 0;
-
 XLogRecPtr	prefetch_lsn = 0;
 
 static bool compact_prefetch_buffers(void);
@@ -291,12 +287,13 @@ compact_prefetch_buffers(void)
 
 	/*
 	 * Here we have established:
-	 * slots < search_ring_index may be unused (not scanned)
-	 * slots >= search_ring_index and <= empty_ring_index are unused
-	 * slots > empty_ring_index are in use, or outside our buffer's range.
+	 *   slots < search_ring_index have an unknown state (not scanned)
+	 *   slots >= search_ring_index and <= empty_ring_index are unused
+	 *   slots > empty_ring_index are in use, or outside our buffer's range.
+	 * ... unless search_ring_index <= ring_last
 	 * 
 	 * Therefore, there is a gap of at least one unused items between
-	 * search_ring_index and empty_ring_index, which grows as we hit
+	 * search_ring_index and empty_ring_index (both inclusive), which grows as we hit
 	 * more unused items while moving backwards through the array.
 	 */
 
@@ -306,6 +303,7 @@ compact_prefetch_buffers(void)
 		PrefetchRequest *target_slot;
 		bool		found;
 
+		/* update search index to an unprocessed entry */
 		search_ring_index--;
 
 		source_slot = GetPrfSlot(search_ring_index);
@@ -313,6 +311,7 @@ compact_prefetch_buffers(void)
 		if (source_slot->status == PRFS_UNUSED)
 			continue;
 
+		/* slot is used -- start moving slot */
 		target_slot = GetPrfSlot(empty_ring_index);
 
 		Assert(source_slot->status == PRFS_RECEIVED);
@@ -332,16 +331,22 @@ compact_prefetch_buffers(void)
 		/* Adjust the location of our known-empty slot */
 		empty_ring_index--;
 
+		/* empty the moved slot */
 		source_slot->status = PRFS_UNUSED;
 		source_slot->buftag = (BufferTag) {0};
 		source_slot->response = NULL;
 		source_slot->my_ring_index = 0;
 		source_slot->effective_request_lsn = 0;
 
+		/* update bookkeeping */
 		n_moved++;
 	}
 
-	if (MyPState->ring_last != empty_ring_index)
+	/*
+	 * Only when we've moved slots we can expect trailing unused slots,
+	 * so only then we clean up trailing unused slots.
+	 */
+	if (n_moved > 0)
 	{
 		prefetch_cleanup_trailing_unused();
 		return true;
@@ -770,7 +775,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 		else
 		{
 			/* The buffered request is good enough, return that index */
-			n_prefetch_dupes++;
+			pgBufferUsage.prefetch.duplicates++;
 			return ring_index;
 		}
 	}
@@ -1845,7 +1850,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (slot->effective_request_lsn >= request_lsn)
 		{
 			ring_index = slot->my_ring_index;
-			n_prefetch_hits += 1;
+			pgBufferUsage.prefetch.hits += 1;
 		}
 		else /* the current prefetch LSN is not large enough, so drop the prefetch */
 		{
@@ -1860,7 +1865,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 			}
 			/* drop caches */
 			prefetch_set_unused(slot->my_ring_index);
-			n_prefetch_missed_caches += 1;
+			pgBufferUsage.prefetch.expired += 1;
 			/* make it look like a prefetch cache miss */
 			entry = NULL;
 		}
@@ -1870,7 +1875,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	{
 		if (entry == NULL)
 		{
-			n_prefetch_misses += 1;
+			pgBufferUsage.prefetch.misses += 1;
 
 			ring_index = prefetch_register_buffer(buftag, &request_latest,
 												  &request_lsn);

@@ -55,6 +55,12 @@ pub trait Storage {
     /// that without timeline lock.
     fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>>;
 
+    /// Release resources associated with the storage -- technically, close FDs.
+    /// Currently we don't remove timelines until restart (#3146), so need to
+    /// spare descriptors. This would be useful for temporary tli detach as
+    /// well.
+    fn close(&mut self) {}
+
     /// Get metrics for this timeline.
     fn get_metrics(&self) -> WalStorageMetrics;
 }
@@ -399,6 +405,11 @@ impl Storage for PhysicalStorage {
         Box::new(move |segno_up_to: XLogSegNo| {
             remove_segments_from_disk(&timeline_dir, wal_seg_size, |x| x <= segno_up_to)
         })
+    }
+
+    fn close(&mut self) {
+        // close happens in destructor
+        let _open_file = self.file.take();
     }
 
     fn get_metrics(&self) -> WalStorageMetrics {

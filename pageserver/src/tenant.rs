@@ -38,6 +38,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
@@ -92,7 +94,7 @@ mod timeline;
 
 pub mod size;
 
-pub use timeline::{with_ondemand_download, PageReconstructError, PageReconstructResult, Timeline};
+pub use timeline::{PageReconstructError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -139,6 +141,7 @@ pub struct Tenant {
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
+    cached_synthetic_tenant_size: Arc<AtomicU64>,
 }
 
 /// A timeline with some of its files on disk, being initialized.
@@ -438,8 +441,16 @@ struct RemoteStartupData {
 
 impl Tenant {
     /// Yet another helper for timeline initialization.
-    /// Contains common part for `load_local_timeline` and `load_remote_timeline`
-    async fn setup_timeline(
+    /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
+    ///
+    /// - Initializes the Timeline struct and inserts it into the tenant's hash map
+    /// - Scans the local timeline directory for layer files and builds the layer map
+    /// - Downloads remote index file and adds remote files to the layer map
+    /// - Schedules remote upload tasks for any files that are present locally but missing from remote storage.
+    ///
+    /// If the operation fails, the timeline is left in the tenant's hash map in Broken state. On success,
+    /// it is marked as Active.
+    async fn timeline_init_and_sync(
         &self,
         timeline_id: TimelineId,
         remote_client: Option<RemoteTimelineClient>,
@@ -482,10 +493,7 @@ impl Tenant {
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
             // will ingest data which may require looking at the layers which are not yet available locally
             match timeline.initialize_with_lock(&mut timelines_accessor, true, false) {
-                Ok(initialized_timeline) => {
-                    timelines_accessor.insert(timeline_id, initialized_timeline.clone());
-                    Ok(initialized_timeline)
-                }
+                Ok(new_timeline) => new_timeline,
                 Err(e) => {
                     error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
                     // FIXME using None is a hack, it wont hurt, just ugly.
@@ -501,16 +509,14 @@ impl Tenant {
                             None,
                         )
                         .with_context(|| {
-                            format!(
-                            "Failed to crate broken timeline data for {tenant_id}/{timeline_id}"
-                        )
+                            format!("creating broken timeline data for {tenant_id}/{timeline_id}")
                         })?;
                     broken_timeline.set_state(TimelineState::Broken);
                     timelines_accessor.insert(timeline_id, broken_timeline);
-                    Err(e)
+                    return Err(e);
                 }
             }
-        }?;
+        };
 
         if self.remote_storage.is_some() {
             // Reconcile local state with remote storage, downloading anything that's
@@ -612,7 +618,7 @@ impl Tenant {
     #[instrument(skip(self), fields(tenant_id=%self.tenant_id))]
     async fn attach(self: &Arc<Tenant>) -> anyhow::Result<()> {
         // Create directory with marker file to indicate attaching state.
-        // The load_local_tenants() function in tenant_mgr relies on the marker file
+        // The load_local_tenants() function in tenant::mgr relies on the marker file
         // to determine whether a tenant has finished attaching.
         let tenant_dir = self.conf.tenant_path(&self.tenant_id);
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
@@ -783,7 +789,7 @@ impl Tenant {
         // cannot be older than the local one
         let local_metadata = None;
 
-        self.setup_timeline(
+        self.timeline_init_and_sync(
             timeline_id,
             Some(remote_client),
             Some(RemoteStartupData {
@@ -1048,7 +1054,7 @@ impl Tenant {
             None => None,
         };
 
-        self.setup_timeline(
+        self.timeline_init_and_sync(
             timeline_id,
             remote_client,
             remote_startup_data,
@@ -1722,6 +1728,7 @@ impl Tenant {
             remote_storage,
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
+            cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -2359,6 +2366,24 @@ impl Tenant {
 
         size::gather_inputs(self, logical_sizes_at_once, &mut shared_cache).await
     }
+
+    /// Calculate synthetic tenant size
+    /// This is periodically called by background worker.
+    /// result is cached in tenant struct
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
+    pub async fn calculate_synthetic_size(&self) -> anyhow::Result<u64> {
+        let inputs = self.gather_size_inputs().await?;
+
+        let size = inputs.calculate()?;
+
+        self.cached_synthetic_tenant_size
+            .store(size, Ordering::Relaxed);
+
+        Ok(size)
+    }
+    pub fn get_cached_synthetic_size(&self) -> u64 {
+        self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
+    }
 }
 
 fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
@@ -2816,15 +2841,15 @@ mod tests {
         drop(writer);
 
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x10)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x10)).await?,
             TEST_IMG("foo at 0x10")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x1f)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x1f)).await?,
             TEST_IMG("foo at 0x10")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x20)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x20)).await?,
             TEST_IMG("foo at 0x20")
         );
 
@@ -2903,15 +2928,15 @@ mod tests {
 
         // Check page contents on both branches
         assert_eq!(
-            from_utf8(&tline.get(TEST_KEY_A, Lsn(0x40)).no_ondemand_download()?)?,
+            from_utf8(&tline.get(TEST_KEY_A, Lsn(0x40)).await?)?,
             "foo at 0x40"
         );
         assert_eq!(
-            from_utf8(&newtline.get(TEST_KEY_A, Lsn(0x40)).no_ondemand_download()?)?,
+            from_utf8(&newtline.get(TEST_KEY_A, Lsn(0x40)).await?)?,
             "bar at 0x40"
         );
         assert_eq!(
-            from_utf8(&newtline.get(TEST_KEY_B, Lsn(0x40)).no_ondemand_download()?)?,
+            from_utf8(&newtline.get(TEST_KEY_B, Lsn(0x40)).await?)?,
             "foobar at 0x20"
         );
 
@@ -3070,10 +3095,7 @@ mod tests {
         tenant
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)
             .await?;
-        assert!(newtline
-            .get(*TEST_KEY, Lsn(0x25))
-            .no_ondemand_download()
-            .is_ok());
+        assert!(newtline.get(*TEST_KEY, Lsn(0x25)).await.is_ok());
 
         Ok(())
     }
@@ -3103,7 +3125,7 @@ mod tests {
 
         // Check that the data is still accessible on the branch.
         assert_eq!(
-            newtline.get(*TEST_KEY, Lsn(0x50)).no_ondemand_download()?,
+            newtline.get(*TEST_KEY, Lsn(0x50)).await?,
             TEST_IMG(&format!("foo at {}", Lsn(0x40)))
         );
 
@@ -3251,23 +3273,23 @@ mod tests {
         tline.compact().await?;
 
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x10)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x10)).await?,
             TEST_IMG("foo at 0x10")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x1f)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x1f)).await?,
             TEST_IMG("foo at 0x10")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x20)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x20)).await?,
             TEST_IMG("foo at 0x20")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x30)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x30)).await?,
             TEST_IMG("foo at 0x30")
         );
         assert_eq!(
-            tline.get(*TEST_KEY, Lsn(0x40)).no_ondemand_download()?,
+            tline.get(*TEST_KEY, Lsn(0x40)).await?,
             TEST_IMG("foo at 0x40")
         );
 
@@ -3377,7 +3399,7 @@ mod tests {
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, lsn).no_ondemand_download()?,
+                    tline.get(test_key, lsn).await?,
                     TEST_IMG(&format!("{} at {}", blknum, last_lsn))
                 );
             }
@@ -3463,7 +3485,7 @@ mod tests {
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, lsn).no_ondemand_download()?,
+                    tline.get(test_key, lsn).await?,
                     TEST_IMG(&format!("{} at {}", blknum, last_lsn))
                 );
             }
@@ -3538,7 +3560,7 @@ mod tests {
                 println!("checking [{idx}][{blknum}] at {lsn}");
                 test_key.field6 = blknum as u32;
                 assert_eq!(
-                    tline.get(test_key, *lsn).no_ondemand_download()?,
+                    tline.get(test_key, *lsn).await?,
                     TEST_IMG(&format!("{idx} {blknum} at {lsn}"))
                 );
             }

@@ -19,6 +19,7 @@ use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
@@ -59,7 +60,7 @@ pub async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
-    mut cancellation: watch::Receiver<()>,
+    cancellation: CancellationToken,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
@@ -98,7 +99,7 @@ pub async fn handle_walreceiver_connection(
 
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
-    let mut connection_cancellation = cancellation.clone();
+    let connection_cancellation = cancellation.clone();
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverConnection,
@@ -117,7 +118,7 @@ pub async fn handle_walreceiver_connection(
                     }
                 },
 
-                _ = connection_cancellation.changed() => info!("Connection cancelled"),
+                _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
             }
             Ok(())
         },
@@ -183,7 +184,7 @@ pub async fn handle_walreceiver_connection(
 
     while let Some(replication_message) = {
         select! {
-            _ = cancellation.changed() => {
+            _ = cancellation.cancelled() => {
                 info!("walreceiver interrupted");
                 None
             }

@@ -27,7 +27,7 @@ use tracing::*;
 ///
 use tokio_tar::{Builder, EntryType, Header};
 
-use crate::tenant::{with_ondemand_download, Timeline};
+use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
@@ -171,30 +171,23 @@ where
             SlruKind::MultiXactOffsets,
             SlruKind::MultiXactMembers,
         ] {
-            for segno in
-                with_ondemand_download(|| self.timeline.list_slru_segments(kind, self.lsn)).await?
-            {
+            for segno in self.timeline.list_slru_segments(kind, self.lsn).await? {
                 self.add_slru_segment(kind, segno).await?;
             }
         }
 
         // Create tablespace directories
-        for ((spcnode, dbnode), has_relmap_file) in
-            with_ondemand_download(|| self.timeline.list_dbdirs(self.lsn)).await?
-        {
+        for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn).await? {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
             // Gather and send relational files in each database if full backup is requested.
             if self.full_backup {
-                for rel in
-                    with_ondemand_download(|| self.timeline.list_rels(spcnode, dbnode, self.lsn))
-                        .await?
-                {
+                for rel in self.timeline.list_rels(spcnode, dbnode, self.lsn).await? {
                     self.add_rel(rel).await?;
                 }
             }
         }
-        for xid in with_ondemand_download(|| self.timeline.list_twophase_files(self.lsn)).await? {
+        for xid in self.timeline.list_twophase_files(self.lsn).await? {
             self.add_twophase_file(xid).await?;
         }
 
@@ -210,8 +203,7 @@ where
     }
 
     async fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
-        let nblocks =
-            with_ondemand_download(|| self.timeline.get_rel_size(tag, self.lsn, false)).await?;
+        let nblocks = self.timeline.get_rel_size(tag, self.lsn, false).await?;
 
         // If the relation is empty, create an empty file
         if nblocks == 0 {
@@ -229,11 +221,10 @@ where
 
             let mut segment_data: Vec<u8> = vec![];
             for blknum in startblk..endblk {
-                let img = with_ondemand_download(|| {
-                    self.timeline
-                        .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
-                })
-                .await?;
+                let img = self
+                    .timeline
+                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)
+                    .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
@@ -252,17 +243,17 @@ where
     // Generate SLRU segment files from repository.
     //
     async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let nblocks =
-            with_ondemand_download(|| self.timeline.get_slru_segment_size(slru, segno, self.lsn))
-                .await?;
+        let nblocks = self
+            .timeline
+            .get_slru_segment_size(slru, segno, self.lsn)
+            .await?;
 
         let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
         for blknum in 0..nblocks {
-            let img = with_ondemand_download(|| {
-                self.timeline
-                    .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)
-            })
-            .await?;
+            let img = self
+                .timeline
+                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)
+                .await?;
 
             if slru == SlruKind::Clog {
                 ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
@@ -294,9 +285,10 @@ where
         has_relmap_file: bool,
     ) -> anyhow::Result<()> {
         let relmap_img = if has_relmap_file {
-            let img =
-                with_ondemand_download(|| self.timeline.get_relmap_file(spcnode, dbnode, self.lsn))
-                    .await?;
+            let img = self
+                .timeline
+                .get_relmap_file(spcnode, dbnode, self.lsn)
+                .await?;
             ensure!(img.len() == 512);
             Some(img)
         } else {
@@ -329,7 +321,9 @@ where
             // XLOG_TBLSPC_DROP records. But we probably should just
             // throw an error on CREATE TABLESPACE in the first place.
             if !has_relmap_file
-                && with_ondemand_download(|| self.timeline.list_rels(spcnode, dbnode, self.lsn))
+                && self
+                    .timeline
+                    .list_rels(spcnode, dbnode, self.lsn)
                     .await?
                     .is_empty()
             {
@@ -362,7 +356,7 @@ where
     // Extract twophase state files
     //
     async fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
-        let img = with_ondemand_download(|| self.timeline.get_twophase_file(xid, self.lsn)).await?;
+        let img = self.timeline.get_twophase_file(xid, self.lsn).await?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -398,10 +392,14 @@ where
             )
             .await?;
 
-        let checkpoint_bytes = with_ondemand_download(|| self.timeline.get_checkpoint(self.lsn))
+        let checkpoint_bytes = self
+            .timeline
+            .get_checkpoint(self.lsn)
             .await
             .context("failed to get checkpoint bytes")?;
-        let pg_control_bytes = with_ondemand_download(|| self.timeline.get_control_file(self.lsn))
+        let pg_control_bytes = self
+            .timeline
+            .get_control_file(self.lsn)
             .await
             .context("failed get control bytes")?;
 

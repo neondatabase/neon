@@ -18,10 +18,6 @@ Intended to be used in integration tests and in CLI tools for local installation
 Documentation of the Neon features and concepts.
 Now it is mostly dev documentation.
 
-`/monitoring`:
-
-TODO
-
 `/pageserver`:
 
 Neon storage service.
@@ -97,6 +93,13 @@ cargo hakari manage-deps
 ```
 
 If you don't have hakari installed (`error: no such subcommand: hakari`), install it by running `cargo install cargo-hakari`.
+
+### Checking Rust 3rd-parties
+[Cargo deny](https://embarkstudios.github.io/cargo-deny/index.html) is a cargo plugin that lets us lint project's dependency graph to ensure all dependencies conform to requirements. It detects security issues, matches licenses, and ensures crates only come from trusted sources.
+
+```bash
+cargo deny check
+```
 
 ## Using Python
 Note that Debian/Ubuntu Python packages are stale, as it commonly happens,

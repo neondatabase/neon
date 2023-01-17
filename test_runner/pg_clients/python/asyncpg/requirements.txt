@@ -1,1 +1,1 @@
-asyncpg==0.25.0
+asyncpg==0.27.0
