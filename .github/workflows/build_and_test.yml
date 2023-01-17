@@ -762,14 +762,14 @@ jobs:
       - name: Pull compute node v14 image from Docker Hub
         run: crane pull ctring/compute-node-v14:${{needs.tag.outputs.build-tag}} compute-node-v14
 
-      - name: Pull vm compute node v14 image from Docker Hub
-        run: crane pull ctring/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
+      # - name: Pull vm compute node v14 image from Docker Hub
+      #   run: crane pull ctring/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
 
       - name: Pull compute node v15 image from Docker Hub
         run: crane pull ctring/compute-node-v15:${{needs.tag.outputs.build-tag}} compute-node-v15
 
-      - name: Pull vm compute node v15 image from Docker Hub
-        run: crane pull ctring/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
+      # - name: Pull vm compute node v15 image from Docker Hub
+      #   run: crane pull ctring/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
 
       # - name: Pull rust image from ECR
       #   run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
@@ -819,9 +819,9 @@ jobs:
           crane tag ctring/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag ctring/compute-tools:${{needs.tag.outputs.build-tag}} latest
           crane tag ctring/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag ctring/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          # crane tag ctring/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag ctring/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag ctring/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          # crane tag ctring/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
