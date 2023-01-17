@@ -232,7 +232,7 @@ services:
         - TAG=${TAG:-latest}
         - http_proxy=$http_proxy
         - https_proxy=$https_proxy
-    image: localhost:5000/compute-node-v${PG_VERSION:-14}:${TAG:-latest}
+    image: localhost:5000/compute-node-multi-region-v${PG_VERSION:-14}:${TAG:-latest}
     environment:
       - PG_VERSION=${PG_VERSION:-14}
       - PAGESERVER_HOST=pageserver-r1

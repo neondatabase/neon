@@ -157,6 +157,11 @@
                 "name": "temp_buffers",
                 "value": "4096",
                 "vartype": "integer"
+            },
+            {
+                "name": "track_counts",
+                "value": "off",
+                "vartype": "bool"
             }
         ]
     },
