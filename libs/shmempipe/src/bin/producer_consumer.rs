@@ -64,7 +64,8 @@ where
 fn inner_respond(mut responder: OwnedResponder) -> ! {
     let mut response = vec![0; 8192];
 
-    let mut buffer = vec![0; 16 * 1024];
+    const INITIAL_BUF_SIZE: usize = 16 * 1024;
+    let mut buffer = vec![0; INITIAL_BUF_SIZE];
 
     #[cfg(not_now)]
     let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
@@ -81,14 +82,30 @@ fn inner_respond(mut responder: OwnedResponder) -> ! {
         #[cfg(not_now)]
         let started_at = std::time::Instant::now();
 
-        let len = responder
-            .read_next_frame_len()
-            .expect("should be in the beginning of frame");
-        if buffer.len() < len as usize {
+        // read the messages stricly one by one, this is less efficient but guaranteed to have less
+        // bugs here.
+        let mut buffered = 0;
+
+        let mut len = [0u8; 4];
+
+        while buffered < 4 {
+            buffered += responder.read(&mut len[buffered..]);
+        }
+
+        let len = u32::from_ne_bytes(len);
+
+        if len as usize > buffer.len() {
+            // the buffer size is never shrunk
             buffer.resize(len as usize, 0);
         }
-        responder.read_exact(&mut buffer[..len as usize]);
-        // println!("inner: {} bytes of buffer", buffer.len());
+        buffered = 0;
+
+        while buffered < len as usize {
+            let until = len as usize - buffered;
+            buffered += responder.read(&mut buffer[buffered..][..until]);
+        }
+
+        assert_eq!(buffered, len as usize);
 
         // this is quite ridiculous that sha256 seems slower than walredo for short/short
         if SHA_INPUT {
@@ -272,15 +289,19 @@ fn as_outer() {
                             InputSize::Fixed(fixed) => fixed,
                         };
 
-                        let id = owned.request_response(&req[..len as usize], &mut resp);
+                        let head = len.to_ne_bytes();
+                        let tail = &req[..len as usize];
+
+                        let payload = [&head[..], tail];
+
+                        let id = owned.request_response(&payload, &mut resp);
 
                         reqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                         assert_eq!(resp.len(), 8192);
 
                         if SHA_INPUT {
-                            let expected =
-                                <[u8; 32]>::from(sha2::Sha256::digest(&req[..len as usize]));
+                            let expected = <[u8; 32]>::from(sha2::Sha256::digest(&tail));
                             if expected.as_slice() != &resp[..32] {
                                 println!(
                                     "{id} -- hash mismatch, expected {:?}, got {:?} (len: {len})",

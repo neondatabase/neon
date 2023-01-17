@@ -14,8 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use nix::sys::mman::{MapFlags, ProtFlags};
 
-use bytes::Bytes;
-
 /// C-api as defined in the `shmempipe.h`
 mod c_api;
 pub mod shared;
@@ -146,7 +144,7 @@ impl OwnedRequester {
         ]
     }
 
-    pub fn request_response(&self, req: &[Bytes], resp: &mut [u8]) -> u32 {
+    pub fn request_response<B: AsRef<[u8]>>(&self, req: &[B], resp: &mut [u8]) -> u32 {
         // Overview:
         // - `self.producer` creates an order amongst competing request_response callers (id).
         // - the same token (id) is used to find some order with `self.consumer` to read the
@@ -189,7 +187,7 @@ impl OwnedRequester {
         id
     }
 
-    fn send_request(&self, request: &[Bytes]) -> u32 {
+    fn send_request<B: AsRef<[u8]>>(&self, request: &[B]) -> u32 {
         let sem = unsafe { shared::EventfdSemaphore::from_raw_fd(self.ptr.notify_worker) };
 
         // this will be contended if there's anyone else interested in writing
