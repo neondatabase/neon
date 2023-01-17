@@ -36,7 +36,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
     /// See BufferedHistoricLayerCoverage for a more general insertion method.
     pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value, is_image: bool) {
         // It's only a persistent map, not a retroactive one
-        if let Some(last_entry) = self.historic.iter().rev().next() {
+        if let Some(last_entry) = self.historic.iter().next_back() {
             let last_lsn = last_entry.0;
             if lsn.start == *last_lsn {
                 // TODO there are edge cases to take care of
@@ -59,7 +59,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
 
     /// Query at a particular LSN, inclusive
     pub fn get_version(&self, lsn: u64) -> Option<&LayerCoverageTuple<Value>> {
-        match self.historic.range(..=lsn).rev().next() {
+        match self.historic.range(..=lsn).next_back() {
             Some((_, v)) => Some(v),
             None => None,
         }
