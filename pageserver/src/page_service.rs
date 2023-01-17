@@ -55,7 +55,7 @@ use crate::trace::Tracer;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
-fn copyin_stream<'a>(pgb: &'a mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + 'a {
+fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + '_ {
     async_stream::try_stream! {
         loop {
             let msg = tokio::select! {
@@ -390,6 +390,7 @@ impl PageServerHandler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_import_basebackup(
         &self,
@@ -656,6 +657,7 @@ impl PageServerHandler {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_basebackup_request(
         &mut self,

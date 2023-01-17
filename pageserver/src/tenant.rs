@@ -175,10 +175,7 @@ impl UninitializedTimeline<'_> {
     ///
     /// The new timeline is initialized in Active state, and its background jobs are
     /// started
-    pub fn initialize(
-        self,
-        _ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    pub fn initialize(self, _ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         self.initialize_with_lock(&mut timelines, true, true)
     }
@@ -1206,7 +1203,7 @@ impl Tenant {
                     // decoding the new WAL might need to look up previous pages, relation
                     // sizes etc. and that would get confused if the previous page versions
                     // are not in the repository yet.
-                    ancestor_timeline.wait_lsn(*lsn, &ctx).await?;
+                    ancestor_timeline.wait_lsn(*lsn, ctx).await?;
                 }
 
                 self.branch_timeline(
@@ -1290,7 +1287,7 @@ impl Tenant {
 
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
-                .compact(&ctx)
+                .compact(ctx)
                 .instrument(info_span!("compact_timeline", timeline = %timeline_id))
                 .await?;
         }
@@ -2823,7 +2820,7 @@ pub mod harness {
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
             // FIXME starts background jobs
-            tenant.load(&ctx).await?;
+            tenant.load(ctx).await?;
             Ok(tenant)
         }
 

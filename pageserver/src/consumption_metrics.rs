@@ -142,7 +142,7 @@ pub async fn collect_metrics_iteration(
                     timeline_written_size,
                 ));
 
-                let (timeline_logical_size, is_exact) = timeline.get_current_logical_size(&ctx)?;
+                let (timeline_logical_size, is_exact) = timeline.get_current_logical_size(ctx)?;
                 // Only send timeline logical size when it is fully calculated.
                 if is_exact {
                     current_metrics.push((
