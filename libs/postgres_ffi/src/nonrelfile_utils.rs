@@ -38,9 +38,9 @@ pub fn transaction_id_get_status(xid: u32, page: &[u8]) -> u8 {
 pub fn transaction_id_set_csn(xid: u32, csn: XidCSN, page: &mut BytesMut) {
     trace!("handle_apply_csn_request for RM_XACT_ID-{}", csn);
 
-    let entryno: usize = (xid as usize % pg_constants::CSN_LOG_XACTS_PER_PAGE as usize) as usize;
-    let bytebegin: usize = (entryno * pg_constants::CSN_SIZE as usize) as usize;
-    let byteend: usize = (bytebegin + pg_constants::CSN_SIZE as usize) as usize;
+    let entryno: usize = xid as usize % pg_constants::CSN_LOG_XACTS_PER_PAGE as usize;
+    let bytebegin: usize = entryno * pg_constants::CSN_SIZE as usize;
+    let byteend: usize = bytebegin + pg_constants::CSN_SIZE as usize;
 
     LittleEndian::write_u64(&mut page[bytebegin..byteend], csn);
 }

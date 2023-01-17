@@ -546,13 +546,13 @@ impl PagestreamFeMessage {
 
             Self::GetSlruPage(req) => {
                 bytes.put_u8(4); /* tag from pagestore_client.h */
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u8(req.region.0);
                 bytes.put_u8(req.kind.into());
                 bytes.put_u32(req.segno);
                 bytes.put_u32(req.blkno);
-                bytes.put_u8(if req.check_exists_only { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.check_exists_only));
             }
         }
 

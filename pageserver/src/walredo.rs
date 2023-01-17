@@ -596,7 +596,7 @@ impl PostgresRedoManager {
                 );
 
                 for &xid in xids {
-                    let pageno = ((xid as u32 / pg_constants::CSN_LOG_XACTS_PER_PAGE)
+                    let pageno = ((xid / pg_constants::CSN_LOG_XACTS_PER_PAGE)
                         * pg_constants::MAX_REGIONS)
                         + *region;
                     let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -629,7 +629,7 @@ impl PostgresRedoManager {
                 );
 
                 for &xid in xids {
-                    let pageno = ((xid as u32 / pg_constants::CSN_LOG_XACTS_PER_PAGE)
+                    let pageno = ((xid / pg_constants::CSN_LOG_XACTS_PER_PAGE)
                         * pg_constants::MAX_REGIONS)
                         + *region;
                     let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
