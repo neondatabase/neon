@@ -610,7 +610,7 @@ jobs:
 
       - name: Downloading VM informant version ${{ env.VM_INFORMANT_VERSION }}
         run: |
-          curl -L https://github.com/neondatabase/autoscaling/releases/download/${{ env.VM_INFORMANT_VERSION }}/vm-informant -o vm-informant
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/${{ env.VM_INFORMANT_VERSION }}/vm-informant -o vm-informant
           chmod +x vm-informant
 
       - name: Adding VM informant to compute-node image
