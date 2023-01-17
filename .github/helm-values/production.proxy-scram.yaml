@@ -5,7 +5,7 @@ settings:
   sentryEnvironment: "production"
   wssPort: 8443
   metricCollectionEndpoint: "http://console-release.local/billing/api/v1/usage_events"
-  metricCollectionInterval: "1min"
+  metricCollectionInterval: "10min"
 
 podLabels:
   zenith_service: proxy-scram
