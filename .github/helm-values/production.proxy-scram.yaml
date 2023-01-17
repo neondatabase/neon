@@ -4,6 +4,8 @@ settings:
   domain: "*.cloud.neon.tech"
   sentryEnvironment: "production"
   wssPort: 8443
+  metricCollectionEndpoint: "http://console-release.local/billing/api/v1/usage_events"
+  metricCollectionInterval: "1min"
 
 podLabels:
   zenith_service: proxy-scram
