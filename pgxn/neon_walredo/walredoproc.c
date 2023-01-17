@@ -133,9 +133,14 @@ enter_seccomp_mode(void)
 
 		/* Memory allocation */
 		PG_SCMP_ALLOW(brk),
+#ifdef HAVE_SHMEMPIPE
+		PG_SCMP_ALLOW(mmap),
+#endif
 #ifndef MALLOC_NO_MMAP
 		/* TODO: musl doesn't have mallopt */
+#ifndef HAVE_SHMEMPIPE
 		PG_SCMP_ALLOW(mmap),
+#endif
 		PG_SCMP_ALLOW(munmap),
 #endif
 		/*
@@ -145,6 +150,12 @@ enter_seccomp_mode(void)
 		 * is stored in MyProcPid anyway.
 		 */
 		PG_SCMP_ALLOW(getpid),
+
+#ifdef HAVE_SHMEMPIPE
+		PG_SCMP_ALLOW(ftruncate64),
+		/* busy looping */
+		PG_SCMP_ALLOW(sched_yield),
+#endif
 
 		/* Enable those for a proper shutdown.
 		PG_SCMP_ALLOW(munmap),

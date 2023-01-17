@@ -767,7 +767,6 @@ impl PostgresRedoProcess {
 
         builder
             .arg("--wal-redo")
-            .arg("--disable-seccomp")
             .stdin(Stdio::piped())
             .stderr(Stdio::inherit())
             .stdout(Stdio::piped())
