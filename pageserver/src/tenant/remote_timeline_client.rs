@@ -135,7 +135,7 @@
 //! - Initiate upload queue with that [`IndexPart`].
 //! - Reschedule all lost operations by comparing the local filesystem state
 //!   and remote state as per [`IndexPart`]. This is done in
-//!   [`Timeline::setup_timeline`] and [`Timeline::reconcile_with_remote`].
+//!   [`Timeline::timeline_init_and_sync`] and [`Timeline::reconcile_with_remote`].
 //!
 //! Note that if we crash during file deletion between the index update
 //! that removes the file from the list of files, and deleting the remote file,
