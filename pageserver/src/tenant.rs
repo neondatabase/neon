@@ -1487,7 +1487,7 @@ impl Tenant {
                         .values()
                         .filter(|timeline| timeline.current_state() != TimelineState::Broken);
                     for timeline in not_broken_timelines {
-                        timeline.set_state(TimelineState::Suspended);
+                        timeline.set_state(TimelineState::Stopping);
                     }
                 }
                 TenantState::Broken => {
