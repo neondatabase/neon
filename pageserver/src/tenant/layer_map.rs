@@ -9,6 +9,39 @@
 //! are frozen, and it is split up into new image and delta layers and the
 //! corresponding files are written to disk.
 //!
+//! Design overview:
+//!
+//! The `search` method of the layer map is on the read critical path, so we've
+//! built an efficient data structure for fast reads, stored in `LayerMap::historic`.
+//! Other read methods are less critical but still impact performance of background tasks.
+//!
+//! This data structure relies on a persistent/immutable binary search tree. See the
+//! following lecture for an introduction https://www.youtube.com/watch?v=WqCWghETNDc&t=581s
+//! Summary: A persistent/immutable BST (and persistent data structures in general) allows
+//! you to modify the tree in such a way that each modification creates a new "version"
+//! of the tree. When you modify it, you get a new version, but all previous versions are
+//! still accessible too. So if someone is still holding a reference to an older version,
+//! they continue to see the tree as it was then. The persistent BST stores all the
+//! different versions in an efficient way.
+//!
+//! Our persistent BST maintains a map of which layer file "covers" each key. It has only
+//! one dimension, the key. See `layer_coverage.rs`. We use the persistent/immutable property
+//! to handle the LSN dimension.
+//!
+//! To build the layer map, we insert each layer to the persistent BST in LSN.start order,
+//! starting from the oldest one. After each insertion, we grab a reference to that "version"
+//! of the tree, and store it in another tree, a BtreeMap keyed by the LSN. See
+//! `historic_layer_coverage.rs`.
+//!
+//! To search for a particular key-LSN pair, you first look up the right "version" in the
+//! BTreeMap. Then you search that version of the BST with the key.
+//!
+//! The persistent BST keeps all the versions, but there is no way to change the old versions
+//! afterwards. We can add layers as long as they have larger LSNs than any previous layer in
+//! the map, but if we need to remove a layer, or insert anything with an older LSN, we need
+//! to throw away most of the persistent BST and build a new one, starting from the oldest
+//! LSN. See `LayerMap::flush_updates()`.
+//!
 
 mod historic_layer_coverage;
 mod layer_coverage;
