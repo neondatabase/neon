@@ -188,7 +188,7 @@ impl UninitializedTimeline<'_> {
         mut self,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
         load_layer_map: bool,
-        launch_wal_receiver: bool,
+        activate: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
@@ -221,13 +221,12 @@ impl UninitializedTimeline<'_> {
                         "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
                     )
                 })?;
-                new_timeline.set_state(TimelineState::Active);
                 v.insert(Arc::clone(&new_timeline));
 
                 new_timeline.maybe_spawn_flush_loop();
 
-                if launch_wal_receiver {
-                    new_timeline.launch_wal_receiver();
+                if activate {
+                    new_timeline.activate();
                 }
             }
         }
@@ -1462,8 +1461,7 @@ impl Tenant {
                     tasks::start_background_loops(self.tenant_id);
 
                     for timeline in not_broken_timelines {
-                        timeline.set_state(TimelineState::Active);
-                        timeline.launch_wal_receiver();
+                        timeline.activate();
                     }
                 }
             }
