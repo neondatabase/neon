@@ -11,6 +11,7 @@ use anyhow::{bail, Result};
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
 use serde::Deserialize;
+use tracing::{debug, instrument};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
@@ -229,6 +230,7 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
 /// Wait for Postgres to become ready to accept connections. It's ready to
 /// accept connections when the state-field in `pgdata/postmaster.pid` says
 /// 'ready'.
+#[instrument(skip(pg))]
 pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
 
@@ -287,18 +289,18 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
         }
 
         let res = rx.recv_timeout(Duration::from_millis(100));
-        log::debug!("woken up by notify: {res:?}");
+        debug!("woken up by notify: {res:?}");
         // If there are multiple events in the channel already, we only need to be
         // check once. Swallow the extra events before we go ahead to check the
         // pid file.
         while let Ok(res) = rx.try_recv() {
-            log::debug!("swallowing extra event: {res:?}");
+            debug!("swallowing extra event: {res:?}");
         }
 
         // Check that we can open pid file first.
         if let Ok(file) = File::open(&pid_path) {
             if !postmaster_pid_seen {
-                log::debug!("postmaster.pid appeared");
+                debug!("postmaster.pid appeared");
                 watcher
                     .unwatch(pgdata)
                     .expect("Failed to remove pgdata dir watch");
@@ -314,7 +316,7 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
             // Pid file could be there and we could read it, but it could be empty, for example.
             if let Some(Ok(line)) = last_line {
                 let status = line.trim();
-                log::debug!("last line of postmaster.pid: {status:?}");
+                debug!("last line of postmaster.pid: {status:?}");
 
                 // Now Postgres is ready to accept connections
                 if status == "ready" {
@@ -330,7 +332,7 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
         }
     }
 
-    log::info!("PostgreSQL is now running, continuing to configure it");
+    tracing::info!("PostgreSQL is now running, continuing to configure it");
 
     Ok(())
 }

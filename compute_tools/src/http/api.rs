@@ -6,8 +6,8 @@ use std::thread;
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use log::{error, info};
 use serde_json;
+use tracing::{error, info};
 
 use crate::compute::ComputeNode;
 

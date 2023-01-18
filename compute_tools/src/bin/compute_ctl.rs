@@ -40,7 +40,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use log::{error, info};
+use tracing::{error, info};
 
 use compute_tools::compute::{ComputeMetrics, ComputeNode, ComputeState, ComputeStatus};
 use compute_tools::http::api::launch_http_server;
@@ -53,7 +53,6 @@ use compute_tools::spec::*;
 use url::Url;
 
 fn main() -> Result<()> {
-    // TODO: re-use `utils::logging` later
     init_logger(DEFAULT_LOG_LEVEL)?;
 
     let matches = cli().get_matches();
@@ -122,29 +121,45 @@ fn main() -> Result<()> {
     // Also spawn the thread responsible for handling the VM informant -- if it's present
     let _vm_informant_handle = spawn_vm_informant_if_present().expect("cannot launch VM informant");
 
-    // Run compute (Postgres) and hang waiting on it.
-    match compute.prepare_and_run() {
-        Ok(ec) => {
-            let code = ec.code().unwrap_or(1);
-            info!("Postgres exited with code {}, shutting down", code);
-            exit(code)
-        }
-        Err(error) => {
-            error!("could not start the compute node: {:?}", error);
-
+    // Start Postgres
+    let mut delay_exit = false;
+    let mut exit_code = None;
+    let pg = match compute.start_compute() {
+        Ok(pg) => Some(pg),
+        Err(err) => {
+            error!("could not start the compute node: {:?}", err);
             let mut state = compute.state.write().unwrap();
-            state.error = Some(format!("{:?}", error));
+            state.error = Some(format!("{:?}", err));
             state.status = ComputeStatus::Failed;
             drop(state);
-
-            // Keep serving HTTP requests, so the cloud control plane was able to
-            // get the actual error.
-            info!("giving control plane 30s to collect the error before shutdown");
-            thread::sleep(Duration::from_secs(30));
-            info!("shutting down");
-            Err(error)
+            delay_exit = true;
+            None
         }
+    };
+
+    // Wait for the child Postgres process forever. In this state Ctrl+C will
+    // propagate to Postgres and it will be shut down as well.
+    if let Some(mut pg) = pg {
+        let ecode = pg
+            .wait()
+            .expect("failed to start waiting on Postgres process");
+        info!("Postgres exited with code {}, shutting down", ecode);
+        exit_code = ecode.code()
     }
+
+    if let Err(err) = compute.check_for_core_dumps() {
+        error!("error while checking for core dumps: {err:?}");
+    }
+
+    // If launch failed, keep serving HTTP requests for a while, so the cloud
+    // control plane can get the actual error.
+    if delay_exit {
+        info!("giving control plane 30s to collect the error before shutdown");
+        thread::sleep(Duration::from_secs(30));
+        info!("shutting down");
+    }
+
+    exit(exit_code.unwrap_or(1))
 }
 
 fn cli() -> clap::Command {
