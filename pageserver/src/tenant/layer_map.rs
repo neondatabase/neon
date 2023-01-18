@@ -133,8 +133,8 @@ where
             }
             (Some(delta), Some(image)) => {
                 let img_lsn = image.get_lsn_range().start;
-                let image_is_newer = image.get_lsn_range().end > delta.get_lsn_range().end;
-                let image_exact_match = Lsn(img_lsn.0 + 1) == end_lsn;
+                let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
+                let image_exact_match = img_lsn + 1 == end_lsn;
                 if image_is_newer || image_exact_match {
                     Some(SearchResult {
                         layer: image,
