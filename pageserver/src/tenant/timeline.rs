@@ -812,7 +812,7 @@ impl Timeline {
         pg_version: u32,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
-        let (state, _) = watch::channel(TimelineState::Suspended);
+        let (state, _) = watch::channel(TimelineState::Loading);
 
         let (layer_flush_start_tx, _) = tokio::sync::watch::channel(0);
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
@@ -1400,7 +1400,7 @@ impl Timeline {
                             TimelineState::Active => continue,
                             TimelineState::Broken
                             | TimelineState::Stopping
-                            | TimelineState::Suspended => {
+                            | TimelineState::Loading => {
                                 break format!("aborted because timeline became inactive (new state: {new_state:?})")
                             }
                         }

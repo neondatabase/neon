@@ -44,18 +44,17 @@ impl TenantState {
 /// A state of a timeline in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TimelineState {
-    /// Timeline is fully operational. If the containing Tenant is Active, the timeline's
-    /// background jobs are running otherwise they will be launched when the tenant is activated.
+    /// The timeline is recognized by the pageserver but is not yet operational.
+    /// In particular, the walreceiver connection loop is not running for this timeline.
+    /// It will eventually transition to state Active or Broken.
+    Loading,
+    /// The timeline is fully operational.
+    /// It can be queried, and the walreceiver connection loop is running.
     Active,
-    /// A timeline is recognized by pageserver, but not yet ready to operate.
-    /// The status indicates, that the timeline could eventually go back to Active automatically:
-    /// for example, if the owning tenant goes back to Active again.
-    Suspended,
-    /// A timeline is recognized by pageserver, but not yet ready to operate and not allowed to
-    /// automatically become Active after certain events: only a management call can change this status.
+    /// The timeline was previously Loading or Active but is shutting down.
+    /// It cannot transition back into any other state.
     Stopping,
-    /// A timeline is recognized by the pageserver, but can no longer be used for
-    /// any operations, because it failed to be activated.
+    /// The timeline is broken and not operational (previous states: Loading or Active).
     Broken,
 }
 
