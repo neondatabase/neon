@@ -1010,7 +1010,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                layers.insert_historic(Arc::new(layer));
+                layers.insert_historic_noflush(Arc::new(layer));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1041,7 +1041,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                layers.insert_historic(Arc::new(layer));
+                layers.insert_historic_noflush(Arc::new(layer));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1067,7 +1067,7 @@ impl Timeline {
             }
         }
 
-        layers.rebuild_index();
+        layers.flush_updates();
         layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
 
         info!(
@@ -1134,7 +1134,7 @@ impl Timeline {
                             anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                         } else {
                             self.metrics.resident_physical_size_gauge.sub(local_size);
-                            layer_map.remove_historic(local_layer);
+                            layer_map.remove_historic_noflush(local_layer);
                             // fall-through to adding the remote layer
                         }
                     } else {
@@ -1176,7 +1176,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    layer_map.insert_historic(remote_layer);
+                    layer_map.insert_historic_noflush(remote_layer);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1199,14 +1199,14 @@ impl Timeline {
                         &remote_layer_metadata,
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    layer_map.insert_historic(remote_layer);
+                    layer_map.insert_historic_noflush(remote_layer);
                 }
                 #[cfg(test)]
                 LayerFileName::Test(_) => unreachable!(),
             }
         }
 
-        layer_map.rebuild_index();
+        layer_map.flush_updates();
         Ok(local_only_layers)
     }
 
@@ -2107,8 +2107,8 @@ impl Timeline {
         // Add it to the layer map
         {
             let mut layers = self.layers.write().unwrap();
-            layers.insert_historic(Arc::new(new_delta));
-            layers.rebuild_index();
+            layers.insert_historic_noflush(Arc::new(new_delta));
+            layers.flush_updates();
         }
 
         // update the timeline's physical size
@@ -2289,9 +2289,9 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            layers.insert_historic(Arc::new(l));
+            layers.insert_historic_noflush(Arc::new(l));
         }
-        layers.rebuild_index();
+        layers.flush_updates();
         drop(layers);
         timer.stop_and_record();
 
@@ -2607,7 +2607,7 @@ impl Timeline {
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            layers.insert_historic(x);
+            layers.insert_historic_noflush(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -2621,9 +2621,9 @@ impl Timeline {
             }
             layer_names_to_delete.push(l.filename());
             l.delete()?;
-            layers.remove_historic(l);
+            layers.remove_historic_noflush(l);
         }
-        layers.rebuild_index();
+        layers.flush_updates();
         drop(layers);
 
         // Also schedule the deletions in remote storage
@@ -2924,7 +2924,7 @@ impl Timeline {
                 }
                 layer_names_to_delete.push(doomed_layer.filename());
                 doomed_layer.delete()?; // FIXME: schedule succeeded deletions before returning?
-                layers.remove_historic(doomed_layer);
+                layers.remove_historic_noflush(doomed_layer);
                 result.layers_removed += 1;
             }
 
@@ -2936,7 +2936,7 @@ impl Timeline {
                 remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
             }
         }
-        layers.rebuild_index();
+        layers.flush_updates();
 
         info!(
             "GC completed removing {} layers, cutoff {}",
@@ -3095,10 +3095,10 @@ impl Timeline {
                     let mut layers = self_clone.layers.write().unwrap();
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        layers.remove_historic(l);
+                        layers.remove_historic_noflush(l);
                     }
-                    layers.insert_historic(new_layer);
-                    layers.rebuild_index();
+                    layers.insert_historic_noflush(new_layer);
+                    layers.flush_updates();
                     drop(layers);
 
                     // Now that we've inserted the download into the layer map,

@@ -33,7 +33,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
                 is_incremental: false,
                 short_id: fname.to_string(),
             };
-            layer_map.insert_historic(Arc::new(layer));
+            layer_map.insert_historic_noflush(Arc::new(layer));
             min_lsn = min(min_lsn, imgfilename.lsn);
             max_lsn = max(max_lsn, imgfilename.lsn);
         } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
@@ -43,14 +43,14 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
                 is_incremental: true,
                 short_id: fname.to_string(),
             };
-            layer_map.insert_historic(Arc::new(layer));
+            layer_map.insert_historic_noflush(Arc::new(layer));
             min_lsn = min(min_lsn, deltafilename.lsn_range.start);
             max_lsn = max(max_lsn, deltafilename.lsn_range.end);
         } else {
             panic!("unexpected filename {fname}");
         }
     }
-    layer_map.rebuild_index();
+    layer_map.flush_updates();
 
     println!("min: {min_lsn}, max: {max_lsn}");
 
@@ -232,9 +232,9 @@ fn bench_sequential(c: &mut Criterion) {
             is_incremental: false,
             short_id: format!("Layer {}", i),
         };
-        layer_map.insert_historic(Arc::new(layer));
+        layer_map.insert_historic_noflush(Arc::new(layer));
     }
-    layer_map.rebuild_index();
+    layer_map.flush_updates();
     println!("Finished layer map init in {:?}", now.elapsed());
 
     // Choose 100 uniformly random queries

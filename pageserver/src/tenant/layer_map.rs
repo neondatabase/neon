@@ -155,7 +155,7 @@ where
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<L>) {
+    pub fn insert_historic_noflush(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.historic.insert(
@@ -174,17 +174,12 @@ where
         NUM_ONDISK_LAYERS.inc();
     }
 
-    /// Must be called after a batch of insert_historic calls, before querying
-    pub fn rebuild_index(&mut self) {
-        self.historic.rebuild();
-    }
-
     ///
     /// Remove an on-disk layer from the map.
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<L>) {
+    pub fn remove_historic_noflush(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.historic.remove(historic_layer_coverage::LayerKey {
@@ -207,6 +202,13 @@ where
         }
 
         NUM_ONDISK_LAYERS.dec();
+    }
+
+    /// Must be called after a batch of insert_historic_noflush or
+    /// remove_historic_noflush calls, before querying. Otherwise
+    /// the next query will panic.
+    pub fn flush_updates(&mut self) {
+        self.historic.rebuild();
     }
 
     /// Is there a newer image layer for given key- and LSN-range? Or a set
