@@ -183,13 +183,23 @@ async fn connection_manager_loop_step(
 
             new_event = async {
                 loop {
+                    if walreceiver_state.timeline.current_state() == TimelineState::Loading {
+                        warn!("wal connection manager should only be launched after timeline has become active");
+                    }
                     match timeline_state_updates.changed().await {
                         Ok(()) => {
                             let new_state = walreceiver_state.timeline.current_state();
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
-                                TimelineState::Broken | TimelineState::Stopping | TimelineState::Suspended => return ControlFlow::Continue(new_state),
+                                TimelineState::Broken | TimelineState::Stopping => {
+                                    info!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
+                                    return ControlFlow::Break(());
+                                }
+                                TimelineState::Loading => {
+                                    warn!("timeline transitioned back to Loading state, that should not happen");
+                                    return ControlFlow::Continue(new_state);
+                                }
                             }
                         }
                         Err(_sender_dropped_error) => return ControlFlow::Break(()),
@@ -197,7 +207,7 @@ async fn connection_manager_loop_step(
                 }
             } => match new_event {
                 ControlFlow::Continue(new_state) => {
-                    info!("Timeline became inactive (new state: {new_state:?}), dropping current connections until it reactivates");
+                    info!("observed timeline state change, new state is {new_state:?}");
                     return ControlFlow::Continue(());
                 }
                 ControlFlow::Break(()) => {
