@@ -3,6 +3,42 @@ use std::ops::Range;
 
 use super::layer_coverage::LayerCoverageTuple;
 
+/// Layers in this module are identified and indexed by this data.
+///
+/// This is a helper struct to enable sorting layers by lsn.start.
+///
+/// These three values are enough to uniquely identify a layer, since
+/// a layer is obligated to contain all contents within range, so two
+/// deltas (or images) with the same range have identical content.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct LayerKey {
+    // TODO I use i128 and u64 because it was easy for prototyping,
+    //      testing, and benchmarking. If we can use the Lsn and Key
+    //      types without overhead that would be preferable.
+    pub key: Range<i128>,
+    pub lsn: Range<u64>,
+    pub is_image: bool,
+}
+
+impl PartialOrd for LayerKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LayerKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // NOTE we really care about comparing by lsn.start first
+        self.lsn
+            .start
+            .cmp(&other.lsn.start)
+            .then(self.lsn.end.cmp(&other.lsn.end))
+            .then(self.key.start.cmp(&other.key.start))
+            .then(self.key.end.cmp(&other.key.end))
+            .then(self.is_image.cmp(&other.is_image))
+    }
+}
+
 /// Efficiently queryable layer coverage for each LSN.
 ///
 /// Allows answering layer map queries very efficiently,
@@ -34,27 +70,28 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
     ///
     /// Panics if new layer has older lsn.start than an existing layer.
     /// See BufferedHistoricLayerCoverage for a more general insertion method.
-    pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value, is_image: bool) {
+    pub fn insert(&mut self, layer_key: LayerKey, value: Value) {
         // It's only a persistent map, not a retroactive one
         if let Some(last_entry) = self.historic.iter().next_back() {
             let last_lsn = last_entry.0;
-            if lsn.start == *last_lsn {
-                // TODO there are edge cases to take care of
-            }
-            if lsn.start < *last_lsn {
+            if layer_key.lsn.start < *last_lsn {
                 panic!("unexpected retroactive insert");
             }
         }
 
         // Insert into data structure
-        if is_image {
-            self.head.image_coverage.insert(key, lsn.clone(), value);
+        if layer_key.is_image {
+            self.head
+                .image_coverage
+                .insert(layer_key.key, layer_key.lsn.clone(), value);
         } else {
-            self.head.delta_coverage.insert(key, lsn.clone(), value);
+            self.head
+                .delta_coverage
+                .insert(layer_key.key, layer_key.lsn.clone(), value);
         }
 
         // Remember history. Clone is O(1)
-        self.historic.insert(lsn.start, self.head.clone());
+        self.historic.insert(layer_key.lsn.start, self.head.clone());
     }
 
     /// Query at a particular LSN, inclusive
@@ -83,9 +120,30 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
 #[test]
 fn test_persistent_simple() {
     let mut map = HistoricLayerCoverage::<String>::new();
-    map.insert(0..5, 100..101, "Layer 1".to_string(), true);
-    map.insert(3..9, 110..111, "Layer 2".to_string(), true);
-    map.insert(5..6, 120..121, "Layer 3".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 0..5,
+            lsn: 100..101,
+            is_image: true,
+        },
+        "Layer 1".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 3..9,
+            lsn: 110..111,
+            is_image: true,
+        },
+        "Layer 2".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 5..6,
+            lsn: 120..121,
+            is_image: true,
+        },
+        "Layer 3".to_string(),
+    );
 
     // After Layer 1 insertion
     let version = map.get_version(105).unwrap();
@@ -109,7 +167,14 @@ fn test_persistent_simple() {
 #[test]
 fn test_off_by_one() {
     let mut map = HistoricLayerCoverage::<String>::new();
-    map.insert(3..5, 100..110, "Layer 1".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 3..5,
+            lsn: 100..110,
+            is_image: true,
+        },
+        "Layer 1".to_string(),
+    );
 
     // Check different LSNs
     let version = map.get_version(99);
@@ -132,10 +197,30 @@ fn test_off_by_one() {
 fn test_key_collision() {
     let mut map = HistoricLayerCoverage::<String>::new();
 
-    map.insert(3..5, 100..110, "Layer 10".to_string(), true);
-    map.insert(5..8, 100..110, "Layer 11".to_string(), true);
-
-    map.insert(3..4, 200..210, "Layer 20".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 3..5,
+            lsn: 100..110,
+            is_image: true,
+        },
+        "Layer 10".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 5..8,
+            lsn: 100..110,
+            is_image: true,
+        },
+        "Layer 11".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 3..4,
+            lsn: 200..210,
+            is_image: true,
+        },
+        "Layer 20".to_string(),
+    );
 
     // Check after layer 11
     let version = map.get_version(105).unwrap();
@@ -178,18 +263,60 @@ fn test_persistent_overlapping() {
     let mut map = HistoricLayerCoverage::<String>::new();
 
     // Add 3 key-disjoint layers with varying LSN ranges
-    map.insert(1..2, 100..200, "Layer 1".to_string(), true);
-    map.insert(4..5, 110..200, "Layer 2".to_string(), true);
-    map.insert(7..8, 120..300, "Layer 3".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 1..2,
+            lsn: 100..200,
+            is_image: true,
+        },
+        "Layer 1".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 4..5,
+            lsn: 110..200,
+            is_image: true,
+        },
+        "Layer 2".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 7..8,
+            lsn: 120..300,
+            is_image: true,
+        },
+        "Layer 3".to_string(),
+    );
 
     // Add wide and short layer
-    map.insert(0..9, 130..199, "Layer 4".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 0..9,
+            lsn: 130..199,
+            is_image: true,
+        },
+        "Layer 4".to_string(),
+    );
 
     // Add wide layer taller than some
-    map.insert(0..9, 140..201, "Layer 5".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 0..9,
+            lsn: 140..201,
+            is_image: true,
+        },
+        "Layer 5".to_string(),
+    );
 
     // Add wide layer taller than all
-    map.insert(0..9, 150..301, "Layer 6".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 0..9,
+            lsn: 150..301,
+            is_image: true,
+        },
+        "Layer 6".to_string(),
+    );
 
     // After layer 4 insertion
     let version = map.get_version(135).unwrap();
@@ -248,15 +375,10 @@ pub struct BufferedHistoricLayerCoverage<Value> {
     historic_coverage: HistoricLayerCoverage<Value>,
 
     /// We buffer insertion into the PersistentLayerMap to decrease the number of rebuilds.
-    ///
-    /// We implicitly assume that layers are identified by their key and lsn range.
-    /// A value of None means we want to delete this item.
-    buffer: BTreeMap<(u64, u64, i128, i128, bool), Option<Value>>,
+    buffer: BTreeMap<LayerKey, Option<Value>>,
 
     /// All current layers. This is not used for search. Only to make rebuilds easier.
-    ///
-    /// We implicitly assume that layers are identified by their key and lsn range.
-    layers: BTreeMap<(u64, u64, i128, i128, bool), Value>,
+    layers: BTreeMap<LayerKey, Value>,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for BufferedHistoricLayerCoverage<T> {
@@ -283,33 +405,29 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         }
     }
 
-    pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value, is_image: bool) {
-        self.buffer.insert(
-            (lsn.start, lsn.end, key.start, key.end, is_image),
-            Some(value),
-        );
+    pub fn insert(&mut self, layer_key: LayerKey, value: Value) {
+        self.buffer.insert(layer_key, Some(value));
     }
 
-    pub fn remove(&mut self, key: Range<i128>, lsn: Range<u64>, is_image: bool) {
-        self.buffer
-            .insert((lsn.start, lsn.end, key.start, key.end, is_image), None);
+    pub fn remove(&mut self, layer_key: LayerKey) {
+        self.buffer.insert(layer_key, None);
     }
 
     pub fn rebuild(&mut self) {
         // Find the first LSN that needs to be rebuilt
         let rebuild_since: u64 = match self.buffer.iter().next() {
-            Some(((lsn_start, _, _, _, _), _)) => *lsn_start,
+            Some((LayerKey { lsn, .. }, _)) => lsn.start,
             None => return, // No need to rebuild if buffer is empty
         };
 
         // Apply buffered updates to self.layers
-        self.buffer.retain(|rect, layer| {
+        self.buffer.retain(|layer_key, layer| {
             match layer {
                 Some(l) => {
-                    self.layers.insert(*rect, l.clone());
+                    self.layers.insert(layer_key.clone(), l.clone());
                 }
                 None => {
-                    self.layers.remove(rect);
+                    self.layers.remove(layer_key);
                 }
             };
             false
@@ -317,15 +435,15 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
 
         // Rebuild
         self.historic_coverage.trim(&rebuild_since);
-        for ((lsn_start, lsn_end, key_start, key_end, is_image), layer) in
-            self.layers.range((rebuild_since, 0, 0, 0, false)..)
-        {
-            self.historic_coverage.insert(
-                *key_start..*key_end,
-                *lsn_start..*lsn_end,
-                layer.clone(),
-                *is_image,
-            );
+        for (layer_key, layer) in self.layers.range(
+            LayerKey {
+                lsn: rebuild_since..0,
+                key: 0..0,
+                is_image: false,
+            }..,
+        ) {
+            self.historic_coverage
+                .insert(layer_key.clone(), layer.clone());
         }
     }
 
@@ -359,10 +477,12 @@ fn test_retroactive_regression_1() {
     let mut map = BufferedHistoricLayerCoverage::new();
 
     map.insert(
-        0..21267647932558653966460912964485513215,
-        23761336..23761457,
+        LayerKey {
+            key: 0..21267647932558653966460912964485513215,
+            lsn: 23761336..23761457,
+            is_image: false,
+        },
         "sdfsdfs".to_string(),
-        false,
     );
 
     map.rebuild();
@@ -379,13 +499,48 @@ fn test_retroactive_simple() {
     let mut map = BufferedHistoricLayerCoverage::new();
 
     // Append some images in increasing LSN order
-    map.insert(0..5, 100..101, "Image 1".to_string(), true);
-    map.insert(3..9, 110..111, "Image 2".to_string(), true);
-    map.insert(4..6, 120..121, "Image 3".to_string(), true);
-    map.insert(8..9, 120..121, "Image 4".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 0..5,
+            lsn: 100..101,
+            is_image: true,
+        },
+        "Image 1".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 3..9,
+            lsn: 110..111,
+            is_image: true,
+        },
+        "Image 2".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 4..6,
+            lsn: 120..121,
+            is_image: true,
+        },
+        "Image 3".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 8..9,
+            lsn: 120..121,
+            is_image: true,
+        },
+        "Image 4".to_string(),
+    );
 
     // Add a delta layer out of order
-    map.insert(2..5, 105..106, "Delta 1".to_string(), true);
+    map.insert(
+        LayerKey {
+            key: 2..5,
+            lsn: 105..106,
+            is_image: true,
+        },
+        "Delta 1".to_string(),
+    );
 
     // Rebuild so we can start querying
     map.rebuild();
@@ -403,7 +558,11 @@ fn test_retroactive_simple() {
     assert_eq!(version.image_coverage.query(4), Some("Image 3".to_string()));
 
     // Remove Image 3
-    map.remove(4..6, 120..121, true);
+    map.remove(LayerKey {
+        key: 4..6,
+        lsn: 120..121,
+        is_image: true,
+    });
     map.rebuild();
 
     // Check deletion worked

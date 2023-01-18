@@ -159,10 +159,12 @@ where
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.historic.insert(
-            kr.start.to_i128()..kr.end.to_i128(),
-            lr.start.0..lr.end.0,
+            historic_layer_coverage::LayerKey {
+                key: kr.start.to_i128()..kr.end.to_i128(),
+                lsn: lr.start.0..lr.end.0,
+                is_image: !layer.is_incremental(),
+            },
             Arc::clone(&layer),
-            !layer.is_incremental(),
         );
 
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
@@ -185,11 +187,11 @@ where
     pub fn remove_historic(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
-        self.historic.remove(
-            kr.start.to_i128()..kr.end.to_i128(),
-            lr.start.0..lr.end.0,
-            !layer.is_incremental(),
-        );
+        self.historic.remove(historic_layer_coverage::LayerKey {
+            key: kr.start.to_i128()..kr.end.to_i128(),
+            lsn: lr.start.0..lr.end.0,
+            is_image: !layer.is_incremental(),
+        });
 
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             let len_before = self.l0_delta_layers.len();
