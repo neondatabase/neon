@@ -23,7 +23,7 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use log::{info, warn};
+use log::{error, info, warn};
 use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
 
@@ -311,8 +311,9 @@ impl ComputeNode {
             .wait()
             .expect("failed to start waiting on Postgres process");
 
-        self.check_for_core_dumps()
-            .expect("failed to check for core dumps");
+        if let Err(err) = self.check_for_core_dumps() {
+            error!("error while checking for core dumps: {err:?}");
+        }
 
         Ok(ecode)
     }
