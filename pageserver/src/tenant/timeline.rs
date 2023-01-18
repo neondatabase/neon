@@ -732,13 +732,16 @@ impl Timeline {
     pub fn set_state(&self, new_state: TimelineState) {
         match (self.current_state(), new_state) {
             (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
-                debug!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
+                warn!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
+            }
+            (st, TimelineState::Loading) => {
+                error!("ignoring transition from {st:?} into Loading state");
             }
             (TimelineState::Broken, _) => {
                 error!("Ignoring state update {new_state:?} for broken tenant");
             }
             (TimelineState::Stopping, TimelineState::Active) => {
-                debug!("Not activating a Stopping timeline");
+                error!("Not activating a Stopping timeline");
             }
             (_, new_state) => {
                 self.state.send_replace(new_state);
