@@ -233,6 +233,8 @@ fn test_persistent_overlapping() {
 /// Even though rebuilding is an expensive (N log N) solution to the problem,
 /// it's not critical since we do something equally expensive just to decide
 /// whether or not to create new image layers.
+/// TODO It's not expensive but it's not great to hold a layer map write lock
+///      for that long.
 ///
 /// If this becomes an actual bottleneck, one solution would be to build a
 /// segment tree that holds PersistentLayerMaps. Though this would mean that
