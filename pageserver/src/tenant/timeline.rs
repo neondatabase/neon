@@ -729,6 +729,11 @@ impl Timeline {
         Ok(())
     }
 
+    pub fn activate(self: &Arc<Self>) {
+        self.set_state(TimelineState::Active);
+        self.launch_wal_receiver();
+    }
+
     pub fn set_state(&self, new_state: TimelineState) {
         match (self.current_state(), new_state) {
             (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
