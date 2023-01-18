@@ -218,7 +218,7 @@ where
             return Ok(true);
         }
 
-        let version = match self.historic.get().unwrap().get_version(lsn.end.0) {
+        let version = match self.historic.get().unwrap().get_version(lsn.end.0 - 1) {
             Some(v) => v,
             None => return Ok(false),
         };
@@ -252,8 +252,8 @@ where
 
     ///
     /// Divide the whole given range of keys into sub-ranges based on the latest
-    /// image layer that covers each range. (This is used when creating  new
-    /// image layers)
+    /// image layer that covers each range at the specified lsn (inclusive).
+    /// This is used when creating  new image layers.
     ///
     // FIXME: clippy complains that the result type is very complex. She's probably
     // right...
@@ -263,8 +263,6 @@ where
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<L>>)>> {
-        // TODO I'm 80% sure the lsn bound is inclusive. Double-check that
-        //      and document it. Do the same for image_layer_exists and count_deltas
         let version = match self.historic.get().unwrap().get_version(lsn.0) {
             Some(v) => v,
             None => return Ok(vec![]),
