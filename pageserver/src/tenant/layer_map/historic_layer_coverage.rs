@@ -304,17 +304,10 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.buffer.retain(|rect, layer| {
             match layer {
                 Some(l) => {
-                    let existing = self.layers.insert(*rect, l.clone());
-                    if existing.is_some() {
-                        // TODO this happened once. Investigate.
-                        // panic!("can't overwrite layer");
-                    }
+                    self.layers.insert(*rect, l.clone());
                 }
                 None => {
-                    let existing = self.layers.remove(rect);
-                    if existing.is_none() {
-                        panic!("invalid layer deletion");
-                    }
+                    self.layers.remove(rect);
                 }
             };
             false
