@@ -18,7 +18,9 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
         size == 0
     ), "initial implementation returns zero tenant_size before last_record_lsn is past gc_horizon"
 
-    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+    main_branch_name = "main"
+
+    with env.postgres.create_start(main_branch_name, tenant_id=tenant_id) as pg:
         with pg.cursor() as cur:
             cur.execute("SELECT 1")
             row = cur.fetchone()
@@ -31,6 +33,21 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
     # gc_horizon
     size = http_client.tenant_size(tenant_id)
     assert size == 0, "tenant_size should not be affected by shutdown of compute"
+
+    first_branch_timeline_id = env.neon_cli.create_branch(
+        "first-branch", main_branch_name, tenant_id
+    )
+
+    with env.postgres.create_start("first-branch", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
+            )
+        wait_for_last_flush_lsn(env, pg, tenant_id, first_branch_timeline_id)
+
+    size_after_branching = http_client.tenant_size(tenant_id)
+
+    assert size_after_branching > 0
 
 
 def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):

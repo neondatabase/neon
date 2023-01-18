@@ -187,6 +187,9 @@ pub(super) async fn gather_inputs(
         // All timelines are below tenant's gc_horizon; alternative would be to use
         // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
         // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
+        //
+        // FIXME: timelines which are under gc_horizon do have about 32MB of logical_size and so
+        // they will also have tenant_size, so perhaps this is the wrong way?
         return Ok(ModelInputs {
             updates: vec![],
             retention_period: 0,
@@ -206,6 +209,9 @@ pub(super) async fn gather_inputs(
 
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
+
+    // mapping from (TimelineId, Lsn) => handled
+    let mut referenced_branch_froms = HashMap::<(TimelineId, Lsn), bool>::new();
 
     for timeline in timelines {
         let last_record_lsn = timeline.get_last_record_lsn();
@@ -279,7 +285,18 @@ pub(super) async fn gather_inputs(
             timeline_id: timeline.timeline_id,
         });
 
+        if let Some(parent_timeline_id) = timeline.get_ancestor_timeline_id() {
+            referenced_branch_froms
+                .entry((parent_timeline_id, timeline.get_ancestor_lsn()))
+                .or_default();
+        }
+
         for (lsn, _kind) in &interesting_lsns {
+            // mark this visited so don't need to re-process this parent
+            *referenced_branch_froms
+                .entry((timeline.timeline_id, *lsn))
+                .or_default() = true;
+
             if let Some(size) = logical_size_cache.get(&(timeline.timeline_id, *lsn)) {
                 updates.push(Update {
                     lsn: *lsn,
@@ -319,6 +336,81 @@ pub(super) async fn gather_inputs(
                 next_gc_cutoff,
             },
         );
+    }
+
+    while !referenced_branch_froms.is_empty() {
+        let mut tmp: HashMap<(TimelineId, Lsn), bool> = HashMap::new();
+
+        for ((timeline_id, lsn), handled) in referenced_branch_froms.drain() {
+            if handled {
+                continue;
+            }
+
+            let timeline = if let Some(size) = logical_size_cache.get(&(timeline_id, lsn)) {
+                updates.push(Update {
+                    lsn,
+                    timeline_id,
+                    command: Command::Update(*size),
+                });
+
+                needed_cache.insert((timeline_id, lsn));
+                None
+            } else {
+                let timeline = tenant
+                    .get_timeline(timeline_id, false)
+                    .context("Failed to find referenced ancestor timeline")?;
+                let parallel_size_calcs = Arc::clone(limit);
+                joinset.spawn(calculate_logical_size(
+                    parallel_size_calcs,
+                    timeline.clone(),
+                    lsn,
+                ));
+
+                Some(timeline)
+            };
+
+            if !timeline_inputs.contains_key(&timeline_id) {
+                // for the cases where we have a branch which is longer of gc_horizon but it's parent
+                // is not, we need to fix it to the data by processing this timeline as well.
+
+                let timeline = timeline
+                    .map(Ok)
+                    .unwrap_or_else(|| tenant.get_timeline(timeline_id, false))
+                    .context("Failed to find referenced ancestor timeline")?;
+
+                updates.push(Update {
+                    lsn: timeline.get_ancestor_lsn(),
+                    timeline_id,
+                    command: Command::BranchFrom(timeline.get_ancestor_timeline_id()),
+                });
+
+                updates.push(Update {
+                    lsn: timeline.get_last_record_lsn(),
+                    timeline_id,
+                    command: Command::EndOfBranch,
+                });
+
+                if let Some(parent_timeline_id) = timeline.get_ancestor_timeline_id() {
+                    if !timeline_inputs.contains_key(&parent_timeline_id) {
+                        tmp.entry((parent_timeline_id, timeline.get_ancestor_lsn()))
+                            .or_default();
+                    }
+                }
+
+                timeline_inputs.insert(
+                    timeline_id,
+                    TimelineInputs {
+                        last_record: timeline.get_last_record_lsn(),
+                        latest_gc_cutoff: Lsn(0),
+                        horizon_cutoff: Lsn(0),
+                        pitr_cutoff: Lsn(0),
+                        next_gc_cutoff: Lsn(tenant.get_gc_horizon()),
+                    },
+                );
+            }
+        }
+
+        std::mem::swap(&mut tmp, &mut referenced_branch_froms);
     }
 
     let mut have_any_error = false;
@@ -379,6 +471,9 @@ pub(super) async fn gather_inputs(
     // handled by the variant order in `Command`.
     //
     updates.sort_unstable();
+
+    tracing::info!("updates: {updates:#?}");
+
     // And another sort to handle Command::BranchFrom ordering
     // in case when there are multiple branches at the same LSN.
     let sorted_updates = sort_updates_in_tree_order(updates)?;
