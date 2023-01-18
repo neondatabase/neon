@@ -562,8 +562,6 @@ where
 
     /// Count the height of the tallest stack of deltas in this 2d region.
     ///
-    /// If `limit` is provided we don't try to count above that number.
-    ///
     /// This number is used to compute the largest number of deltas that
     /// we'll need to visit for any page reconstruction in this region.
     /// We use this heuristic to decide whether to create an image layer.
