@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Result};
-use log::error;
 use postgres::Client;
 use tokio_postgres::NoTls;
+use tracing::{error, instrument};
 
 use crate::compute::ComputeNode;
 
+#[instrument(skip_all)]
 pub fn create_writability_check_data(client: &mut Client) -> Result<()> {
     let query = "
     CREATE TABLE IF NOT EXISTS health_check (
@@ -21,6 +22,7 @@ pub fn create_writability_check_data(client: &mut Client) -> Result<()> {
     Ok(())
 }
 
+#[instrument(skip_all)]
 pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
     let (client, connection) = tokio_postgres::connect(compute.connstr.as_str(), NoTls).await?;
     if client.is_closed() {

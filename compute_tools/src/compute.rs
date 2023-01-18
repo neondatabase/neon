@@ -17,15 +17,15 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use log::{error, info, warn};
 use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
+use tracing::{info, instrument, warn};
 
 use crate::checker::create_writability_check_data;
 use crate::config;
@@ -121,6 +121,7 @@ impl ComputeNode {
 
     // Get basebackup from the libpq connection to pageserver using `connstr` and
     // unarchive it to `pgdata` directory overriding all its previous content.
+    #[instrument(skip(self))]
     fn get_basebackup(&self, lsn: &str) -> Result<()> {
         let start_time = Utc::now();
 
@@ -154,6 +155,7 @@ impl ComputeNode {
 
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
+    #[instrument(skip(self))]
     fn sync_safekeepers(&self) -> Result<String> {
         let start_time = Utc::now();
 
@@ -196,6 +198,7 @@ impl ComputeNode {
 
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
+    #[instrument(skip(self))]
     pub fn prepare_pgdata(&self) -> Result<()> {
         let spec = &self.spec;
         let pgdata_path = Path::new(&self.pgdata);
@@ -229,9 +232,8 @@ impl ComputeNode {
 
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
-    pub fn run(&self) -> Result<ExitStatus> {
-        let start_time = Utc::now();
-
+    #[instrument(skip(self))]
+    pub fn start_postgres(&self) -> Result<std::process::Child> {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
@@ -242,6 +244,11 @@ impl ComputeNode {
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
+        Ok(pg)
+    }
+
+    #[instrument(skip(self))]
+    pub fn apply_config(&self) -> Result<()> {
         // If connection fails,
         // it may be the old node with `zenith_admin` superuser.
         //
@@ -279,8 +286,34 @@ impl ComputeNode {
 
         // 'Close' connection
         drop(client);
-        let startup_end_time = Utc::now();
 
+        info!(
+            "finished configuration of compute for project {}",
+            self.spec.cluster.cluster_id
+        );
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    pub fn start_compute(&self) -> Result<std::process::Child> {
+        info!(
+            "starting compute for project {}, operation {}, tenant {}, timeline {}",
+            self.spec.cluster.cluster_id,
+            self.spec.operation_uuid.as_ref().unwrap(),
+            self.tenant,
+            self.timeline,
+        );
+
+        self.prepare_pgdata()?;
+
+        let start_time = Utc::now();
+
+        let pg = self.start_postgres()?;
+
+        self.apply_config()?;
+
+        let startup_end_time = Utc::now();
         self.metrics.config_ms.store(
             startup_end_time
                 .signed_duration_since(start_time)
@@ -300,35 +333,7 @@ impl ComputeNode {
 
         self.set_status(ComputeStatus::Running);
 
-        info!(
-            "finished configuration of compute for project {}",
-            self.spec.cluster.cluster_id
-        );
-
-        // Wait for child Postgres process basically forever. In this state Ctrl+C
-        // will propagate to Postgres and it will be shut down as well.
-        let ecode = pg
-            .wait()
-            .expect("failed to start waiting on Postgres process");
-
-        if let Err(err) = self.check_for_core_dumps() {
-            error!("error while checking for core dumps: {err:?}");
-        }
-
-        Ok(ecode)
-    }
-
-    pub fn prepare_and_run(&self) -> Result<ExitStatus> {
-        info!(
-            "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            self.spec.cluster.cluster_id,
-            self.spec.operation_uuid.as_ref().unwrap(),
-            self.tenant,
-            self.timeline,
-        );
-
-        self.prepare_pgdata()?;
-        self.run()
+        Ok(pg)
     }
 
     // Look for core dumps and collect backtraces.
@@ -341,7 +346,7 @@ impl ComputeNode {
     //
     // Use that as a default location and pattern, except macos where core dumps are written
     // to /cores/ directory by default.
-    fn check_for_core_dumps(&self) -> Result<()> {
+    pub fn check_for_core_dumps(&self) -> Result<()> {
         let core_dump_dir = match std::env::consts::OS {
             "macos" => Path::new("/cores/"),
             _ => Path::new(&self.pgdata),

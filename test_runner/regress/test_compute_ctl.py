@@ -194,7 +194,7 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         )
     except TimeoutExpired as exc:
         ctl_logs = (exc.stderr or b"").decode("utf-8")
-        log.info("compute_ctl output:\n{ctl_logs}")
+        log.info(f"compute_ctl stderr:\n{ctl_logs}")
 
     with ExternalProcessManager(Path(pgdata) / "postmaster.pid"):
         start = "starting safekeepers syncing"

@@ -1,12 +1,11 @@
 use std::path::Path;
 use std::str::FromStr;
-use std::time::Instant;
 
 use anyhow::Result;
-use log::{info, log_enabled, warn, Level};
 use postgres::config::Config;
 use postgres::{Client, NoTls};
 use serde::Deserialize;
+use tracing::{info, info_span, instrument, span_enabled, warn, Level};
 
 use crate::compute::ComputeNode;
 use crate::config;
@@ -80,23 +79,25 @@ pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
 
 /// Given a cluster spec json and open transaction it handles roles creation,
 /// deletion and update.
+#[instrument(skip_all)]
 pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let mut xact = client.transaction()?;
     let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
 
     // Print a list of existing Postgres roles (only in debug mode)
-    info!("postgres roles:");
-    for r in &existing_roles {
-        info_println!(
-            "{} - {}:{}",
-            " ".repeat(27 + 5),
-            r.name,
-            if r.encrypted_password.is_some() {
-                "[FILTERED]"
-            } else {
-                "(null)"
-            }
-        );
+    if span_enabled!(Level::INFO) {
+        info!("postgres roles:");
+        for r in &existing_roles {
+            info!(
+                "    - {}:{}",
+                r.name,
+                if r.encrypted_password.is_some() {
+                    "[FILTERED]"
+                } else {
+                    "(null)"
+                }
+            );
+        }
     }
 
     // Process delta operations first
@@ -137,58 +138,68 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     info!("cluster spec roles:");
     for role in &spec.cluster.roles {
         let name = &role.name;
-
-        info_print!(
-            "{} - {}:{}",
-            " ".repeat(27 + 5),
-            name,
-            if role.encrypted_password.is_some() {
-                "[FILTERED]"
-            } else {
-                "(null)"
-            }
-        );
-
         // XXX: with a limited number of roles it is fine, but consider making it a HashMap
         let pg_role = existing_roles.iter().find(|r| r.name == *name);
 
-        if let Some(r) = pg_role {
-            let mut update_role = false;
-
+        enum RoleAction {
+            None,
+            Update,
+            Create,
+        }
+        let action = if let Some(r) = pg_role {
             if (r.encrypted_password.is_none() && role.encrypted_password.is_some())
                 || (r.encrypted_password.is_some() && role.encrypted_password.is_none())
             {
-                update_role = true;
+                RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {
                 // Check whether password changed or not (trim 'md5:' prefix first)
-                update_role = pg_pwd[3..] != *role.encrypted_password.as_ref().unwrap();
+                if pg_pwd[3..] != *role.encrypted_password.as_ref().unwrap() {
+                    RoleAction::Update
+                } else {
+                    RoleAction::None
+                }
+            } else {
+                RoleAction::None
             }
+        } else {
+            RoleAction::Create
+        };
 
-            if update_role {
+        match action {
+            RoleAction::None => {}
+            RoleAction::Update => {
                 let mut query: String = format!("ALTER ROLE {} ", name.pg_quote());
-                info_print!(" -> update");
-
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }
-        } else {
-            info!("role name: '{}'", &name);
-            let mut query: String = format!("CREATE ROLE {} ", name.pg_quote());
-            info!("role create query: '{}'", &query);
-            info_print!(" -> create");
+            RoleAction::Create => {
+                let mut query: String = format!("CREATE ROLE {} ", name.pg_quote());
+                info!("role create query: '{}'", &query);
+                query.push_str(&role.to_pg_options());
+                xact.execute(query.as_str(), &[])?;
 
-            query.push_str(&role.to_pg_options());
-            xact.execute(query.as_str(), &[])?;
-
-            let grant_query = format!(
-                "GRANT pg_read_all_data, pg_write_all_data TO {}",
-                name.pg_quote()
-            );
-            xact.execute(grant_query.as_str(), &[])?;
-            info!("role grant query: '{}'", &grant_query);
+                let grant_query = format!(
+                    "GRANT pg_read_all_data, pg_write_all_data TO {}",
+                    name.pg_quote()
+                );
+                xact.execute(grant_query.as_str(), &[])?;
+                info!("role grant query: '{}'", &grant_query);
+            }
         }
 
-        info_print!("\n");
+        if span_enabled!(Level::INFO) {
+            let pwd = if role.encrypted_password.is_some() {
+                "[FILTERED]"
+            } else {
+                "(null)"
+            };
+            let action_str = match action {
+                RoleAction::None => "",
+                RoleAction::Create => " -> create",
+                RoleAction::Update => " -> update",
+            };
+            info!("   - {}:{}{}", name, pwd, action_str);
+        }
     }
 
     xact.commit()?;
@@ -197,6 +208,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 }
 
 /// Reassign all dependent objects and delete requested roles.
+#[instrument(skip_all)]
 pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<()> {
     if let Some(ops) = &node.spec.delta_operations {
         // First, reassign all dependent objects to db owners.
@@ -261,13 +273,16 @@ fn reassign_owned_objects(node: &ComputeNode, role_name: &PgIdent) -> Result<()>
 /// like `CREATE DATABASE` and `DROP DATABASE` do not support it. Statement-level
 /// atomicity should be enough here due to the order of operations and various checks,
 /// which together provide us idempotency.
+#[instrument(skip_all)]
 pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let existing_dbs: Vec<Database> = get_existing_dbs(client)?;
 
     // Print a list of existing Postgres databases (only in debug mode)
-    info!("postgres databases:");
-    for r in &existing_dbs {
-        info_println!("{} - {}:{}", " ".repeat(27 + 5), r.name, r.owner);
+    if span_enabled!(Level::INFO) {
+        info!("postgres databases:");
+        for r in &existing_dbs {
+            info!("    {}:{}", r.name, r.owner);
+        }
     }
 
     // Process delta operations first
@@ -310,13 +325,15 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     for db in &spec.cluster.databases {
         let name = &db.name;
 
-        info_print!("{} - {}:{}", " ".repeat(27 + 5), db.name, db.owner);
-
         // XXX: with a limited number of databases it is fine, but consider making it a HashMap
         let pg_db = existing_dbs.iter().find(|r| r.name == *name);
 
-        let start_time = Instant::now();
-        if let Some(r) = pg_db {
+        enum DatabaseAction {
+            None,
+            Update,
+            Create,
+        }
+        let action = if let Some(r) = pg_db {
             // XXX: db owner name is returned as quoted string from Postgres,
             // when quoting is needed.
             let new_owner = if r.owner.starts_with('"') {
@@ -326,29 +343,42 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             };
 
             if new_owner != r.owner {
+                // Update the owner
+                DatabaseAction::Update
+            } else {
+                DatabaseAction::None
+            }
+        } else {
+            DatabaseAction::Create
+        };
+
+        match action {
+            DatabaseAction::None => {}
+            DatabaseAction::Update => {
                 let query: String = format!(
                     "ALTER DATABASE {} OWNER TO {}",
                     name.pg_quote(),
                     db.owner.pg_quote()
                 );
-                info_print!(" -> update");
-
+                let _ = info_span!("executing", query).entered();
                 client.execute(query.as_str(), &[])?;
-                let elapsed = start_time.elapsed().as_millis();
-                info_print!(" ({} ms)", elapsed);
             }
-        } else {
-            let mut query: String = format!("CREATE DATABASE {} ", name.pg_quote());
-            info_print!(" -> create");
+            DatabaseAction::Create => {
+                let mut query: String = format!("CREATE DATABASE {} ", name.pg_quote());
+                query.push_str(&db.to_pg_options());
+                let _ = info_span!("executing", query).entered();
+                client.execute(query.as_str(), &[])?;
+            }
+        };
 
-            query.push_str(&db.to_pg_options());
-            client.execute(query.as_str(), &[])?;
-
-            let elapsed = start_time.elapsed().as_millis();
-            info_print!(" ({} ms)", elapsed);
+        if span_enabled!(Level::INFO) {
+            let action_str = match action {
+                DatabaseAction::None => "",
+                DatabaseAction::Create => " -> create",
+                DatabaseAction::Update => " -> update",
+            };
+            info!("   - {}:{}{}", db.name, db.owner, action_str);
         }
-
-        info_print!("\n");
     }
 
     Ok(())
@@ -356,6 +386,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
 /// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
 /// to allow users creating trusted extensions and re-creating `public` schema, for example.
+#[instrument(skip_all)]
 pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
     let spec = &node.spec;
 
