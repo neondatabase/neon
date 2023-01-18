@@ -365,11 +365,27 @@ where
         }
     }
 
+    /// Whether a layer is L0.
+    ///
+    /// A layer is L0 if it's sparse enough that compacting it
+    /// is always more efficient than reimaging over it.
+    fn is_l0(layer: &L) -> bool {
+        // 1 TB key range, very conservative
+        let max_l0_range: i128 = 1024 * 1024 * 1024 * 1024 / (postgres_ffi::BLCKSZ as i128);
+        let kr = layer.get_key_range();
+        // TODO Use `collect_keyspace` result to only count used space covered.
+        //      Otherwise there's a chance that with the current `max_l0_range`
+        //      all layers will be classified as l0.
+        // Divide by 10 to avoid overflow
+        let size = kr.end.to_i128() / 10 - kr.start.to_i128() / 10;
+        size > max_l0_range / 10
+    }
+
     ///
     /// Insert an on-disk layer
     ///
     pub fn insert_historic(&mut self, layer: Arc<L>) {
-        if layer.get_key_range() == (Key::MIN..Key::MAX) {
+        if Self::is_l0(&layer) {
             self.l0_delta_layers.push(layer.clone());
         }
         self.historic_layers.insert(LayerRTreeObject::new(layer));
@@ -382,7 +398,7 @@ where
     /// This should be called when the corresponding file on disk has been deleted.
     ///
     pub fn remove_historic(&mut self, layer: Arc<L>) {
-        if layer.get_key_range() == (Key::MIN..Key::MAX) {
+        if Self::is_l0(&layer) {
             let len_before = self.l0_delta_layers.len();
 
             // FIXME: ptr_eq might fail to return true for 'dyn'
@@ -571,9 +587,7 @@ where
 
             // We ignore level0 delta layers. Unless the whole keyspace fits
             // into one partition
-            if !range_eq(key_range, &(Key::MIN..Key::MAX))
-                && range_eq(&l.get_key_range(), &(Key::MIN..Key::MAX))
-            {
+            if !range_eq(key_range, &(Key::MIN..Key::MAX)) && Self::is_l0(&l) {
                 continue;
             }
 
