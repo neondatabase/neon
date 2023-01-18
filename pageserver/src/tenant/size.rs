@@ -178,24 +178,28 @@ pub(super) async fn gather_inputs(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    let timelines = tenant
+    tenant
         .refresh_gc_info()
         .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
-    if timelines.is_empty() {
-        // All timelines are below tenant's gc_horizon; alternative would be to use
-        // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
-        // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
-        //
-        // FIXME: timelines which are under gc_horizon do have about 32MB of logical_size and so
-        // they will also have tenant_size, so perhaps this is the wrong way?
-        return Ok(ModelInputs {
-            updates: vec![],
-            retention_period: 0,
-            timeline_inputs: HashMap::new(),
-        });
-    }
+    let timelines = tenant.list_timelines();
+
+    // this is an actual metric changing change, commenting this part out:
+    //
+    // if timelines.is_empty() {
+    //     // All timelines are below tenant's gc_horizon; alternative would be to use
+    //     // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
+    //     // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
+    //     //
+    //     // FIXME: timelines which are under gc_horizon do have about 32MB of logical_size and so
+    //     // they will also have tenant_size, so perhaps this is the wrong way?
+    //     return Ok(ModelInputs {
+    //         updates: vec![],
+    //         retention_period: 0,
+    //         timeline_inputs: HashMap::new(),
+    //     });
+    // }
 
     // record the used/inserted cache keys here, to remove extras not to start leaking
     // after initial run the cache should be quite stable, but live timelines will eventually
@@ -211,9 +215,17 @@ pub(super) async fn gather_inputs(
     let mut max_cutoff_distance = None;
 
     // mapping from (TimelineId, Lsn) => handled
+    // TODO: this should be (Arc<Timeline>, Lsn)
     let mut referenced_branch_froms = HashMap::<(TimelineId, Lsn), bool>::new();
 
     for timeline in timelines {
+        if !timeline.is_active() {
+            anyhow::bail!(
+                "timeline {} is not active, cannot calculate tenant_size now",
+                timeline.timeline_id
+            );
+        }
+
         let last_record_lsn = timeline.get_last_record_lsn();
 
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
@@ -338,79 +350,41 @@ pub(super) async fn gather_inputs(
         );
     }
 
-    while !referenced_branch_froms.is_empty() {
-        let mut tmp: HashMap<(TimelineId, Lsn), bool> = HashMap::new();
-
-        for ((timeline_id, lsn), handled) in referenced_branch_froms.drain() {
-            if handled {
-                continue;
-            }
-
-            let timeline = if let Some(size) = logical_size_cache.get(&(timeline_id, lsn)) {
-                updates.push(Update {
-                    lsn,
-                    timeline_id,
-                    command: Command::Update(*size),
-                });
-
-                needed_cache.insert((timeline_id, lsn));
-                None
-            } else {
-                let timeline = tenant
-                    .get_timeline(timeline_id, false)
-                    .context("Failed to find referenced ancestor timeline")?;
-                let parallel_size_calcs = Arc::clone(limit);
-                joinset.spawn(calculate_logical_size(
-                    parallel_size_calcs,
-                    timeline.clone(),
-                    lsn,
-                ));
-
-                Some(timeline)
-            };
-
-            if !timeline_inputs.contains_key(&timeline_id) {
-                // for the cases where we have a branch which is longer of gc_horizon but it's parent
-                // is not, we need to fix it to the data by processing this timeline as well.
-
-                let timeline = timeline
-                    .map(Ok)
-                    .unwrap_or_else(|| tenant.get_timeline(timeline_id, false))
-                    .context("Failed to find referenced ancestor timeline")?;
-
-                updates.push(Update {
-                    lsn: timeline.get_ancestor_lsn(),
-                    timeline_id,
-                    command: Command::BranchFrom(timeline.get_ancestor_timeline_id()),
-                });
-
-                updates.push(Update {
-                    lsn: timeline.get_last_record_lsn(),
-                    timeline_id,
-                    command: Command::EndOfBranch,
-                });
-
-                if let Some(parent_timeline_id) = timeline.get_ancestor_timeline_id() {
-                    if !timeline_inputs.contains_key(&parent_timeline_id) {
-                        tmp.entry((parent_timeline_id, timeline.get_ancestor_lsn()))
-                            .or_default();
-                    }
-                }
-
-                timeline_inputs.insert(
-                    timeline_id,
-                    TimelineInputs {
-                        last_record: timeline.get_last_record_lsn(),
-                        latest_gc_cutoff: Lsn(0),
-                        horizon_cutoff: Lsn(0),
-                        pitr_cutoff: Lsn(0),
-                        next_gc_cutoff: Lsn(tenant.get_gc_horizon()),
-                    },
-                );
-            }
+    // iterate over discovered branch points and make sure we are getting logical sizes at those
+    // points.
+    for ((timeline_id, lsn), handled) in referenced_branch_froms.drain() {
+        if handled {
+            continue;
         }
 
-        std::mem::swap(&mut tmp, &mut referenced_branch_froms);
+        if let Some(size) = logical_size_cache.get(&(timeline_id, lsn)) {
+            updates.push(Update {
+                lsn,
+                timeline_id,
+                command: Command::Update(*size),
+            });
+
+            needed_cache.insert((timeline_id, lsn));
+        } else {
+            let timeline = tenant
+                .get_timeline(timeline_id, false)
+                .context("Failed to find referenced ancestor timeline")?;
+            let parallel_size_calcs = Arc::clone(limit);
+            joinset.spawn(calculate_logical_size(
+                parallel_size_calcs,
+                timeline.clone(),
+                lsn,
+            ));
+
+            if let Some(parent_id) = timeline.get_ancestor_timeline_id() {
+                assert!(
+                    timeline_inputs.contains_key(&parent_id),
+                    "we should not discover new timelines while processing referenced_branch_froms because we iterated over all tenant timelines"
+                );
+            }
+        };
+
+        assert!(timeline_inputs.contains_key(&timeline_id), "timeline_id must be already in timeline_inputs because we iterated over all of tenants timelines");
     }
 
     let mut have_any_error = false;
