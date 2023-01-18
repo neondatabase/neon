@@ -1092,6 +1092,10 @@ impl Timeline {
         // Are we missing some files that are present in remote storage?
         // Create RemoteLayer instances for them.
         let mut local_only_layers = local_layers;
+
+        // We're holding a layer map lock for a while but this
+        // method is only called during init so it's fine.
+        let mut layer_map = self.layers.write().unwrap();
         for remote_layer_name in &index_part.timeline_layers {
             let local_layer = local_only_layers.remove(remote_layer_name);
 
@@ -1130,11 +1134,7 @@ impl Timeline {
                             anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                         } else {
                             self.metrics.resident_physical_size_gauge.sub(local_size);
-                            {
-                                let mut layers = self.layers.write().unwrap();
-                                layers.remove_historic(local_layer);
-                                layers.rebuild_index();
-                            }
+                            layer_map.remove_historic(local_layer);
                             // fall-through to adding the remote layer
                         }
                     } else {
@@ -1176,11 +1176,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    {
-                        let mut layers = self.layers.write().unwrap();
-                        layers.insert_historic(remote_layer);
-                        layers.rebuild_index();
-                    }
+                    layer_map.insert_historic(remote_layer);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1203,17 +1199,14 @@ impl Timeline {
                         &remote_layer_metadata,
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    {
-                        let mut layers = self.layers.write().unwrap();
-                        layers.insert_historic(remote_layer);
-                        layers.rebuild_index();
-                    }
+                    layer_map.insert_historic(remote_layer);
                 }
                 #[cfg(test)]
                 LayerFileName::Test(_) => unreachable!(),
             }
         }
 
+        layer_map.rebuild_index();
         Ok(local_only_layers)
     }
 
