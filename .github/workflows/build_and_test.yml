@@ -631,7 +631,7 @@ jobs:
 
   test-images:
     needs: [ tag, neon-image, compute-node-image, compute-tools-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
 
     steps:
       - name: Checkout
@@ -779,7 +779,7 @@ jobs:
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
   calculate-deploy-targets:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     if: |
       github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
@@ -797,7 +797,7 @@ jobs:
           fi
 
   deploy:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -845,7 +845,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-new:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -885,7 +885,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-pr-test-new:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -918,7 +918,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-prod-new:
-    runs-on: prod
+    runs-on: [ self-hosted, gen3, small ]
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -960,7 +960,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -1005,7 +1005,7 @@ jobs:
 
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -1047,7 +1047,7 @@ jobs:
           helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install --atomic -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
   deploy-proxy-new:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1100,7 +1100,7 @@ jobs:
           helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-dev-new:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1136,7 +1136,7 @@ jobs:
           helm upgrade neon-storage-broker-lb neondatabase/neon-storage-broker --namespace neon-storage-broker-lb --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
   deploy-proxy-prod-new:
-    runs-on: prod
+    runs-on: [ self-hosted, gen3, small ]
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1187,7 +1187,7 @@ jobs:
           helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-prod-new:
-    runs-on: prod
+    runs-on: [ self-hosted, gen3, small ]
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1227,7 +1227,7 @@ jobs:
           helm upgrade neon-storage-broker-lb neondatabase/neon-storage-broker --namespace neon-storage-broker-lb --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
   promote-compatibility-data:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
