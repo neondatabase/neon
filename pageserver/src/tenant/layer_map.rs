@@ -215,6 +215,7 @@ where
     /// be deleted.
     pub fn image_layer_exists(&self, key: &Range<Key>, lsn: &Range<Lsn>) -> Result<bool> {
         if key.is_empty() {
+            // Vacuously true. There's a newer image for all 0 of the kerys in the range.
             return Ok(true);
         }
 

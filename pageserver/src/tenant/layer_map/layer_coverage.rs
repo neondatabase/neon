@@ -55,9 +55,12 @@ impl<Value: Clone> LayerCoverage<Value> {
     ///
     /// Complexity: worst case O(N), in practice O(log N). See NOTE in implementation.
     pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value) {
-        // NOTE The order of the following lines is important!!
-
         // Add nodes at endpoints
+        //
+        // NOTE The order of lines is important. We add nodes at the start
+        // and end of the key range **before updating any nodes** in order
+        // to pin down the current coverage outside of the relevant key range.
+        // Only the coverage inside the layer's key range should change.
         self.add_node(key.start);
         self.add_node(key.end);
 
