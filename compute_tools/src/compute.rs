@@ -252,7 +252,7 @@ impl ComputeNode {
         // If connection fails,
         // it may be the old node with `zenith_admin` superuser.
         //
-        // In this case we need to connect with old `zenith_admin`name
+        // In this case we need to connect with old `zenith_admin` name
         // and create new user. We cannot simply rename connected user,
         // but we can create a new one and grant it all privileges.
         let mut client = match Client::connect(self.connstr.as_str(), NoTls) {
@@ -278,6 +278,7 @@ impl ComputeNode {
             Ok(client) => client,
         };
 
+        // Proceed with post-startup configuration. Note, that order of operations is important.
         handle_roles(&self.spec, &mut client)?;
         handle_databases(&self.spec, &mut client)?;
         handle_role_deletions(self, &mut client)?;
