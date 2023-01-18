@@ -53,7 +53,7 @@ impl<Value: Clone> LayerCoverage<Value> {
 
     /// Insert a layer.
     ///
-    /// Complexity: worst case O(N), in practice O(log N). See not in implementation.
+    /// Complexity: worst case O(N), in practice O(log N). See NOTE in implementation.
     pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value) {
         // NOTE The order of the following lines is important!!
 
