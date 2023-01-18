@@ -1,8 +1,8 @@
-use log::{info, warn};
 use std::path::Path;
 use std::process;
 use std::thread;
 use std::time::Duration;
+use tracing::{info, warn};
 
 use anyhow::{Context, Result};
 

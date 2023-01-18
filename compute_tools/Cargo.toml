@@ -8,10 +8,8 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
-env_logger.workspace = true
 futures.workspace = true
 hyper = { workspace = true, features = ["full"] }
-log = { workspace = true, features = ["std", "serde"] }
 notify.workspace = true
 postgres.workspace = true
 regex.workspace = true
@@ -20,6 +18,8 @@ serde_json.workspace = true
 tar.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 url.workspace = true
 
 workspace_hack.workspace = true

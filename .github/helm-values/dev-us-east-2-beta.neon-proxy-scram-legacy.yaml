@@ -8,7 +8,7 @@ settings:
   authBackend: "console"
   authEndpoint: "http://console-staging.local/management/api/v2"
   domain: "*.cloud.stage.neon.tech"
-  sentryEnvironment: "development"
+  sentryEnvironment: "staging"
   wssPort: 8443
   metricCollectionEndpoint: "http://console-staging.local/billing/api/v1/usage_events"
   metricCollectionInterval: "1min"
