@@ -282,7 +282,7 @@ pub fn writeback(_tenant_id: TenantId, file_id: u64, blkno: u32, buf: &[u8]) -> 
         match file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64) {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                panic!("ephemeral file got deleted on disk while still referenced from pagecache");
+                panic!("ephemeral file got deleted on disk while still referenced from pagecache: {:?}", file.path);
             }
             Err(e) => Err(io::Error::new(
                 ErrorKind::Other,
@@ -358,8 +358,8 @@ mod tests {
             .to_string())
     }
 
-    #[test]
-    fn test_ephemeral_files() -> io::Result<()> {
+    #[tokio::test]
+    async fn test_ephemeral_files() -> io::Result<()> {
         let (harness, timeline_id) = harness()?;
 
         let file_a = EphemeralFile::create(harness.conf, harness.tenant_id, timeline_id)?;
@@ -389,8 +389,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_ephemeral_blobs() -> io::Result<()> {
+    #[tokio::test]
+    async fn test_ephemeral_blobs() -> io::Result<()> {
         let (harness, timeline_id) = harness()?;
 
         let mut file = EphemeralFile::create(harness.conf, harness.tenant_id, timeline_id)?;

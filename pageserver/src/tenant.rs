@@ -1717,6 +1717,7 @@ impl Tenant {
         tenant_id: TenantId,
         remote_storage: Option<GenericRemoteStorage>,
     ) -> Tenant {
+        info!("creating new tenant {tenant_id}");
         let (state, _) = watch::channel(state);
         Tenant {
             tenant_id,
@@ -2694,11 +2695,24 @@ pub mod harness {
 
     impl Drop for TenantHarness {
         fn drop(&mut self) {
-            tokio::runtime::Handle::current().block_on(task_mgr::shutdown_tasks(
-                None,
-                Some(self.tenant_id),
-                None,
-            ));
+            println!(
+                "TENANT_HARNESS : DROP {} {:?}",
+                self.tenant_id,
+                self._temp_repo_dir.path()
+            );
+            let rt = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => handle,
+                Err(_) => {
+                    // We need this to shutdown the tasks cleanly
+                    panic!("TenantHarness must only be used in tests with a tokio runtime, i.e., #[tokio::test]");
+                }
+            };
+            std::thread::scope(|s| {
+                let jh = s.spawn(|| {
+                    rt.block_on(task_mgr::shutdown_tasks(None, Some(self.tenant_id), None))
+                });
+                jh.join().unwrap()
+            });
             crate::page_cache::get().assert_no_ephemeral_files_for_tenant(self.tenant_id);
         }
     }
@@ -2732,6 +2746,8 @@ pub mod harness {
             let tenant_id = TenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
+
+            println!("TENANT_HARNESS : NEW {} {:?}", tenant_id, repo_dir);
 
             Ok(Self {
                 _temp_repo_dir: temp_repo_dir,
