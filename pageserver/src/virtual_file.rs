@@ -326,6 +326,10 @@ impl VirtualFile {
 
     pub fn remove(self) {
         let path = self.path.clone();
+        assert!(
+            !crate::is_ephemeral_file(&path.to_string_lossy()),
+            "ephemeral files get deleted from the filesystem in their own module"
+        );
         drop(self);
         std::fs::remove_file(path).expect("failed to remove the virtual file");
     }

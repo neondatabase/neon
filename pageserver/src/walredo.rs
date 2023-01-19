@@ -627,7 +627,7 @@ impl PostgresRedoProcess {
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
             info!("old temporary datadir {datadir:?} exists, removing");
-            fs::remove_dir_all(&datadir).map_err(|e| {
+            crate::pageserver_remove_dir_all(&datadir).map_err(|e| {
                 Error::new(
                     e.kind(),
                     format!("Old temporary dir {datadir:?} removal failure: {e}"),

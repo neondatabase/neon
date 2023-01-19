@@ -293,7 +293,7 @@ impl Drop for UninitializedTimeline<'_> {
 
 fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
     let timeline_path = &uninit_mark.timeline_path;
-    match ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
+    match ignore_absent_files(|| crate::pageserver_remove_dir_all(timeline_path)) {
         Ok(()) => {
             info!("Timeline dir {timeline_path:?} removed successfully, removing the uninit mark")
         }
@@ -914,7 +914,7 @@ impl Tenant {
                     "Found temporary timeline directory, removing: {}",
                     timeline_dir.display()
                 );
-                if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
+                if let Err(e) = crate::pageserver_remove_dir_all(&timeline_dir) {
                     error!(
                         "Failed to remove temporary directory '{}': {:?}",
                         timeline_dir.display(),
@@ -1372,7 +1372,7 @@ impl Tenant {
             let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
             // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
             // with some layers missing.
-            std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
+            crate::pageserver_remove_dir_all(&local_timeline_directory).with_context(|| {
                 format!(
                     "Failed to remove local timeline directory '{}'",
                     local_timeline_directory.display()
@@ -2139,7 +2139,7 @@ impl Tenant {
         // an uninit mark was placed before, nothing else can access this timeline files
         // current initdb was not run yet, so remove whatever was left from the previous runs
         if initdb_path.exists() {
-            fs::remove_dir_all(&initdb_path).with_context(|| {
+            crate::pageserver_remove_dir_all(&initdb_path).with_context(|| {
                 format!(
                     "Failed to remove already existing initdb directory: {}",
                     initdb_path.display()
@@ -2150,7 +2150,7 @@ impl Tenant {
         run_initdb(self.conf, &initdb_path, pg_version)?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&initdb_path) {
+            if let Err(e) = crate::pageserver_remove_dir_all(&initdb_path) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
                 error!("Failed to remove temporary initdb directory '{}': {}", initdb_path.display(), e);
             }
@@ -2387,7 +2387,7 @@ impl Tenant {
 }
 
 fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
-    fs::remove_dir_all(timeline_dir)
+    crate::pageserver_remove_dir_all(timeline_dir)
         .or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 // we can leave the uninit mark without a timeline dir,
@@ -2449,7 +2449,7 @@ pub(crate) fn create_tenant_files(
 
     if creation_result.is_err() {
         error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
-        if let Err(e) = fs::remove_dir_all(&temporary_tenant_dir) {
+        if let Err(e) = crate::pageserver_remove_dir_all(&temporary_tenant_dir) {
             error!("Failed to remove temporary tenant directory {temporary_tenant_dir:?}: {e}")
         } else if let Err(e) = crashsafe::fsync(&temporary_tenant_dir) {
             error!(
