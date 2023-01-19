@@ -182,9 +182,6 @@ fn bench_from_real_project(c: &mut Criterion) {
         println!("Finished fast in {:?}", now.elapsed());
 
         // Assert results are equal. Manually iterate for easier debugging.
-        //
-        // TODO The difficulty numbers are in the 50-80 range. That's pretty bad.
-        //      We should be monitoring it in prod.
         let zip = std::iter::zip(
             &partitioning.parts,
             std::iter::zip(result_bruteforce, result_fast),

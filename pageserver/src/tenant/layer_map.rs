@@ -59,6 +59,8 @@ use utils::lsn::Lsn;
 
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 
+use super::storage_layer::range_eq;
+
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
@@ -200,7 +202,7 @@ where
             Arc::clone(&layer),
         );
 
-        if layer.get_key_range() == (Key::MIN..Key::MAX) {
+        if Self::is_l0(&layer) {
             self.l0_delta_layers.push(layer);
         }
 
@@ -221,7 +223,7 @@ where
             is_image: !layer.is_incremental(),
         });
 
-        if layer.get_key_range() == (Key::MIN..Key::MAX) {
+        if Self::is_l0(&layer) {
             let len_before = self.l0_delta_layers.len();
 
             // FIXME: ptr_eq might fail to return true for 'dyn'
@@ -329,7 +331,48 @@ where
         Ok(coverage)
     }
 
-    /// Count the height of the tallest stack of deltas in this 2d region.
+    pub fn is_l0(layer: &L) -> bool {
+        range_eq(&layer.get_key_range(), &(Key::MIN..Key::MAX))
+    }
+
+    /// This function determines which layers are counted in `count_deltas`:
+    /// layers that should count towards deciding whether or not to reimage
+    /// a certain partition range.
+    ///
+    /// There are two kinds of layers we currently consider reimage-worthy:
+    ///
+    /// Case 1: Non-L0 layers are currently reimage-worthy by default.
+    /// TODO Some of these layers are very sparse and cover the entire key
+    ///      range. Replacing 256MB of data (or less!) with terabytes of
+    ///      images doesn't seem wise. We need a better heuristic, possibly
+    ///      based on some of these factors:
+    ///      a) whether this layer has any wal in this partition range
+    ///      b) the size of the layer
+    ///      c) the number of images needed to cover it
+    ///      d) the estimated time until we'll have to reimage over it for GC
+    ///
+    /// Case 2: Since L0 layers by definition cover the entire key space, we consider
+    /// them reimage-worthy only when the entire key space can be covered by very few
+    /// images (currently 1).
+    /// TODO The optimal number should probably be slightly higher than 1, but to
+    ///      implement that we need to plumb a lot more context into this function
+    ///      than just the current partition_range.
+    pub fn is_reimage_worthy(layer: &L, partition_range: &Range<Key>) -> bool {
+        // Case 1
+        if !Self::is_l0(layer) {
+            return true;
+        }
+
+        // Case 2
+        if range_eq(partition_range, &(Key::MIN..Key::MAX)) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Count the height of the tallest stack of reimage-worthy deltas
+    /// in this 2d region.
     ///
     /// If `limit` is provided we don't try to count above that number.
     ///
@@ -372,11 +415,14 @@ where
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
-                        let new_limit = limit.map(|l| l - 1);
+                        let base_count = Self::is_reimage_worthy(&val, &key) as usize;
+                        let new_limit = limit.map(|l| l - base_count);
                         let max_stacked_deltas_underneath =
                             self.count_deltas(&kr, &lr, new_limit)?;
-                        max_stacked_deltas =
-                            std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
+                        max_stacked_deltas = std::cmp::max(
+                            max_stacked_deltas,
+                            base_count + max_stacked_deltas_underneath,
+                        );
                     }
                 }
             }
@@ -392,10 +438,13 @@ where
                 let lr = lsn.start..val.get_lsn_range().start;
 
                 if !kr.is_empty() {
-                    let new_limit = limit.map(|l| l - 1);
+                    let base_count = Self::is_reimage_worthy(&val, &key) as usize;
+                    let new_limit = limit.map(|l| l - base_count);
                     let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit)?;
-                    max_stacked_deltas =
-                        std::cmp::max(max_stacked_deltas, 1 + max_stacked_deltas_underneath);
+                    max_stacked_deltas = std::cmp::max(
+                        max_stacked_deltas,
+                        base_count + max_stacked_deltas_underneath,
+                    );
                 }
             }
         }
@@ -403,14 +452,17 @@ where
         Ok(max_stacked_deltas)
     }
 
-    /// Count how many layers we need to visit for given key-lsn pair.
+    /// Count how many reimage-worthy layers we need to visit for given key-lsn pair.
+    ///
+    /// The `partition_range` argument is used as context for the reimage-worthiness decision.
     ///
     /// Used as a helper for correctness checks only. Performance not critical.
-    pub fn get_difficulty(&self, lsn: Lsn, key: Key) -> usize {
+    pub fn get_difficulty(&self, lsn: Lsn, key: Key, partition_range: &Range<Key>) -> usize {
         match self.search(key, lsn) {
             Some(search_result) => {
                 if search_result.layer.is_incremental() {
-                    1 + self.get_difficulty(search_result.lsn_floor, key)
+                    (Self::is_reimage_worthy(&search_result.layer, &partition_range) as usize)
+                        + self.get_difficulty(search_result.lsn_floor, key, &partition_range)
                 } else {
                     0
                 }
@@ -460,7 +512,7 @@ where
                 for range in &part.ranges {
                     if !range.is_empty() {
                         difficulty =
-                            std::cmp::max(difficulty, self.get_difficulty(lsn, range.start));
+                            std::cmp::max(difficulty, self.get_difficulty(lsn, range.start, range));
                     }
                     while let Some(key) = keys_iter.peek() {
                         if key >= &range.end {
@@ -470,7 +522,8 @@ where
                         if key < range.start {
                             continue;
                         }
-                        difficulty = std::cmp::max(difficulty, self.get_difficulty(lsn, key));
+                        difficulty =
+                            std::cmp::max(difficulty, self.get_difficulty(lsn, key, range));
                     }
                 }
                 difficulty
