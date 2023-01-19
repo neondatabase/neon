@@ -115,7 +115,7 @@ pub async fn collect_metrics_iteration(
     );
 
     // get list of tenants
-    let tenants = mgr::list_tenants().await;
+    let tenants = mgr::list_tenants().await?;
 
     // iterate through list of Active tenants and collect metrics
     for (tenant_id, tenant_state) in tenants {
@@ -276,7 +276,13 @@ pub async fn calculate_synthetic_size_worker(
             },
         _ = ticker.tick() => {
 
-                let tenants = mgr::list_tenants().await;
+                let tenants = match mgr::list_tenants().await {
+                    Ok(tenants) => tenants,
+                    Err(e) => {
+                        warn!("cannot get tenant list: {e:#}");
+                        continue;
+                    }
+                };
                 // iterate through list of Active tenants and collect metrics
                 for (tenant_id, tenant_state) in tenants {
 

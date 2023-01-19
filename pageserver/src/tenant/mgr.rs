@@ -25,8 +25,35 @@ use crate::IGNORED_TENANT_FILE_NAME;
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
-static TENANTS: Lazy<RwLock<HashMap<TenantId, Arc<Tenant>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+/// The tenants known to the pageserver.
+/// The enum variants are used to distinguish the different states that the pageserver can be in.
+enum TenantsMap {
+    /// [`init_tenant_mgr`] is not done yet.
+    Initializing,
+    /// [`init_tenant_mgr`] is done, all on-disk tenants have been loaded.
+    /// New tenants can be added using [`tenant_map_insert`].
+    Open(HashMap<TenantId, Arc<Tenant>>),
+    /// The pageserver has entered shutdown mode via [`shutdown_all_tenants`].
+    /// Existing tenants are still accessible, but no new tenants can be created.
+    ShuttingDown(HashMap<TenantId, Arc<Tenant>>),
+}
+
+impl TenantsMap {
+    fn get(&self, tenant_id: &TenantId) -> Option<&Arc<Tenant>> {
+        match self {
+            TenantsMap::Initializing => None,
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.get(tenant_id),
+        }
+    }
+    fn remove(&mut self, tenant_id: &TenantId) -> Option<Arc<Tenant>> {
+        match self {
+            TenantsMap::Initializing => None,
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.remove(tenant_id),
+        }
+    }
+}
+
+static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
 
 /// Initialize repositories with locally available timelines.
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
@@ -37,8 +64,9 @@ pub async fn init_tenant_mgr(
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
-    let mut number_of_tenants = 0;
     let tenants_dir = conf.tenants_path();
+
+    let mut tenants = HashMap::new();
 
     let mut dir_entries = fs::read_dir(&tenants_dir)
         .await
@@ -92,8 +120,7 @@ pub async fn init_tenant_mgr(
                         &ctx,
                     ) {
                         Ok(tenant) => {
-                            TENANTS.write().await.insert(tenant.tenant_id(), tenant);
-                            number_of_tenants += 1;
+                            tenants.insert(tenant.tenant_id(), tenant);
                         }
                         Err(e) => {
                             error!("Failed to collect tenant files from dir {tenants_dir:?} for entry {dir_entry:?}, reason: {e:#}");
@@ -112,7 +139,11 @@ pub async fn init_tenant_mgr(
         }
     }
 
-    info!("Processed {number_of_tenants} local tenants at startup");
+    info!("Processed {} local tenants at startup", tenants.len());
+
+    let mut tenants_map = TENANTS.write().await;
+    assert!(matches!(&*tenants_map, &TenantsMap::Initializing));
+    *tenants_map = TenantsMap::Open(tenants);
     Ok(())
 }
 
@@ -171,20 +202,43 @@ pub fn schedule_local_tenant_processing(
 ///
 /// Shut down all tenants. This runs as part of pageserver shutdown.
 ///
+/// NB: We leave the tenants in the map, so that they remain accessible through
+/// the management API until we shut it down. If we removed the shut-down tenants
+/// from the tenants map, the management API would return 404 for these tenants,
+/// because TenantsMap::get() now returns `None`.
+/// That could be easily misinterpreted by control plane, the consumer of the
+/// management API. For example, it could attach the tenant on a different pageserver.
+/// We would then be in split-brain once this pageserver restarts.
 pub async fn shutdown_all_tenants() {
+    // Prevent new tenants from being created.
     let tenants_to_shut_down = {
         let mut m = TENANTS.write().await;
-        let mut tenants_to_shut_down = Vec::with_capacity(m.len());
-        for (_, tenant) in m.drain() {
-            if tenant.is_active() {
-                // updates tenant state, forbidding new GC and compaction iterations from starting
-                tenant.set_stopping();
-                tenants_to_shut_down.push(tenant)
+        match &mut *m {
+            TenantsMap::Initializing => {
+                *m = TenantsMap::ShuttingDown(HashMap::default());
+                info!("tenants map is empty");
+                return;
+            }
+            TenantsMap::Open(tenants) => {
+                let tenants_clone = tenants.clone();
+                *m = TenantsMap::ShuttingDown(std::mem::take(tenants));
+                tenants_clone
+            }
+            TenantsMap::ShuttingDown(_) => {
+                error!("already shutting down, this function isn't supposed to be called more than once");
+                return;
             }
         }
-        drop(m);
-        tenants_to_shut_down
     };
+
+    let mut tenants_to_freeze_and_flush = Vec::with_capacity(tenants_to_shut_down.len());
+    for (_, tenant) in tenants_to_shut_down {
+        if tenant.is_active() {
+            // updates tenant state, forbidding new GC and compaction iterations from starting
+            tenant.set_stopping();
+            tenants_to_freeze_and_flush.push(tenant);
+        }
+    }
 
     // Shut down all existing walreceiver connections and stop accepting the new ones.
     task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
@@ -197,7 +251,7 @@ pub async fn shutdown_all_tenants() {
     // should be no more activity in any of the repositories.
     //
     // On error, log it but continue with the shutdown for other tenants.
-    for tenant in tenants_to_shut_down {
+    for tenant in tenants_to_freeze_and_flush {
         let tenant_id = tenant.tenant_id();
         debug!("shutdown tenant {tenant_id}");
 
@@ -213,27 +267,22 @@ pub async fn create_tenant(
     tenant_id: TenantId,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
-) -> anyhow::Result<Option<Arc<Tenant>>> {
-    match TENANTS.write().await.entry(tenant_id) {
-        hash_map::Entry::Occupied(_) => {
-            debug!("tenant {tenant_id} already exists");
-            Ok(None)
-        }
-        hash_map::Entry::Vacant(v) => {
-            // Hold the write_tenants() lock, since all of this is local IO.
-            // If this section ever becomes contentious, introduce a new `TenantState::Creating`.
-            let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id)?;
-            let created_tenant =
-                schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
-            let crated_tenant_id = created_tenant.tenant_id();
-            anyhow::ensure!(
+) -> Result<Arc<Tenant>, TenantMapInsertError> {
+    tenant_map_insert(tenant_id, |vacant_entry| {
+        // We're holding the tenants lock in write mode while doing local IO.
+        // If this section ever becomes contentious, introduce a new `TenantState::Creating`
+        // and do the work in that state.
+        let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id)?;
+        let created_tenant =
+            schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+        let crated_tenant_id = created_tenant.tenant_id();
+        anyhow::ensure!(
                 tenant_id == crated_tenant_id,
                 "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
             );
-            v.insert(Arc::clone(&created_tenant));
-            Ok(Some(created_tenant))
-        }
-    }
+        vacant_entry.insert(Arc::clone(&created_tenant));
+        Ok(created_tenant)
+    }).await
 }
 
 pub async fn update_tenant_config(
@@ -302,8 +351,8 @@ pub async fn load_tenant(
     tenant_id: TenantId,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
-) -> anyhow::Result<()> {
-    run_if_no_tenant_in_memory(tenant_id, |vacant_entry| {
+) -> Result<(), TenantMapInsertError> {
+    tenant_map_insert(tenant_id, |vacant_entry| {
         let tenant_path = conf.tenant_path(&tenant_id);
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
         if tenant_ignore_mark.exists() {
@@ -340,16 +389,24 @@ pub async fn ignore_tenant(
     .await
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum TenantMapListError {
+    #[error("tenant map is still initiailizing")]
+    Initializing,
+}
+
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub async fn list_tenants() -> Vec<(TenantId, TenantState)> {
-    TENANTS
-        .read()
-        .await
-        .iter()
+pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
+    let tenants = TENANTS.read().await;
+    let m = match &*tenants {
+        TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
+        TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
+    };
+    Ok(m.iter()
         .map(|(id, tenant)| (*id, tenant.current_state()))
-        .collect()
+        .collect())
 }
 
 /// Execute Attach mgmt API command.
@@ -361,8 +418,8 @@ pub async fn attach_tenant(
     tenant_id: TenantId,
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
-) -> anyhow::Result<()> {
-    run_if_no_tenant_in_memory(tenant_id, |vacant_entry| {
+) -> Result<(), TenantMapInsertError> {
+    tenant_map_insert(tenant_id, |vacant_entry| {
         let tenant_path = conf.tenant_path(&tenant_id);
         anyhow::ensure!(
             !tenant_path.exists(),
@@ -371,24 +428,51 @@ pub async fn attach_tenant(
 
         let tenant = Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx);
         vacant_entry.insert(tenant);
-
         Ok(())
     })
     .await
 }
 
-async fn run_if_no_tenant_in_memory<F, V>(tenant_id: TenantId, run: F) -> anyhow::Result<V>
+#[derive(Debug, thiserror::Error)]
+pub enum TenantMapInsertError {
+    #[error("tenant map is still initializing")]
+    StillInitializing,
+    #[error("tenant map is shutting down")]
+    ShuttingDown,
+    #[error("tenant {0} already exists, state: {1:?}")]
+    TenantAlreadyExists(TenantId, TenantState),
+    #[error(transparent)]
+    Closure(#[from] anyhow::Error),
+}
+
+/// Give the given closure access to the tenants map entry for the given `tenant_id`, iff that
+/// entry is vacant. The closure is responsible for creating the tenant object and inserting
+/// it into the tenants map through the vacnt entry that it receives as argument.
+///
+/// NB: the closure should return quickly because the current implementation of tenants map
+/// serializes access through an `RwLock`.
+async fn tenant_map_insert<F, V>(
+    tenant_id: TenantId,
+    insert_fn: F,
+) -> Result<V, TenantMapInsertError>
 where
     F: FnOnce(hash_map::VacantEntry<TenantId, Arc<Tenant>>) -> anyhow::Result<V>,
 {
-    match TENANTS.write().await.entry(tenant_id) {
-        hash_map::Entry::Occupied(e) => {
-            anyhow::bail!(
-                "tenant {tenant_id} already exists, state: {:?}",
-                e.get().current_state()
-            )
-        }
-        hash_map::Entry::Vacant(v) => run(v),
+    let mut guard = TENANTS.write().await;
+    let m = match &mut *guard {
+        TenantsMap::Initializing => return Err(TenantMapInsertError::StillInitializing),
+        TenantsMap::ShuttingDown(_) => return Err(TenantMapInsertError::ShuttingDown),
+        TenantsMap::Open(m) => m,
+    };
+    match m.entry(tenant_id) {
+        hash_map::Entry::Occupied(e) => Err(TenantMapInsertError::TenantAlreadyExists(
+            tenant_id,
+            e.get().current_state(),
+        )),
+        hash_map::Entry::Vacant(v) => match insert_fn(v) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(TenantMapInsertError::Closure(e)),
+        },
     }
 }
 
