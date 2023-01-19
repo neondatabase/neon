@@ -194,22 +194,6 @@ pub(super) async fn gather_inputs(
 
     let timelines = tenant.list_timelines();
 
-    // this is an actual metric changing change, commenting this part out:
-    //
-    // if timelines.is_empty() {
-    //     // All timelines are below tenant's gc_horizon; alternative would be to use
-    //     // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
-    //     // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
-    //     //
-    //     // FIXME: timelines which are under gc_horizon do have about 32MB of logical_size and so
-    //     // they will also have tenant_size, so perhaps this is the wrong way?
-    //     return Ok(ModelInputs {
-    //         updates: vec![],
-    //         retention_period: 0,
-    //         timeline_inputs: HashMap::new(),
-    //     });
-    // }
-
     // record the used/inserted cache keys here, to remove extras not to start leaking
     // after initial run the cache should be quite stable, but live timelines will eventually
     // require new lsns to be inspected.
