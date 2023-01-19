@@ -198,6 +198,46 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv):
     assert size_before_branching < size_after
 
 
+def test_only_heads_within_horizon(neon_simple_env: NeonEnv):
+    """
+    gc_horizon = small
+
+    main: 0--------10-----I>20
+    first:         |-----------------------------I>150
+    second:        |---------I>30
+    """
+
+    env = neon_simple_env
+    (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": "1024"})
+    http_client = env.pageserver.http_client()
+
+    initial_size = http_client.tenant_size(tenant_id)
+
+    first_id = env.neon_cli.create_branch("first", tenant_id=tenant_id)
+    second_id = env.neon_cli.create_branch("second", tenant_id=tenant_id)
+
+    ids = {"main": main_id, "first": first_id, "second": second_id}
+
+    latest_size = None
+
+    # gc is not expected to change the results
+
+    for branch_name, amount in [("main", 2000), ("first", 15000), ("second", 3000)]:
+        with env.postgres.create_start(branch_name, tenant_id=tenant_id) as pg:
+            with pg.cursor() as cur:
+                cur.execute(
+                    f"CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, {amount}) s(i)"
+                )
+            wait_for_last_flush_lsn(env, pg, tenant_id, ids[branch_name])
+            size_now = http_client.tenant_size(tenant_id)
+            if latest_size is not None:
+                assert size_now > latest_size
+            else:
+                assert size_now > initial_size
+
+            latest_size = size_now
+
+
 def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     """
     Operate on single branch reading the tenants size after each transaction.
