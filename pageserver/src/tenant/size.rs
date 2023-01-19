@@ -186,6 +186,7 @@ pub(super) async fn gather_inputs(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
+    // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
     tenant
         .refresh_gc_info()
         .await
@@ -216,14 +217,15 @@ pub(super) async fn gather_inputs(
 
     let mut updates = Vec::new();
 
-    // record the per timline values used to determine `retention_period`
+    // record the per timeline values useful to debug the model inputs, also used to track
+    // ancestor_lsn without keeping a hold of Timeline
     let mut timeline_inputs = HashMap::with_capacity(timelines.len());
 
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
-    // mapping from (TimelineId, Lsn) => handled
-    // TODO: this should be (Arc<Timeline>, Lsn)
+    // mapping from (TimelineId, Lsn) => if this branch point has been handled already via
+    // GcInfo::retain_lsns or if it needs to have it's logical_size calculated.
     let mut referenced_branch_froms = HashMap::<(TimelineId, Lsn), bool>::new();
 
     for timeline in timelines {
@@ -370,6 +372,7 @@ pub(super) async fn gather_inputs(
             }
             Some(_) => {}
             None => {
+                // we should have this because we have iterated through all of the timelines
                 anyhow::bail!("missing timeline_input for {timeline_id}")
             }
         }
