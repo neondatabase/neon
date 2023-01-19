@@ -298,6 +298,9 @@ pub(super) async fn gather_inputs(
         });
 
         if let Some(parent_timeline_id) = timeline.get_ancestor_timeline_id() {
+            // refresh_gc_info will update branchpoints and pitr_cutoff but only do it for branches
+            // which are over gc_horizon. for example, a "main" branch which never received any
+            // updates apart from initdb not have branch points recorded.
             referenced_branch_froms
                 .entry((parent_timeline_id, timeline.get_ancestor_lsn()))
                 .or_default();
@@ -358,7 +361,7 @@ pub(super) async fn gather_inputs(
         } else {
             let timeline = tenant
                 .get_timeline(timeline_id, false)
-                .context("Failed to find referenced ancestor timeline")?;
+                .with_context(|| format!("find referenced ancestor timeline {timeline_id}"))?;
             let parallel_size_calcs = Arc::clone(limit);
             joinset.spawn(calculate_logical_size(
                 parallel_size_calcs,
@@ -367,17 +370,23 @@ pub(super) async fn gather_inputs(
             ));
 
             if let Some(parent_id) = timeline.get_ancestor_timeline_id() {
-                assert!(
+                // we should not find new ones because we iterated tenants all timelines
+                anyhow::ensure!(
                     timeline_inputs.contains_key(&parent_id),
-                    "we should not discover new timelines while processing referenced_branch_froms because we iterated over all tenant timelines"
+                    "discovered new timeline {parent_id} (parent of {timeline_id})"
                 );
             }
         };
 
-        assert!(timeline_inputs.contains_key(&timeline_id), "timeline_id must be already in timeline_inputs because we iterated over all of tenants timelines");
+        // we must have visited this timeline during iteration of all timelines as well
+        anyhow::ensure!(
+            timeline_inputs.contains_key(&timeline_id),
+            "discovered unvisited {timeline_id} via branch points"
+        );
     }
 
-    // finally add in EndOfBranch for all timelines and lsn's, which are not also branch points
+    // finally add in EndOfBranch for all timelines where their last_record_lsn is not a branch
+    // point. this is needed by the model.
     for (timeline_id, inputs) in timeline_inputs.iter() {
         let lsn = inputs.last_record;
 
