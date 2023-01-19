@@ -281,20 +281,20 @@ pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> io::Result<()> {
     if let Some(file) = EPHEMERAL_FILES.read().unwrap().files.get(&file_id) {
         match file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64) {
             Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                panic!("ephemeral file got deleted on disk while still referenced from pagecache");
+            }
             Err(e) => Err(io::Error::new(
                 ErrorKind::Other,
                 format!(
                     "failed to write back to ephemeral file at {} error: {}",
                     file.path.display(),
-                    e
+                    e,
                 ),
             )),
         }
     } else {
-        Err(io::Error::new(
-            ErrorKind::Other,
-            "could not write back page, not found in ephemeral files hash",
-        ))
+        panic!("ephemeral file got dropped and maybe deleted from disk while still referenced from page cache");
     }
 }
 
