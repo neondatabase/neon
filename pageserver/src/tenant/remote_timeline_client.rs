@@ -1064,7 +1064,7 @@ mod tests {
     // Test scheduling
     #[test]
     fn upload_scheduling() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
+        let harness = TenantHarness::create("upload_scheduling")?;
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
         std::fs::create_dir_all(&timeline_path)?;
 
