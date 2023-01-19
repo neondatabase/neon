@@ -126,7 +126,7 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
     """
 
     env = neon_simple_env
-    gc_horizon = 200_000
+    gc_horizon = 20_000
     (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
     http_client = env.pageserver.http_client()
 
