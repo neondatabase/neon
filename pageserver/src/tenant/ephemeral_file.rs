@@ -76,7 +76,7 @@ impl EphemeralFile {
         })
     }
 
-    fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), io::Error> {
+    fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> io::Result<()> {
         let mut off = 0;
         while off < PAGE_SZ {
             let n = self
@@ -277,7 +277,7 @@ impl Drop for EphemeralFile {
     }
 }
 
-pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), io::Error> {
+pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> io::Result<()> {
     if let Some(file) = EPHEMERAL_FILES.read().unwrap().files.get(&file_id) {
         match file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64) {
             Ok(_) => Ok(()),
@@ -332,25 +332,17 @@ mod tests {
     use super::*;
     use crate::tenant::blob_io::{BlobCursor, BlobWriter};
     use crate::tenant::block_io::BlockCursor;
+    use crate::tenant::harness::TenantHarness;
     use rand::{seq::SliceRandom, thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;
 
-    fn harness(
-        test_name: &str,
-    ) -> Result<(&'static PageServerConf, TenantId, TimelineId), io::Error> {
-        let repo_dir = PageServerConf::test_repo_dir(test_name);
-        let _ = fs::remove_dir_all(&repo_dir);
-        let conf = PageServerConf::dummy_conf(repo_dir);
-        // Make a static copy of the config. This can never be free'd, but that's
-        // OK in a test.
-        let conf: &'static PageServerConf = Box::leak(Box::new(conf));
-
-        let tenant_id = TenantId::from_str("11000000000000000000000000000000").unwrap();
+    fn harness() -> Result<(TenantHarness, TimelineId), io::Error> {
+        let harness = TenantHarness::new().expect("Failed to create tenant harness");
         let timeline_id = TimelineId::from_str("22000000000000000000000000000000").unwrap();
-        fs::create_dir_all(conf.timeline_path(&timeline_id, &tenant_id))?;
+        fs::create_dir_all(harness.timeline_path(&timeline_id))?;
 
-        Ok((conf, tenant_id, timeline_id))
+        Ok((harness, timeline_id))
     }
 
     // Helper function to slurp contents of a file, starting at the current position,
@@ -367,10 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn test_ephemeral_files() -> Result<(), io::Error> {
-        let (conf, tenant_id, timeline_id) = harness("ephemeral_files")?;
+    fn test_ephemeral_files() -> io::Result<()> {
+        let (harness, timeline_id) = harness()?;
 
-        let file_a = EphemeralFile::create(conf, tenant_id, timeline_id)?;
+        let file_a = EphemeralFile::create(harness.conf, harness.tenant_id, timeline_id)?;
 
         file_a.write_all_at(b"foo", 0)?;
         assert_eq!("foo", read_string(&file_a, 0, 20)?);
@@ -381,7 +373,7 @@ mod tests {
         // Open a lot of files, enough to cause some page evictions.
         let mut efiles = Vec::new();
         for fileno in 0..100 {
-            let efile = EphemeralFile::create(conf, tenant_id, timeline_id)?;
+            let efile = EphemeralFile::create(harness.conf, harness.tenant_id, timeline_id)?;
             efile.write_all_at(format!("file {}", fileno).as_bytes(), 0)?;
             assert_eq!(format!("file {}", fileno), read_string(&efile, 0, 10)?);
             efiles.push((fileno, efile));
@@ -398,10 +390,10 @@ mod tests {
     }
 
     #[test]
-    fn test_ephemeral_blobs() -> Result<(), io::Error> {
-        let (conf, tenant_id, timeline_id) = harness("ephemeral_blobs")?;
+    fn test_ephemeral_blobs() -> io::Result<()> {
+        let (harness, timeline_id) = harness()?;
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
+        let mut file = EphemeralFile::create(harness.conf, harness.tenant_id, timeline_id)?;
 
         let pos_foo = file.write_blob(b"foo")?;
         assert_eq!(b"foo", file.block_cursor().read_blob(pos_foo)?.as_slice());
