@@ -142,7 +142,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         let newseg_id = self.segments.len();
         let lastseg = &mut self.segments[lastseg_id];
 
-        assert!(lsn >= lastseg.end_lsn);
+        assert!(lsn > lastseg.end_lsn);
 
         let newseg = Segment {
             op,

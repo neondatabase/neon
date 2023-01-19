@@ -324,19 +324,6 @@ pub(super) async fn gather_inputs(
             }
         }
 
-        // all timelines also have an end point if they have made any progress
-        if last_record_lsn > timeline.get_ancestor_lsn()
-            && !interesting_lsns
-                .iter()
-                .any(|(lsn, _)| lsn == &last_record_lsn)
-        {
-            updates.push(Update {
-                lsn: last_record_lsn,
-                command: Command::EndOfBranch,
-                timeline_id: timeline.timeline_id,
-            });
-        }
-
         timeline_inputs.insert(
             timeline.timeline_id,
             TimelineInputs {
@@ -352,10 +339,13 @@ pub(super) async fn gather_inputs(
 
     // iterate over discovered branch points and make sure we are getting logical sizes at those
     // points.
-    for ((timeline_id, lsn), handled) in referenced_branch_froms.drain() {
-        if handled {
+    for ((timeline_id, lsn), handled) in referenced_branch_froms.iter() {
+        if *handled {
             continue;
         }
+
+        let timeline_id = *timeline_id;
+        let lsn = *lsn;
 
         if let Some(size) = logical_size_cache.get(&(timeline_id, lsn)) {
             updates.push(Update {
@@ -385,6 +375,25 @@ pub(super) async fn gather_inputs(
         };
 
         assert!(timeline_inputs.contains_key(&timeline_id), "timeline_id must be already in timeline_inputs because we iterated over all of tenants timelines");
+    }
+
+    // finally add in EndOfBranch for all timelines and lsn's, which are not also branch points
+    for (timeline_id, inputs) in timeline_inputs.iter() {
+        let lsn = inputs.last_record;
+
+        if referenced_branch_froms.contains_key(&(*timeline_id, lsn)) {
+            // this means that the (timeline_id, last_record_lsn) represents a branch point
+            // we do not want to add EndOfBranch updates for these points because it doesn't fit
+            // into the current tenant_size_model.
+            continue;
+        }
+
+        // all timelines also have an end point if they have made any progress
+        updates.push(Update {
+            lsn,
+            command: Command::EndOfBranch,
+            timeline_id: *timeline_id,
+        });
     }
 
     let mut have_any_error = false;
