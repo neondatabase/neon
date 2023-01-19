@@ -26,7 +26,7 @@ use anyhow::{bail, Context};
 use clap::{self, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
-use std::{borrow::Cow, future::Future, net::SocketAddr, time::Duration};
+use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use tracing::{info, info_span, Instrument};
 use utils::{
@@ -53,11 +53,12 @@ async fn main() -> anyhow::Result<()> {
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
+    info!("Version: {GIT_VERSION}");
+    ::metrics::set_build_info_metric(GIT_VERSION);
+
     let args = cli().get_matches();
     let config = build_config(&args)?;
 
-    info!("Version: {GIT_VERSION}");
-    ::metrics::set_build_info_metric(GIT_VERSION);
     info!("Authentication backend: {}", config.auth_backend);
 
     // Check that we can bind to address before further initialization
@@ -90,13 +91,13 @@ async fn main() -> anyhow::Result<()> {
         )));
     }
 
+    // TODO: refactor.
     if let Some(metric_collection) = &config.metric_collection {
         let hostname = hostname::get()?
             .into_string()
             .map_err(|e| anyhow::anyhow!("failed to get hostname {e:?}"))?;
 
         tasks.push(tokio::spawn(
-            // TODO: refactor.
             metrics::collect_metrics(
                 &metric_collection.endpoint,
                 metric_collection.interval,
@@ -112,18 +113,6 @@ async fn main() -> anyhow::Result<()> {
     let _: Vec<()> = futures::future::try_join_all(tasks).await?;
 
     Ok(())
-}
-
-fn parse_cache_options(options: &str) -> anyhow::Result<(usize, Duration)> {
-    if options == "size=0" {
-        return Ok((0, Duration::default()));
-    }
-
-    let (size, ttl) = options.split_once(',').context("no comma found")?;
-    let size = size.strip_prefix("size=").context("no `size=` prefix")?;
-    let ttl = ttl.strip_prefix("ttl=").context("no `ttl=` prefix")?;
-
-    Ok((size.parse()?, humantime::parse_duration(ttl)?))
 }
 
 // Config is expected to live forever.
@@ -170,9 +159,12 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
     };
 
     let wake_compute_cache = {
-        let options = args.get_one::<String>("wake-compute-cache").unwrap();
-        let (size, ttl) = parse_cache_options(options)?;
+        let config::CacheOptions { size, ttl } = args
+            .get_one::<String>("wake-compute-cache")
+            .unwrap()
+            .parse()?;
 
+        info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
         auth::caches::NodeInfoCache::new(size, ttl)
     };
 
@@ -267,7 +259,7 @@ fn cli() -> clap::Command {
             Arg::new("wake-compute-cache")
                 .long("wake-compute-cache")
                 .help("cache for `wake_compute` api method (use `size=0` to disable)")
-                .default_value("size=4000,ttl=5m"),
+                .default_value(config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO),
         )
 }
 
@@ -278,20 +270,5 @@ mod tests {
     #[test]
     fn verify_cli() {
         cli().debug_assert();
-    }
-
-    #[test]
-    fn test_parse_cache_options() {
-        let (size, ttl) = parse_cache_options("size=4096,ttl=5min").unwrap();
-        assert_eq!(size, 4096);
-        assert_eq!(ttl, Duration::from_secs(5 * 60));
-
-        let (size, ttl) = parse_cache_options("size=0,ttl=1s").unwrap();
-        assert_eq!(size, 0);
-        assert_eq!(ttl, Duration::from_secs(1));
-
-        let (size, ttl) = parse_cache_options("size=0").unwrap();
-        assert_eq!(size, 0);
-        assert_eq!(ttl, Duration::from_secs(0));
     }
 }

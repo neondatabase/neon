@@ -269,9 +269,11 @@ impl Api<'_> {
 
     /// Wake up the compute node and return the corresponding connection info.
     pub async fn wake_compute(&self) -> Result<CachedNodeInfo, WakeComputeError> {
-        // Wake-up might not be needed if the node is still alive.
         let key = self.creds.project().expect("impossible");
+
+        // Wake-up might not be needed if the node is still alive.
         if let Some(cached) = self.caches.node_info.get(key) {
+            info!("found cached compute node info, skipping wake_compute");
             return Ok(cached);
         }
 

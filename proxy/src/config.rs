@@ -1,6 +1,6 @@
 use crate::auth;
-use anyhow::{ensure, Context};
-use std::sync::Arc;
+use anyhow::{bail, ensure, Context};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
@@ -11,7 +11,7 @@ pub struct ProxyConfig {
 
 pub struct MetricCollectionConfig {
     pub endpoint: reqwest::Url,
-    pub interval: std::time::Duration,
+    pub interval: Duration,
 }
 
 pub struct TlsConfig {
@@ -73,4 +73,81 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
         config,
         common_name,
     })
+}
+
+/// Helper for cmdline cache options parsing.
+pub struct CacheOptions {
+    /// Max number of entries.
+    pub size: usize,
+    /// Entry's time-to-live.
+    pub ttl: Duration,
+}
+
+impl CacheOptions {
+    /// Default options for [`crate::auth::caches::NodeInfoCache`].
+    pub const DEFAULT_OPTIONS_NODE_INFO: &str = "size=4000,ttl=5m";
+
+    /// Parse cache options passed via cmdline.
+    /// Example: [`Self::DEFAULT_OPTIONS_NODE_INFO`].
+    fn parse(options: &str) -> anyhow::Result<Self> {
+        let mut size = None;
+        let mut ttl = None;
+
+        for option in options.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .with_context(|| format!("bad key-value pair: {option}"))?;
+
+            match key {
+                "size" => size = Some(value.parse()?),
+                "ttl" => ttl = Some(humantime::parse_duration(value)?),
+                unknown => bail!("unknown key: {unknown}"),
+            }
+        }
+
+        // TTL doesn't matter if cache is always empty.
+        if let Some(0) = size {
+            ttl.get_or_insert(Duration::default());
+        }
+
+        Ok(Self {
+            size: size.context("missing `size`")?,
+            ttl: ttl.context("missing `ttl`")?,
+        })
+    }
+}
+
+impl FromStr for CacheOptions {
+    type Err = anyhow::Error;
+
+    fn from_str(options: &str) -> Result<Self, Self::Err> {
+        let error = || format!("failed to parse cache options '{options}'");
+        Self::parse(options).with_context(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_cache_options() -> anyhow::Result<()> {
+        let CacheOptions { size, ttl } = "size=4096,ttl=5min".parse()?;
+        assert_eq!(size, 4096);
+        assert_eq!(ttl, Duration::from_secs(5 * 60));
+
+        let CacheOptions { size, ttl } = "ttl=4m,size=2".parse()?;
+        assert_eq!(size, 2);
+        assert_eq!(ttl, Duration::from_secs(4 * 60));
+
+        let CacheOptions { size, ttl } = "size=0,ttl=1s".parse()?;
+        assert_eq!(size, 0);
+        assert_eq!(ttl, Duration::from_secs(1));
+
+        let CacheOptions { size, ttl } = "size=0".parse()?;
+        assert_eq!(size, 0);
+        assert_eq!(ttl, Duration::default());
+
+        Ok(())
+    }
 }

@@ -14,7 +14,7 @@ use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -291,6 +291,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             .await
             .map_err(|e| {
                 // Invalidate the cache entry if we failed to connect.
+                warn!("invalidating stalled compute node info cache entry");
                 node.invalidate();
                 e
             })?;
