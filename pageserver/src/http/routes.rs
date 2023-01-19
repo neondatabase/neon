@@ -16,6 +16,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
+use crate::tenant::mgr::TenantMapInsertError;
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
@@ -96,6 +97,18 @@ fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
         PageReconstructError::WalRedo(err) => {
             ApiError::InternalServerError(anyhow::Error::new(err))
         }
+    }
+}
+
+fn apierror_from_tenant_map_insert_error(e: TenantMapInsertError) -> ApiError {
+    match e {
+        TenantMapInsertError::StillInitializing | TenantMapInsertError::ShuttingDown => {
+            ApiError::InternalServerError(anyhow::Error::new(e))
+        }
+        TenantMapInsertError::TenantAlreadyExists(id, state) => {
+            ApiError::Conflict(format!("tenant {id} already exists, state: {state:?}"))
+        }
+        TenantMapInsertError::Closure(e) => ApiError::InternalServerError(e),
     }
 }
 
@@ -356,11 +369,10 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     let state = get_state(&request);
 
     if let Some(remote_storage) = &state.remote_storage {
-        // FIXME: distinguish between "Tenant already exists" and other errors
         mgr::attach_tenant(state.conf, tenant_id, remote_storage.clone(), &ctx)
             .instrument(info_span!("tenant_attach", tenant = %tenant_id))
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(apierror_from_tenant_map_insert_error)?;
     } else {
         return Err(ApiError::BadRequest(anyhow!(
             "attach_tenant is not possible because pageserver was configured without remote storage"
@@ -414,7 +426,7 @@ async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, A
     mgr::load_tenant(state.conf, tenant_id, state.remote_storage.clone(), &ctx)
         .instrument(info_span!("load", tenant = %tenant_id))
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(apierror_from_tenant_map_insert_error)?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -441,6 +453,8 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     let response_data = mgr::list_tenants()
         .instrument(info_span!("tenant_list"))
         .await
+        .map_err(anyhow::Error::new)
+        .map_err(ApiError::InternalServerError)?
         .iter()
         .map(|(id, state)| TenantInfo {
             id: *id,
@@ -638,31 +652,24 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     )
     .instrument(info_span!("tenant_create", tenant = ?target_tenant_id))
     .await
-    // FIXME: `create_tenant` can fail from both user and internal errors. Replace this
-    // with better error handling once the type permits it
-    .map_err(ApiError::InternalServerError)?;
+    .map_err(apierror_from_tenant_map_insert_error)?;
 
-    Ok(match new_tenant {
-        Some(tenant) => {
-            // We created the tenant. Existing API semantics are that the tenant
-            // is Active when this function returns.
-            if let res @ Err(_) = tenant.wait_to_become_active().await {
-                // This shouldn't happen because we just created the tenant directory
-                // in tenant::mgr::create_tenant, and there aren't any remote timelines
-                // to load, so, nothing can really fail during load.
-                // Don't do cleanup because we don't know how we got here.
-                // The tenant will likely be in `Broken` state and subsequent
-                // calls will fail.
-                res.context("created tenant failed to become active")
-                    .map_err(ApiError::InternalServerError)?;
-            }
-            json_response(
-                StatusCode::CREATED,
-                TenantCreateResponse(tenant.tenant_id()),
-            )?
-        }
-        None => json_response(StatusCode::CONFLICT, ())?,
-    })
+    // We created the tenant. Existing API semantics are that the tenant
+    // is Active when this function returns.
+    if let res @ Err(_) = new_tenant.wait_to_become_active().await {
+        // This shouldn't happen because we just created the tenant directory
+        // in tenant::mgr::create_tenant, and there aren't any remote timelines
+        // to load, so, nothing can really fail during load.
+        // Don't do cleanup because we don't know how we got here.
+        // The tenant will likely be in `Broken` state and subsequent
+        // calls will fail.
+        res.context("created tenant failed to become active")
+            .map_err(ApiError::InternalServerError)?;
+    }
+    json_response(
+        StatusCode::CREATED,
+        TenantCreateResponse(new_tenant.tenant_id()),
+    )
 }
 
 async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
