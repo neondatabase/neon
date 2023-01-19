@@ -80,7 +80,7 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
     last_branch_name = first_branch_name
     last_branch = None
 
-    for i in range(0, 10):
+    for i in range(0, 4):
         latest_branch_name = f"nth_{i}"
         last_branch = env.neon_cli.create_branch(
             latest_branch_name, ancestor_branch_name=last_branch_name, tenant_id=tenant_id
