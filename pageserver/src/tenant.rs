@@ -2626,10 +2626,10 @@ where
 #[cfg(test)]
 pub mod harness {
     use bytes::{Bytes, BytesMut};
+    use once_cell::sync::Lazy;
     use once_cell::sync::OnceCell;
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
-    use tempfile::TempDir;
     use utils::logging;
     use utils::lsn::Lsn;
 
@@ -2661,6 +2661,8 @@ pub mod harness {
         buf.freeze()
     }
 
+    static LOCK: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
+
     impl From<TenantConf> for TenantConfOpt {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
@@ -2681,31 +2683,42 @@ pub mod harness {
         }
     }
 
-    /// The harness saves some boilerplate and provides a way to create functional tenant
-    /// without running pageserver binary. It uses temporary directory to store data in it.
-    /// Tempdir gets removed on harness drop.
-    pub struct TenantHarness {
-        // keep the struct to not to remove tmp dir during the test
-        _temp_repo_dir: TempDir,
+    pub struct TenantHarness<'a> {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
+
+        pub lock_guard: (
+            Option<RwLockReadGuard<'a, ()>>,
+            Option<RwLockWriteGuard<'a, ()>>,
+        ),
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
 
-    impl TenantHarness {
-        pub fn new() -> anyhow::Result<Self> {
+    impl<'a> TenantHarness<'a> {
+        pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
+            Self::create_internal(test_name, false)
+        }
+        pub fn create_exclusive(test_name: &'static str) -> anyhow::Result<Self> {
+            Self::create_internal(test_name, true)
+        }
+        fn create_internal(test_name: &'static str, exclusive: bool) -> anyhow::Result<Self> {
+            let lock_guard = if exclusive {
+                (None, Some(LOCK.write().unwrap()))
+            } else {
+                (Some(LOCK.read().unwrap()), None)
+            };
+
             LOG_HANDLE.get_or_init(|| {
                 logging::init(logging::LogFormat::Test).expect("Failed to init test logging")
             });
 
-            let temp_repo_dir = tempfile::tempdir()?;
-            // `TempDir` uses a randomly generated subdirectory of a system tmp dir,
-            // so far it's enough to take care of concurrently running tests.
-            let repo_dir = temp_repo_dir.path();
+            let repo_dir = PageServerConf::test_repo_dir(test_name);
+            let _ = fs::remove_dir_all(&repo_dir);
+            fs::create_dir_all(&repo_dir)?;
 
-            let conf = PageServerConf::dummy_conf(repo_dir.to_path_buf());
+            let conf = PageServerConf::dummy_conf(repo_dir);
             // Make a static copy of the config. This can never be free'd, but that's
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
@@ -2723,10 +2736,10 @@ pub mod harness {
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
             Ok(Self {
-                _temp_repo_dir: temp_repo_dir,
                 conf,
                 tenant_conf,
                 tenant_id,
+                lock_guard,
             })
         }
 
@@ -2820,8 +2833,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_basic")?.load().await;
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -2854,8 +2866,9 @@ mod tests {
 
     #[tokio::test]
     async fn no_duplicate_timelines() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("no_duplicate_timelines")?
+            .load()
+            .await;
         let _ = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -2886,8 +2899,7 @@ mod tests {
     ///
     #[tokio::test]
     async fn test_branch() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_branch")?.load().await;
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -2984,8 +2996,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant =
+            TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
+                .load()
+                .await;
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -3020,8 +3034,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?
+            .load()
+            .await;
 
         tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0x50), DEFAULT_PG_VERSION)?
@@ -3070,8 +3085,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_retain_data_in_parent_which_is_needed_for_child() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
+            .load()
+            .await;
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -3093,8 +3109,9 @@ mod tests {
     }
     #[tokio::test]
     async fn test_parent_keeps_data_forever_after_branching() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_parent_keeps_data_forever_after_branching")?
+            .load()
+            .await;
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -3125,7 +3142,8 @@ mod tests {
 
     #[tokio::test]
     async fn timeline_load() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
+        const TEST_NAME: &str = "timeline_load";
+        let harness = TenantHarness::create(TEST_NAME)?;
         {
             let tenant = harness.load().await;
             let tline = tenant
@@ -3144,7 +3162,8 @@ mod tests {
 
     #[tokio::test]
     async fn timeline_load_with_ancestor() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
+        const TEST_NAME: &str = "timeline_load_with_ancestor";
+        let harness = TenantHarness::create(TEST_NAME)?;
         // create two timelines
         {
             let tenant = harness.load().await;
@@ -3182,7 +3201,8 @@ mod tests {
 
     #[tokio::test]
     async fn corrupt_metadata() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
+        const TEST_NAME: &str = "corrupt_metadata";
+        let harness = TenantHarness::create(TEST_NAME)?;
         let tenant = harness.load().await;
 
         tenant
@@ -3223,8 +3243,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_images() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_images")?.load().await;
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -3291,8 +3310,7 @@ mod tests {
     //
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_bulk_insert")?.load().await;
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -3336,8 +3354,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_random_updates")?.load().await;
         let tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -3410,8 +3427,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_traverse_branches() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_traverse_branches")?
+            .load()
+            .await;
         let mut tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;
@@ -3495,8 +3513,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_traverse_ancestors() -> anyhow::Result<()> {
-        let harness = TenantHarness::new()?;
-        let tenant = harness.load().await;
+        let tenant = TenantHarness::create("test_traverse_ancestors")?
+            .load()
+            .await;
         let mut tline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?
             .initialize()?;

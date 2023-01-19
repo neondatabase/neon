@@ -525,13 +525,12 @@ mod tests {
         })
     }
 
-    fn test_files<OF, FD>(test_name: &str, openfunc: OF) -> Result<(), Error>
+    fn test_files<OF, FD>(testname: &str, openfunc: OF) -> Result<(), Error>
     where
         FD: Read + Write + Seek + FileExt,
         OF: Fn(&Path, &OpenOptions) -> Result<FD, std::io::Error>,
     {
-        let temp_repo_dir = tempfile::tempdir()?;
-        let testdir = temp_repo_dir.path().join(test_name);
+        let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
         let path_a = testdir.join("file_a");
@@ -633,8 +632,7 @@ mod tests {
         const THREADS: usize = 100;
         const SAMPLE: [u8; SIZE] = [0xADu8; SIZE];
 
-        let temp_repo_dir = tempfile::tempdir()?;
-        let testdir = temp_repo_dir.path().join("vfile_concurrency");
+        let testdir = crate::config::PageServerConf::test_repo_dir("vfile_concurrency");
         std::fs::create_dir_all(&testdir)?;
 
         // Create a test file.
