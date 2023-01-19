@@ -388,7 +388,7 @@ pub(super) async fn gather_inputs(
         } else {
             let timeline = tenant
                 .get_timeline(timeline_id, false)
-                .with_context(|| format!("find referenced ancestor timeline {timeline_id}"))?;
+                .context("find referenced ancestor timeline")?;
             let parallel_size_calcs = Arc::clone(limit);
             joinset.spawn(calculate_logical_size(
                 parallel_size_calcs,
