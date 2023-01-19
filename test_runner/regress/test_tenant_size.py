@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import pytest
 from fixtures.log_helper import log
@@ -31,8 +31,9 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
     size, inputs = http_client.tenant_size_and_modelinputs(tenant_id)
     assert size == initial_size, "tenant_size should not be affected by shutdown of compute"
 
-    expected_commands = [{"branch_from": None}, "end_of_branch"]
-    assert list(map(lambda x: x["command"], inputs["updates"])) == expected_commands
+    expected_commands: List[Any] = [{"branch_from": None}, "end_of_branch"]
+    actual_commands: List[Any] = list(map(lambda x: x["command"], inputs["updates"]))  # type: ignore
+    assert actual_commands == expected_commands
 
 
 def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
