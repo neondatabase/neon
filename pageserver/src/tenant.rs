@@ -2692,6 +2692,17 @@ pub mod harness {
         pub tenant_id: TenantId,
     }
 
+    impl Drop for TenantHarness {
+        fn drop(&mut self) {
+            tokio::runtime::Handle::current().block_on(task_mgr::shutdown_tasks(
+                None,
+                Some(self.tenant_id),
+                None,
+            ));
+            crate::page_cache::get().assert_no_ephemeral_files_for_tenant(self.tenant_id);
+        }
+    }
+
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
 
     impl TenantHarness {

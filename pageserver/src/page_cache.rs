@@ -426,6 +426,23 @@ impl PageCache {
         }
     }
 
+    pub fn assert_no_ephemeral_files_for_tenant(&self, no_tenant_id: TenantId) {
+        // hold everything to rule out race conditions
+        let mut inners = Vec::with_capacity(self.slots.len());
+        for slot in self.slots.iter() {
+            inners.push(slot.inner.write().unwrap());
+        }
+        for inner in &inners {
+            if let Some(CacheKey::EphemeralPage { tenant_id, .. }) = &inner.key {
+                assert!(*tenant_id != no_tenant_id);
+            }
+        }
+        let pm = self.ephemeral_page_map.read().unwrap();
+        for ((tenant_id, _, _), _) in &*pm {
+            assert!(*tenant_id != no_tenant_id);
+        }
+    }
+
     // Section 1.3: Public interface functions for working with immutable file pages.
 
     pub fn read_immutable_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<ReadBufResult> {
