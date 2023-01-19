@@ -58,6 +58,51 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
     assert size_after_branching > initial_size
 
 
+def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
+    """
+    More general version of test_branched_empty_timeline_size
+    """
+    env = neon_simple_env
+    (tenant_id, _) = env.neon_cli.create_tenant()
+    http_client = env.pageserver.http_client()
+
+    initial_size = http_client.tenant_size(tenant_id)
+
+    first_branch_name = "first"
+    env.neon_cli.create_branch(first_branch_name, tenant_id=tenant_id)
+
+    size_after_branching = http_client.tenant_size(tenant_id)
+
+    # this might be flaky like test_get_tenant_size_with_multiple_branches
+    # https://github.com/neondatabase/neon/issues/2962
+    assert size_after_branching == initial_size
+
+    last_branch_name = first_branch_name
+    last_branch = None
+
+    for i in range(0, 10):
+        latest_branch_name = f"nth_{i}"
+        last_branch = env.neon_cli.create_branch(
+            latest_branch_name, ancestor_branch_name=last_branch_name, tenant_id=tenant_id
+        )
+        last_branch_name = latest_branch_name
+
+        size_after_branching = http_client.tenant_size(tenant_id)
+        assert size_after_branching == initial_size
+
+    assert last_branch is not None
+
+    with env.postgres.create_start(last_branch_name, tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
+            )
+        wait_for_last_flush_lsn(env, pg, tenant_id, last_branch)
+
+    size_after_writes = http_client.tenant_size(tenant_id)
+    assert size_after_writes > initial_size
+
+
 def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     """
     Operate on single branch reading the tenants size after each transaction.
