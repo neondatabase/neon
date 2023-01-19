@@ -9,15 +9,10 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
     http_client = env.pageserver.http_client()
-    size = http_client.tenant_size(tenant_id)
+    initial_size = http_client.tenant_size(tenant_id)
 
-    # we should never have zero, because there should be the initdb however
-    # this is questionable if we should have anything in this case, as the
-    # gc_cutoff is negative
-    log.info(f"initial {size}");
-    #assert (
-    #    size == 0
-    #), "initial implementation returns zero tenant_size before last_record_lsn is past gc_horizon"
+    # we should never have zero, because there should be the initdb "changes"
+    assert initial_size > 0, "initial implementation returns ~initdb tenant_size"
 
     main_branch_name = "main"
 
@@ -28,30 +23,39 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
             assert row is not None
             assert row[0] == 1
         size = http_client.tenant_size(tenant_id)
-        log.info(f"after creation: {size}");
-        # assert size == 0, "starting idle compute should not change the tenant size"
+        assert size == initial_size, "starting idle compute should not change the tenant size"
 
     # the size should be the same, until we increase the size over the
     # gc_horizon
     size = http_client.tenant_size(tenant_id)
-    log.info(f"after shutting down compute: {size}");
-    # assert size == 0, "tenant_size should not be affected by shutdown of compute"
+    assert size == initial_size, "tenant_size should not be affected by shutdown of compute"
 
-    first_branch_timeline_id = env.neon_cli.create_branch(
-        "first-branch", main_branch_name, tenant_id
-    )
+
+def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
+    """
+    Issue found in production. Because the ancestor branch was under
+    gc_horizon, the branchpoint was "dangling" and the computation could not be
+    done.
+    """
+    env = neon_simple_env
+    (tenant_id, _) = env.neon_cli.create_tenant()
+    http_client = env.pageserver.http_client()
+
+    initial_size = http_client.tenant_size(tenant_id)
+
+    first_branch_timeline_id = env.neon_cli.create_branch("first-branch", tenant_id=tenant_id)
 
     with env.postgres.create_start("first-branch", tenant_id=tenant_id) as pg:
         with pg.cursor() as cur:
             cur.execute(
-                f"CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
+                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
             )
         wait_for_last_flush_lsn(env, pg, tenant_id, first_branch_timeline_id)
 
     size_after_branching = http_client.tenant_size(tenant_id)
-    log.info(f"size_after_branching: {size_after_branching}");
+    log.info(f"size_after_branching: {size_after_branching}")
 
-    assert size_after_branching > 0
+    assert size_after_branching > initial_size
 
 
 def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
