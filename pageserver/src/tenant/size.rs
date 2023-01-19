@@ -362,6 +362,18 @@ pub(super) async fn gather_inputs(
         let timeline_id = *timeline_id;
         let lsn = *lsn;
 
+        match timeline_inputs.get(&timeline_id) {
+            Some(inputs) if inputs.ancestor_lsn == lsn => {
+                // we don't need an update at this branch point which is also point where
+                // timeline_id branch was branched from.
+                continue;
+            }
+            Some(_) => {}
+            None => {
+                anyhow::bail!("missing timeline_input for {timeline_id}")
+            }
+        }
+
         if let Some(size) = logical_size_cache.get(&(timeline_id, lsn)) {
             updates.push(Update {
                 lsn,
