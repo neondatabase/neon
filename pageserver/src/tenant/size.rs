@@ -471,8 +471,6 @@ pub(super) async fn gather_inputs(
     //
     updates.sort_unstable();
 
-    tracing::info!("updates: {updates:#?}");
-
     // And another sort to handle Command::BranchFrom ordering
     // in case when there are multiple branches at the same LSN.
     let sorted_updates = sort_updates_in_tree_order(updates)?;
