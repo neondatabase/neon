@@ -27,8 +27,11 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
 
     # the size should be the same, until we increase the size over the
     # gc_horizon
-    size = http_client.tenant_size(tenant_id)
+    size, inputs = http_client.tenant_size_and_modelinputs(tenant_id)
     assert size == initial_size, "tenant_size should not be affected by shutdown of compute"
+
+    expected_commands = [{"branch_from": None}, "end_of_branch"]
+    assert list(map(lambda x: x["command"], inputs["updates"])) == expected_commands
 
 
 def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
