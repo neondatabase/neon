@@ -388,12 +388,6 @@ pub(super) async fn gather_inputs(
                 );
             }
         };
-
-        // we must have visited this timeline during iteration of all timelines as well
-        anyhow::ensure!(
-            timeline_inputs.contains_key(&timeline_id),
-            "discovered unvisited {timeline_id} via branch points"
-        );
     }
 
     // finally add in EndOfBranch for all timelines where their last_record_lsn is not a branch
