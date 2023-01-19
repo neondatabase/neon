@@ -154,6 +154,50 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
     assert size_before_branching < size_after
 
 
+def test_parent_within_horizon(neon_simple_env: NeonEnv):
+    """
+    gc_horizon = 5
+
+    main:          0----10----I->20
+    branch:              |-------------------I---------->150
+                                   gc_horizon
+    """
+
+    env = neon_simple_env
+    gc_horizon = 200_000
+    (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
+    http_client = env.pageserver.http_client()
+
+    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+        initdb_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000) s(i)")
+
+        flushed_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t00 AS SELECT i::bigint n FROM generate_series(0, 2000) s(i)")
+
+        wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+
+    size_before_branching = http_client.tenant_size(tenant_id)
+
+    assert flushed_lsn.lsn_int - gc_horizon > initdb_lsn.lsn_int
+
+    branch_id = env.neon_cli.create_branch(
+        "branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn
+    )
+
+    with env.postgres.create_start("branch", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
+        wait_for_last_flush_lsn(env, pg, tenant_id, branch_id)
+
+    size_after = http_client.tenant_size(tenant_id)
+
+    assert size_before_branching < size_after
+
+
 def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     """
     Operate on single branch reading the tenants size after each transaction.
