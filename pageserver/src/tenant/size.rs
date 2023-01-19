@@ -33,6 +33,8 @@ pub struct ModelInputs {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct TimelineInputs {
     #[serde_as(as = "serde_with::DisplayFromStr")]
+    ancestor_lsn: Lsn,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     last_record: Lsn,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     latest_gc_cutoff: Lsn,
@@ -291,8 +293,11 @@ pub(super) async fn gather_inputs(
 
         // all timelines branch from something, because it might be impossible to pinpoint
         // which is the tenant_size_model's "default" branch.
+
+        let ancestor_lsn = timeline.get_ancestor_lsn();
+
         updates.push(Update {
-            lsn: timeline.get_ancestor_lsn(),
+            lsn: ancestor_lsn,
             command: Command::BranchFrom(timeline.get_ancestor_timeline_id()),
             timeline_id: timeline.timeline_id,
         });
@@ -330,6 +335,7 @@ pub(super) async fn gather_inputs(
         timeline_inputs.insert(
             timeline.timeline_id,
             TimelineInputs {
+                ancestor_lsn,
                 last_record: last_record_lsn,
                 // this is not used above, because it might not have updated recently enough
                 latest_gc_cutoff: *timeline.get_latest_gc_cutoff_lsn(),
@@ -397,12 +403,14 @@ pub(super) async fn gather_inputs(
             continue;
         }
 
-        // all timelines also have an end point if they have made any progress
-        updates.push(Update {
-            lsn,
-            command: Command::EndOfBranch,
-            timeline_id: *timeline_id,
-        });
+        if lsn > inputs.ancestor_lsn {
+            // all timelines also have an end point if they have made any progress
+            updates.push(Update {
+                lsn,
+                command: Command::EndOfBranch,
+                timeline_id: *timeline_id,
+            });
+        }
     }
 
     let mut have_any_error = false;
