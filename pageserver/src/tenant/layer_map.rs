@@ -415,7 +415,7 @@ where
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
-                        let base_count = Self::is_reimage_worthy(&val, &key) as usize;
+                        let base_count = Self::is_reimage_worthy(&val, key) as usize;
                         let new_limit = limit.map(|l| l - base_count);
                         let max_stacked_deltas_underneath =
                             self.count_deltas(&kr, &lr, new_limit)?;
@@ -438,7 +438,7 @@ where
                 let lr = lsn.start..val.get_lsn_range().start;
 
                 if !kr.is_empty() {
-                    let base_count = Self::is_reimage_worthy(&val, &key) as usize;
+                    let base_count = Self::is_reimage_worthy(&val, key) as usize;
                     let new_limit = limit.map(|l| l - base_count);
                     let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit)?;
                     max_stacked_deltas = std::cmp::max(
@@ -461,8 +461,8 @@ where
         match self.search(key, lsn) {
             Some(search_result) => {
                 if search_result.layer.is_incremental() {
-                    (Self::is_reimage_worthy(&search_result.layer, &partition_range) as usize)
-                        + self.get_difficulty(search_result.lsn_floor, key, &partition_range)
+                    (Self::is_reimage_worthy(&search_result.layer, partition_range) as usize)
+                        + self.get_difficulty(search_result.lsn_floor, key, partition_range)
                 } else {
                     0
                 }
