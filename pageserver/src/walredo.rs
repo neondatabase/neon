@@ -94,15 +94,14 @@ pub trait WalRedoManager: Send + Sync {
 
 struct ProcessInput {
     child: NoLeakChild,
-    stream: ChildStdin,
-    stdout_fd: RawFd,
+    stdin: ChildStdin,
     stderr_fd: RawFd,
-    stdin_fd: RawFd,
+    stdout_fd: RawFd,
     n_requests: usize,
 }
 
 struct ProcessOutput {
-    stream: ChildStdout,
+    stdout: ChildStdout,
     pending_responses: VecDeque<Option<Bytes>>,
     n_processed_responses: usize,
 }
@@ -734,15 +733,14 @@ impl PostgresRedoManager {
 
         **input = Some(ProcessInput {
             child,
-            stdin_fd: stdin.as_raw_fd(),
             stdout_fd: stdout.as_raw_fd(),
             stderr_fd: stderr.as_raw_fd(),
-            stream: stdin,
+            stdin,
             n_requests: 0,
         });
 
         *self.stdout.lock().unwrap() = Some(ProcessOutput {
-            stream: stdout,
+            stdout,
             pending_responses: VecDeque::new(),
             n_processed_responses: 0,
         });
@@ -796,12 +794,13 @@ impl PostgresRedoManager {
 
         let proc = input.as_mut().unwrap();
         let mut nwrite = 0usize;
+        let stdout_fd = proc.stdout_fd;
 
         // Prepare for calling poll()
         let mut pollfds = [
-            PollFd::new(proc.stdin_fd, PollFlags::POLLOUT),
+            PollFd::new(proc.stdin.as_raw_fd(), PollFlags::POLLOUT),
             PollFd::new(proc.stderr_fd, PollFlags::POLLIN),
-            PollFd::new(proc.stdout_fd, PollFlags::POLLIN),
+            PollFd::new(stdout_fd, PollFlags::POLLIN),
         ];
 
         // We do two things simultaneously: send the old base image and WAL records to
@@ -849,7 +848,7 @@ impl PostgresRedoManager {
             // If 'stdin' is writeable, do write.
             let in_revents = pollfds[0].revents().unwrap();
             if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
-                nwrite += proc.stream.write(&writebuf[nwrite..])?;
+                nwrite += proc.stdin.write(&writebuf[nwrite..])?;
             } else if in_revents.contains(PollFlags::POLLHUP) {
                 // We still have more data to write, but the process closed the pipe.
                 return Err(Error::new(
@@ -876,6 +875,18 @@ impl PostgresRedoManager {
 
         let mut output_guard = self.stdout.lock().unwrap();
         let output = output_guard.as_mut().unwrap();
+        if output.stdout.as_raw_fd() != stdout_fd {
+            // If stdout file descriptor is changed then it means that walredo process is crashed and restarted.
+            // As far as ProcessInput and ProcessOutout are protected by different mutexes,
+            // it can happen that we send request to one process and waiting response from another.
+            // To prevent such situation we compare stdout file descriptors.
+            // As far as old stdout pipe is destroyed only after new one is created,
+            // it can not reuse the same file descriptor, so this check is safe.
+            return Err(Error::new(
+                ErrorKind::BrokenPipe,
+                "WAL redo process closed its stdout unexpectedly",
+            ));
+        }
         let n_processed_responses = output.n_processed_responses;
         while n_processed_responses + output.pending_responses.len() <= request_no {
             // We expect the WAL redo process to respond with an 8k page image. We read it
@@ -926,7 +937,7 @@ impl PostgresRedoManager {
                 // If we have some data in stdout, read it to the result buffer.
                 let out_revents = pollfds[2].revents().unwrap();
                 if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
-                    nresult += output.stream.read(&mut resultbuf[nresult..])?;
+                    nresult += output.stdout.read(&mut resultbuf[nresult..])?;
                 } else if out_revents.contains(PollFlags::POLLHUP) {
                     return Err(Error::new(
                         ErrorKind::BrokenPipe,
