@@ -36,6 +36,11 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
     Issue found in production. Because the ancestor branch was under
     gc_horizon, the branchpoint was "dangling" and the computation could not be
     done.
+
+    Assuming gc_horizon = 50
+    root:    I      0---10------>20
+    branch:              |-------------------I---------->150
+                                   gc_horizon
     """
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
@@ -61,6 +66,14 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
 def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
     """
     More general version of test_branched_empty_timeline_size
+
+    Assuming gc_horizon = 50
+
+    root:  I 0------10
+    first: I        10
+    nth_0: I        10
+    nth_1: I        10
+    nth_n:          10------------I--------100
     """
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
