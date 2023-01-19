@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use tracing::info;
+
 use super::layer_coverage::LayerCoverageTuple;
 
 /// Layers in this module are identified and indexed by this data.
@@ -102,7 +104,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         }
     }
 
-    /// Remove all entries after a certain LSN
+    /// Remove all entries after a certain LSN (inclusive)
     pub fn trim(&mut self, begin: &u64) {
         self.historic.split_off(begin);
         self.head = self
@@ -421,6 +423,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         };
 
         // Apply buffered updates to self.layers
+        let num_updates = self.buffer.len();
         self.buffer.retain(|layer_key, layer| {
             match layer {
                 Some(l) => {
@@ -434,6 +437,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         });
 
         // Rebuild
+        let mut num_inserted = 0;
         self.historic_coverage.trim(&rebuild_since);
         for (layer_key, layer) in self.layers.range(
             LayerKey {
@@ -444,7 +448,14 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         ) {
             self.historic_coverage
                 .insert(layer_key.clone(), layer.clone());
+            num_inserted += 1;
         }
+
+        // TODO maybe only warn if ratio is at least 10
+        info!(
+            "Rebuilt layer map. Did {} insertions to process a batch of {} updates.",
+            num_inserted, num_updates,
+        )
     }
 
     /// Iterate all the layers
