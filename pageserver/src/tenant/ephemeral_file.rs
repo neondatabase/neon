@@ -100,7 +100,7 @@ impl EphemeralFile {
         // Look up the right page
         let cache = page_cache::get();
         let mut write_guard = match cache
-            .write_ephemeral_buf(self.file_id, blkno)
+            .write_ephemeral_buf(self._tenant_id, self.file_id, blkno)
             .map_err(|e| to_io_error(e, "Failed to write ephemeral buf"))?
         {
             WriteBufResult::Found(guard) => guard,
@@ -141,7 +141,7 @@ impl FileExt for EphemeralFile {
 
         let cache = page_cache::get();
         let buf = match cache
-            .read_ephemeral_buf(self.file_id, blkno)
+            .read_ephemeral_buf(self._tenant_id, self.file_id, blkno)
             .map_err(|e| to_io_error(e, "Failed to read ephemeral buf"))?
         {
             ReadBufResult::Found(guard) => {
@@ -173,7 +173,7 @@ impl FileExt for EphemeralFile {
         let mut write_guard;
         let cache = page_cache::get();
         let buf = match cache
-            .write_ephemeral_buf(self.file_id, blkno)
+            .write_ephemeral_buf(self._tenant_id, self.file_id, blkno)
             .map_err(|e| to_io_error(e, "Failed to write ephemeral buf"))?
         {
             WriteBufResult::Found(guard) => {
@@ -277,7 +277,7 @@ impl Drop for EphemeralFile {
     }
 }
 
-pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> io::Result<()> {
+pub fn writeback(_tenant_id: TenantId, file_id: u64, blkno: u32, buf: &[u8]) -> io::Result<()> {
     if let Some(file) = EPHEMERAL_FILES.read().unwrap().files.get(&file_id) {
         match file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64) {
             Ok(_) => Ok(()),
@@ -306,7 +306,7 @@ impl BlockReader for EphemeralFile {
         let cache = page_cache::get();
         loop {
             match cache
-                .read_ephemeral_buf(self.file_id, blknum)
+                .read_ephemeral_buf(self._tenant_id, self.file_id, blknum)
                 .map_err(|e| to_io_error(e, "Failed to read ephemeral buf"))?
             {
                 ReadBufResult::Found(guard) => return Ok(guard),

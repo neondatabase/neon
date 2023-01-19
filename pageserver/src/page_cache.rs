@@ -98,6 +98,7 @@ enum CacheKey {
         lsn: Lsn,
     },
     EphemeralPage {
+        tenant_id: TenantId,
         file_id: u64,
         blkno: u32,
     },
@@ -177,7 +178,7 @@ pub struct PageCache {
     /// can have a separate mapping map, next to this field.
     materialized_page_map: RwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
 
-    ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
+    ephemeral_page_map: RwLock<HashMap<(TenantId, u64, u32), usize>>,
 
     immutable_page_map: RwLock<HashMap<(u64, u32), usize>>,
 
@@ -371,14 +372,32 @@ impl PageCache {
 
     // Section 1.2: Public interface functions for working with Ephemeral pages.
 
-    pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<ReadBufResult> {
-        let mut cache_key = CacheKey::EphemeralPage { file_id, blkno };
+    pub fn read_ephemeral_buf(
+        &self,
+        tenant_id: TenantId,
+        file_id: u64,
+        blkno: u32,
+    ) -> anyhow::Result<ReadBufResult> {
+        let mut cache_key = CacheKey::EphemeralPage {
+            tenant_id,
+            file_id,
+            blkno,
+        };
 
         self.lock_for_read(&mut cache_key)
     }
 
-    pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<WriteBufResult> {
-        let cache_key = CacheKey::EphemeralPage { file_id, blkno };
+    pub fn write_ephemeral_buf(
+        &self,
+        tenant_id: TenantId,
+        file_id: u64,
+        blkno: u32,
+    ) -> anyhow::Result<WriteBufResult> {
+        let cache_key = CacheKey::EphemeralPage {
+            tenant_id,
+            file_id,
+            blkno,
+        };
 
         self.lock_for_write(&cache_key)
     }
@@ -391,7 +410,11 @@ impl PageCache {
             let mut inner = slot.inner.write().unwrap();
             if let Some(key) = &inner.key {
                 match key {
-                    CacheKey::EphemeralPage { file_id, blkno: _ } if *file_id == drop_file_id => {
+                    CacheKey::EphemeralPage {
+                        tenant_id: _tenant_id,
+                        file_id,
+                        blkno: _,
+                    } if *file_id == drop_file_id => {
                         // remove mapping for old buffer
                         self.remove_mapping(key);
                         inner.key = None;
@@ -628,9 +651,13 @@ impl PageCache {
                 *lsn = version.lsn;
                 Some(version.slot_idx)
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::EphemeralPage {
+                tenant_id,
+                file_id,
+                blkno,
+            } => {
                 let map = self.ephemeral_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                Some(*map.get(&(*tenant_id, *file_id, *blkno))?)
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let map = self.immutable_page_map.read().unwrap();
@@ -655,9 +682,13 @@ impl PageCache {
                     None
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::EphemeralPage {
+                tenant_id,
+                file_id,
+                blkno,
+            } => {
                 let map = self.ephemeral_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                Some(*map.get(&(*tenant_id, *file_id, *blkno))?)
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let map = self.immutable_page_map.read().unwrap();
@@ -689,9 +720,13 @@ impl PageCache {
                     panic!("could not find old key in mapping")
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::EphemeralPage {
+                tenant_id,
+                file_id,
+                blkno,
+            } => {
                 let mut map = self.ephemeral_page_map.write().unwrap();
-                map.remove(&(*file_id, *blkno))
+                map.remove(&(*tenant_id, *file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
@@ -729,9 +764,13 @@ impl PageCache {
                     }
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::EphemeralPage {
+                tenant_id,
+                file_id,
+                blkno,
+            } => {
                 let mut map = self.ephemeral_page_map.write().unwrap();
-                match map.entry((*file_id, *blkno)) {
+                match map.entry((*tenant_id, *file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
                         entry.insert(slot_idx);
@@ -823,9 +862,11 @@ impl PageCache {
                 std::io::ErrorKind::Other,
                 "unexpected dirty materialized page",
             )),
-            CacheKey::EphemeralPage { file_id, blkno } => {
-                writeback_ephemeral_file(*file_id, *blkno, buf)
-            }
+            CacheKey::EphemeralPage {
+                tenant_id,
+                file_id,
+                blkno,
+            } => writeback_ephemeral_file(*tenant_id, *file_id, *blkno, buf),
             CacheKey::ImmutableFilePage {
                 file_id: _,
                 blkno: _,
