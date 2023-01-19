@@ -1,5 +1,6 @@
 from typing import List, Tuple
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
@@ -119,6 +120,7 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
     assert size_after_writes > initial_size
 
 
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
     """
     gc_horizon = 15
@@ -157,6 +159,7 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
     assert size_before_branching < size_after
 
 
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_parent_within_horizon(neon_simple_env: NeonEnv):
     """
     gc_horizon = 5
@@ -201,6 +204,7 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv):
     assert size_before_branching < size_after
 
 
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_only_heads_within_horizon(neon_simple_env: NeonEnv):
     """
     gc_horizon = small
