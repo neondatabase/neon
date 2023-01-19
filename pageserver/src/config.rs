@@ -693,6 +693,11 @@ impl PageServerConf {
         Ok(t_conf)
     }
 
+    #[cfg(test)]
+    pub fn test_repo_dir(test_name: &str) -> PathBuf {
+        PathBuf::from(format!("../tmp_check/test_{test_name}"))
+    }
+
     pub fn dummy_conf(repo_dir: PathBuf) -> Self {
         let pg_distrib_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
