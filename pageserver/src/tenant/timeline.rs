@@ -970,6 +970,7 @@ impl Timeline {
     ///
     pub(super) fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         let mut layers = self.layers.write().unwrap();
+        let mut updates = layers.batch_update();
         let mut num_layers = 0;
 
         let timer = self.metrics.load_layer_map_histo.start_timer();
@@ -1010,7 +1011,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                layers.insert_historic(Arc::new(layer));
+                updates.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1041,7 +1042,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                layers.insert_historic(Arc::new(layer));
+                updates.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1067,6 +1068,7 @@ impl Timeline {
             }
         }
 
+        updates.flush();
         layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
 
         info!(
@@ -1091,6 +1093,11 @@ impl Timeline {
         // Are we missing some files that are present in remote storage?
         // Create RemoteLayer instances for them.
         let mut local_only_layers = local_layers;
+
+        // We're holding a layer map lock for a while but this
+        // method is only called during init so it's fine.
+        let mut layer_map = self.layers.write().unwrap();
+        let mut updates = layer_map.batch_update();
         for remote_layer_name in &index_part.timeline_layers {
             let local_layer = local_only_layers.remove(remote_layer_name);
 
@@ -1129,7 +1136,7 @@ impl Timeline {
                             anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                         } else {
                             self.metrics.resident_physical_size_gauge.sub(local_size);
-                            self.layers.write().unwrap().remove_historic(local_layer);
+                            updates.remove_historic(local_layer);
                             // fall-through to adding the remote layer
                         }
                     } else {
@@ -1171,7 +1178,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    self.layers.write().unwrap().insert_historic(remote_layer);
+                    updates.insert_historic(remote_layer);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1194,13 +1201,14 @@ impl Timeline {
                         &remote_layer_metadata,
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    self.layers.write().unwrap().insert_historic(remote_layer);
+                    updates.insert_historic(remote_layer);
                 }
                 #[cfg(test)]
                 LayerFileName::Test(_) => unreachable!(),
             }
         }
 
+        updates.flush();
         Ok(local_only_layers)
     }
 
@@ -2099,10 +2107,11 @@ impl Timeline {
         ])?;
 
         // Add it to the layer map
-        {
-            let mut layers = self.layers.write().unwrap();
-            layers.insert_historic(Arc::new(new_delta));
-        }
+        self.layers
+            .write()
+            .unwrap()
+            .batch_update()
+            .insert_historic(Arc::new(new_delta));
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
@@ -2166,13 +2175,15 @@ impl Timeline {
                 // are some delta layers *later* than current 'lsn', if more WAL was processed and flushed
                 // after we read last_record_lsn, which is passed here in the 'lsn' argument.
                 if img_lsn < lsn {
-                    let num_deltas = layers.count_deltas(&img_range, &(img_lsn..lsn))?;
+                    let threshold = self.get_image_creation_threshold();
+                    let num_deltas =
+                        layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
 
                     debug!(
                         "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
                         img_range.start, img_range.end, num_deltas, img_lsn, lsn
                     );
-                    if num_deltas >= self.get_image_creation_threshold() {
+                    if num_deltas >= threshold {
                         return Ok(true);
                     }
                 }
@@ -2267,6 +2278,7 @@ impl Timeline {
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
         let mut layers = self.layers.write().unwrap();
+        let mut updates = layers.batch_update();
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for l in image_layers {
             let path = l.filename();
@@ -2280,8 +2292,9 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            layers.insert_historic(Arc::new(l));
+            updates.insert_historic(Arc::new(l));
         }
+        updates.flush();
         drop(layers);
         timer.stop_and_record();
 
@@ -2577,6 +2590,7 @@ impl Timeline {
         }
 
         let mut layers = self.layers.write().unwrap();
+        let mut updates = layers.batch_update();
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
             let new_delta_path = l.path();
@@ -2597,7 +2611,7 @@ impl Timeline {
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            layers.insert_historic(x);
+            updates.insert_historic(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -2611,8 +2625,9 @@ impl Timeline {
             }
             layer_names_to_delete.push(l.filename());
             l.delete()?;
-            layers.remove_historic(l);
+            updates.remove_historic(l);
         }
+        updates.flush();
         drop(layers);
 
         // Also schedule the deletions in remote storage
@@ -2812,6 +2827,7 @@ impl Timeline {
         // 3. it doesn't need to be retained for 'retain_lsns';
         // 4. newer on-disk image layers cover the layer's whole key range
         //
+        // TODO holding a write lock is too agressive and avoidable
         let mut layers = self.layers.write().unwrap();
         'outer: for l in layers.iter_historic_layers() {
             result.layers_total += 1;
@@ -2843,6 +2859,8 @@ impl Timeline {
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
             // they are no longer needed. This might be complicated with long inheritance chains.
+            //
+            // TODO Vec is not a great choice for `retain_lsns`
             for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
@@ -2896,6 +2914,7 @@ impl Timeline {
             layers_to_remove.push(Arc::clone(&l));
         }
 
+        let mut updates = layers.batch_update();
         if !layers_to_remove.is_empty() {
             // Persist the new GC cutoff value in the metadata file, before
             // we actually remove anything.
@@ -2913,7 +2932,13 @@ impl Timeline {
                 }
                 layer_names_to_delete.push(doomed_layer.filename());
                 doomed_layer.delete()?; // FIXME: schedule succeeded deletions before returning?
-                layers.remove_historic(doomed_layer);
+
+                // TODO Removing from the bottom of the layer map is expensive.
+                //      Maybe instead discard all layer map historic versions that
+                //      won't be needed for page reconstruction for this timeline,
+                //      and mark what we can't delete yet as deleted from the layer
+                //      map index without actually rebuilding the index.
+                updates.remove_historic(doomed_layer);
                 result.layers_removed += 1;
             }
 
@@ -2925,6 +2950,7 @@ impl Timeline {
                 remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
             }
         }
+        updates.flush();
 
         info!(
             "GC completed removing {} layers, cutoff {}",
@@ -3081,11 +3107,13 @@ impl Timeline {
                     // Delta- or ImageLayer in the layer map.
                     let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     let mut layers = self_clone.layers.write().unwrap();
+                    let mut updates = layers.batch_update();
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        layers.remove_historic(l);
+                        updates.remove_historic(l);
                     }
-                    layers.insert_historic(new_layer);
+                    updates.insert_historic(new_layer);
+                    updates.flush();
                     drop(layers);
 
                     // Now that we've inserted the download into the layer map,

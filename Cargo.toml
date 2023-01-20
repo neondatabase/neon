@@ -69,7 +69,7 @@ rand = "0.8"
 regex = "1.4"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 routerify = "3"
-rstar = "0.9.3"
+rpds = "0.12.0"
 rustls = "0.20"
 rustls-pemfile = "1"
 rustls-split = "0.3"
@@ -106,9 +106,6 @@ x509-parser = "0.14"
 ## TODO replace this with tracing
 env_logger = "0.10"
 log = "0.4"
-
-## TODO switch when the new release is made
-amplify_num = { git = "https://github.com/rust-amplify/rust-amplify.git", tag = "v4.0.0-beta.1" }
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
