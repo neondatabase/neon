@@ -2823,6 +2823,7 @@ impl Timeline {
         // 3. it doesn't need to be retained for 'retain_lsns';
         // 4. newer on-disk image layers cover the layer's whole key range
         //
+        // TODO holding a write lock is too agressive and avoidable
         let mut layers = self.layers.write().unwrap();
         'outer: for l in layers.iter_historic_layers() {
             result.layers_total += 1;
@@ -2854,6 +2855,8 @@ impl Timeline {
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
             // they are no longer needed. This might be complicated with long inheritance chains.
+            //
+            // TODO Vec is not a great choice for `retain_lsns`
             for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
@@ -2924,6 +2927,13 @@ impl Timeline {
                 }
                 layer_names_to_delete.push(doomed_layer.filename());
                 doomed_layer.delete()?; // FIXME: schedule succeeded deletions before returning?
+
+                // TODO Removing from the bottom of the layer map is expensive.
+                //      Maybe instead discard all layer map versions before
+                //      min(new_gc_cutoff, pitr_cutoff) since we never search
+                //      before that LSN. But make sure that iter_historic_layers
+                //      still knows about the layers older than this threshold
+                //      that were not deleted (if needed).
                 layers.remove_historic_noflush(doomed_layer);
                 result.layers_removed += 1;
             }
