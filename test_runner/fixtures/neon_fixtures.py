@@ -1220,7 +1220,7 @@ class PageserverHttpClient(requests.Session):
         size = res["size"]
         assert type(size) == int
         inputs = res["inputs"]
-        assert inputs is dict
+        assert type(inputs) is dict
         return (size, inputs)
 
     def timeline_list(
