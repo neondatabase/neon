@@ -951,10 +951,41 @@ impl PostgresRedoManager {
                 .pending_responses
                 .push_back(Some(Bytes::from(resultbuf)));
         }
+        // Replace our request's response with None in `pending_responses`.
+        // Then make space in the ring buffer by clearing out any seqence of contiguous
+        // `None`'s from the front of `pending_responses`.
+        // NB: We can't pop_front() because other requests' responses because another
+        // requester might have grabbed the output mutex before us:
+        // T1: grab input mutex
+        // T1: send request_no 23
+        // T1: release input mutex
+        // T2: grab input mutex
+        // T2: send request_no 24
+        // T2: release input mutex
+        // T2: grab output mutex
+        // T2: n_processed_responses + output.pending_responses.len() <= request_no
+        //            23                                0                   24
+        // T2: enters poll loop that reads stdout
+        // T2: put response for 23 into pending_responses
+        // T2: put response for 24 into pending_resposnes
+        // pending_responses now looks like this: Front Some(response_23) Some(response_24) Back
+        // T2: takes its response_24
+        // pending_responses now looks like this: Front Some(response_23) None Back
+        // T2: does the while loop below
+        // pending_responses now looks like this: Front Some(response_23) None Back
+        // T2: releases output mutex
+        // T1: grabs output mutex
+        // T1: n_processed_responses + output.pending_responses.len() > request_no
+        //            23                                2                   23
+        // T1: skips poll loop that reads stdout
+        // T1: takes its response_23
+        // pending_responses now looks like this: Front None None Back
+        // T2: does the while loop below
+        // pending_responses now looks like this: Front Back
+        // n_processed_responses now has value 25
         let res = output.pending_responses[request_no - n_processed_responses]
             .take()
-            .unwrap();
-        // Remove processed entries from ring buffer
+            .expect("we own this request_no, nobody else is supposed to take it");
         while let Some(front) = output.pending_responses.front() {
             if front.is_none() {
                 output.pending_responses.pop_front();
