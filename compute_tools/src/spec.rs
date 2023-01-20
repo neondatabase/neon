@@ -213,8 +213,20 @@ pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<
     if let Some(ops) = &node.spec.delta_operations {
         // First, reassign all dependent objects to db owners.
         info!("reassigning dependent objects of to-be-deleted roles");
+
+        // Fetch existing roles. We could've exported and used `existing_roles` from
+        // `handle_roles()`, but we only make this list there before creating new roles.
+        // Which is probably fine as we never create to-be-deleted roles, but that'd
+        // just look a bit untidy. Anyway, the entire `pg_roles` should be in shared
+        // buffers already, so this shouldn't be a big deal.
+        let mut xact = client.transaction()?;
+        let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
+        xact.commit()?;
+
         for op in ops {
-            if op.action == "delete_role" {
+            // Check that role is still present in Postgres, as this could be a
+            // restart with the same spec after role deletion.
+            if op.action == "delete_role" && existing_roles.iter().any(|r| r.name == op.name) {
                 reassign_owned_objects(node, &op.name)?;
             }
         }
