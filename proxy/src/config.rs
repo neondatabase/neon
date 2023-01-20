@@ -85,7 +85,7 @@ pub struct CacheOptions {
 
 impl CacheOptions {
     /// Default options for [`crate::auth::caches::NodeInfoCache`].
-    pub const DEFAULT_OPTIONS_NODE_INFO: &str = "size=4000,ttl=5m";
+    pub const DEFAULT_OPTIONS_NODE_INFO: &str = "size=4000,ttl=4m40s";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::DEFAULT_OPTIONS_NODE_INFO`].

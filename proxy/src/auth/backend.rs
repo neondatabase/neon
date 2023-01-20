@@ -292,7 +292,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
 
                 link::handle_user(&url, client)
                     .await?
-                    .map(CachedNodeInfo::uncached)
+                    .map(CachedNodeInfo::new_uncached)
             }
         };
 

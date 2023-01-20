@@ -188,7 +188,7 @@ pub mod timed_lru {
     impl<C: Cache> Cached<C> {
         /// Place any entry into this wrapper; invalidation will be a no-op.
         /// Unfortunately, rust doesn't let us implement [`From`] or [`Into`].
-        pub fn uncached(value: C::Value) -> Self {
+        pub fn new_uncached(value: C::Value) -> Self {
             Self { token: None, value }
         }
 
@@ -197,6 +197,11 @@ pub mod timed_lru {
             if let Some((cache, info)) = &self.token {
                 cache.invalidate(info);
             }
+        }
+
+        /// Tell if this entry is cached.
+        pub fn cached(&self) -> bool {
+            self.token.is_some()
         }
     }
 

@@ -35,6 +35,15 @@ static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_connection_failures_total",
+        "Number of connection failures (per kind).",
+        &["kind"],
+    )
+    .unwrap()
+});
+
 static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes_per_client",
@@ -290,11 +299,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             .or_else(|e| stream.throw_error(e))
             .await
             .map_err(|e| {
+                let is_cached = node.cached();
+
+                let label = match is_cached {
+                    true => "compute_cached",
+                    false => "compute_uncached",
+                };
+                NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+
                 // If we couldn't connect, a cached connection info might be to blame
                 // (e.g. the compute node's address might've changed at the wrong time).
                 // Invalidate the cache entry (if any) to prevent subsequent errors.
-                warn!("invalidating stalled compute node info cache entry");
-                node.invalidate();
+                if is_cached {
+                    warn!("invalidating stalled compute node info cache entry");
+                    node.invalidate();
+                }
+
                 e
             })?;
 

@@ -115,7 +115,7 @@ impl Api<'_> {
             aux: Default::default(),
         };
 
-        Ok(CachedNodeInfo::uncached(node))
+        Ok(CachedNodeInfo::new_uncached(node))
     }
 }
 
