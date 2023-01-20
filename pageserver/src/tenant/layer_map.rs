@@ -225,7 +225,8 @@ where
         let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
 
-        match (latest_delta, latest_image) {
+		loop {
+        return match (latest_delta, latest_image) {
             (None, None) => None,
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
@@ -235,6 +236,11 @@ where
                 })
             }
             (Some(delta), None) => {
+				if let Ok(contains) = delta.overlaps(&(key..key.next())) {
+					if !contains {
+						continue;
+					}
+				}
                 let lsn_floor = delta.get_lsn_range().start;
                 Some(SearchResult {
                     layer: delta,
@@ -251,6 +257,11 @@ where
                         lsn_floor: img_lsn,
                     })
                 } else {
+					if let Ok(contains) = delta.overlaps(&(key..key.next())) {
+						if !contains {
+							continue;
+						}
+					}
                     let lsn_floor =
                         std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
                     Some(SearchResult {
@@ -260,6 +271,7 @@ where
                 }
             }
         }
+		}
     }
 
     /// Start a batch of updates, applied on drop

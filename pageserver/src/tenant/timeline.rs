@@ -3292,15 +3292,17 @@ impl Timeline {
             // If GC horizon is at 2500, we can remove layers A and B, but
             // we cannot remove C, even though it's older than 2500, because
             // the delta layer 2000-3000 depends on it.
-            if !layers
-                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
-            {
-                debug!(
-                    "keeping {} because it is the latest layer",
-                    l.filename().file_name()
-                );
-                result.layers_not_updated += 1;
-                continue 'outer;
+            for occupied_range in &l.get_occupied_ranges()? {
+                if !layers
+                    .image_layer_exists(occupied_range, &(l.get_lsn_range().end..new_gc_cutoff))?
+                {
+                    debug!(
+                        "keeping {} because it is the latest layer",
+                        l.filename().file_name()
+                    );
+                    result.layers_not_updated += 1;
+                    continue 'outer;
+                }
             }
 
             // We didn't find any reason to keep this file, so remove it.

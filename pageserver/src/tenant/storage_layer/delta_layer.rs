@@ -41,6 +41,8 @@ use anyhow::{bail, ensure, Context, Result};
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
@@ -60,6 +62,11 @@ use super::{
     DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerFileName, LayerIter,
     LayerKeyIter, LayerResidenceStatus, PathOrConf,
 };
+
+// Number of holes for delta layer kept in memory by layer map to speedup DeltaLayer::overlaps operation.
+// To much number of layers can cause large memory footprint of layer map,
+const MAX_CACHED_HOLES: usize = 10; // TODO: move it to tenant config? (not available in layer methods)
+const MIN_HOLE_LENGTH: i128 = (128 * 1024 * 1024 / PAGE_SZ) as i128; // TODO: use compaction_target? (see above)
 
 ///
 /// Header stored in the beginning of the file
@@ -171,6 +178,24 @@ impl DeltaKey {
     }
 }
 
+/// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
+#[derive(PartialEq, Eq)]
+struct Hole(Range<Key>);
+
+impl Ord for Hole {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let other_len = other.0.end.to_i128() - other.0.start.to_i128();
+        let self_len = self.0.end.to_i128() - self.0.start.to_i128();
+        other_len.cmp(&self_len)
+    }
+}
+
+impl PartialOrd for Hole {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// DeltaLayer is the in-memory data structure associated with an on-disk delta
 /// file.
 ///
@@ -214,6 +239,9 @@ pub struct DeltaLayerInner {
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
+
+    /// Largest holes in this layer
+    holes: Option<Vec<Hole>>,
 }
 
 impl std::fmt::Debug for DeltaLayerInner {
@@ -316,26 +344,44 @@ impl Layer for DeltaLayer {
         Ok(())
     }
 
+    fn get_occupied_ranges(&self) -> Result<Vec<Range<Key>>> {
+        let inner = self.load()?;
+        if let Some(holes) = &inner.holes {
+            let mut occ = Vec::with_capacity(holes.len() + 1);
+            let key_range = self.get_key_range();
+            let mut prev = key_range.start;
+            for hole in holes {
+                occ.push(prev..hole.0.start);
+                prev = hole.0.end;
+            }
+            occ.push(prev..key_range.end);
+            Ok(occ)
+        } else {
+            Ok(vec![self.get_key_range()])
+        }
+    }
+
     fn overlaps(&self, key_range: &Range<Key>) -> anyhow::Result<bool> {
         if !range_overlaps(&self.key_range, key_range) {
-            return Ok(false);
+            Ok(false)
+        } else {
+            let inner = self.load()?;
+            if let Some(holes) = &inner.holes {
+                let start = match holes.binary_search_by_key(&key_range.start, |hole| hole.0.start)
+                {
+                    Ok(index) => index,
+                    Err(index) => {
+                        if index == 0 {
+                            return Ok(true);
+                        }
+                        index - 1
+                    }
+                };
+                Ok(holes[start].0.end < key_range.end)
+            } else {
+                Ok(true)
+            }
         }
-        // Open the file and lock the metadata in memory
-        let inner = self.load()?;
-        let file = inner.file.as_ref().unwrap();
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
-            file,
-        );
-        let search_key = DeltaKey::from_key_lsn(&key_range.start, Lsn(0));
-        let mut overlaps = false;
-        tree_reader.visit(&search_key.0, VisitDirection::Forwards, |key, _value| {
-            let key = Key::from_slice(&key[..KEY_SIZE]);
-            overlaps = key < key_range.end;
-            false
-        })?;
-        Ok(overlaps)
     }
 
     fn get_value_reconstruct_data(
@@ -608,6 +654,37 @@ impl DeltaLayer {
 
         debug!("loaded from {}", &path.display());
 
+        // Construct vector with largest holes
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            inner.index_start_blk,
+            inner.index_root_blk,
+            file,
+        );
+        // min-heap (reserve space for one more element added before eviction)
+        let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(MAX_CACHED_HOLES + 1);
+        let mut prev_key: Option<Key> = None;
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, _value| {
+                let curr = Key::from_slice(&key[..KEY_SIZE]);
+                if let Some(prev) = prev_key {
+                    if curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH {
+                        heap.push(Hole(prev..curr));
+                        if heap.len() > MAX_CACHED_HOLES {
+                            heap.pop(); // remove smallest hole
+                        }
+                    }
+                }
+                prev_key = Some(curr.next());
+                true
+            },
+        )?;
+        let mut holes = heap.into_vec();
+        holes.sort_by_key(|hole| hole.0.start);
+        inner.holes = Some(holes);
+
         inner.loaded = true;
         Ok(())
     }
@@ -634,6 +711,7 @@ impl DeltaLayer {
                 file: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
+                holes: None,
             }),
         }
     }
@@ -664,6 +742,7 @@ impl DeltaLayer {
                 file: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
+                holes: None,
             }),
         })
     }
@@ -835,6 +914,7 @@ impl DeltaLayerWriterInner {
                 file: None,
                 index_start_blk,
                 index_root_blk,
+                holes: None,
             }),
         };
 
