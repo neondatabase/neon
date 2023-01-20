@@ -1206,6 +1206,9 @@ class PageserverHttpClient(requests.Session):
         return res_json
 
     def tenant_size(self, tenant_id: TenantId) -> int:
+        return self.tenant_size_and_modelinputs(tenant_id)[0]
+
+    def tenant_size_and_modelinputs(self, tenant_id: TenantId) -> Tuple[int, Dict[str, Any]]:
         """
         Returns the tenant size, together with the model inputs as the second tuple item.
         """
@@ -1216,9 +1219,9 @@ class PageserverHttpClient(requests.Session):
         assert TenantId(res["id"]) == tenant_id
         size = res["size"]
         assert type(size) == int
-        # there are additional inputs, which are the collected raw information before being fed to the tenant_size_model
-        # there are no tests for those right now.
-        return size
+        inputs = res["inputs"]
+        assert type(inputs) is dict
+        return (size, inputs)
 
     def timeline_list(
         self,

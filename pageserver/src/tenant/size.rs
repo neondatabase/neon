@@ -23,7 +23,13 @@ use tracing::*;
 pub struct ModelInputs {
     updates: Vec<Update>,
     retention_period: u64,
+
+    /// Relevant lsns per timeline.
+    ///
+    /// This field is not required for deserialization purposes, which is mostly used in tests. The
+    /// LSNs explain the outcome (updates) but are not needed in size calculation.
     #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
+    #[serde(default)]
     timeline_inputs: HashMap<TimelineId, TimelineInputs>,
 }
 
@@ -32,6 +38,8 @@ pub struct ModelInputs {
 #[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct TimelineInputs {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    ancestor_lsn: Lsn,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     last_record: Lsn,
     #[serde_as(as = "serde_with::DisplayFromStr")]
@@ -178,21 +186,13 @@ pub(super) async fn gather_inputs(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    let timelines = tenant
+    // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
+    tenant
         .refresh_gc_info()
         .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
-    if timelines.is_empty() {
-        // All timelines are below tenant's gc_horizon; alternative would be to use
-        // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
-        // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
-        return Ok(ModelInputs {
-            updates: vec![],
-            retention_period: 0,
-            timeline_inputs: HashMap::new(),
-        });
-    }
+    let timelines = tenant.list_timelines();
 
     // record the used/inserted cache keys here, to remove extras not to start leaking
     // after initial run the cache should be quite stable, but live timelines will eventually
@@ -201,13 +201,25 @@ pub(super) async fn gather_inputs(
 
     let mut updates = Vec::new();
 
-    // record the per timline values used to determine `retention_period`
+    // record the per timeline values useful to debug the model inputs, also used to track
+    // ancestor_lsn without keeping a hold of Timeline
     let mut timeline_inputs = HashMap::with_capacity(timelines.len());
 
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
+    // mapping from (TimelineId, Lsn) => if this branch point has been handled already via
+    // GcInfo::retain_lsns or if it needs to have its logical_size calculated.
+    let mut referenced_branch_froms = HashMap::<(TimelineId, Lsn), bool>::new();
+
     for timeline in timelines {
+        if !timeline.is_active() {
+            anyhow::bail!(
+                "timeline {} is not active, cannot calculate tenant_size now",
+                timeline.timeline_id
+            );
+        }
+
         let last_record_lsn = timeline.get_last_record_lsn();
 
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
@@ -273,13 +285,30 @@ pub(super) async fn gather_inputs(
 
         // all timelines branch from something, because it might be impossible to pinpoint
         // which is the tenant_size_model's "default" branch.
+
+        let ancestor_lsn = timeline.get_ancestor_lsn();
+
         updates.push(Update {
-            lsn: timeline.get_ancestor_lsn(),
+            lsn: ancestor_lsn,
             command: Command::BranchFrom(timeline.get_ancestor_timeline_id()),
             timeline_id: timeline.timeline_id,
         });
 
+        if let Some(parent_timeline_id) = timeline.get_ancestor_timeline_id() {
+            // refresh_gc_info will update branchpoints and pitr_cutoff but only do it for branches
+            // which are over gc_horizon. for example, a "main" branch which never received any
+            // updates apart from initdb not have branch points recorded.
+            referenced_branch_froms
+                .entry((parent_timeline_id, timeline.get_ancestor_lsn()))
+                .or_default();
+        }
+
         for (lsn, _kind) in &interesting_lsns {
+            // mark this visited so don't need to re-process this parent
+            *referenced_branch_froms
+                .entry((timeline.timeline_id, *lsn))
+                .or_default() = true;
+
             if let Some(size) = logical_size_cache.get(&(timeline.timeline_id, *lsn)) {
                 updates.push(Update {
                     lsn: *lsn,
@@ -295,22 +324,10 @@ pub(super) async fn gather_inputs(
             }
         }
 
-        // all timelines also have an end point if they have made any progress
-        if last_record_lsn > timeline.get_ancestor_lsn()
-            && !interesting_lsns
-                .iter()
-                .any(|(lsn, _)| lsn == &last_record_lsn)
-        {
-            updates.push(Update {
-                lsn: last_record_lsn,
-                command: Command::EndOfBranch,
-                timeline_id: timeline.timeline_id,
-            });
-        }
-
         timeline_inputs.insert(
             timeline.timeline_id,
             TimelineInputs {
+                ancestor_lsn,
                 last_record: last_record_lsn,
                 // this is not used above, because it might not have updated recently enough
                 latest_gc_cutoff: *timeline.get_latest_gc_cutoff_lsn(),
@@ -319,6 +336,80 @@ pub(super) async fn gather_inputs(
                 next_gc_cutoff,
             },
         );
+    }
+
+    // iterate over discovered branch points and make sure we are getting logical sizes at those
+    // points.
+    for ((timeline_id, lsn), handled) in referenced_branch_froms.iter() {
+        if *handled {
+            continue;
+        }
+
+        let timeline_id = *timeline_id;
+        let lsn = *lsn;
+
+        match timeline_inputs.get(&timeline_id) {
+            Some(inputs) if inputs.ancestor_lsn == lsn => {
+                // we don't need an update at this branch point which is also point where
+                // timeline_id branch was branched from.
+                continue;
+            }
+            Some(_) => {}
+            None => {
+                // we should have this because we have iterated through all of the timelines
+                anyhow::bail!("missing timeline_input for {timeline_id}")
+            }
+        }
+
+        if let Some(size) = logical_size_cache.get(&(timeline_id, lsn)) {
+            updates.push(Update {
+                lsn,
+                timeline_id,
+                command: Command::Update(*size),
+            });
+
+            needed_cache.insert((timeline_id, lsn));
+        } else {
+            let timeline = tenant
+                .get_timeline(timeline_id, false)
+                .context("find referenced ancestor timeline")?;
+            let parallel_size_calcs = Arc::clone(limit);
+            joinset.spawn(calculate_logical_size(
+                parallel_size_calcs,
+                timeline.clone(),
+                lsn,
+            ));
+
+            if let Some(parent_id) = timeline.get_ancestor_timeline_id() {
+                // we should not find new ones because we iterated tenants all timelines
+                anyhow::ensure!(
+                    timeline_inputs.contains_key(&parent_id),
+                    "discovered new timeline {parent_id} (parent of {timeline_id})"
+                );
+            }
+        };
+    }
+
+    // finally add in EndOfBranch for all timelines where their last_record_lsn is not a branch
+    // point. this is needed by the model.
+    for (timeline_id, inputs) in timeline_inputs.iter() {
+        let lsn = inputs.last_record;
+
+        if referenced_branch_froms.contains_key(&(*timeline_id, lsn)) {
+            // this means that the (timeline_id, last_record_lsn) represents a branch point
+            // we do not want to add EndOfBranch updates for these points because it doesn't fit
+            // into the current tenant_size_model.
+            continue;
+        }
+
+        if lsn > inputs.ancestor_lsn {
+            // all timelines also have an end point if they have made any progress
+            updates.push(Update {
+                lsn,
+                command: Command::EndOfBranch,
+                timeline_id: *timeline_id,
+            });
+        }
     }
 
     let mut have_any_error = false;
@@ -379,6 +470,7 @@ pub(super) async fn gather_inputs(
     // handled by the variant order in `Command`.
     //
     updates.sort_unstable();
+
     // And another sort to handle Command::BranchFrom ordering
     // in case when there are multiple branches at the same LSN.
     let sorted_updates = sort_updates_in_tree_order(updates)?;
@@ -574,7 +666,10 @@ fn updates_sort() {
 fn verify_size_for_multiple_branches() {
     // this is generated from integration test test_tenant_size_with_multiple_branches, but this way
     // it has the stable lsn's
-    let doc = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"update":25763840},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/1819818","command":{"update":26075136},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/18B5E40","command":{"update":26427392},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"update":26492928},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"230fc9d756f7363574c0d66533564dcc"},{"lsn":"0/220F438","command":{"update":25239552},"timeline_id":"230fc9d756f7363574c0d66533564dcc"}],"retention_period":131072,"timeline_inputs":{"cd9d9409c216e64bf580904facedb01b":{"last_record":"0/18D5E40","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/18B5E40","pitr_cutoff":"0/18B5E40","next_gc_cutoff":"0/18B5E40"},"10b532a550540bc15385eac4edde416a":{"last_record":"0/1839818","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/1819818","pitr_cutoff":"0/1819818","next_gc_cutoff":"0/1819818"},"230fc9d756f7363574c0d66533564dcc":{"last_record":"0/222F438","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/220F438","pitr_cutoff":"0/220F438","next_gc_cutoff":"0/220F438"}}}"#;
+    //
+    // timelineinputs have been left out, because those explain the inputs, but don't participate
+    // in further size calculations.
+    let doc = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"update":25763840},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/1819818","command":{"update":26075136},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/18B5E40","command":{"update":26427392},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"update":26492928},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"230fc9d756f7363574c0d66533564dcc"},{"lsn":"0/220F438","command":{"update":25239552},"timeline_id":"230fc9d756f7363574c0d66533564dcc"}],"retention_period":131072}"#;
 
     let inputs: ModelInputs = serde_json::from_str(doc).unwrap();
 
