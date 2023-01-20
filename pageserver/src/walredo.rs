@@ -311,6 +311,19 @@ impl PostgresRedoManager {
 				base_img_lsn,
                 lsn
             );
+            // self.stdin only holds stdin & stderr as_raw_fd().
+            // Dropping it as part of take() doesn't close them.
+            // The owning objects (ChildStdout and ChildStderr) are stored in
+            // self.stdout and self.stderr, respsectively.
+            // We intentionally keep them open here to avoid a race between
+            // currently running `apply_wal_records()` and a `launch()` call
+            // after we return here.
+            // The currently running `apply_wal_records()` must not read from
+            // the newly launched process.
+            // By keeping self.stdout and self.stderr open here, `launch()` will
+            // get other file descriptors for the new child's stdout and stderr,
+            // and hence the current `apply_wal_records()` calls will observe
+            //  `output.stdout.as_raw_fd() != stdout_fd` .
             if let Some(proc) = self.stdin.lock().unwrap().take() {
                 proc.child.kill_and_wait();
             }
@@ -884,6 +897,9 @@ impl PostgresRedoManager {
             // To prevent such situation we compare stdout file descriptors.
             // As far as old stdout pipe is destroyed only after new one is created,
             // it can not reuse the same file descriptor, so this check is safe.
+            //
+            // Cross-read this with the comment in apply_batch_postgres if result.is_err().
+            // That's where we kill the child process.
             return Err(Error::new(
                 ErrorKind::BrokenPipe,
                 "WAL redo process closed its stdout unexpectedly",
