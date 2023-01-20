@@ -2929,11 +2929,10 @@ impl Timeline {
                 doomed_layer.delete()?; // FIXME: schedule succeeded deletions before returning?
 
                 // TODO Removing from the bottom of the layer map is expensive.
-                //      Maybe instead discard all layer map versions before
-                //      min(new_gc_cutoff, pitr_cutoff) since we never search
-                //      before that LSN. But make sure that iter_historic_layers
-                //      still knows about the layers older than this threshold
-                //      that were not deleted (if needed).
+                //      Maybe instead discard all layer map historic versions that
+                //      won't be needed for page reconstruction for this timeline,
+                //      and mark what we can't delete yet as deleted from the layer
+                //      map index without actually rebuilding the index.
                 layers.remove_historic_noflush(doomed_layer);
                 result.layers_removed += 1;
             }
