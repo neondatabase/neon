@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use notify::{RecursiveMode, Watcher};
-use postgres::{Client, Transaction};
 use serde::Deserialize;
 use tracing::{debug, instrument};
+use tracing_postgres::{Client, Transaction};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 

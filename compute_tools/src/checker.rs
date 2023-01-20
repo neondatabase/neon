@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
-use postgres::Client;
-use tokio_postgres::NoTls;
 use tracing::{error, instrument};
+use tracing_postgres::{Client, NoTls};
 
 use crate::compute::ComputeNode;
 
@@ -24,6 +23,8 @@ pub fn create_writability_check_data(client: &mut Client) -> Result<()> {
 
 #[instrument(skip_all)]
 pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
+    // XXX: There is no tracing wrapper around tokio_postgres. But we have
+    // a span for the whole function, that's good enough for now.
     let (client, connection) = tokio_postgres::connect(compute.connstr.as_str(), NoTls).await?;
     if client.is_closed() {
         return Err(anyhow!("connection to postgres closed"));

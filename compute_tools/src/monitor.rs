@@ -3,8 +3,8 @@ use std::{thread, time};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use postgres::{Client, NoTls};
 use tracing::{debug, info};
+use tracing_postgres::{Client, NoTls};
 
 use crate::compute::ComputeNode;
 

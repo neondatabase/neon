@@ -836,7 +836,6 @@ dependencies = [
  "futures",
  "hyper",
  "notify",
- "postgres",
  "regex",
  "serde",
  "serde_json",
@@ -844,6 +843,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-postgres",
  "tracing-subscriber",
  "url",
  "workspace_hack",
@@ -4069,6 +4069,15 @@ dependencies = [
  "lazy_static",
  "log",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-postgres"
+version = "0.1.0"
+dependencies = [
+ "postgres",
+ "tracing",
+ "workspace_hack",
 ]
 
 [[package]]

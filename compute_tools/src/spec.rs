@@ -2,10 +2,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::Result;
-use postgres::config::Config;
-use postgres::{Client, NoTls};
 use serde::Deserialize;
 use tracing::{info, info_span, instrument, span_enabled, warn, Level};
+use tracing_postgres::{Client, Config, NoTls};
 
 use crate::compute::ComputeNode;
 use crate::config;

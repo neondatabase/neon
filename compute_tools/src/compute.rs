@@ -23,9 +23,9 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
 use tracing::{info, instrument, warn};
+use tracing_postgres::{Client, NoTls};
 
 use crate::checker::create_writability_check_data;
 use crate::config;
