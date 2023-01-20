@@ -328,7 +328,10 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
         if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
             let metrics_ctx = RequestContext::todo_child(
                 TaskKind::MetricsCollection,
-                DownloadBehavior::Error, // metrics collector shouldn't be downloading anything
+                // This task itself shouldn't download anything.
+                // The actual size calculation does need downloads, and
+                // creates a child context with the right DownloadBehavior.
+                DownloadBehavior::Error,
             );
             task_mgr::spawn(
                 MGMT_REQUEST_RUNTIME.handle(),
