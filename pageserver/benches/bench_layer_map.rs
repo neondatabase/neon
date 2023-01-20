@@ -24,6 +24,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
 
     let filenames = BufReader::new(File::open(filename_dump).unwrap()).lines();
 
+    let mut updates = layer_map.batch_update();
     for fname in filenames {
         let fname = &fname.unwrap();
         if let Some(imgfilename) = ImageFileName::parse_str(fname) {
@@ -33,7 +34,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
                 is_incremental: false,
                 short_id: fname.to_string(),
             };
-            layer_map.insert_historic_noflush(Arc::new(layer));
+            updates.insert_historic(Arc::new(layer));
             min_lsn = min(min_lsn, imgfilename.lsn);
             max_lsn = max(max_lsn, imgfilename.lsn);
         } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
@@ -43,17 +44,17 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
                 is_incremental: true,
                 short_id: fname.to_string(),
             };
-            layer_map.insert_historic_noflush(Arc::new(layer));
+            updates.insert_historic(Arc::new(layer));
             min_lsn = min(min_lsn, deltafilename.lsn_range.start);
             max_lsn = max(max_lsn, deltafilename.lsn_range.end);
         } else {
             panic!("unexpected filename {fname}");
         }
     }
-    layer_map.flush_updates();
 
     println!("min: {min_lsn}, max: {max_lsn}");
 
+    updates.flush();
     layer_map
 }
 
@@ -220,6 +221,7 @@ fn bench_sequential(c: &mut Criterion) {
     //      because then it runs multiple times during warmup.
     let now = Instant::now();
     let mut layer_map = LayerMap::default();
+    let mut updates = layer_map.batch_update();
     for i in 0..100_000 {
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
@@ -229,9 +231,9 @@ fn bench_sequential(c: &mut Criterion) {
             is_incremental: false,
             short_id: format!("Layer {}", i),
         };
-        layer_map.insert_historic_noflush(Arc::new(layer));
+        updates.insert_historic(Arc::new(layer));
     }
-    layer_map.flush_updates();
+    updates.flush();
     println!("Finished layer map init in {:?}", now.elapsed());
 
     // Choose 100 uniformly random queries

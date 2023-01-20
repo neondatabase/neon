@@ -104,6 +104,61 @@ impl<L: ?Sized> Default for LayerMap<L> {
     }
 }
 
+/// The primary update API for the layer map.
+///
+/// Batching historic layer insertions and removals is good for
+/// performance and this struct helps us do that correctly.
+#[must_use]
+pub struct BatchedUpdates<'a, L: ?Sized + Layer> {
+    // While we hold this exclusive reference to the layer map the type checker
+    // will prevent us from accidentally reading any unflushed updates.
+    layer_map: &'a mut LayerMap<L>,
+}
+
+/// Provide ability to batch more updates while hiding the read
+/// API so we don't accidentally read without flushing.
+impl<L> BatchedUpdates<'_, L>
+where
+    L: ?Sized + Layer,
+{
+    ///
+    /// Insert an on-disk layer.
+    ///
+    pub fn insert_historic(&mut self, layer: Arc<L>) {
+        self.layer_map.insert_historic_noflush(layer)
+    }
+
+    ///
+    /// Remove an on-disk layer from the map.
+    ///
+    /// This should be called when the corresponding file on disk has been deleted.
+    ///
+    pub fn remove_historic(&mut self, layer: Arc<L>) {
+        self.layer_map.remove_historic_noflush(layer)
+    }
+
+    // We will flush on drop anyway, but this method makes it
+    // more explicit that there is some work being done.
+    /// Apply all updates
+    pub fn flush(self) {
+        // Flush happens on drop
+    }
+}
+
+// Ideally the flush() method should be called explicitly for more
+// controlled execution. But if we forget we'd rather flush on drop
+// than panic later or read without flushing.
+//
+// TODO maybe warn if flush hasn't explicitly been called
+impl<L> Drop for BatchedUpdates<'_, L>
+where
+    L: ?Sized + Layer,
+{
+    fn drop(&mut self) {
+        self.layer_map.flush_updates();
+    }
+}
+
 /// Return value of LayerMap::search
 pub struct SearchResult<L: ?Sized> {
     pub layer: Arc<L>,
@@ -187,10 +242,17 @@ where
         }
     }
 
+    /// Start a batch of updates, applied on drop
+    pub fn batch_update(&mut self) -> BatchedUpdates<'_, L> {
+        BatchedUpdates { layer_map: self }
+    }
+
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic_noflush(&mut self, layer: Arc<L>) {
+    /// Helper function for BatchedUpdates::insert_historic
+    ///
+    pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
         let lr = layer.get_lsn_range();
         self.historic.insert(
@@ -212,7 +274,7 @@ where
     ///
     /// Remove an on-disk layer from the map.
     ///
-    /// This should be called when the corresponding file on disk has been deleted.
+    /// Helper function for BatchedUpdates::remove_historic
     ///
     pub fn remove_historic_noflush(&mut self, layer: Arc<L>) {
         let kr = layer.get_key_range();
@@ -239,10 +301,8 @@ where
         NUM_ONDISK_LAYERS.dec();
     }
 
-    /// Must be called after a batch of insert_historic_noflush or
-    /// remove_historic_noflush calls, before querying. Otherwise
-    /// the next query will panic.
-    pub fn flush_updates(&mut self) {
+    /// Helper function for BatchedUpdates::drop.
+    pub(self) fn flush_updates(&mut self) {
         self.historic.rebuild();
     }
 
