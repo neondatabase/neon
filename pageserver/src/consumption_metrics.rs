@@ -59,7 +59,7 @@ pub async fn collect_metrics(
         None,
         None,
         "synthetic size calculation",
-        true,
+        false,
         async move {
             calculate_synthetic_size_worker(synthetic_size_calculation_interval)
                 .instrument(info_span!("synthetic_size_worker"))
