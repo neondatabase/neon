@@ -1,10 +1,9 @@
 //! This module defines `RequestContext`, a structure that we use throughout
-//! the pageserver codebase to propagate high-level context from the places
+//! the pageserver to propagate high-level context from places
 //! that _originate_ activity down to the shared code paths at the
 //! heart of the pageserver.
 //!
-//! For example, the initial product needs were that we needed to answer the
-//! following questions inside `Timline::get(page_nr, lsn)`:
+//! For example, in `Timeline::get(page_nr, lsn)` we need to answer the following questions:
 //! 1. What high-level activity ([`TaskKind`]) needs this page?
 //!    We need that information as a categorical dimension for page access
 //!    statistics, which we, in turn, need to guide layer eviction policy design.
