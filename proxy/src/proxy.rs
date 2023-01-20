@@ -290,7 +290,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             .or_else(|e| stream.throw_error(e))
             .await
             .map_err(|e| {
-                // Invalidate the cache entry if we failed to connect.
+                // If we couldn't connect, a cached connection info might be to blame
+                // (e.g. the compute node's address might've changed at the wrong time).
+                // Invalidate the cache entry (if any) to prevent subsequent errors.
                 warn!("invalidating stalled compute node info cache entry");
                 node.invalidate();
                 e
