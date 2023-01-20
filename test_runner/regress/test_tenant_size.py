@@ -17,13 +17,20 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
 
     main_branch_name = "main"
 
-    with env.postgres.create_start(main_branch_name, tenant_id=tenant_id) as pg:
+    with env.postgres.create_start(
+        main_branch_name,
+        tenant_id=tenant_id,
+        config_lines=["autovacuum=off", "checkpoint_timeout=10min"],
+    ) as pg:
         with pg.cursor() as cur:
             cur.execute("SELECT 1")
             row = cur.fetchone()
             assert row is not None
             assert row[0] == 1
         size = http_client.tenant_size(tenant_id)
+        # we've disabled the autovacuum and checkpoint
+        # so background processes should not change the size.
+        # If this test will flake we should probably loosen the check
         assert size == initial_size, "starting idle compute should not change the tenant size"
 
     # the size should be the same, until we increase the size over the

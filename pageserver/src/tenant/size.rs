@@ -209,7 +209,7 @@ pub(super) async fn gather_inputs(
     let mut max_cutoff_distance = None;
 
     // mapping from (TimelineId, Lsn) => if this branch point has been handled already via
-    // GcInfo::retain_lsns or if it needs to have it's logical_size calculated.
+    // GcInfo::retain_lsns or if it needs to have its logical_size calculated.
     let mut referenced_branch_froms = HashMap::<(TimelineId, Lsn), bool>::new();
 
     for timeline in timelines {
