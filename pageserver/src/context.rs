@@ -1,7 +1,7 @@
 //! This module defines `RequestContext`, a structure that we use throughout
 //! the pageserver to propagate high-level context from places
 //! that _originate_ activity down to the shared code paths at the
-//! heart of the pageserver.
+//! heart of the pageserver. It's inspired by Golang's `context.Context`.
 //!
 //! For example, in `Timeline::get(page_nr, lsn)` we need to answer the following questions:
 //! 1. What high-level activity ([`TaskKind`]) needs this page?
@@ -13,6 +13,8 @@
 //! [`RequestContext`] satisfies those needs.
 //! The current implementation is a small `struct` that is passed through
 //! the call chain by reference.
+//!
+//! ### Future Work
 //!
 //! However, we do not intend to stop here, since there are other needs that
 //! require carrying information from high to low levels of the app.
@@ -45,13 +47,13 @@
 //! RequestContext might look quite different once it supports those features.
 //! Likely, it will have a shape similar to Golang's `context.Context`.
 //!
-//! ### Why A Container Struct Instead Of Parameters
+//! ### Why A Struct Instead Of Method Parameters
 //!
 //! What's typical about such information is that it needs to be passed down
 //! along the call chain from high level to low level, but few of the functions
 //! in the middle need to understand it.
 //! Further, it is to be expected that we will need to propagate more data
-//! in the future (see the section on future work below).
+//! in the future (see the earlier section on future work).
 //! Hence, for functions in the middle of the call chain, we have the following
 //! requirements:
 //! 1. It should be easy to forward the context to callees.
