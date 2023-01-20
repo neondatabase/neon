@@ -1,5 +1,6 @@
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
@@ -9,28 +10,247 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
     http_client = env.pageserver.http_client()
-    size = http_client.tenant_size(tenant_id)
+    initial_size = http_client.tenant_size(tenant_id)
 
-    # we should never have zero, because there should be the initdb however
-    # this is questionable if we should have anything in this case, as the
-    # gc_cutoff is negative
-    assert (
-        size == 0
-    ), "initial implementation returns zero tenant_size before last_record_lsn is past gc_horizon"
+    # we should never have zero, because there should be the initdb "changes"
+    assert initial_size > 0, "initial implementation returns ~initdb tenant_size"
 
-    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+    main_branch_name = "main"
+
+    with env.postgres.create_start(
+        main_branch_name,
+        tenant_id=tenant_id,
+        config_lines=["autovacuum=off", "checkpoint_timeout=10min"],
+    ) as pg:
         with pg.cursor() as cur:
             cur.execute("SELECT 1")
             row = cur.fetchone()
             assert row is not None
             assert row[0] == 1
         size = http_client.tenant_size(tenant_id)
-        assert size == 0, "starting idle compute should not change the tenant size"
+        # we've disabled the autovacuum and checkpoint
+        # so background processes should not change the size.
+        # If this test will flake we should probably loosen the check
+        assert size == initial_size, "starting idle compute should not change the tenant size"
 
     # the size should be the same, until we increase the size over the
     # gc_horizon
-    size = http_client.tenant_size(tenant_id)
-    assert size == 0, "tenant_size should not be affected by shutdown of compute"
+    size, inputs = http_client.tenant_size_and_modelinputs(tenant_id)
+    assert size == initial_size, "tenant_size should not be affected by shutdown of compute"
+
+    expected_commands: List[Any] = [{"branch_from": None}, "end_of_branch"]
+    actual_commands: List[Any] = list(map(lambda x: x["command"], inputs["updates"]))  # type: ignore
+    assert actual_commands == expected_commands
+
+
+def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
+    """
+    Issue found in production. Because the ancestor branch was under
+    gc_horizon, the branchpoint was "dangling" and the computation could not be
+    done.
+
+    Assuming gc_horizon = 50
+    root:    I      0---10------>20
+    branch:              |-------------------I---------->150
+                                   gc_horizon
+    """
+    env = neon_simple_env
+    (tenant_id, _) = env.neon_cli.create_tenant()
+    http_client = env.pageserver.http_client()
+
+    initial_size = http_client.tenant_size(tenant_id)
+
+    first_branch_timeline_id = env.neon_cli.create_branch("first-branch", tenant_id=tenant_id)
+
+    with env.postgres.create_start("first-branch", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
+            )
+        wait_for_last_flush_lsn(env, pg, tenant_id, first_branch_timeline_id)
+
+    size_after_branching = http_client.tenant_size(tenant_id)
+    log.info(f"size_after_branching: {size_after_branching}")
+
+    assert size_after_branching > initial_size
+
+
+def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
+    """
+    More general version of test_branched_empty_timeline_size
+
+    Assuming gc_horizon = 50
+
+    root:  I 0------10
+    first: I        10
+    nth_0: I        10
+    nth_1: I        10
+    nth_n:          10------------I--------100
+    """
+    env = neon_simple_env
+    (tenant_id, _) = env.neon_cli.create_tenant()
+    http_client = env.pageserver.http_client()
+
+    initial_size = http_client.tenant_size(tenant_id)
+
+    first_branch_name = "first"
+    env.neon_cli.create_branch(first_branch_name, tenant_id=tenant_id)
+
+    size_after_branching = http_client.tenant_size(tenant_id)
+
+    # this might be flaky like test_get_tenant_size_with_multiple_branches
+    # https://github.com/neondatabase/neon/issues/2962
+    assert size_after_branching == initial_size
+
+    last_branch_name = first_branch_name
+    last_branch = None
+
+    for i in range(0, 4):
+        latest_branch_name = f"nth_{i}"
+        last_branch = env.neon_cli.create_branch(
+            latest_branch_name, ancestor_branch_name=last_branch_name, tenant_id=tenant_id
+        )
+        last_branch_name = latest_branch_name
+
+        size_after_branching = http_client.tenant_size(tenant_id)
+        assert size_after_branching == initial_size
+
+    assert last_branch is not None
+
+    with env.postgres.create_start(last_branch_name, tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
+            )
+        wait_for_last_flush_lsn(env, pg, tenant_id, last_branch)
+
+    size_after_writes = http_client.tenant_size(tenant_id)
+    assert size_after_writes > initial_size
+
+
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
+    """
+    gc_horizon = 15
+
+    main:          0--I-10------>20
+    branch:              |-------------------I---------->150
+                                   gc_horizon
+    """
+
+    env = neon_simple_env
+    gc_horizon = 20_000
+    (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
+    http_client = env.pageserver.http_client()
+
+    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+        initdb_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000) s(i)")
+        flushed_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+
+    size_before_branching = http_client.tenant_size(tenant_id)
+
+    assert flushed_lsn.lsn_int - gc_horizon > initdb_lsn.lsn_int
+
+    branch_id = env.neon_cli.create_branch(
+        "branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn
+    )
+
+    with env.postgres.create_start("branch", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 1000) s(i)")
+        wait_for_last_flush_lsn(env, pg, tenant_id, branch_id)
+
+    size_after = http_client.tenant_size(tenant_id)
+
+    assert size_before_branching < size_after
+
+
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+def test_parent_within_horizon(neon_simple_env: NeonEnv):
+    """
+    gc_horizon = 5
+
+    main:          0----10----I->20
+    branch:              |-------------------I---------->150
+                                   gc_horizon
+    """
+
+    env = neon_simple_env
+    gc_horizon = 200_000
+    (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
+    http_client = env.pageserver.http_client()
+
+    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+        initdb_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000) s(i)")
+
+        flushed_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t00 AS SELECT i::bigint n FROM generate_series(0, 2000) s(i)")
+
+        wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+
+    size_before_branching = http_client.tenant_size(tenant_id)
+
+    assert flushed_lsn.lsn_int - gc_horizon > initdb_lsn.lsn_int
+
+    branch_id = env.neon_cli.create_branch(
+        "branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn
+    )
+
+    with env.postgres.create_start("branch", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
+        wait_for_last_flush_lsn(env, pg, tenant_id, branch_id)
+
+    size_after = http_client.tenant_size(tenant_id)
+
+    assert size_before_branching < size_after
+
+
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+def test_only_heads_within_horizon(neon_simple_env: NeonEnv):
+    """
+    gc_horizon = small
+
+    main: 0--------10-----I>20
+    first:         |-----------------------------I>150
+    second:        |---------I>30
+    """
+
+    env = neon_simple_env
+    (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": "1024"})
+    http_client = env.pageserver.http_client()
+
+    initial_size = http_client.tenant_size(tenant_id)
+
+    first_id = env.neon_cli.create_branch("first", tenant_id=tenant_id)
+    second_id = env.neon_cli.create_branch("second", tenant_id=tenant_id)
+
+    ids = {"main": main_id, "first": first_id, "second": second_id}
+
+    latest_size = None
+
+    # gc is not expected to change the results
+
+    for branch_name, amount in [("main", 2000), ("first", 15000), ("second", 3000)]:
+        with env.postgres.create_start(branch_name, tenant_id=tenant_id) as pg:
+            with pg.cursor() as cur:
+                cur.execute(
+                    f"CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, {amount}) s(i)"
+                )
+            wait_for_last_flush_lsn(env, pg, tenant_id, ids[branch_name])
+            size_now = http_client.tenant_size(tenant_id)
+            if latest_size is not None:
+                assert size_now > latest_size
+            else:
+                assert size_now > initial_size
+
+            latest_size = size_now
 
 
 def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
