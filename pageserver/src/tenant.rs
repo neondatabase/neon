@@ -1420,7 +1420,7 @@ impl Tenant {
     }
 
     pub fn current_state(&self) -> TenantState {
-        *self.state.borrow()
+        self.state.borrow().clone()
     }
 
     pub fn is_active(&self) -> bool {
@@ -1474,7 +1474,7 @@ impl Tenant {
     /// Change tenant status to Stopping, to mark that it is being shut down
     pub fn set_stopping(&self) {
         self.state.send_modify(|current_state| {
-            match *current_state {
+            match current_state {
                 TenantState::Active | TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Stopping;
 
@@ -1540,7 +1540,7 @@ impl Tenant {
     pub async fn wait_to_become_active(&self) -> anyhow::Result<()> {
         let mut receiver = self.state.subscribe();
         loop {
-            let current_state = *receiver.borrow_and_update();
+            let current_state = receiver.borrow_and_update().clone();
             match current_state {
                 TenantState::Loading | TenantState::Attaching => {
                     // in these states, there's a chance that we can reach ::Active
