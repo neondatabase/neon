@@ -1,8 +1,10 @@
+use std::convert::AsRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use strum_macros;
 use utils::{
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
@@ -13,11 +15,20 @@ use anyhow::bail;
 use bytes::{BufMut, Bytes, BytesMut};
 
 /// A state of a tenant in pageserver's memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum_macros::Display,
+    strum_macros::EnumString,
+    strum_macros::AsRefStr,
+)]
 pub enum TenantState {
-    // This tenant is being loaded from local disk
+    /// This tenant is being loaded from local disk
     Loading,
-    // This tenant is being downloaded from cloud storage.
+    /// This tenant is being downloaded from cloud storage.
     Attaching,
     /// Tenant is fully operational
     Active,
@@ -26,7 +37,7 @@ pub enum TenantState {
     Stopping,
     /// A tenant is recognized by the pageserver, but can no longer be used for
     /// any operations, because it failed to be activated.
-    Broken,
+    Broken { reason: String, backtrace: String },
 }
 
 impl TenantState {
@@ -36,7 +47,26 @@ impl TenantState {
             Self::Attaching => true,
             Self::Active => false,
             Self::Stopping => false,
-            Self::Broken => false,
+            Self::Broken { .. } => false,
+        }
+    }
+
+    pub fn broken_from_reason(reason: &str) -> Self {
+        let backtrace_str: String = format!("{}", std::backtrace::Backtrace::force_capture());
+        Self::Broken {
+            reason: reason.into(),
+            backtrace: backtrace_str,
+        }
+    }
+}
+
+impl std::fmt::Debug for TenantState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Broken { reason, backtrace } if !reason.is_empty() => {
+                write!(f, "Broken due to: {}. Backtrace:\n{}", &reason, &backtrace)
+            }
+            _ => write!(f, "{}", self.as_ref()),
         }
     }
 }
@@ -162,6 +192,7 @@ impl TenantConfigRequest {
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
+    #[serde_as(as = "DisplayFromStr")]
     pub state: TenantState,
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
