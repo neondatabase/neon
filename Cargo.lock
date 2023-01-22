@@ -2517,6 +2517,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "strum",
+ "strum_macros",
  "utils",
  "workspace_hack",
 ]

@@ -537,7 +537,7 @@ where
             Some(tenant) => match tenant.current_state() {
                 TenantState::Attaching
                 | TenantState::Loading
-                | TenantState::Broken
+                | TenantState::Broken { .. }
                 | TenantState::Active => tenant.set_stopping(),
                 TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
             },

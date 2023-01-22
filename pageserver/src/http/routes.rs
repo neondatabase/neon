@@ -465,7 +465,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
         .iter()
         .map(|(id, state)| TenantInfo {
             id: *id,
-            state: *state,
+            state: state.clone(),
             current_physical_size: None,
             has_in_progress_downloads: Some(state.has_in_progress_downloads()),
         })
@@ -490,7 +490,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         let state = tenant.current_state();
         Ok(TenantInfo {
             id: tenant_id,
-            state,
+            state: state.clone(),
             current_physical_size: Some(current_physical_size),
             has_in_progress_downloads: Some(state.has_in_progress_downloads()),
         })

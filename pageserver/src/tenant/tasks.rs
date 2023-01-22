@@ -209,7 +209,7 @@ async fn wait_for_active_tenant(
         loop {
             match tenant_state_updates.changed().await {
                 Ok(()) => {
-                    let new_state = *tenant_state_updates.borrow();
+                    let new_state = &*tenant_state_updates.borrow();
                     match new_state {
                         TenantState::Active => {
                             debug!("Tenant state changed to active, continuing the task loop");
