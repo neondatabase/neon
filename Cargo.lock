@@ -2260,7 +2260,10 @@ dependencies = [
  "const_format",
  "postgres_ffi",
  "serde",
+ "serde_json",
  "serde_with",
+ "strum",
+ "strum_macros",
  "utils",
  "workspace_hack",
 ]
