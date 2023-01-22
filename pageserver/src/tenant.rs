@@ -807,7 +807,10 @@ impl Tenant {
     pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         Arc::new(Tenant::new(
-            TenantState::Broken,
+            TenantState::Broken {
+                reason: String::new(),
+                backtrace: String::new(),
+            },
             conf,
             TenantConfOpt::default(),
             wal_redo_manager,
@@ -1436,10 +1439,11 @@ impl Tenant {
                     // activate() was called on an already Active tenant. Shouldn't happen.
                     result = Err(anyhow::anyhow!("Tenant is already active"));
                 }
-                TenantState::Broken => {
+                TenantState::Broken { .. } => {
                     // This shouldn't happen either
                     result = Err(anyhow::anyhow!(
-                        "Could not activate tenant because it is in broken state"
+                        "Could not activate tenant because it is in broken state due to: {:?}",
+                        current_state
                     ));
                 }
                 TenantState::Stopping => {
@@ -1490,8 +1494,8 @@ impl Tenant {
                         timeline.set_state(TimelineState::Suspended);
                     }
                 }
-                TenantState::Broken => {
-                    info!("Cannot set tenant to Stopping state, it is already in Broken state");
+                TenantState::Broken{..} => {
+                    info!("Cannot set tenant to Stopping state, it is already in Broken state due to: {:?}", current_state);
                 }
                 TenantState::Stopping => {
                     // The tenant was detached, or system shutdown was requested, while we were
@@ -1510,24 +1514,24 @@ impl Tenant {
                     // while loading or attaching a tenant. A tenant that has already been
                     // activated should never be marked as broken. We cope with it the best
                     // we can, but it shouldn't happen.
-                    *current_state = TenantState::Broken;
+                    *current_state = TenantState::broken_from_reason(reason);
                     warn!("Changing Active tenant to Broken state, reason: {}", reason);
                 }
-                TenantState::Broken => {
+                TenantState::Broken { .. } => {
                     // This shouldn't happen either
                     warn!("Tenant is already in Broken state");
                 }
                 TenantState::Stopping => {
                     // This shouldn't happen either
-                    *current_state = TenantState::Broken;
+                    *current_state = TenantState::broken_from_reason(reason);
                     warn!(
                         "Marking Stopping tenant as Broken state, reason: {}",
                         reason
                     );
                 }
                 TenantState::Loading | TenantState::Attaching => {
+                    *current_state = TenantState::broken_from_reason(reason);
                     info!("Setting tenant as Broken state, reason: {}", reason);
-                    *current_state = TenantState::Broken;
                 }
             }
         });
@@ -1549,12 +1553,12 @@ impl Tenant {
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
-                TenantState::Broken | TenantState::Stopping => {
+                TenantState::Broken { .. } | TenantState::Stopping => {
                     // There's no chance the tenant can transition back into ::Active
                     anyhow::bail!(
                         "Tenant {} will not become active. Current state: {:?}",
                         self.tenant_id,
-                        current_state,
+                        &current_state,
                     );
                 }
             }

@@ -401,7 +401,7 @@ where
             Some(tenant) => match tenant.current_state() {
                 TenantState::Attaching
                 | TenantState::Loading
-                | TenantState::Broken
+                | TenantState::Broken { .. }
                 | TenantState::Active => tenant.set_stopping(),
                 TenantState::Stopping => {
                     anyhow::bail!("Tenant {tenant_id} is stopping already")
