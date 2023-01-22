@@ -487,6 +487,7 @@ impl PagestreamBeMessage {
 #[cfg(test)]
 mod tests {
     use bytes::Buf;
+    use serde_json::json;
 
     use super::*;
 
@@ -536,5 +537,48 @@ mod tests {
             let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
             assert!(msg == reconstructed);
         }
+    }
+
+    #[test]
+    fn test_tenantinfo_serde() {
+        // Test serialization/deserialization of TenantInfo
+        let original_active = TenantInfo {
+            id: TenantId::generate(),
+            state: TenantState::Active,
+            current_physical_size: Some(42),
+            has_in_progress_downloads: Some(false),
+        };
+        let expected_active = json!({
+            "id": original_active.id.to_string(),
+            "state": "Active",
+            "current_physical_size": 42,
+            "has_in_progress_downloads": false,
+        });
+
+        let original_broken = TenantInfo {
+            id: TenantId::generate(),
+            state: TenantState::Broken {
+                reason: "reason".into(),
+                backtrace: "backtrace".into(),
+            },
+            current_physical_size: Some(42),
+            has_in_progress_downloads: Some(false),
+        };
+        let expected_broken = json!({
+            "id": original_broken.id.to_string(),
+            "state": "Broken",
+            "current_physical_size": 42,
+            "has_in_progress_downloads": false,
+        });
+
+        assert_eq!(
+            serde_json::to_value(&original_active).unwrap(),
+            expected_active
+        );
+
+        assert_eq!(
+            serde_json::to_value(&original_broken).unwrap(),
+            expected_broken
+        );
     }
 }
