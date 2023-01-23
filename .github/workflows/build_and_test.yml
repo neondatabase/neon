@@ -138,9 +138,6 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
-      # Have to use absolute path for ${GITHUB_WORKSPACE} else this doesn't work
-      volumes:
-        - /home/nonroot/target:/__w/neon/neon/target
     strategy:
       fail-fast: false
       matrix:
