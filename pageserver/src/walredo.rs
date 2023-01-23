@@ -642,10 +642,12 @@ impl PostgresRedoManager {
                 )
             })?;
         }
-        let pg_bin_dir_path = self.conf
+        let pg_bin_dir_path = self
+            .conf
             .pg_bin_dir(pg_version)
             .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_bin_dir path: {e}")))?;
-        let pg_lib_dir_path = self.conf
+        let pg_lib_dir_path = self
+            .conf
             .pg_lib_dir(pg_version)
             .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_lib_dir path: {e}")))?;
 
