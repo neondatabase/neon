@@ -104,10 +104,10 @@ jobs:
         uses: actions/cache@v3
         with:
           path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-          key: v1-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+            /home/nonroot/.cargo/registry/
+            !/home/nonroot/.cargo/registry/src
+            /home/nonroot/.cargo/git/
+          key: v2-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
@@ -138,8 +138,8 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
-#      volumes:
-#        - /home/nonroot/.cargo:/home/nonroot/.cargo
+      volumes:
+        - /home/nonroot/.cargo:${{ GITHUB.WORKSPACE }}/.cargo
     strategy:
       fail-fast: false
       matrix:
@@ -196,7 +196,7 @@ jobs:
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
-          echo "CARGO_HOME=/home/nonroot/.cargo" >> $GITHUB_ENV
+          echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
 
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
