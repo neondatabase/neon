@@ -186,12 +186,34 @@ pub enum TaskKind {
     // associated with one later, after receiving a command from the client.
     PageRequestHandler,
 
-    // Manages the WAL receiver connection for one timeline. It subscribes to
-    // events from storage_broker, decides which safekeeper to connect to. It spawns a
-    // separate WalReceiverConnection task to handle each connection.
+    /// Manages the WAL receiver connection for one timeline.
+    /// It subscribes to events from storage_broker and decides which safekeeper to connect to.
+    /// Once the decision has been made, it establishes the connection using the `tokio-postgres` library.
+    /// There is at most one connection at any given time.
+    ///
+    /// That `tokio-postgres` library represents a connection as two objects: a `Client` and a `Connection`.
+    /// The `Client` object is what library users use to make requests & get responses.
+    /// Internally, `Client` hands over requests to the `Connection` object.
+    /// The `Connection` object is responsible for speaking the wire protocol.
+    ///
+    /// Walreceiver uses its own abstraction called `TaskHandle` to represent the activity of establishing and handling a connection.
+    /// That abstraction doesn't use `task_mgr`.
+    /// The [`WalReceiverManager`] task ensures that this `TaskHandle` task does not outlive the [`WalReceiverManager`] task.
+    /// For the `RequestContext` that we hand to the TaskHandle, we use the [`WalReceiverConnectionPoller`] task kind.
+    ///
+    /// Once the connection is established, the `TaskHandle` task creates a
+    /// [`WalReceiverConnection`] task_mgr task that is responsible for polling
+    /// the `Connection` object.
+    /// A `CancellationToken` created by the `TaskHandle` task ensures
+    /// that the [`WalReceiverConnection`] task will cancel soon after as the `TaskHandle` is dropped.
     WalReceiverManager,
 
-    // Handles a connection to a safekeeper, to stream WAL to a timeline.
+    // The `TaskHandle` task that executes [`walreceiver_connection::handle_walreceiver_connection`].
+    // Not a `task_mgr` task, but we use this `TaskKind` for its `RequestContext`.
+    WalReceiverManagerConnectionPoller,
+
+    /// The task that polls the `tokio-postgres::Connection` object.
+    /// See the comment on [`WalReceiverManager`].
     WalReceiverConnection,
 
     // Garbage collection worker. One per tenant

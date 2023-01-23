@@ -984,9 +984,6 @@ impl Timeline {
             }
         }
 
-        let background_ctx =
-            RequestContext::todo_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
             self.timeline_id, self.tenant_id
@@ -1003,6 +1000,9 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
         let self_clone = Arc::clone(self);
+        let background_ctx =
+            // XXX: this is a detached_child. Plumb through the ctx from call sites.
+            RequestContext::todo_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
         spawn_connection_manager_task(
             self_clone,
             walreceiver_connect_timeout,

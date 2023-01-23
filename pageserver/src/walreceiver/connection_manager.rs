@@ -401,7 +401,10 @@ impl WalreceiverState {
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
-        let ctx_clone = ctx.attached_child();
+        let ctx = ctx.detached_child(
+            TaskKind::WalReceiverManagerConnectionPoller,
+            ctx.download_behavior(),
+        );
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
@@ -410,7 +413,7 @@ impl WalreceiverState {
                     events_sender,
                     cancellation,
                     connect_timeout,
-                    ctx_clone,
+                    ctx,
                 )
                 .await
                 .context("walreceiver connection handling failure")
