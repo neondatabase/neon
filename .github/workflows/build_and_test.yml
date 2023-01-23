@@ -139,7 +139,7 @@ jobs:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
       volumes:
-        - home/nonroot/.cargo:/home/nonroot/.cargo
+        - /home/nonroot/.cargo:/home/nonroot/.cargo
     strategy:
       fail-fast: false
       matrix:
