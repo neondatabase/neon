@@ -514,10 +514,10 @@ impl ModelInputs {
             let Lsn(now) = *lsn;
             match op {
                 Command::Update(sz) => {
-                    storage.insert_point(&Some(*timeline_id), "".into(), now, Some(*sz));
+                    storage.insert_point(&Some(*timeline_id), "".into(), now, Some(*sz))?;
                 }
                 Command::EndOfBranch => {
-                    storage.insert_point(&Some(*timeline_id), "".into(), now, None);
+                    storage.insert_point(&Some(*timeline_id), "".into(), now, None)?;
                 }
                 Command::BranchFrom(parent) => {
                     // This branch command may fail if it cannot find a parent to branch from.
@@ -526,7 +526,7 @@ impl ModelInputs {
             }
         }
 
-        Ok(storage.calculate(self.retention_period).total_children())
+        Ok(storage.calculate(self.retention_period)?.total_children())
     }
 }
 
