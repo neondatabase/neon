@@ -140,7 +140,6 @@ jobs:
       options: --init
       # Have to use absolute path for ${GITHUB_WORKSPACE} else this doesn't work
       volumes:
-        - /home/nonroot/.cargo:/__w/neon/neon/.cargo
         - /home/nonroot/target:/__w/neon/neon/target
     strategy:
       fail-fast: false
