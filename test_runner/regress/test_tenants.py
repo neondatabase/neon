@@ -273,6 +273,9 @@ def test_pageserver_with_empty_tenants(
 
     assert len(tenants) == 2
 
+    
+
+
     [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
     assert (
         broken_tenant["state"] == "Broken"

@@ -39,6 +39,16 @@ impl TenantState {
             Self::Broken => false,
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TenantState::Loading => "loading",
+            TenantState::Attaching => "attaching",
+            TenantState::Active => "active",
+            TenantState::Stopping => "stopping",
+            TenantState::Broken => "broken",
+        }
+    }
 }
 
 /// A state of a timeline in pageserver's memory.
