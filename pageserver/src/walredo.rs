@@ -626,24 +626,20 @@ impl PostgresRedoProcess {
 
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
-            info!(
-                "old temporary datadir {} exists, removing",
-                datadir.display()
-            );
-            fs::remove_dir_all(&datadir)?;
+            info!("old temporary datadir {datadir:?} exists, removing");
+            fs::remove_dir_all(&datadir).map_err(|e| {
+                Error::new(
+                    e.kind(),
+                    format!("Old temporary dir {datadir:?} removal failure: {e}"),
+                )
+            })?;
         }
-        let pg_bin_dir_path = conf.pg_bin_dir(pg_version).map_err(|e| {
-            Error::new(
-                ErrorKind::Other,
-                format!("incorrect pg_bin_dir path: {}", e),
-            )
-        })?;
-        let pg_lib_dir_path = conf.pg_lib_dir(pg_version).map_err(|e| {
-            Error::new(
-                ErrorKind::Other,
-                format!("incorrect pg_lib_dir path: {}", e),
-            )
-        })?;
+        let pg_bin_dir_path = conf
+            .pg_bin_dir(pg_version)
+            .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_bin_dir path: {e}")))?;
+        let pg_lib_dir_path = conf
+            .pg_lib_dir(pg_version)
+            .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_lib_dir path: {e}")))?;
 
         info!("running initdb in {}", datadir.display());
         let initdb = Command::new(pg_bin_dir_path.join("initdb"))

@@ -7,118 +7,118 @@
 use tenant_size_model::{Segment, SegmentSize, Storage};
 
 // Main branch only. Some updates on it.
-fn scenario_1() -> (Vec<Segment>, SegmentSize) {
+fn scenario_1() -> anyhow::Result<(Vec<Segment>, SegmentSize)> {
     // Create main branch
     let mut storage = Storage::new("main");
 
     // Bulk load 5 GB of data to it
-    storage.insert("main", 5_000);
+    storage.insert("main", 5_000)?;
 
     // Stream of updates
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        storage.update("main", 1_000)?;
     }
 
-    let size = storage.calculate(1000);
+    let size = storage.calculate(1000)?;
 
-    (storage.into_segments(), size)
+    Ok((storage.into_segments(), size))
 }
 
 // Main branch only. Some updates on it.
-fn scenario_2() -> (Vec<Segment>, SegmentSize) {
+fn scenario_2() -> anyhow::Result<(Vec<Segment>, SegmentSize)> {
     // Create main branch
     let mut storage = Storage::new("main");
 
     // Bulk load 5 GB of data to it
-    storage.insert("main", 5_000);
+    storage.insert("main", 5_000)?;
 
     // Stream of updates
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        storage.update("main", 1_000)?;
     }
 
     // Branch
-    storage.branch("main", "child").unwrap();
-    storage.update("child", 1_000);
+    storage.branch("main", "child")?;
+    storage.update("child", 1_000)?;
 
     // More updates on parent
-    storage.update("main", 1_000);
+    storage.update("main", 1_000)?;
 
-    let size = storage.calculate(1000);
+    let size = storage.calculate(1000)?;
 
-    (storage.into_segments(), size)
+    Ok((storage.into_segments(), size))
 }
 
 // Like 2, but more updates on main
-fn scenario_3() -> (Vec<Segment>, SegmentSize) {
+fn scenario_3() -> anyhow::Result<(Vec<Segment>, SegmentSize)> {
     // Create main branch
     let mut storage = Storage::new("main");
 
     // Bulk load 5 GB of data to it
-    storage.insert("main", 5_000);
+    storage.insert("main", 5_000)?;
 
     // Stream of updates
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        storage.update("main", 1_000)?;
     }
 
     // Branch
-    storage.branch("main", "child").unwrap();
-    storage.update("child", 1_000);
+    storage.branch("main", "child")?;
+    storage.update("child", 1_000)?;
 
     // More updates on parent
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        storage.update("main", 1_000)?;
     }
 
-    let size = storage.calculate(1000);
+    let size = storage.calculate(1000)?;
 
-    (storage.into_segments(), size)
+    Ok((storage.into_segments(), size))
 }
 
 // Diverged branches
-fn scenario_4() -> (Vec<Segment>, SegmentSize) {
+fn scenario_4() -> anyhow::Result<(Vec<Segment>, SegmentSize)> {
     // Create main branch
     let mut storage = Storage::new("main");
 
     // Bulk load 5 GB of data to it
-    storage.insert("main", 5_000);
+    storage.insert("main", 5_000)?;
 
     // Stream of updates
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        storage.update("main", 1_000)?;
     }
 
     // Branch
-    storage.branch("main", "child").unwrap();
-    storage.update("child", 1_000);
+    storage.branch("main", "child")?;
+    storage.update("child", 1_000)?;
 
     // More updates on parent
     for _ in 0..8 {
-        storage.update("main", 1_000);
+        storage.update("main", 1_000)?;
     }
 
-    let size = storage.calculate(1000);
+    let size = storage.calculate(1000)?;
 
-    (storage.into_segments(), size)
+    Ok((storage.into_segments(), size))
 }
 
-fn scenario_5() -> (Vec<Segment>, SegmentSize) {
+fn scenario_5() -> anyhow::Result<(Vec<Segment>, SegmentSize)> {
     let mut storage = Storage::new("a");
-    storage.insert("a", 5000);
-    storage.branch("a", "b").unwrap();
-    storage.update("b", 4000);
-    storage.update("a", 2000);
-    storage.branch("a", "c").unwrap();
-    storage.insert("c", 4000);
-    storage.insert("a", 2000);
+    storage.insert("a", 5000)?;
+    storage.branch("a", "b")?;
+    storage.update("b", 4000)?;
+    storage.update("a", 2000)?;
+    storage.branch("a", "c")?;
+    storage.insert("c", 4000)?;
+    storage.insert("a", 2000)?;
 
-    let size = storage.calculate(5000);
+    let size = storage.calculate(5000)?;
 
-    (storage.into_segments(), size)
+    Ok((storage.into_segments(), size))
 }
 
-fn scenario_6() -> (Vec<Segment>, SegmentSize) {
+fn scenario_6() -> anyhow::Result<(Vec<Segment>, SegmentSize)> {
     use std::borrow::Cow;
 
     const NO_OP: Cow<'static, str> = Cow::Borrowed("");
@@ -133,18 +133,18 @@ fn scenario_6() -> (Vec<Segment>, SegmentSize) {
 
     let mut storage = Storage::new(None);
 
-    storage.branch(&None, branches[0]).unwrap(); // at 0
-    storage.modify_branch(&branches[0], NO_OP, 108951064, 43696128); // at 108951064
-    storage.branch(&branches[0], branches[1]).unwrap(); // at 108951064
-    storage.modify_branch(&branches[1], NO_OP, 15560408, -1851392); // at 124511472
-    storage.modify_branch(&branches[0], NO_OP, 174464360, -1531904); // at 283415424
-    storage.branch(&branches[0], branches[2]).unwrap(); // at 283415424
-    storage.modify_branch(&branches[2], NO_OP, 15906192, 8192); // at 299321616
-    storage.modify_branch(&branches[0], NO_OP, 18909976, 32768); // at 302325400
+    storage.branch(&None, branches[0])?; // at 0
+    storage.modify_branch(&branches[0], NO_OP, 108951064, 43696128)?; // at 108951064
+    storage.branch(&branches[0], branches[1])?; // at 108951064
+    storage.modify_branch(&branches[1], NO_OP, 15560408, -1851392)?; // at 124511472
+    storage.modify_branch(&branches[0], NO_OP, 174464360, -1531904)?; // at 283415424
+    storage.branch(&branches[0], branches[2])?; // at 283415424
+    storage.modify_branch(&branches[2], NO_OP, 15906192, 8192)?; // at 299321616
+    storage.modify_branch(&branches[0], NO_OP, 18909976, 32768)?; // at 302325400
 
-    let size = storage.calculate(100_000);
+    let size = storage.calculate(100_000)?;
 
-    (storage.into_segments(), size)
+    Ok((storage.into_segments(), size))
 }
 
 fn main() {
@@ -163,7 +163,8 @@ fn main() {
             eprintln!("invalid scenario {}", other);
             std::process::exit(1);
         }
-    };
+    }
+    .unwrap();
 
     graphviz_tree(&segments, &size);
 }
@@ -251,7 +252,7 @@ fn graphviz_tree(segments: &[Segment], tree: &SegmentSize) {
 
 #[test]
 fn scenarios_return_same_size() {
-    type ScenarioFn = fn() -> (Vec<Segment>, SegmentSize);
+    type ScenarioFn = fn() -> anyhow::Result<(Vec<Segment>, SegmentSize)>;
     let truths: &[(u32, ScenarioFn, _)] = &[
         (line!(), scenario_1, 8000),
         (line!(), scenario_2, 9000),
@@ -262,7 +263,7 @@ fn scenarios_return_same_size() {
     ];
 
     for (line, scenario, expected) in truths {
-        let (_, size) = scenario();
+        let (_, size) = scenario().unwrap();
         assert_eq!(*expected, size.total_children(), "scenario on line {line}");
     }
 }

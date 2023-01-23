@@ -2627,8 +2627,10 @@ where
 pub mod harness {
     use bytes::{Bytes, BytesMut};
     use once_cell::sync::Lazy;
+    use once_cell::sync::OnceCell;
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
+    use utils::logging;
     use utils::lsn::Lsn;
 
     use crate::{
@@ -2692,6 +2694,8 @@ pub mod harness {
         ),
     }
 
+    static LOG_HANDLE: OnceCell<()> = OnceCell::new();
+
     impl<'a> TenantHarness<'a> {
         pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
             Self::create_internal(test_name, false)
@@ -2705,6 +2709,10 @@ pub mod harness {
             } else {
                 (Some(LOCK.read().unwrap()), None)
             };
+
+            LOG_HANDLE.get_or_init(|| {
+                logging::init(logging::LogFormat::Test).expect("Failed to init test logging")
+            });
 
             let repo_dir = PageServerConf::test_repo_dir(test_name);
             let _ = fs::remove_dir_all(&repo_dir);

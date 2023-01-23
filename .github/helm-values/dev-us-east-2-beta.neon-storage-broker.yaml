@@ -49,4 +49,4 @@ extraManifests:
           - "{{ .Release.Namespace }}"
 
 settings:
-  sentryEnvironment: "development"
+  sentryEnvironment: "staging"
