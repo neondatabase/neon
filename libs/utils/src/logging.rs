@@ -34,7 +34,7 @@ pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
     let base_logger = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
-        .with_ansi(false)
+        .with_ansi(atty::is(atty::Stream::Stdout))
         .with_writer(std::io::stdout);
 
     match log_format {
