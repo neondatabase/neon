@@ -217,6 +217,10 @@ def test_pageserver_logs_toggle_overrides_env_var(
     initial_log_filter = pageserver_http.current_log_filter()
 
     # Ensure that pageserver does not produce logs with such setting
+    new_timeline_with_no_logs = TimelineId.generate()
+    pageserver_http.timeline_create(
+        tenant_id=env.initial_tenant, new_timeline_id=new_timeline_with_no_logs
+    )
     pageserver_http.tenant_status(env.initial_tenant)
     assert (
         len(pageserver.log_lines()) == 0
@@ -251,9 +255,13 @@ def test_pageserver_logs_toggle_overrides_env_var(
 
     pageserver_http.tenant_status(env.initial_tenant)
     pageserver_http.timeline_compact(env.initial_tenant, env.initial_timeline)
+    latest_log_lines = pageserver.log_lines()
     assert (
-        len(pageserver.log_lines()) == log_lines_count_after_override
+        len(latest_log_lines) == log_lines_count_after_override
     ), "After override is disabled, no more logs should be produced again"
+    assert all(
+        str(new_timeline_with_no_logs) not in line for line in latest_log_lines
+    ), f"Should not contain unised timeline {new_timeline_with_no_logs} in logs"
 
 
 def test_pageserver_logs_restart(neon_env_builder: NeonEnvBuilder):
