@@ -1405,15 +1405,15 @@ fn slru_segment_key_range(kind: SlruKind, segno: u32) -> Range<Key> {
     Key {
         field1: 0x01,
         field2,
-        field3: segno,
-        field4: 0,
+        field3: 1,
+        field4: segno,
         field5: 0,
         field6: 0,
     }..Key {
         field1: 0x01,
         field2,
-        field3: segno,
-        field4: 0,
+        field3: 1,
+        field4: segno,
         field5: 1,
         field6: 0,
     }
