@@ -152,8 +152,20 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             {
                 RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {
-                // Check whether password changed or not (trim 'md5:' prefix first)
-                if pg_pwd[3..] != *role.encrypted_password.as_ref().unwrap() {
+                // Check whether password changed or not (trim 'md5' prefix first if any)
+                //
+                // This is a backward compatibility hack, which comes from the times when we were using
+                // md5 for everyone and hashes were stored in the console db without md5 prefix. So when
+                // role comes from the control-plane (json spec) `Role.encrypted_password` doesn't have md5 prefix,
+                // but when role comes from Postgres (`get_existing_roles` / `existing_roles`) it has this prefix.
+                // Here is the only place so far where we compare hashes, so it seems to be the best candidate
+                // to place this compatibility layer.
+                let pg_pwd = if let Some(stripped) = pg_pwd.strip_prefix("md5") {
+                    stripped
+                } else {
+                    pg_pwd
+                };
+                if pg_pwd != *role.encrypted_password.as_ref().unwrap() {
                     RoleAction::Update
                 } else {
                     RoleAction::None
