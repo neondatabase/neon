@@ -101,7 +101,7 @@ pub async fn handle_walreceiver_connection(
 
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
-    let connection_ctx =
+    let _connection_ctx =
         ctx.detached_child(TaskKind::WalReceiverConnection, ctx.download_behavior());
     let connection_cancellation = cancellation.clone();
     task_mgr::spawn(
@@ -121,10 +121,9 @@ pub async fn handle_walreceiver_connection(
                         }
                     }
                 },
-
+                // Future: replace connection_cancellation with connection_ctx cancellation
                 _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
             }
-            drop(connection_ctx); // Future: replace connection_cancellation with this context
             Ok(())
         },
     );
