@@ -134,22 +134,25 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         op: Cow<'static, str>,
         lsn: u64,
         size: Option<u64>,
-    ) where
+    ) -> anyhow::Result<()>
+    where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + std::fmt::Debug,
     {
-        let lastseg_id = *self.branches.get(branch).unwrap();
+        let Some(lastseg_id) = self.branches.get(branch).copied() else { anyhow::bail!("branch not found: {branch:?}") };
         let newseg_id = self.segments.len();
         let lastseg = &mut self.segments[lastseg_id];
 
         assert!(lsn > lastseg.end_lsn);
+
+        let Some(start_size) = lastseg.end_size else { anyhow::bail!("no end_size on latest segment for {branch:?}") };
 
         let newseg = Segment {
             op,
             parent: Some(lastseg_id),
             start_lsn: lastseg.end_lsn,
             end_lsn: lsn,
-            start_size: lastseg.end_size.unwrap(),
+            start_size,
             end_size: size,
             children_after: Vec::new(),
             needed: false,
@@ -158,6 +161,8 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
 
         self.segments.push(newseg);
         *self.branches.get_mut(branch).expect("read already") = newseg_id;
+
+        Ok(())
     }
 
     /// Advances the branch with the named operation, by the relative LSN and logical size bytes.
@@ -167,21 +172,24 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         op: Cow<'static, str>,
         lsn_bytes: u64,
         size_bytes: i64,
-    ) where
+    ) -> anyhow::Result<()>
+    where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq,
+        Q: std::hash::Hash + Eq + std::fmt::Debug,
     {
-        let lastseg_id = *self.branches.get(branch).unwrap();
+        let Some(lastseg_id) = self.branches.get(branch).copied() else { anyhow::bail!("branch not found: {branch:?}") };
         let newseg_id = self.segments.len();
         let lastseg = &mut self.segments[lastseg_id];
+
+        let Some(last_end_size) = lastseg.end_size else { anyhow::bail!("no end_size on latest segment for {branch:?}") };
 
         let newseg = Segment {
             op,
             parent: Some(lastseg_id),
             start_lsn: lastseg.end_lsn,
             end_lsn: lastseg.end_lsn + lsn_bytes,
-            start_size: lastseg.end_size.unwrap(),
-            end_size: Some((lastseg.end_size.unwrap() as i64 + size_bytes) as u64),
+            start_size: last_end_size,
+            end_size: Some((last_end_size as i64 + size_bytes) as u64),
             children_after: Vec::new(),
             needed: false,
         };
@@ -189,33 +197,33 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
 
         self.segments.push(newseg);
         *self.branches.get_mut(branch).expect("read already") = newseg_id;
+        Ok(())
     }
 
-    pub fn insert<Q: ?Sized>(&mut self, branch: &Q, bytes: u64)
+    pub fn insert<Q: ?Sized>(&mut self, branch: &Q, bytes: u64) -> anyhow::Result<()>
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq,
+        Q: std::hash::Hash + Eq + std::fmt::Debug,
     {
-        self.modify_branch(branch, "insert".into(), bytes, bytes as i64);
+        self.modify_branch(branch, "insert".into(), bytes, bytes as i64)
     }
 
-    pub fn update<Q: ?Sized>(&mut self, branch: &Q, bytes: u64)
+    pub fn update<Q: ?Sized>(&mut self, branch: &Q, bytes: u64) -> anyhow::Result<()>
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq,
+        Q: std::hash::Hash + Eq + std::fmt::Debug,
     {
-        self.modify_branch(branch, "update".into(), bytes, 0i64);
+        self.modify_branch(branch, "update".into(), bytes, 0i64)
     }
 
-    pub fn delete<Q: ?Sized>(&mut self, branch: &Q, bytes: u64)
+    pub fn delete<Q: ?Sized>(&mut self, branch: &Q, bytes: u64) -> anyhow::Result<()>
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq,
+        Q: std::hash::Hash + Eq + std::fmt::Debug,
     {
-        self.modify_branch(branch, "delete".into(), bytes, -(bytes as i64));
+        self.modify_branch(branch, "delete".into(), bytes, -(bytes as i64))
     }
 
-    /// Panics if the parent branch cannot be found.
     pub fn branch<Q: ?Sized>(&mut self, parent: &Q, name: K) -> anyhow::Result<()>
     where
         K: std::borrow::Borrow<Q> + std::fmt::Debug,
@@ -236,7 +244,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         Ok(())
     }
 
-    pub fn calculate(&mut self, retention_period: u64) -> SegmentSize {
+    pub fn calculate(&mut self, retention_period: u64) -> anyhow::Result<SegmentSize> {
         // Phase 1: Mark all the segments that need to be retained
         for (_branch, &last_seg_id) in self.branches.iter() {
             let last_seg = &self.segments[last_seg_id];
@@ -261,7 +269,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         self.size_from_snapshot_later(0)
     }
 
-    fn size_from_wal(&self, seg_id: usize) -> SegmentSize {
+    fn size_from_wal(&self, seg_id: usize) -> anyhow::Result<SegmentSize> {
         let seg = &self.segments[seg_id];
 
         let this_size = seg.end_lsn - seg.start_lsn;
@@ -272,10 +280,10 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         for &child_id in seg.children_after.iter() {
             // try each child both ways
             let child = &self.segments[child_id];
-            let p1 = self.size_from_wal(child_id);
+            let p1 = self.size_from_wal(child_id)?;
 
             let p = if !child.needed {
-                let p2 = self.size_from_snapshot_later(child_id);
+                let p2 = self.size_from_snapshot_later(child_id)?;
                 if p1.total() < p2.total() {
                     p1
                 } else {
@@ -286,15 +294,15 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             };
             children.push(p);
         }
-        SegmentSize {
+        Ok(SegmentSize {
             seg_id,
             method: if seg.needed { WalNeeded } else { Wal },
             this_size,
             children,
-        }
+        })
     }
 
-    fn size_from_snapshot_later(&self, seg_id: usize) -> SegmentSize {
+    fn size_from_snapshot_later(&self, seg_id: usize) -> anyhow::Result<SegmentSize> {
         // If this is needed, then it's time to do the snapshot and continue
         // with wal method.
         let seg = &self.segments[seg_id];
@@ -305,10 +313,10 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             for &child_id in seg.children_after.iter() {
                 // try each child both ways
                 let child = &self.segments[child_id];
-                let p1 = self.size_from_wal(child_id);
+                let p1 = self.size_from_wal(child_id)?;
 
                 let p = if !child.needed {
-                    let p2 = self.size_from_snapshot_later(child_id);
+                    let p2 = self.size_from_snapshot_later(child_id)?;
                     if p1.total() < p2.total() {
                         p1
                     } else {
@@ -319,12 +327,12 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
                 };
                 children.push(p);
             }
-            SegmentSize {
+            Ok(SegmentSize {
                 seg_id,
                 method: WalNeeded,
                 this_size: seg.start_size,
                 children,
-            }
+            })
         } else {
             // If any of the direct children are "needed", need to be able to reconstruct here
             let mut children_needed = false;
@@ -339,7 +347,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             let method1 = if !children_needed {
                 let mut children = Vec::new();
                 for child in seg.children_after.iter() {
-                    children.push(self.size_from_snapshot_later(*child));
+                    children.push(self.size_from_snapshot_later(*child)?);
                 }
                 Some(SegmentSize {
                     seg_id,
@@ -355,20 +363,25 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             let method2 = if children_needed || seg.children_after.len() >= 2 {
                 let mut children = Vec::new();
                 for child in seg.children_after.iter() {
-                    children.push(self.size_from_wal(*child));
+                    children.push(self.size_from_wal(*child)?);
                 }
+                let Some(this_size) = seg.end_size else { anyhow::bail!("no end_size at junction {seg_id}") };
                 Some(SegmentSize {
                     seg_id,
                     method: SnapshotAfter,
-                    this_size: seg.end_size.unwrap(),
+                    this_size,
                     children,
                 })
             } else {
                 None
             };
 
-            match (method1, method2) {
-                (None, None) => panic!(),
+            Ok(match (method1, method2) {
+                (None, None) => anyhow::bail!(
+                    "neither method was applicable: children_after={}, children_needed={}",
+                    seg.children_after.len(),
+                    children_needed
+                ),
                 (Some(method), None) => method,
                 (None, Some(method)) => method,
                 (Some(method1), Some(method2)) => {
@@ -378,7 +391,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
                         method2
                     }
                 }
-            }
+            })
         }
     }
 

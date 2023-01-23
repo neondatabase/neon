@@ -194,6 +194,15 @@ pub(super) async fn gather_inputs(
 
     let timelines = tenant.list_timelines();
 
+    if timelines.is_empty() {
+        // perhaps the tenant has just been created, and as such doesn't have any data yet
+        return Ok(ModelInputs {
+            updates: vec![],
+            retention_period: 0,
+            timeline_inputs: HashMap::default(),
+        });
+    }
+
     // record the used/inserted cache keys here, to remove extras not to start leaking
     // after initial run the cache should be quite stable, but live timelines will eventually
     // require new lsns to be inspected.
@@ -505,10 +514,10 @@ impl ModelInputs {
             let Lsn(now) = *lsn;
             match op {
                 Command::Update(sz) => {
-                    storage.insert_point(&Some(*timeline_id), "".into(), now, Some(*sz));
+                    storage.insert_point(&Some(*timeline_id), "".into(), now, Some(*sz))?;
                 }
                 Command::EndOfBranch => {
-                    storage.insert_point(&Some(*timeline_id), "".into(), now, None);
+                    storage.insert_point(&Some(*timeline_id), "".into(), now, None)?;
                 }
                 Command::BranchFrom(parent) => {
                     // This branch command may fail if it cannot find a parent to branch from.
@@ -517,7 +526,7 @@ impl ModelInputs {
             }
         }
 
-        Ok(storage.calculate(self.retention_period).total_children())
+        Ok(storage.calculate(self.retention_period)?.total_children())
     }
 }
 
