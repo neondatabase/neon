@@ -3302,7 +3302,7 @@ impl Timeline {
         );
 
         let initial_info = DownloadRemoteLayersTaskInfo {
-            task_id: format!("{task_id:?}"),
+            task_id: format!("{task_id}"),
             state: DownloadRemoteLayersTaskState::Running,
             total_layer_count: 0,
             successful_download_count: 0,
