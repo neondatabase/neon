@@ -1062,9 +1062,18 @@ mod tests {
     }
 
     // Test scheduling
-    #[test]
     fn upload_scheduling() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("upload_scheduling")?;
+
+        // Use a current-thread runtime in the test
+        let runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+        ));
+        // Enter it before creating the harness, so that its Drop handler runs within a runtime.
+        let _entered = runtime.enter();
+
+        let harness = TenantHarness::new()?;
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
         std::fs::create_dir_all(&timeline_path)?;
 
@@ -1084,13 +1093,7 @@ mod tests {
             storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
         };
 
-        // Use a current-thread runtime in the test
-        let runtime = Box::leak(Box::new(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?,
-        ));
-        let _entered = runtime.enter();
+       
 
         // Test outline:
         //

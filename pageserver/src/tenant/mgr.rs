@@ -53,7 +53,7 @@ pub async fn init_tenant_mgr(
                         "Found temporary tenant directory, removing: {}",
                         tenant_dir_path.display()
                     );
-                    if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
+                    if let Err(e) = crate::pageserver_remove_dir_all(&tenant_dir_path) {
                         error!(
                             "Failed to remove temporary directory '{}': {:?}",
                             tenant_dir_path.display(),
@@ -277,8 +277,7 @@ pub async fn detach_tenant(
 ) -> anyhow::Result<()> {
     remove_tenant_from_memory(tenant_id, async {
         let local_tenant_directory = conf.tenant_path(&tenant_id);
-        fs::remove_dir_all(&local_tenant_directory)
-            .await
+        crate::pageserver_remove_dir_all(&local_tenant_directory)
             .with_context(|| {
                 format!("Failed to remove local tenant directory {local_tenant_directory:?}")
             })?;

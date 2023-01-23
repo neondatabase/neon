@@ -22,6 +22,7 @@ pub mod walredo;
 use std::path::Path;
 
 use crate::task_mgr::TaskKind;
+use tenant::ephemeral_file::is_ephemeral_file;
 use tracing::info;
 
 /// Current storage format version
@@ -131,6 +132,16 @@ pub fn is_uninit_mark(path: &Path) -> bool {
             .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
         None => false,
     }
+}
+
+pub(crate) fn pageserver_remove_dir_all(path: &Path) -> std::io::Result<()> {
+    for p in walkdir::WalkDir::new(path) {
+        let p = p.unwrap();
+        if is_ephemeral_file(&p.path().to_string_lossy()) {
+            panic!("deleting ephemeral file {p:?}")
+        }
+    }
+    std::fs::remove_dir_all(path)
 }
 
 #[cfg(test)]
