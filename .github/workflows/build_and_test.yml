@@ -104,9 +104,9 @@ jobs:
         uses: actions/cache@v3
         with:
           path: |
-            /home/nonroot/.cargo/registry/
-            !/home/nonroot/.cargo/registry/src
-            /home/nonroot/.cargo/git/
+            ~/.cargo/registry/
+            !~/.cargo/registry/src
+            ~/.cargo/git/
           key: v2-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       # Some of our rust modules use FFI and need those to be checked
@@ -138,6 +138,8 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
       options: --init
+      volumes:
+        - /home/nonroot/.cargo:${{ GITHUB.WORKSPACE }}/.cargo
     strategy:
       fail-fast: false
       matrix:
@@ -427,7 +429,7 @@ jobs:
             ~/.cargo/registry/
             !~/.cargo/registry/src
             ~/.cargo/git/
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          key: v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
