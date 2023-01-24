@@ -1,5 +1,7 @@
 //!
 
+mod walreceiver;
+
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
 use fail::fail_point;
@@ -23,6 +25,7 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::broker_client::is_broker_client_initialized;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
@@ -59,11 +62,11 @@ use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr::TaskKind;
-use crate::walreceiver::{is_broker_client_initialized, spawn_connection_manager_task};
 use crate::walredo::WalRedoManager;
 use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
+use walreceiver::spawn_connection_manager_task;
 
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;

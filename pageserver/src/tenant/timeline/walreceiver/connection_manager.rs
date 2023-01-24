@@ -11,11 +11,12 @@
 
 use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
 
+use super::TaskStateUpdate;
+use crate::broker_client::get_broker_client;
 use crate::context::RequestContext;
-use crate::task_mgr::TaskKind;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
+use crate::task_mgr::{self, TaskKind};
 use crate::tenant::Timeline;
-use crate::{task_mgr, walreceiver::TaskStateUpdate};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
@@ -28,10 +29,7 @@ use storage_broker::Streaming;
 use tokio::{select, sync::watch};
 use tracing::*;
 
-use crate::{
-    exponential_backoff, walreceiver::get_broker_client, DEFAULT_BASE_BACKOFF_SECONDS,
-    DEFAULT_MAX_BACKOFF_SECONDS,
-};
+use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use utils::{
     id::{NodeId, TenantTimelineId},
@@ -149,7 +147,7 @@ async fn connection_manager_loop_step(
                 let wal_connection = walreceiver_state.wal_connection.as_mut()
                     .expect("Should have a connection, as checked by the corresponding select! guard");
                 match wal_connection_update {
-                    TaskEvent::Update(TaskStateUpdate::Init | TaskStateUpdate::Started) => {},
+                    TaskEvent::Update(TaskStateUpdate::Started) => {},
                     TaskEvent::Update(TaskStateUpdate::Progress(new_status)) => {
                         if new_status.has_processed_wal {
                             // We have advanced last_record_lsn by processing the WAL received
