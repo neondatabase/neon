@@ -792,6 +792,9 @@ jobs:
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
+      - name: Cleanup ECR folder
+        run: rm -rf ~/.ecr
+
   calculate-deploy-targets:
     runs-on: [ self-hosted, gen3, small ]
     if: |
