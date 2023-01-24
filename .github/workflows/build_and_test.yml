@@ -528,9 +528,7 @@ jobs:
   neon-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container:
-      image: gcr.io/kaniko-project/executor:v1.9.1-debug
-      options: --user nonroot
+    container: gcr.io/kaniko-project/executor:v1.9.1-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -548,12 +546,14 @@ jobs:
       - name: Kaniko build neon
         run: /kaniko/executor --snapshot-mode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
 
+      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
+      - name: Cleanup ecr folder
+        run: rm -rf .ecr
+
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container:
-      image: gcr.io/kaniko-project/executor:v1.9.1-debug
-      options: --user nonroot
+    container: gcr.io/kaniko-project/executor:v1.9.1-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -568,11 +568,12 @@ jobs:
       - name: Kaniko build compute tools
         run: /kaniko/executor --snapshot-mode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
+      - name: Cleanup ecr folder
+        run: rm -rf .ecr
+
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container:
-      image: gcr.io/kaniko-project/executor:v1.9.1-debug
-      options: --user nonroot
+    container: gcr.io/kaniko-project/executor:v1.9.1-debug
     needs: [ tag ]
     strategy:
       fail-fast: false
@@ -594,6 +595,9 @@ jobs:
 
       - name: Kaniko build compute node with extensions
         run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --build-arg PG_VERSION=${{ matrix.version }} --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+      - name: Cleanup ecr folder
+        run: rm -rf .ecr
 
   vm-compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
