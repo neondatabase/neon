@@ -299,7 +299,9 @@ async fn subscribe_for_timeline_updates(
                 return resp.into_inner();
             }
             Err(e) => {
-                warn!("Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}");
+                // Safekeeper nodes can stop pushing timeline updates to the broker, when no new writes happen and
+                // entire WAL is streamed. Keep this noticeable with logging, but do not warn/error.
+                info!("Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}");
                 continue;
             }
         }
