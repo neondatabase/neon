@@ -1388,7 +1388,11 @@ impl Timeline {
 
         let calculation = async {
             let cancel = cancel.child_token();
+            let span = tracing::info_span!("blocking");
             tokio::task::spawn_blocking(move || {
+                // spans cannot be automatically included with spawn_blocking
+                let _entered = span.entered();
+
                 // Run in a separate thread since this can do a lot of
                 // synchronous file IO without .await inbetween
                 // if there are no RemoteLayers that would require downloading.
