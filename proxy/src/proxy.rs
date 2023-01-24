@@ -109,16 +109,20 @@ pub async fn handle_ws_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name, true))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
-    cancel_map
-        .with_session(|session| client.handle_connection(session))
-        .await
+    let client = Client::new(
+        stream,
+        creds,
+        &params,
+        session_id,
+        cancel_map.new_session()?,
+    );
+    client.handle_connection(true).await
 }
 
 /// Handle an incoming client connection, handshake and authentication.
@@ -150,16 +154,20 @@ async fn handle_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name, false))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
-    cancel_map
-        .with_session(|session| client.handle_connection(session))
-        .await
+    let client = Client::new(
+        stream,
+        creds,
+        &params,
+        session_id,
+        cancel_map.new_session()?,
+    );
+    client.handle_connection(false).await
 }
 
 /// Establish a (most probably, secure) connection with the client.
@@ -238,6 +246,8 @@ struct Client<'a, S> {
     params: &'a StartupMessageParams,
     /// Unique connection ID.
     session_id: uuid::Uuid,
+
+    session: cancellation::Session<'a>,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -247,19 +257,21 @@ impl<'a, S> Client<'a, S> {
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
+        session: cancellation::Session<'a>,
     ) -> Self {
         Self {
             stream,
             creds,
             params,
             session_id,
+            session,
         }
     }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
-    async fn handle_connection(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
-        let (mut client, mut db) = self.connect_to_db(session).await?;
+    async fn handle_connection(self, use_cleartext_password_flow: bool) -> anyhow::Result<()> {
+        let (mut client, mut db) = self.connect_to_db(use_cleartext_password_flow).await?;
 
         // Starting from here we only proxy the client's traffic.
         info!("performing the proxy pass...");
@@ -271,13 +283,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
     #[instrument(skip_all)]
     async fn connect_to_db(
         self,
-        session: cancellation::Session<'_>,
+        use_cleartext_password_flow: bool,
     ) -> anyhow::Result<(MeasuredStream<S>, MeasuredStream<tokio::net::TcpStream>)> {
         let Self {
             mut stream,
             creds,
             params,
             session_id,
+            session,
         } = self;
 
         let extra = auth::ConsoleReqExtra {
@@ -287,7 +300,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
 
         let auth_result = async {
             // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds.authenticate(&extra, &mut stream).await;
+            let res = creds
+                .authenticate(&extra, &mut stream, use_cleartext_password_flow)
+                .await;
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
         .await?;

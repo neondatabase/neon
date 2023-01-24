@@ -143,6 +143,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
         &mut self,
         extra: &ConsoleReqExtra<'_>,
         client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+        use_cleartext_password_flow: bool,
     ) -> auth::Result<Option<AuthSuccess<NodeInfo>>> {
         use BackendType::*;
 
@@ -190,7 +191,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
 
                 (node, payload)
             }
-            Console(endpoint, creds) if creds.use_cleartext_password_flow => {
+            Console(endpoint, creds) if use_cleartext_password_flow => {
                 // This is a hack to allow cleartext password in secure connections (wss).
                 let payload = fetch_plaintext_password(client).await?;
                 let creds = creds.as_ref();
@@ -220,17 +221,25 @@ impl BackendType<'_, ClientCredentials<'_>> {
     }
 
     /// Authenticate the client via the requested backend, possibly using credentials.
+    ///
+    /// If `use_cleartext_password_flow` is true, we use the old cleartext password
+    /// flow. It is used for websocket connections, which want to  minimize the number
+    /// of round trips.
     #[instrument(skip_all)]
     pub async fn authenticate(
         mut self,
         extra: &ConsoleReqExtra<'_>,
         client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+        use_cleartext_password_flow: bool,
     ) -> auth::Result<AuthSuccess<NodeInfo>> {
         use BackendType::*;
 
         // Handle cases when `project` is missing in `creds`.
         // TODO: type safety: return `creds` with irrefutable `project`.
-        if let Some(res) = self.try_password_hack(extra, client).await? {
+        if let Some(res) = self
+            .try_password_hack(extra, client, use_cleartext_password_flow)
+            .await?
+        {
             info!("user successfully authenticated (using the password hack)");
             return Ok(res);
         }
