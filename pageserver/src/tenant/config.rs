@@ -28,7 +28,7 @@ pub mod defaults {
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-    pub const DEFAULT_GC_PERIOD: &str = "100 s";
+    pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
