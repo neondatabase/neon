@@ -10,6 +10,7 @@ use std::{io, task};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_rustls::server::TlsStream;
+use tracing::instrument;
 
 pin_project! {
     /// Stream wrapper which implements libpq's protocol.
@@ -105,6 +106,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Write the error message using [`Self::write_message`], then re-throw it.
     /// Allowing string literals is safe under the assumption they might not contain any runtime info.
     /// This method exists due to `&str` not implementing `Into<anyhow::Error>`.
+    #[instrument(skip_all)]
     pub async fn throw_error_str<T>(&mut self, error: &'static str) -> anyhow::Result<T> {
         tracing::info!("forwarding error to user: {error}");
         self.write_message(&BeMessage::ErrorResponse(error, None))
@@ -114,6 +116,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 
     /// Write the error message using [`Self::write_message`], then re-throw it.
     /// Trait [`UserFacingError`] acts as an allowlist for error types.
+    #[instrument(skip_all)]
     pub async fn throw_error<T, E>(&mut self, error: E) -> anyhow::Result<T>
     where
         E: UserFacingError + Into<anyhow::Error>,

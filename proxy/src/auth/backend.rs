@@ -16,7 +16,7 @@ use crate::{
 use once_cell::sync::Lazy;
 use std::borrow::Cow;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 static CPLANE_WAITERS: Lazy<Waiters<mgmt::ComputeReady>> = Lazy::new(Default::default);
 
@@ -220,6 +220,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
     }
 
     /// Authenticate the client via the requested backend, possibly using credentials.
+    #[instrument(skip_all)]
     pub async fn authenticate(
         mut self,
         extra: &ConsoleReqExtra<'_>,
