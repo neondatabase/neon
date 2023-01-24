@@ -430,6 +430,13 @@ paths:
         schema:
           type: string
           format: hex
+      - name: inputs_only
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: |
+          When true, skip calculation and only provide the model inputs (for debugging). Defaults to false.
     get:
       description: |
         Calculate tenant's size, which is a mixture of WAL (bytes) and logical_size (bytes).
@@ -449,8 +456,9 @@ paths:
                     format: hex
                   size:
                     type: integer
+                    nullable: true
                     description: |
-                      Size metric in bytes.
+                      Size metric in bytes or null if inputs_only=true was given.
         "401":
           description: Unauthorized Error
           content:

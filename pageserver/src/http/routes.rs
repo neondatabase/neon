@@ -453,21 +453,39 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     json_response(StatusCode::OK, tenant_info)
 }
 
+/// HTTP endpoint to query the current tenant_size of a tenant.
+///
+/// This is not used by consumption metrics under [`crate::consumption_metrics`], but can be used
+/// to debug any of the calculations. Requires `tenant_id` request parameter, supports
+/// `inputs_only=true|false` (default false) which supports debugging failure to calculate model
+/// values.
 async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
+
+    let inputs_only = if query_param_present(&request, "inputs_only") {
+        get_query_param(&request, "inputs_only")?
+            .parse()
+            .map_err(|_| ApiError::BadRequest(anyhow!("failed to parse inputs_only")))?
+    } else {
+        false
+    };
 
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    // this can be long operation, it currently is not backed by any request coalescing or similar
+    // this can be long operation
     let inputs = tenant
         .gather_size_inputs()
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    let size = inputs.calculate().map_err(ApiError::InternalServerError)?;
+    let size = if !inputs_only {
+        Some(inputs.calculate().map_err(ApiError::InternalServerError)?)
+    } else {
+        None
+    };
 
     /// Private response type with the additional "unstable" `inputs` field.
     ///
@@ -479,7 +497,9 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
         #[serde_as(as = "serde_with::DisplayFromStr")]
         id: TenantId,
         /// Size is a mixture of WAL and logical size, so the unit is bytes.
-        size: u64,
+        ///
+        /// Will be none if `?inputs_only=true` was given.
+        size: Option<u64>,
         inputs: crate::tenant::size::ModelInputs,
     }
 
