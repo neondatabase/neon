@@ -528,7 +528,9 @@ jobs:
   neon-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.1-debug
+    container:
+      image: gcr.io/kaniko-project/executor:v1.9.1-debug
+      options: --user nonroot
     defaults:
       run:
         shell: sh -eu {0}
@@ -549,7 +551,9 @@ jobs:
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.1-debug
+    container:
+      image: gcr.io/kaniko-project/executor:v1.9.1-debug
+      options: --user nonroot
     defaults:
       run:
         shell: sh -eu {0}
@@ -566,7 +570,9 @@ jobs:
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.1-debug
+    container:
+      image: gcr.io/kaniko-project/executor:v1.9.1-debug
+      options: --user nonroot
     needs: [ tag ]
     strategy:
       fail-fast: false
