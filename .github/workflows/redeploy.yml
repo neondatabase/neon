@@ -12,7 +12,13 @@ on:
         required: true
         type: string
         default: 'main'
-        
+      environment:
+        description: 'Where to deploy: dev or prod'
+        required: true
+        type: choice
+        options:
+        - dev
+        - prod
 
 defaults:
   run:
@@ -26,7 +32,8 @@ env:
   COPT: '-Werror'
 
 jobs:
-  deploy-new:
+  deploy-new-dev:
+    if: inputs.environment == 'dev'
     runs-on: [ self-hosted, dev, x64 ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     defaults:
