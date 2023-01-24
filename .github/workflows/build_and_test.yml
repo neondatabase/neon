@@ -571,8 +571,11 @@ jobs:
       - name: Debug
         run: ls -lha
 
+      - name: Debug2
+        run: ls -lha ~
+
       - name: Cleanup ECR folder
-        run: rm -rf .ecr
+        run: rm -rf ~/.ecr
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
