@@ -105,10 +105,10 @@ jobs:
 #        uses: actions/cache@v3
 #        with:
 #          path: |
-#            .cargo/registry/
-#            !.cargo/registry/src
-#            .cargo/git/
-#          key: v2-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
+#          key: v1-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
@@ -135,7 +135,7 @@ jobs:
         run: cargo deny check
 
   build-neon:
-    runs-on: [ self-hosted, gen3t, large ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -207,13 +207,14 @@ jobs:
 #        uses: actions/cache@v3
 #        with:
 #          path: |
-#            .cargo/registry/
-#            !.cargo/registry/src
-#            .cargo/git/
+#            ~/.cargo/registry/
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
 #          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
 #          key: |
-#            v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-#            v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -426,10 +427,11 @@ jobs:
 #        uses: actions/cache@v3
 #        with:
 #          path: |
-#            .cargo/registry/
-#            !.cargo/registry/src
-#            .cargo/git/
-#          key: v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#            ~/.cargo/registry/
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
+#          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
