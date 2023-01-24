@@ -282,7 +282,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 
         let timeline_info = build_timeline_info(&timeline, include_non_incremental_logical_size)
             .await
-            .context("Failed to get local timeline info: {e:#}")
+            .context("get local timeline info")
             .map_err(ApiError::InternalServerError)?;
 
         Ok::<_, ApiError>(timeline_info)

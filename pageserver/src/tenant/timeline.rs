@@ -2285,7 +2285,7 @@ impl Timeline {
             let metadata = timeline_path
                 .join(path.file_name())
                 .metadata()
-                .context("reading metadata of layer file {path}")?;
+                .with_context(|| format!("reading metadata of layer file {}", path.file_name()))?;
 
             layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
 
