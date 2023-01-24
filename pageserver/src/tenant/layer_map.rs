@@ -306,6 +306,25 @@ where
         self.historic.rebuild();
     }
 
+    /// Allow (but not require) the layer map to clean up any memory from layers
+    /// with lsn.end <= lsn. This is useful for GC, in order to avoid an expensive
+    /// flush_updates call.
+    pub fn retain_since(&mut self, lsn: Lsn) {
+        // TODO drop entries from HistoricLayerCoverage::historic before this lsn
+        todo!()
+    }
+
+    /// Remove the layer so it doesn't come up when we search for it, but don't
+    /// proactively free up all memory associated with it. This is useful for
+    /// gc, where the removed layers are old, so it would be expensive to rebuild
+    /// the layer map after them. Instead we use `retain_since` to eventually
+    /// clean up the memory.
+    pub fn remove_historic_lazy(&mut self, layer: Arc<L>) {
+        // TODO remove from BufferedHistoricLayerCoverage::layers
+        // TODO during queries, check returned layers for existence
+        todo!()
+    }
+
     /// Is there a newer image layer for given key- and LSN-range? Or a set
     /// of image layers within the specified lsn range that cover the entire
     /// specified key range?

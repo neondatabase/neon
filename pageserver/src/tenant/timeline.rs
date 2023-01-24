@@ -2818,6 +2818,10 @@ impl Timeline {
         }
 
         let mut layers_to_remove = Vec::new();
+        let mut oldest_to_retain: Option<Lsn> = None;
+        let mut retain = |lsn: Lsn| {
+            oldest_to_retain = std::cmp::min(oldest_to_retain, Some(lsn));
+        };
 
         // Scan all on-disk layers in the timeline.
         //
@@ -2840,6 +2844,7 @@ impl Timeline {
                     horizon_cutoff
                 );
                 result.layers_needed_by_cutoff += 1;
+                retain(l.get_lsn_range().start);
                 continue 'outer;
             }
 
@@ -2851,6 +2856,7 @@ impl Timeline {
                     pitr_cutoff
                 );
                 result.layers_needed_by_pitr += 1;
+                retain(l.get_lsn_range().start);
                 continue 'outer;
             }
 
@@ -2871,6 +2877,7 @@ impl Timeline {
                         l.is_incremental(),
                     );
                     result.layers_needed_by_branches += 1;
+                    retain(l.get_lsn_range().start);
                     continue 'outer;
                 }
             }
@@ -2902,6 +2909,7 @@ impl Timeline {
                     l.filename().file_name()
                 );
                 result.layers_not_updated += 1;
+                retain(l.get_lsn_range().start);
                 continue 'outer;
             }
 
@@ -2914,7 +2922,10 @@ impl Timeline {
             layers_to_remove.push(Arc::clone(&l));
         }
 
-        let mut updates = layers.batch_update();
+        if let Some(lsn) = oldest_to_retain {
+            layers.retain_since(lsn);
+        }
+
         if !layers_to_remove.is_empty() {
             // Persist the new GC cutoff value in the metadata file, before
             // we actually remove anything.
@@ -2933,12 +2944,7 @@ impl Timeline {
                 layer_names_to_delete.push(doomed_layer.filename());
                 doomed_layer.delete()?; // FIXME: schedule succeeded deletions before returning?
 
-                // TODO Removing from the bottom of the layer map is expensive.
-                //      Maybe instead discard all layer map historic versions that
-                //      won't be needed for page reconstruction for this timeline,
-                //      and mark what we can't delete yet as deleted from the layer
-                //      map index without actually rebuilding the index.
-                updates.remove_historic(doomed_layer);
+                layers.remove_historic_lazy(doomed_layer);
                 result.layers_removed += 1;
             }
 
@@ -2950,7 +2956,6 @@ impl Timeline {
                 remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
             }
         }
-        updates.flush();
 
         info!(
             "GC completed removing {} layers, cutoff {}",
