@@ -55,6 +55,7 @@ impl<Value: Clone> LayerCoverage<Value> {
             Some((_, None)) => None,
             None => None,
         };
+        self.im_nodes.remove(&key);
         self.im_nodes.insert(key, im_value);
     }
 
@@ -125,6 +126,7 @@ impl<Value: Clone> LayerCoverage<Value> {
             to_remove.push(key.end);
         }
         for k in to_update {
+            self.im_nodes.remove(&k);
             self.im_nodes.insert(k, Some((lsn.end, value.clone())));
         }
         for k in to_remove {
@@ -133,23 +135,46 @@ impl<Value: Clone> LayerCoverage<Value> {
 
     }
 
-    /// Get the latest (by lsn.end) layer at a given key
-    ///
-    /// Complexity: O(log N)
-    pub fn query(&self, key: i128) -> Option<Value> {
+    fn get_key_1(&self, key: i128) -> Option<u64> {
         self.im_nodes
             .get_prev(&key)?
             .1
             .as_ref()
-            .map(|(_, v)| v.clone())
+            .map(|(k, _)| k.clone())
+    }
+    fn get_key_2(&self, key: i128) -> Option<u64> {
+        self.im_nodes
+            .range(..=key)
+            .rev()
+            .next()?
+            .1
+            .as_ref()
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Get the latest (by lsn.end) layer at a given key
+    ///
+    /// Complexity: O(log N)
+    pub fn query(&self, key: i128) -> Option<Value> {
+
+        let k1 = self.get_key_1(key);
+        let k2 = self.get_key_2(key);
+        assert_eq!(k1, k2);
+
 
         // self.im_nodes
-        //     .range(..=key)
-        //     .rev()
-        //     .next()?
+        //     .get_prev(&key)?
         //     .1
         //     .as_ref()
         //     .map(|(_, v)| v.clone())
+
+        self.im_nodes
+            .range(..=key)
+            .rev()
+            .next()?
+            .1
+            .as_ref()
+            .map(|(_, v)| v.clone())
 
         // self.nodes
         //     .range(..=key)
