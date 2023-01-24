@@ -1,6 +1,8 @@
 name: Redeploy
 
 on:
+  push:
+    
   workflow_dispatch:
     inputs:
       dockerTag:
