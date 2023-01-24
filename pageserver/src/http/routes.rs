@@ -239,11 +239,7 @@ fn query_param_present(request: &Request<Body>, param: &str) -> bool {
     request
         .uri()
         .query()
-        .map(|v| {
-            url::form_urlencoded::parse(v.as_bytes())
-                .into_owned()
-                .any(|(p, _)| p == param)
-        })
+        .map(|v| url::form_urlencoded::parse(v.as_bytes()).any(|(p, _)| p == param))
         .unwrap_or(false)
 }
 
@@ -252,13 +248,12 @@ fn get_query_param(request: &Request<Body>, param_name: &str) -> Result<String, 
         Err(ApiError::BadRequest(anyhow!("empty query in request"))),
         |v| {
             url::form_urlencoded::parse(v.as_bytes())
-                .into_owned()
                 .find(|(k, _)| k == param_name)
                 .map_or(
                     Err(ApiError::BadRequest(anyhow!(
                         "no {param_name} specified in query parameters"
                     ))),
-                    |(_, v)| Ok(v),
+                    |(_, v)| Ok(v.into_owned()),
                 )
         },
     )
