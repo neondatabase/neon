@@ -87,9 +87,9 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
     steps:
@@ -99,15 +99,16 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Restore cargo deps cache
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            .cargo/registry/
-            !.cargo/registry/src
-            .cargo/git/
-          key: v2-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#      Disabled for now
+#      - name: Restore cargo deps cache
+#        id: cache_cargo
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            .cargo/registry/
+#            !.cargo/registry/src
+#            .cargo/git/
+#          key: v2-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
@@ -136,7 +137,7 @@ jobs:
   build-neon:
     runs-on: [ self-hosted, gen3t, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     strategy:
       fail-fast: false
@@ -196,23 +197,23 @@ jobs:
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
           echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
 
+      # Disabled for now
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
       # directory, and it's faster to let 'cargo' to rebuild it from the
       # compressed crates.
-      # remove target/ as the size is too large for GitHub actions cache
-      - name: Cache cargo deps
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            .cargo/registry/
-            !.cargo/registry/src
-            .cargo/git/
-          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
-          key: |
-            v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-            v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+#      - name: Cache cargo deps
+#        id: cache_cargo
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            .cargo/registry/
+#            !.cargo/registry/src
+#            .cargo/git/
+#          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+#          key: |
+#            v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#            v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -304,7 +305,7 @@ jobs:
   regress-tests:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ build-neon ]
     strategy:
@@ -337,7 +338,7 @@ jobs:
   benchmarks:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -368,7 +369,7 @@ jobs:
   merge-allure-report:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ regress-tests, benchmarks ]
     if: ${{ !cancelled() }}
@@ -405,7 +406,7 @@ jobs:
   coverage-report:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ regress-tests ]
     strategy:
@@ -419,15 +420,16 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Restore cargo deps cache
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            .cargo/registry/
-            !.cargo/registry/src
-            .cargo/git/
-          key: v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#      Disabled for now
+#      - name: Restore cargo deps cache
+#        id: cache_cargo
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            .cargo/registry/
+#            !.cargo/registry/src
+#            .cargo/git/
+#          key: v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
@@ -919,7 +921,7 @@ jobs:
 
   deploy-prod-new:
     runs-on: [ self-hosted, gen3, small ]
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1137,7 +1139,7 @@ jobs:
 
   deploy-proxy-prod-new:
     runs-on: [ self-hosted, gen3, small ]
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
     if: |
@@ -1188,7 +1190,7 @@ jobs:
 
   deploy-storage-broker-prod-new:
     runs-on: [ self-hosted, gen3, small ]
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
     if: |
@@ -1229,7 +1231,7 @@ jobs:
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ deploy, deploy-proxy ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
