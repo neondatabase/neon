@@ -1833,8 +1833,11 @@ impl Timeline {
                 // The next layer doesn't exist locally. Need to download it.
                 // (The control flow is a bit complicated here because we must drop the 'layers'
                 // lock before awaiting on the Future.)
-                match ctx.download_behavior() {
-                    DownloadBehavior::Download => {
+                match (
+                    ctx.download_behavior(),
+                    self.conf.ondemand_download_behavior_treat_error_as_warn,
+                ) {
+                    (DownloadBehavior::Download, _) => {
                         info!(
                             "on-demand downloading remote layer {id} for task kind {:?}",
                             ctx.task_kind()
@@ -1842,7 +1845,7 @@ impl Timeline {
                         timeline.download_remote_layer(remote_layer).await?;
                         continue 'layer_map_search;
                     }
-                    DownloadBehavior::Warn => {
+                    (DownloadBehavior::Warn, _) | (DownloadBehavior::Error, true) => {
                         warn!(
                             "unexpectedly on-demand downloading remote layer {} for task kind {:?}",
                             id,
@@ -1851,7 +1854,7 @@ impl Timeline {
                         timeline.download_remote_layer(remote_layer).await?;
                         continue 'layer_map_search;
                     }
-                    DownloadBehavior::Error => {
+                    (DownloadBehavior::Error, false) => {
                         return Err(PageReconstructError::NeedsDownload(
                             timeline.myself.clone(),
                             Arc::downgrade(&remote_layer),
