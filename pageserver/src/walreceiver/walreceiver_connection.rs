@@ -77,9 +77,13 @@ pub async fn handle_walreceiver_connection(
                 info!("DB connection stream finished: {expected_error}");
                 return Ok(());
             }
-            Err(elapsed) => anyhow::bail!(
-                "Timed out while waiting {elapsed} for walreceiver connection to open"
-            ),
+            Err(_) => {
+                // Timing out to connect to a safekeeper node could happen long time, due to
+                // many reasons that pageserver cannot control.
+                // Do not produce an error, but make it visible, that timeouts happen by logging the `event.
+                info!("Timed out while waiting {connect_timeout:?} for walreceiver connection to open");
+                return Ok(());
+            }
         }
     };
 
