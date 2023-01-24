@@ -488,7 +488,7 @@ impl Timeline {
                 let mut buf = self
                     .get(relsize_key, lsn)
                     .await
-                    .context("read relation size of {rel:?}")?;
+                    .with_context(|| format!("read relation size of {rel:?}"))?;
                 let relsize = buf.get_u32_le();
 
                 total_size += relsize as u64;
