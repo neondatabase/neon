@@ -22,8 +22,9 @@ use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
+use super::TaskStateUpdate;
 use crate::context::RequestContext;
-use crate::{metrics::LIVE_CONNECTIONS_COUNT, walreceiver::TaskStateUpdate};
+use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::{
     task_mgr,
     task_mgr::TaskKind,
