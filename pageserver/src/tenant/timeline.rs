@@ -1457,10 +1457,7 @@ impl Timeline {
         up_to_lsn: Lsn,
         cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        info!(
-            "Calculating logical size for timeline {} at {}",
-            self.timeline_id, up_to_lsn
-        );
+        info!(%up_to_lsn, "Calculating logical size");
         // These failpoints are used by python tests to ensure that we don't delete
         // the timeline while the logical size computation is ongoing.
         // The first failpoint is used to make this function pause.
