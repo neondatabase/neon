@@ -466,7 +466,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let inputs_only = if query_param_present(&request, "inputs_only") {
         get_query_param(&request, "inputs_only")?
             .parse()
-            .map_err(|_| ApiError::BadRequest(anyhow!("failed to parse model_only",)))?
+            .map_err(|_| ApiError::BadRequest(anyhow!("failed to parse inputs_only")))?
     } else {
         false
     };
