@@ -81,6 +81,7 @@ pub async fn handler(err: routerify::RouteError) -> Response<Body> {
         .downcast::<ApiError>()
         .expect("handler should always return api error");
 
+    // Print a stack trace for Internal Server errors
     if let ApiError::InternalServerError(_) = api_error.as_ref() {
         error!("Error processing HTTP request: {api_error:?}");
     } else {
