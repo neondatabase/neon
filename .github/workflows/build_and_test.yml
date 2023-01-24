@@ -948,6 +948,9 @@ jobs:
         target_region: [ us-east-2, us-west-2, eu-central-1, ap-southeast-1 ]
     environment:
       name: prod-${{ matrix.target_region }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_PROD }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_PROD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1177,6 +1180,9 @@ jobs:
             deploy_link_proxy: false
     environment:
       name: prod-${{ matrix.target_region }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_PROD }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_PROD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1224,6 +1230,9 @@ jobs:
             target_cluster: prod-ap-southeast-1-epsilon
     environment:
       name: prod-${{ matrix.target_region }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_PROD }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_PROD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
