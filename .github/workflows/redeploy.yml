@@ -20,16 +20,9 @@ on:
         - dev
         - prod
 
-defaults:
-  run:
-    shell: bash -euxo pipefail {0}
-
 concurrency:
   group: redeploy
-
-env:
-  RUST_BACKTRACE: 1
-  COPT: '-Werror'
+  cancel-in-progress: false
 
 jobs:
   deploy-new-dev:
