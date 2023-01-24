@@ -197,7 +197,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         .new_timeline_id
         .unwrap_or_else(TimelineId::generate);
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
 
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
@@ -293,6 +293,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         query_param_present(&request, "include-non-incremental-logical-size");
     check_permission(&request, Some(tenant_id))?;
 
+    // Logical size calculation needs downloading.
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let timeline_info = async {
