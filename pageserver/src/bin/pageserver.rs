@@ -250,7 +250,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     let signals = signals::install_shutdown_handlers()?;
 
     // Launch broker client
-    WALRECEIVER_RUNTIME.block_on(pageserver::walreceiver::init_broker_client(conf))?;
+    WALRECEIVER_RUNTIME.block_on(pageserver::broker_client::init_broker_client(conf))?;
 
     // Initialize authentication for incoming connections
     let auth = match &conf.auth_type {
