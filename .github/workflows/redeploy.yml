@@ -1,0 +1,57 @@
+name: Redeploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      dockerTag:
+        description: 'Docker tag to deploy'
+        required: true
+        type: string
+      branch:
+        description: 'Branch or commit used for configs'
+        required: true
+        type: string
+        default: 'main'
+        
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  group: redeploy
+
+env:
+  RUST_BACKTRACE: 1
+  COPT: '-Werror'
+
+jobs:
+  deploy-new:
+    runs-on: [ self-hosted, dev, x64 ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        target_region: [ eu-west-1, us-east-2 ]
+    environment:
+      name: dev-${{ matrix.target_region }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+          ref: ${{ inputs.branch }}
+
+      - name: Redeploy
+        run: |
+          export DOCKER_TAG=${{ inputs.dockerTag }}
+          cd "$(pwd)/.github/ansible"
+          
+          ./get_binaries.sh
+
+          ansible-galaxy collection install sivel.toiletwater
+          ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{ secrets.NEON_STAGING_API_KEY }} -e SENTRY_URL_PAGESERVER=${{ secrets.SENTRY_URL_PAGESERVER }} -e SENTRY_URL_SAFEKEEPER=${{ secrets.SENTRY_URL_SAFEKEEPER }}
+          rm -f neon_install.tar.gz .neon_current_version
