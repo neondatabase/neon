@@ -1351,7 +1351,7 @@ impl Timeline {
                 // so that we prevent future callers from spawning this task
                 permit.forget();
                 Ok(())
-            },
+            }.in_current_span(),
         );
     }
 
@@ -1372,7 +1372,8 @@ impl Timeline {
                 let res = self_clone.logical_size_calculation_task(lsn).await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
-            },
+            }
+            .in_current_span(),
         );
         receiver
     }
