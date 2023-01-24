@@ -14,7 +14,7 @@ use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, instrument};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -76,8 +76,7 @@ pub async fn task_main(
             .unwrap_or_else(|e| {
                 // Acknowledge that the task has finished with an error.
                 error!("per-client task finished with an error: {e:#}");
-            })
-            .instrument(info_span!("client", session = format_args!("{session_id}"))),
+            }),
         );
     }
 }
@@ -99,8 +98,7 @@ pub async fn handle_ws_client(
     let hostname = hostname.as_deref();
 
     // TLS is None here, because the connection is already encrypted.
-    let do_handshake = handshake(stream, None, cancel_map).instrument(info_span!("handshake"));
-    let (mut stream, params) = match do_handshake.await? {
+    let (mut stream, params) = match handshake(stream, None, cancel_map).await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
     };
@@ -119,10 +117,13 @@ pub async fn handle_ws_client(
 
     let client = Client::new(stream, creds, &params, session_id);
     cancel_map
-        .with_session(|session| client.connect_to_db(session))
+        .with_session(|session| client.handle_connection(session))
         .await
 }
 
+/// Handle an incoming client connection, handshake and authentication.
+/// After that, keeps forwarding all the data. This doesn't return until the
+/// connection is lost.
 async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
@@ -135,9 +136,9 @@ async fn handle_client(
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
     }
 
+    // Process postgres startup packet and upgrade to TLS (if applicable)
     let tls = config.tls_config.as_ref();
-    let do_handshake = handshake(stream, tls, cancel_map).instrument(info_span!("handshake"));
-    let (mut stream, params) = match do_handshake.await? {
+    let (mut stream, params) = match handshake(stream, tls, cancel_map).await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
     };
@@ -157,7 +158,7 @@ async fn handle_client(
 
     let client = Client::new(stream, creds, &params, session_id);
     cancel_map
-        .with_session(|session| client.connect_to_db(session))
+        .with_session(|session| client.handle_connection(session))
         .await
 }
 
@@ -165,6 +166,7 @@ async fn handle_client(
 /// For better testing experience, `stream` can be any object satisfying the traits.
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
+#[instrument(skip_all)]
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<&TlsConfig>,
@@ -256,8 +258,21 @@ impl<'a, S> Client<'a, S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
+    async fn handle_connection(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
+        let (mut client, mut db) = self.connect_to_db(session).await?;
+
+        // Starting from here we only proxy the client's traffic.
+        info!("performing the proxy pass...");
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
+        Ok(())
+    }
+
     /// Let the client authenticate and connect to the designated compute node.
-    async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
+    #[instrument(skip_all)]
+    async fn connect_to_db(
+        self,
+        session: cancellation::Session<'_>,
+    ) -> anyhow::Result<(MeasuredStream<S>, MeasuredStream<tokio::net::TcpStream>)> {
         let Self {
             mut stream,
             creds,
@@ -275,7 +290,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             let res = creds.authenticate(&extra, &mut stream).await;
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
-        .instrument(info_span!("auth"))
         .await?;
 
         let node = auth_result.value;
@@ -311,15 +325,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             .await?;
 
         let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("tx"));
-        let mut client = MeasuredStream::new(stream.into_inner(), m_sent);
+        let client = MeasuredStream::new(stream.into_inner(), m_sent);
 
         let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("rx"));
-        let mut db = MeasuredStream::new(db.stream, m_recv);
+        let db = MeasuredStream::new(db.stream, m_recv);
 
-        // Starting from here we only proxy the client's traffic.
-        info!("performing the proxy pass...");
-        let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
-
-        Ok(())
+        Ok((client, db))
     }
 }
