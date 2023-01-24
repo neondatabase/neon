@@ -228,27 +228,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
 }
 
 pin_project! {
-    /// This stream tracks all writes and calls user provided
-    /// callback when the underlying stream is flushed.
-    pub struct MeasuredStream<S, W> {
+    /// This stream tracks all writes, and whenever the stream is flushed,
+    /// increments the user-provided counter by the number of bytes flushed.
+    pub struct MeasuredStream<S> {
         #[pin]
         stream: S,
         write_count: usize,
-        inc_write_count: W,
+        write_counter: prometheus::IntCounter,
     }
 }
 
-impl<S, W> MeasuredStream<S, W> {
-    pub fn new(stream: S, inc_write_count: W) -> Self {
+impl<S> MeasuredStream<S> {
+    pub fn new(stream: S, write_counter: prometheus::IntCounter) -> Self {
         Self {
             stream,
             write_count: 0,
-            inc_write_count,
+            write_counter,
         }
     }
 }
 
-impl<S: AsyncRead + Unpin, W> AsyncRead for MeasuredStream<S, W> {
+impl<S: AsyncRead + Unpin> AsyncRead for MeasuredStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         context: &mut task::Context<'_>,
@@ -258,7 +258,7 @@ impl<S: AsyncRead + Unpin, W> AsyncRead for MeasuredStream<S, W> {
     }
 }
 
-impl<S: AsyncWrite + Unpin, W: FnMut(usize)> AsyncWrite for MeasuredStream<S, W> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for MeasuredStream<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         context: &mut task::Context<'_>,
@@ -279,7 +279,7 @@ impl<S: AsyncWrite + Unpin, W: FnMut(usize)> AsyncWrite for MeasuredStream<S, W>
         let this = self.project();
         this.stream.poll_flush(context).map_ok(|()| {
             // Call the user provided callback and reset the write count.
-            (this.inc_write_count)(*this.write_count);
+            this.write_counter.inc_by(*this.write_count as u64);
             *this.write_count = 0;
         })
     }
