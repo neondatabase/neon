@@ -568,7 +568,10 @@ jobs:
       - name: Kaniko build compute tools
         run: /kaniko/executor --snapshot-mode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
-      - name: Cleanup ecr folder
+      - name: Debug
+        run: ls -lha
+
+      - name: Cleanup ECR folder
         run: rm -rf .ecr
 
   compute-node-image:
