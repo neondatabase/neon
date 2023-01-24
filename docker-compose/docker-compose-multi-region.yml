@@ -69,6 +69,8 @@ configs:
     file: ./compute_wrapper/var/db/postgres/specs/spec-multi-region.json
   compute_shell:
     file: ./compute_wrapper/shell/compute-multi-region.sh
+  prometheus:
+    file: ./prometheus.yml
 
 networks:
   default:
@@ -88,6 +90,15 @@ services:
     #   placement:
     #     constraints:
     #       - node.role==manager
+
+  prometheus:
+    restart: always
+    image: prom/prometheus:latest
+    ports:
+      - 9090:9090
+    configs:
+      - source: prometheus
+        target: /etc/prometheus/prometheus.yml
 
   #############################################
   #                 REGION 1                  #
@@ -215,7 +226,8 @@ services:
           --listen-pg=0.0.0.0:10000 \
           --connect-pg=$$CONNECT_PG \
           --node-id=$$NODE_ID       \
-          --nodes=$$NODES
+          --nodes=$$NODES           \
+          --listen-http=0.0.0.0:8080
     # deploy:
     #   placement:
     #     constraints:
