@@ -71,6 +71,7 @@ use walreceiver::spawn_connection_manager_task;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
+use super::TimelineMapEntry;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -80,7 +81,7 @@ enum FlushLoopState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+pub(super) enum State {
     Loading,
     Active,
     Stopping,
@@ -136,7 +137,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<Arc<Timeline>>,
+    ancestor_timeline: Option<TimelineMapEntry>, // TODO: replace Option with 4th state of TimelineMapEntry
     ancestor_lsn: Lsn,
 
     // Metrics
@@ -432,7 +433,7 @@ impl Timeline {
     pub fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
         self.ancestor_timeline
             .as_ref()
-            .map(|ancestor| ancestor.timeline_id)
+            .map(|ancestor| ancestor.timeline_id())
     }
 
     /// Lock and get timeline's GC cuttof
@@ -561,7 +562,10 @@ impl Timeline {
         lsn: Lsn,
         _ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.is_active(), "Cannot wait for Lsn on inactive timeline");
+        anyhow::ensure!(
+            self.current_state() == State::Active,
+            "Cannot wait for Lsn on inactive timeline"
+        );
 
         // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
@@ -851,21 +855,17 @@ impl Timeline {
         res.expect("closure must set `res`")
     }
 
-    fn current_state(&self) -> State {
+    pub(super) fn current_state(&self) -> State {
         *self.state.borrow()
     }
 
-    pub fn api_state(&self) -> pageserver_api::models::TimelineState {
+    pub(super) fn api_state(&self) -> pageserver_api::models::TimelineState {
         use pageserver_api::models as api;
         match self.current_state() {
             State::Loading => api::TimelineState::Loading,
             State::Active => api::TimelineState::Active,
             State::Stopping => api::TimelineState::Stopping,
         }
-    }
-
-    pub fn is_active(&self) -> bool {
-        self.current_state() == State::Active
     }
 
     fn subscribe_for_state_updates(&self) -> watch::Receiver<State> {
@@ -918,7 +918,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
-        ancestor: Option<Arc<Timeline>>,
+        ancestor: Option<TimelineMapEntry>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -1773,12 +1773,35 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                let ancestor = match timeline.get_ancestor_timeline() {
-                    Ok(timeline) => timeline,
-                    Err(e) => return Err(PageReconstructError::from(e)),
+                let ancestor = match &timeline.ancestor_timeline {
+                    Some(ancestor_timeline) => {
+                        match ancestor_timeline {
+                            crate::tenant::TimelineMapEntry::InitializeFailed(_) => {
+                                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                    "ancestor timeline is broken",
+                                )));
+                            }
+                            // RemovingFromMemory has priority over GetPage.
+                            // This shouldn't happen anyways because shutdown should
+                            // drain all the GetPage requests first anyways.
+                            crate::tenant::TimelineMapEntry::RemovingFromMemory(_) => {
+                                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                    "ancestor timeline is being removed from memory",
+                                )));
+                            }
+                            crate::tenant::TimelineMapEntry::Live(tl) => tl,
+                        }
+                    }
+                    None => {
+                        return Err(PageReconstructError::from(anyhow::anyhow!(
+                            "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
+                            self.timeline_id,
+                            self.get_ancestor_timeline_id(),
+                        )))
+                    }
                 };
                 timeline_owned = ancestor;
-                timeline = &*timeline_owned;
+                timeline = timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
                 continue 'outer;
             }
@@ -1945,17 +1968,6 @@ impl Timeline {
             cache.lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
-    }
-
-    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
-        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
-            format!(
-                "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
-                self.timeline_id,
-                self.get_ancestor_timeline_id(),
-            )
-        })?;
-        Ok(Arc::clone(ancestor))
     }
 
     ///
@@ -2228,15 +2240,10 @@ impl Timeline {
             None
         };
 
-        let ancestor_timeline_id = self
-            .ancestor_timeline
-            .as_ref()
-            .map(|ancestor| ancestor.timeline_id);
-
         let metadata = TimelineMetadata::new(
             disk_consistent_lsn,
             ondisk_prev_record_lsn,
-            ancestor_timeline_id,
+            self.get_ancestor_timeline_id(),
             self.ancestor_lsn,
             *self.latest_gc_cutoff_lsn.read(),
             self.initdb_lsn,

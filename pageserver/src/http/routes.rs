@@ -125,79 +125,107 @@ async fn build_timeline_info(
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
         // Otherwise, if someone deletes the timeline / detaches the tenant while
         // we're executing this function, we will outlive the timeline on-disk state.
-        info.current_logical_size_non_incremental = Some(
-            timeline_map_entry
-                .any_state_ok()
-                .get_current_logical_size_non_incremental(
-                    info.last_record_lsn,
-                    CancellationToken::new(),
-                    ctx,
-                )
-                .await?,
-        );
+        match timeline_map_entry {
+            TimelineMapEntry::InitializeFailed(_) => todo!(),
+            TimelineMapEntry::Live(tl) | TimelineMapEntry::RemovingFromMemory(tl) => {
+                info.current_logical_size_non_incremental = Some(
+                    tl.get_current_logical_size_non_incremental(
+                        info.last_record_lsn,
+                        CancellationToken::new(),
+                        ctx,
+                    )
+                    .await?,
+                );
+            }
+        }
     }
     Ok(info)
 }
 
 fn build_timeline_info_common(
-    timeline_map_entry: &TimelineMapEntry,
+    tlme: &TimelineMapEntry,
     ctx: &RequestContext,
 ) -> anyhow::Result<api::TimelineInfo> {
-    let timeline = timeline_map_entry.any_state_ok();
-    let last_record_lsn = timeline.get_last_record_lsn();
-    let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
-        let guard = timeline.last_received_wal.lock().unwrap();
-        if let Some(info) = guard.as_ref() {
-            (
-                Some(format!("{:?}", info.wal_source_connconf)), // Password is hidden, but it's for statistics only.
-                Some(info.last_received_msg_lsn),
-                Some(info.last_received_msg_ts),
-            )
-        } else {
-            (None, None, None)
-        }
-    };
-
-    let ancestor_timeline_id = timeline.get_ancestor_timeline_id();
-    let ancestor_lsn = match timeline.get_ancestor_lsn() {
+    let tenant_id = tlme.tenant_id();
+    let timeline_id = tlme.timeline_id();
+    let pg_version = tlme.pg_version();
+    let state = tlme.api_state();
+    let ancestor_timeline_id = tlme.get_ancestor_timeline_id();
+    let ancestor_lsn = match tlme.get_ancestor_lsn() {
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size = match timeline.get_current_logical_size(ctx) {
-        Ok((size, _)) => Some(size),
-        Err(err) => {
-            error!("Timeline info creation failed to get current logical size: {err:?}");
-            None
+    let info = match tlme {
+        TimelineMapEntry::InitializeFailed(_broken) => {
+            todo!()
+            // api::TimelineInfo {
+            //     tenant_id,
+            //     timeline_id,
+            //     pg_version,
+            //     state,
+            //     ancestor_timeline_id,
+            //     ancestor_lsn,
+            //     // Callers are responsible for setting these
+            //     current_logical_size_non_incremental: None,
+            //     timeline_dir_layer_file_size_sum: None,
+            //     // for broken timeline, the following fields remain None
+            //     ...
+            // }
+        }
+        TimelineMapEntry::Live(timeline) | TimelineMapEntry::RemovingFromMemory(timeline) => {
+            let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
+                let guard = timeline.last_received_wal.lock().unwrap();
+                if let Some(info) = guard.as_ref() {
+                    (
+                        Some(format!("{:?}", info.wal_source_connconf)), // Password is hidden, but it's for statistics only.
+                        Some(info.last_received_msg_lsn),
+                        Some(info.last_received_msg_ts),
+                    )
+                } else {
+                    (None, None, None)
+                }
+            };
+
+            let last_record_lsn = timeline.get_last_record_lsn();
+            let current_logical_size = match timeline.get_current_logical_size(ctx) {
+                Ok((size, _)) => Some(size),
+                Err(err) => {
+                    error!("Timeline info creation failed to get current logical size: {err:?}");
+                    None
+                }
+            };
+            let current_physical_size = Some(timeline.layer_size_sum().approximate_is_ok());
+
+            let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
+            let prev_record_lsn = Some(timeline.get_prev_record_lsn());
+            let latest_gc_cutoff_lsn = *timeline.get_latest_gc_cutoff_lsn();
+            let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+
+            api::TimelineInfo {
+                tenant_id,
+                timeline_id,
+                pg_version,
+                state,
+                ancestor_timeline_id,
+                ancestor_lsn,
+                // Callers are responsible for setting these
+                current_logical_size_non_incremental: None,
+                timeline_dir_layer_file_size_sum: None,
+                // Filled from NotBrokenPart
+                last_record_lsn,
+                prev_record_lsn,
+                latest_gc_cutoff_lsn,
+                disk_consistent_lsn,
+                remote_consistent_lsn,
+                current_logical_size,
+                current_physical_size,
+                wal_source_connstr,
+                last_received_msg_lsn,
+                last_received_msg_ts,
+            }
         }
     };
-    let current_physical_size = Some(timeline.layer_size_sum().approximate_is_ok());
-    let state = match timeline_map_entry {
-        TimelineMapEntry::InitializeFailed(_) => api::TimelineState::Broken,
-        TimelineMapEntry::Live(tl) | TimelineMapEntry::RemovingFromMemory(tl) => tl.api_state(),
-    };
-    let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
-    let info = api::TimelineInfo {
-        tenant_id: timeline.tenant_id,
-        timeline_id: timeline.timeline_id,
-        ancestor_timeline_id,
-        ancestor_lsn,
-        disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
-        remote_consistent_lsn,
-        last_record_lsn,
-        prev_record_lsn: Some(timeline.get_prev_record_lsn()),
-        latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
-        current_logical_size,
-        current_physical_size,
-        current_logical_size_non_incremental: None,
-        timeline_dir_layer_file_size_sum: None,
-        wal_source_connstr,
-        last_received_msg_lsn,
-        last_received_msg_ts,
-        pg_version: timeline.pg_version,
-
-        state,
-    };
     Ok(info)
 }
 
@@ -254,7 +282,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         let tenant = mgr::get_tenant(tenant_id, true)
             .await
             .map_err(ApiError::NotFound)?;
-        let timelines = tenant.list_timeline_entries();
+        let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
@@ -484,6 +512,10 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
         for timeline in tenant.list_timelines().iter() {
+            let timeline = match timeline {
+                TimelineMapEntry::InitializeFailed(_) => todo!(),
+                TimelineMapEntry::Live(tl) | TimelineMapEntry::RemovingFromMemory(tl) => tl,
+            };
             current_physical_size += timeline.layer_size_sum().approximate_is_ok();
         }
 

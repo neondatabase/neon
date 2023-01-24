@@ -1256,10 +1256,11 @@ mod tests {
 
     async fn dummy_state(harness: &TenantHarness<'_>) -> WalreceiverState {
         let (tenant, ctx) = harness.load().await;
-        let timeline = tenant
+        let utimeline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION, &ctx)
             .expect("Failed to create an empty timeline for dummy wal connection manager");
-        let timeline = timeline.initialize(&ctx).unwrap();
+        let tlme = utimeline.initialize(&ctx).unwrap();
+        let timeline = tlme.try_as_active().map(Arc::clone).unwrap();
 
         WalreceiverState {
             id: TenantTimelineId {

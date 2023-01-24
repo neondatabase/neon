@@ -1598,13 +1598,14 @@ pub fn create_test_timeline(
     pg_version: u32,
     ctx: &RequestContext,
 ) -> anyhow::Result<std::sync::Arc<Timeline>> {
-    let tline = tenant
+    let tlme = tenant
         .create_empty_timeline(timeline_id, Lsn(8), pg_version, ctx)?
         .initialize(ctx)?;
+    let tline = tlme.try_as_active().unwrap();
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;
-    Ok(tline)
+    Ok(std::sync::Arc::clone(tline))
 }
 
 #[allow(clippy::bool_assert_comparison)]

@@ -130,7 +130,7 @@ pub async fn collect_metrics_iteration(
         // iterate through list of timelines in tenant
         for timeline in tenant.list_timelines().iter() {
             // collect per-timeline metrics only for active timelines
-            if timeline.is_active() {
+            if let Some(timeline) = timeline.try_as_active() {
                 let timeline_written_size = u64::from(timeline.get_last_record_lsn());
 
                 current_metrics.push((
@@ -156,7 +156,15 @@ pub async fn collect_metrics_iteration(
                 }
             }
 
-            let timeline_resident_size = timeline.get_resident_physical_size();
+            let timeline_resident_size = match timeline {
+                crate::tenant::TimelineMapEntry::InitializeFailed(_) => {
+                    todo!("the reported size would be inaccurate")
+                }
+                crate::tenant::TimelineMapEntry::Live(tl)
+                | crate::tenant::TimelineMapEntry::RemovingFromMemory(tl) => {
+                    tl.get_resident_physical_size()
+                }
+            };
             tenant_resident_size += timeline_resident_size;
         }
 
