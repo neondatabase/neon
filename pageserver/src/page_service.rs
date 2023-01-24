@@ -29,7 +29,6 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::error::Elapsed;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::postgres_backend_async::QueryError;
@@ -995,11 +994,11 @@ impl postgres_backend_async::Handler for PageServerHandler {
 #[derive(thiserror::Error, Debug)]
 enum GetActiveTenantError {
     #[error(
-        "Timed out waiting {wait_time} for tenant active state. Latest state: {latest_state:?}"
+        "Timed out waiting {wait_time:?} for tenant active state. Latest state: {latest_state:?}"
     )]
     WaitForActiveTimeout {
         latest_state: TenantState,
-        wait_time: Elapsed,
+        wait_time: Duration,
     },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -1025,18 +1024,19 @@ async fn get_active_tenant_with_timeout(
     tenant_id: TenantId,
 ) -> Result<Arc<Tenant>, GetActiveTenantError> {
     let tenant = mgr::get_tenant(tenant_id, false).await?;
-    match tokio::time::timeout(Duration::from_secs(30), tenant.wait_to_become_active()).await {
+    let wait_time = Duration::from_secs(30);
+    match tokio::time::timeout(wait_time, tenant.wait_to_become_active()).await {
         Ok(Ok(())) => Ok(tenant),
         // no .context(), the error message is good enough and some tests depend on it
         Ok(Err(wait_error)) => Err(GetActiveTenantError::Other(wait_error)),
-        Err(elapsed) => {
+        Err(_) => {
             let latest_state = tenant.current_state();
             if latest_state == TenantState::Active {
                 Ok(tenant)
             } else {
                 Err(GetActiveTenantError::WaitForActiveTimeout {
                     latest_state,
-                    wait_time: elapsed,
+                    wait_time,
                 })
             }
         }
