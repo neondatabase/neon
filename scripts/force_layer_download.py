@@ -6,7 +6,7 @@ import signal
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Awaitable, List, Tuple
+from typing import Any, Awaitable, Dict, List, Tuple
 
 import aiohttp
 
@@ -16,8 +16,9 @@ class ClientException(Exception):
 
 
 class Client:
-    def __init__(self, pageserver_api_endpoint: str):
+    def __init__(self, pageserver_api_endpoint: str, max_concurrent_layer_downloads: int):
         self.endpoint = pageserver_api_endpoint
+        self.max_concurrent_layer_downloads = max_concurrent_layer_downloads
         self.sess = aiohttp.ClientSession()
 
     async def close(self):
@@ -29,36 +30,37 @@ class Client:
     async def __aexit__(self, exc_t, exc_v, exc_tb):
         await self.close()
 
-    async def get_tenant_ids(self):
-        resp = await self.sess.get(f"{self.endpoint}/v1/tenant")
+    async def parse_response(self, resp, expected_type):
         body = await resp.json()
         if not resp.ok:
-            raise ClientException(f"{resp}")
-        if not isinstance(body, list):
-            raise ClientException("expecting list")
-        return [t["id"] for t in body]
+            raise ClientException(f"Response: {resp} Body: {body}")
+
+        if not isinstance(body, expected_type):
+            raise ClientException(f"expecting {expected_type.__name__}")
+        return body
+
+    async def get_tenant_ids(self):
+        resp = await self.sess.get(f"{self.endpoint}/v1/tenant")
+        payload = await self.parse_response(resp=resp, expected_type=list)
+        return [t["id"] for t in payload]
 
     async def get_timeline_ids(self, tenant_id):
         resp = await self.sess.get(f"{self.endpoint}/v1/tenant/{tenant_id}/timeline")
-        body = await resp.json()
-        if not resp.ok:
-            raise ClientException(f"{resp}")
-        if not isinstance(body, list):
-            raise ClientException("expecting list")
-        return [t["timeline_id"] for t in body]
+        payload = await self.parse_response(resp=resp, expected_type=list)
+        return [t["timeline_id"] for t in payload]
 
     async def timeline_spawn_download_remote_layers(self, tenant_id, timeline_id, ongoing_ok=False):
-
         resp = await self.sess.post(
             f"{self.endpoint}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+            json={"max_concurrent_downloads": self.max_concurrent_layer_downloads},
         )
         body = await resp.json()
         if resp.status == 409:
             if not ongoing_ok:
                 raise ClientException("download already ongoing")
-            pass  # response body has same shape for ongoing and newly created
+            # response body has same shape for ongoing and newly created
         elif not resp.ok:
-            raise ClientException(f"{resp}")
+            raise ClientException(f"Response: {resp} Body: {body}")
 
         if not isinstance(body, dict):
             raise ClientException("expecting dict")
@@ -78,7 +80,7 @@ class Client:
         if resp.status == 404:
             return None
         elif not resp.ok:
-            raise ClientException(f"{resp}")
+            raise ClientException(f"Response: {resp} Body: {body}")
 
         return body
 
@@ -87,8 +89,7 @@ class Client:
 class Completed:
     """The status dict returned by the API"""
 
-    status: dict[str, Any]
-    pass
+    status: Dict[str, Any]
 
 
 sigint_received = asyncio.Event()
@@ -147,21 +148,39 @@ def handle_sigint():
 
 
 async def main(args):
-
-    async with Client(args.pageserver_http_endpoint) as client:
-        with open(args.report_output, "w") as report_out:
-            exit_code = await main_impl(args, report_out, client)
+    async with Client(args.pageserver_http_endpoint, args.max_concurrent_layer_downloads) as client:
+        exit_code = await main_impl(args, args.report_output, client)
 
     return exit_code
+
+
+async def taskq_handler(task_q, result_q):
+    while True:
+        try:
+            (id, fut) = task_q.get_nowait()
+        except asyncio.QueueEmpty:
+            logging.debug("taskq_handler observed empty task_q, returning")
+            return
+        logging.info(f"starting task {id}")
+        try:
+            res = await fut
+        except Exception as e:
+            res = e
+        result_q.put_nowait((id, res))
+
+
+async def print_progress(result_q, tasks):
+    while True:
+        await asyncio.sleep(10)
+        logging.info(f"{result_q.qsize()} / {len(tasks)} tasks done")
 
 
 async def main_impl(args, report_out, client: Client):
     """
     Returns OS exit status.
     """
-
     tenant_and_timline_ids: List[Tuple[str, str]] = []
-    # fill  tenant_and_timline_ids based on spec
+    # fill tenant_and_timline_ids based on spec
     for spec in args.what:
         comps = spec.split(":")
         if comps == ["ALL"]:
@@ -206,29 +225,9 @@ async def main_impl(args, report_out, client: Client):
     result_q: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue()
     taskq_handlers = []
     for _ in range(0, args.concurrent_tasks):
+        taskq_handlers.append(taskq_handler(task_q, result_q))
 
-        async def taskq_handler(task_q):
-            while True:
-                try:
-                    (id, fut) = task_q.get_nowait()
-                except asyncio.QueueEmpty:
-                    logging.debug("taskq_handler observed empty task_q, returning")
-                    return
-                logging.info(f"starting task {id}")
-                try:
-                    res = await fut
-                except Exception as e:
-                    res = e
-                result_q.put_nowait((id, res))
-
-        taskq_handlers.append(taskq_handler(task_q))
-
-    async def print_progress():
-        while True:
-            await asyncio.sleep(10)
-            logging.info(f"{result_q.qsize()} / {len(tasks)} tasks done")
-
-    print_progress_task = asyncio.create_task(print_progress())
+    print_progress_task = asyncio.create_task(print_progress(result_q, tasks))
 
     await asyncio.gather(*taskq_handlers)
     print_progress_task.cancel()
@@ -273,21 +272,31 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--report-output",
-        required=True,
+        type=argparse.FileType("w"),
+        default="-",
         help="where to write report output (default: stdout)",
     )
     parser.add_argument(
         "--pageserver-http-endpoint",
-        required=True,
-        help="where to write report output (default: stdout)",
+        default="http://localhost:9898",
+        help="pageserver http endpoint, (default http://localhost:9898)",
     )
     parser.add_argument(
         "--concurrent-tasks",
         required=False,
-        default=1,
+        default=5,
         type=int,
         help="Max concurrent download tasks created & polled by this script",
     )
+    parser.add_argument(
+        "--max-concurrent-layer-downloads",
+        dest="max_concurrent_layer_downloads",
+        required=False,
+        default=8,
+        type=int,
+        help="Max concurrent download tasks spawned by pageserver. Each layer is a separate task.",
+    )
+
     parser.add_argument(
         "what",
         nargs="+",
