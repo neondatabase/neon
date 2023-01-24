@@ -11,11 +11,14 @@
 
 use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
 
+use super::super::State as TimelineState;
 use super::TaskStateUpdate;
 use crate::broker_client::get_broker_client;
 use crate::context::RequestContext;
-use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
-use crate::tenant::{Timeline, TimelineState};
+use crate::task_mgr;
+use crate::task_mgr::TaskKind;
+use crate::task_mgr::WALRECEIVER_RUNTIME;
+use crate::tenant::Timeline;
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
@@ -192,7 +195,7 @@ async fn connection_manager_loop_step(
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
-                                TimelineState::Broken | TimelineState::Stopping => {
+                                TimelineState::Stopping => {
                                     info!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
                                     return ControlFlow::Break(());
                                 }

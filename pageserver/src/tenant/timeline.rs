@@ -79,13 +79,11 @@ enum FlushLoopState {
     Exited,
 }
 
-/// XXX: this type will become internal to Timeline in a future commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum State {
+enum State {
     Loading,
     Active,
     Stopping,
-    Broken,
 }
 
 pub struct Timeline {
@@ -791,40 +789,86 @@ impl Timeline {
         Ok(())
     }
 
+    /// Call this method exactly once before starting to use the timeline.
+    /// Panics if called multiple times.
     pub fn activate(self: &Arc<Self>) {
-        self.set_state(State::Active);
+        self.state_cmpxchg(State::Loading, State::Active)
+            .map_err(|current_state| format!("unexpected state {current_state:?}"))
+            .unwrap();
         self.launch_wal_receiver();
     }
 
-    pub(crate) fn set_state(&self, new_state: State) {
-        match (self.current_state(), new_state) {
-            (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
-                warn!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
+    /// Shut down all currently running tasks of this timeline.
+    /// After this function returns, the Timeline won't spawn any new tasks.
+    ///
+    /// Tasks that run concurrently to this function may still observe
+    /// `State::Active` and therefore spawn new tasks that won't
+    /// be shut down by this function.
+    /// Fixing this is future work.
+    pub async fn shutdown(self: &Arc<Self>) {
+        match self.state_cmpxchg(State::Active, State::Stopping) {
+            Ok(()) => (),
+            Err(State::Active) => unreachable!("cmpxchg would have succeeded"),
+            Err(State::Loading) => {
+                info!("timeline was never activated, nothing to shut down");
+                return;
             }
-            (st, State::Loading) => {
-                error!("ignoring transition from {st:?} into Loading state");
-            }
-            (State::Broken, _) => {
-                error!("Ignoring state update {new_state:?} for broken tenant");
-            }
-            (State::Stopping, State::Active) => {
-                error!("Not activating a Stopping timeline");
-            }
-            (_, new_state) => {
-                self.state.send_replace(new_state);
+            Err(State::Stopping) => {
+                warn!("shutdown was called multiple times for this timeline");
+                return;
             }
         }
+
+        // Now that the Timeline is in Stopping state, request all the related tasks to
+        // shut down.
+
+        // Stop the walreceiver first.
+        debug!("waiting for wal receiver to shutdown");
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+        )
+        .await;
+        debug!("wal receiver shutdown confirmed");
+
+        info!("waiting for timeline tasks to shutdown");
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
     }
 
-    pub(crate) fn current_state(&self) -> State {
+    fn state_cmpxchg(&self, expected: State, new: State) -> Result<(), State> {
+        let mut res = None;
+        self.state.send_if_modified(|current| {
+            if *current == expected {
+                *current = new;
+                res = Some(Ok(()));
+                true
+            } else {
+                res = Some(Err(*current));
+                false
+            }
+        });
+        res.expect("closure must set `res`")
+    }
+
+    fn current_state(&self) -> State {
         *self.state.borrow()
+    }
+
+    pub fn api_state(&self) -> pageserver_api::models::TimelineState {
+        use pageserver_api::models as api;
+        match self.current_state() {
+            State::Loading => api::TimelineState::Loading,
+            State::Active => api::TimelineState::Active,
+            State::Stopping => api::TimelineState::Stopping,
+        }
     }
 
     pub fn is_active(&self) -> bool {
         self.current_state() == State::Active
     }
 
-    pub(crate) fn subscribe_for_state_updates(&self) -> watch::Receiver<State> {
+    fn subscribe_for_state_updates(&self) -> watch::Receiver<State> {
         self.state.subscribe()
     }
 }
@@ -1498,8 +1542,7 @@ impl Timeline {
                         match new_state {
                             // we're running this job for active timelines only
                             State::Active => continue,
-                            State::Broken
-                            | State::Stopping
+                            State::Stopping
                             | State::Loading => {
                                 break format!("aborted because timeline became inactive (new state: {new_state:?})")
                             }

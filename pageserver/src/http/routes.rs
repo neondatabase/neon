@@ -19,7 +19,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::mgr::TenantMapInsertError;
-use crate::tenant::{self, PageReconstructError, Timeline};
+use crate::tenant::{PageReconstructError, TimelineMapEntry};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -116,17 +116,18 @@ fn apierror_from_tenant_map_insert_error(e: TenantMapInsertError) -> ApiError {
 
 // Helper function to construct a api::TimelineInfo struct for a timeline
 async fn build_timeline_info(
-    timeline: &Arc<Timeline>,
+    timeline_map_entry: &TimelineMapEntry,
     include_non_incremental_logical_size: bool,
     ctx: &RequestContext,
 ) -> anyhow::Result<api::TimelineInfo> {
-    let mut info = build_timeline_info_common(timeline, ctx)?;
+    let mut info = build_timeline_info_common(timeline_map_entry, ctx)?;
     if include_non_incremental_logical_size {
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
         // Otherwise, if someone deletes the timeline / detaches the tenant while
         // we're executing this function, we will outlive the timeline on-disk state.
         info.current_logical_size_non_incremental = Some(
-            timeline
+            timeline_map_entry
+                .any_state_ok()
                 .get_current_logical_size_non_incremental(
                     info.last_record_lsn,
                     CancellationToken::new(),
@@ -139,9 +140,10 @@ async fn build_timeline_info(
 }
 
 fn build_timeline_info_common(
-    timeline: &Arc<Timeline>,
+    timeline_map_entry: &TimelineMapEntry,
     ctx: &RequestContext,
 ) -> anyhow::Result<api::TimelineInfo> {
+    let timeline = timeline_map_entry.any_state_ok();
     let last_record_lsn = timeline.get_last_record_lsn();
     let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
         let guard = timeline.last_received_wal.lock().unwrap();
@@ -169,11 +171,9 @@ fn build_timeline_info_common(
         }
     };
     let current_physical_size = Some(timeline.layer_size_sum().approximate_is_ok());
-    let state = match timeline.current_state() {
-        tenant::TimelineState::Loading => api::TimelineState::Loading,
-        tenant::TimelineState::Active => api::TimelineState::Active,
-        tenant::TimelineState::Stopping => api::TimelineState::Stopping,
-        tenant::TimelineState::Broken => api::TimelineState::Broken,
+    let state = match timeline_map_entry {
+        TimelineMapEntry::InitializeFailed(_) => api::TimelineState::Broken,
+        TimelineMapEntry::Live(tl) | TimelineMapEntry::RemovingFromMemory(tl) => tl.api_state(),
     };
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
@@ -254,7 +254,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         let tenant = mgr::get_tenant(tenant_id, true)
             .await
             .map_err(ApiError::NotFound)?;
-        let timelines = tenant.list_timelines();
+        let timelines = tenant.list_timeline_entries();
 
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
@@ -316,12 +316,12 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             .await
             .map_err(ApiError::NotFound)?;
 
-        let timeline = tenant
-            .get_timeline(timeline_id, false)
+        let timeline_entry = tenant
+            .get_timeline_map_entry(timeline_id)
             .map_err(ApiError::NotFound)?;
 
         let timeline_info =
-            build_timeline_info(&timeline, include_non_incremental_logical_size, &ctx)
+            build_timeline_info(&timeline_entry, include_non_incremental_logical_size, &ctx)
                 .await
                 .context("get local timeline info")
                 .map_err(ApiError::InternalServerError)?;

@@ -94,7 +94,7 @@ mod timeline;
 
 pub mod size;
 
-pub(crate) use timeline::{PageReconstructError, State as TimelineState, Timeline};
+pub(crate) use timeline::{PageReconstructError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -109,6 +109,46 @@ pub use crate::tenant::timeline::WalReceiverInfo;
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
 pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
+
+pub(crate) enum TimelineMapEntry {
+    /// Timeline state exists on this pageserver, but something went wrong during initialization (likely on-disk state problem).
+    /// No background activity is running for the timeline.
+    ///
+    /// The timeline is present here only to answer control plane status requests.
+    InitializeFailed(Arc<Timeline>),
+    /// The timeline is live, i.e., we successfully activated it.
+    Live(Arc<Timeline>),
+    /// Timeline is being removed from memory, don't start new operations on it.
+    RemovingFromMemory(Arc<Timeline>),
+}
+
+impl TimelineMapEntry {
+    fn clone(other: &TimelineMapEntry) -> Self {
+        match other {
+            TimelineMapEntry::InitializeFailed(i) => {
+                TimelineMapEntry::InitializeFailed(Arc::clone(i))
+            }
+            TimelineMapEntry::Live(i) => TimelineMapEntry::Live(Arc::clone(i)),
+            TimelineMapEntry::RemovingFromMemory(i) => {
+                TimelineMapEntry::RemovingFromMemory(Arc::clone(i))
+            }
+        }
+    }
+    pub(crate) fn any_state_ok(&self) -> &Arc<Timeline> {
+        match self {
+            TimelineMapEntry::InitializeFailed(i) => i,
+            TimelineMapEntry::Live(i) => i,
+            TimelineMapEntry::RemovingFromMemory(i) => i,
+        }
+    }
+    pub(crate) fn into_any_state_ok(self) -> Arc<Timeline> {
+        match self {
+            TimelineMapEntry::InitializeFailed(i) => i,
+            TimelineMapEntry::Live(i) => i,
+            TimelineMapEntry::RemovingFromMemory(i) => i,
+        }
+    }
+}
 
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
@@ -126,7 +166,7 @@ pub struct Tenant {
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     tenant_id: TenantId,
-    timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
+    timelines: Mutex<HashMap<TimelineId, TimelineMapEntry>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration
@@ -177,6 +217,7 @@ impl UninitializedTimeline<'_> {
     pub fn initialize(self, _ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         self.initialize_with_lock(&mut timelines, true, true)
+            .map(|tlme| tlme.into_any_state_ok())
     }
 
     /// Like `initialize`, but the caller is already holding lock on Tenant::timelines.
@@ -186,10 +227,10 @@ impl UninitializedTimeline<'_> {
     /// been initialized.
     fn initialize_with_lock(
         mut self,
-        timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
+        timelines: &mut HashMap<TimelineId, TimelineMapEntry>,
         load_layer_map: bool,
         activate: bool,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> anyhow::Result<TimelineMapEntry> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
 
@@ -221,17 +262,19 @@ impl UninitializedTimeline<'_> {
                         "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
                     )
                 })?;
-                v.insert(Arc::clone(&new_timeline));
+
+                let map_entry = TimelineMapEntry::Live(Arc::clone(&new_timeline));
+                v.insert(TimelineMapEntry::clone(&map_entry));
 
                 new_timeline.maybe_spawn_flush_loop();
 
                 if activate {
                     new_timeline.activate();
                 }
+
+                Ok(map_entry)
             }
         }
-
-        Ok(new_timeline)
     }
 
     /// Prepares timeline data by loading it from the basebackup archive.
@@ -446,8 +489,9 @@ impl Tenant {
     /// - Downloads remote index file and adds remote files to the layer map
     /// - Schedules remote upload tasks for any files that are present locally but missing from remote storage.
     ///
-    /// If the operation fails, the timeline is left in the tenant's hash map in Broken state. On success,
-    /// it is marked as Active.
+    /// If the operation fails, the timeline is left in the tenant's hash map as
+    /// a `TimelineMapEntry::InitializeFailed`.
+    /// On success, the entry becomes `TimelineMapEntry::Live`.
     #[allow(clippy::too_many_arguments)]
     async fn timeline_init_and_sync(
         &self,
@@ -493,7 +537,7 @@ impl Tenant {
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
             // will ingest data which may require looking at the layers which are not yet available locally
             match timeline.initialize_with_lock(&mut timelines_accessor, true, false) {
-                Ok(new_timeline) => new_timeline,
+                Ok(new_timeline) => new_timeline.into_any_state_ok(),
                 Err(e) => {
                     error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
                     // FIXME using None is a hack, it wont hurt, just ugly.
@@ -501,7 +545,7 @@ impl Tenant {
                     //     Or return ownership of itself completely so somethin like into_broken
                     //     can be called directly on Uninitielized timeline
                     //     also leades to redundant .clone
-                    let broken_timeline = self
+                    let failed_timeline = self
                         .create_timeline_data(
                             timeline_id,
                             up_to_date_metadata.clone(),
@@ -511,8 +555,12 @@ impl Tenant {
                         .with_context(|| {
                             format!("creating broken timeline data for {tenant_id}/{timeline_id}")
                         })?;
-                    broken_timeline.set_state(TimelineState::Broken);
-                    timelines_accessor.insert(timeline_id, broken_timeline);
+                    timelines_accessor.insert(
+                        timeline_id,
+                        // TODO: this `failed_timeline` is in state `TimelineState::Loading`.
+                        // We should have a separate `BrokenTimeline` struct.
+                        TimelineMapEntry::InitializeFailed(failed_timeline),
+                    );
                     return Err(e);
                 }
             }
@@ -777,13 +825,16 @@ impl Tenant {
 
         let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
             let timelines = self.timelines.lock().unwrap();
-            Some(Arc::clone(timelines.get(&ancestor_id).ok_or_else(
-                || {
-                    anyhow::anyhow!(
+            Some(Arc::clone(
+                timelines
+                    .get(&ancestor_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
                         "cannot find ancestor timeline {ancestor_id} for timeline {timeline_id}"
                     )
-                },
-            )?))
+                    })?
+                    .any_state_ok(),
+            ))
         } else {
             None
         };
@@ -1078,6 +1129,17 @@ impl Tenant {
         self.tenant_id
     }
 
+    pub(crate) fn get_timeline_map_entry(
+        &self,
+        timeline_id: TimelineId,
+    ) -> anyhow::Result<TimelineMapEntry> {
+        let timelines_accessor = self.timelines.lock().unwrap();
+        timelines_accessor
+            .get(&timeline_id)
+            .with_context(|| format!("Timeline {}/{} was not found", self.tenant_id, timeline_id))
+            .map(TimelineMapEntry::clone)
+    }
+
     /// Get Timeline handle for given Neon timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
     pub fn get_timeline(
@@ -1085,20 +1147,19 @@ impl Tenant {
         timeline_id: TimelineId,
         active_only: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let timelines_accessor = self.timelines.lock().unwrap();
-        let timeline = timelines_accessor.get(&timeline_id).with_context(|| {
-            format!("Timeline {}/{} was not found", self.tenant_id, timeline_id)
-        })?;
-
+        let timeline = self
+            .get_timeline_map_entry(timeline_id)?
+            .into_any_state_ok();
+        // TODO: is_active() returns true for timelines in state InitializeFailed
         if active_only && !timeline.is_active() {
             anyhow::bail!(
                 "Timeline {}/{} is not active, state: {:?}",
                 self.tenant_id,
                 timeline_id,
-                timeline.current_state()
+                timeline.api_state()
             )
         } else {
-            Ok(Arc::clone(timeline))
+            Ok(timeline)
         }
     }
 
@@ -1109,7 +1170,17 @@ impl Tenant {
             .lock()
             .unwrap()
             .values()
+            .map(|timeline_map_entry| timeline_map_entry.any_state_ok())
             .map(Arc::clone)
+            .collect()
+    }
+
+    pub(crate) fn list_timeline_entries(&self) -> Vec<TimelineMapEntry> {
+        self.timelines
+            .lock()
+            .unwrap()
+            .values()
+            .map(TimelineMapEntry::clone)
             .collect()
     }
 
@@ -1157,14 +1228,14 @@ impl Tenant {
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
     /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
     /// a new unique ID is generated.
-    pub async fn create_timeline(
+    pub(crate) async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Option<Arc<Timeline>>> {
+    ) -> anyhow::Result<Option<TimelineMapEntry>> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot create timelines on inactive tenant"
@@ -1277,7 +1348,7 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             let timelines_to_compact = timelines
                 .iter()
-                .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
+                .map(|(timeline_id, timeline)| (*timeline_id, Arc::clone(timeline.any_state_ok())))
                 .collect::<Vec<_>>();
             drop(timelines);
             timelines_to_compact
@@ -1306,7 +1377,7 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             timelines
                 .iter()
-                .map(|(_id, timeline)| Arc::clone(timeline))
+                .map(|(_id, timeline)| Arc::clone(timeline.any_state_ok()))
                 .collect::<Vec<_>>()
         };
 
@@ -1323,53 +1394,47 @@ impl Tenant {
         timeline_id: TimelineId,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        // Transition the timeline into TimelineState::Stopping.
+        // Mark the timeline as `Removing` in the timelines map.
         // This should prevent new operations from starting.
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
 
             // Ensure that there are no child timelines **attached to that pageserver**,
             // because detach removes files, which will break child branches
-            let children_exist = timelines
-                .iter()
-                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+            let children_exist = timelines.iter().any(|(_, entry)| {
+                entry.any_state_ok().get_ancestor_timeline_id() == Some(timeline_id)
+            });
 
             anyhow::ensure!(
                 !children_exist,
                 "Cannot delete timeline which has child timelines"
             );
-            let timeline_entry = match timelines.entry(timeline_id) {
+            let mut timeline_entry = match timelines.entry(timeline_id) {
                 Entry::Occupied(e) => e,
                 Entry::Vacant(_) => bail!("timeline not found"),
             };
 
-            let timeline = Arc::clone(timeline_entry.get());
-            timeline.set_state(TimelineState::Stopping);
+            let timeline = match timeline_entry.get() {
+                TimelineMapEntry::Live(timeline) | TimelineMapEntry::InitializeFailed(timeline) => {
+                    Arc::clone(timeline)
+                }
+                TimelineMapEntry::RemovingFromMemory(_) => {
+                    bail!("timeline map entry is already in state Removing")
+                }
+            };
+            // XXX: once replace_entry is available, use that
+            timeline_entry.insert(TimelineMapEntry::RemovingFromMemory(Arc::clone(&timeline)));
 
             drop(timelines);
             timeline
         };
 
-        // Now that the Timeline is in Stopping state, request all the related tasks to
-        // shut down.
-        //
         // NB: If you call delete_timeline multiple times concurrently, they will
         // all go through the motions here. Make sure the code here is idempotent,
         // and don't error out if some of the shutdown tasks have already been
         // completed!
 
-        // Stop the walreceiver first.
-        debug!("waiting for wal receiver to shutdown");
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_id),
-            Some(timeline_id),
-        )
-        .await;
-        debug!("wal receiver shutdown confirmed");
-
-        info!("waiting for timeline tasks to shutdown");
-        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
+        timeline.shutdown().await;
 
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.
@@ -1411,7 +1476,7 @@ impl Tenant {
         let mut timelines = self.timelines.lock().unwrap();
         let children_exist = timelines
             .iter()
-            .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+            .any(|(_, entry)| entry.any_state_ok().get_ancestor_timeline_id() == Some(timeline_id));
         // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
         // We already deleted the layer files, so it's probably best to panic.
         // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
@@ -1477,9 +1542,19 @@ impl Tenant {
                     info!("Activating tenant {}", self.tenant_id);
 
                     let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+                    let not_broken_timelines =
+                        timelines_accessor
+                            .values()
+                            .filter_map(|timeline_map_entry| {
+                                match timeline_map_entry {
+                                    TimelineMapEntry::Live(tl) => Some(tl),
+                                    TimelineMapEntry::InitializeFailed(_) => None,
+                                    TimelineMapEntry::RemovingFromMemory(tl) => {
+                                        warn!(timeline_id=%tl.timeline_id, "timeline should not be removing from memory prior to tenant activation, skipping");
+                                        None
+                                    }
+                                }
+                            });
 
                     // Spawn gc and compaction loops. The loops will shut themselves
                     // down when they notice that the tenant is inactive.
@@ -1500,18 +1575,6 @@ impl Tenant {
             match *current_state {
                 TenantState::Active | TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Stopping;
-
-                    // FIXME: If the tenant is still Loading or Attaching, new timelines
-                    // might be created after this. That's harmless, as the Timelines
-                    // won't be accessible to anyone, when the Tenant is in Stopping
-                    // state.
-                    let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
-                    for timeline in not_broken_timelines {
-                        timeline.set_state(TimelineState::Stopping);
-                    }
                 }
                 TenantState::Broken => {
                     info!("Cannot set tenant to Stopping state, it is already in Broken state");
@@ -1983,6 +2046,7 @@ impl Tenant {
                 timelines
                     .iter()
                     .map(|(timeline_id, timeline_entry)| {
+                        let timeline_entry = timeline_entry.any_state_ok();
                         if let Some(ancestor_timeline_id) =
                             &timeline_entry.get_ancestor_timeline_id()
                         {
@@ -2053,7 +2117,7 @@ impl Tenant {
         dst: TimelineId,
         start_lsn: Option<Lsn>,
         _ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> anyhow::Result<TimelineMapEntry> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
@@ -2154,7 +2218,7 @@ impl Tenant {
         timeline_id: TimelineId,
         pg_version: u32,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> anyhow::Result<TimelineMapEntry> {
         let timeline_uninit_mark = {
             let timelines = self.timelines.lock().unwrap();
             self.create_timeline_uninit_mark(timeline_id, &timelines)?
@@ -2247,7 +2311,7 @@ impl Tenant {
         info!(
             "created root timeline {} timeline.lsn {}",
             timeline_id,
-            timeline.get_last_record_lsn()
+            timeline.any_state_ok().get_last_record_lsn()
         );
 
         Ok(timeline)
@@ -2348,7 +2412,7 @@ impl Tenant {
     fn create_timeline_uninit_mark(
         &self,
         timeline_id: TimelineId,
-        timelines: &MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        timelines: &MutexGuard<HashMap<TimelineId, TimelineMapEntry>>,
     ) -> anyhow::Result<TimelineUninitMark> {
         let tenant_id = self.tenant_id;
 
