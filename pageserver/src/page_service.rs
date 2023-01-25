@@ -203,7 +203,7 @@ async fn page_service_conn_main(
         }
         Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
             if is_expected_io_error(&io_error) {
-                info!("Postgres client failed with expected io error: {io_error}");
+                info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
                 Err(io_error).context("Postgres connection error")
