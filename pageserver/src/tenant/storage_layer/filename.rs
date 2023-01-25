@@ -1,12 +1,10 @@
 //!
 //! Helper functions for dealing with filenames of the image and delta layer files.
 //!
-use crate::config::PageServerConf;
 use crate::repository::Key;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::str::FromStr;
 
 use utils::lsn::Lsn;
@@ -269,17 +267,4 @@ impl<'de> serde::de::Visitor<'de> for LayerFileNameVisitor {
     {
         v.parse().map_err(|e| E::custom(e))
     }
-}
-
-/// Helper enum to hold a PageServerConf, or a path
-///
-/// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
-/// global config, and paths to layer files are constructed using the tenant/timeline
-/// path from the config. But in the 'pageserver_binutils' binary, we need to construct a Layer
-/// struct for a file on disk, without having a page server running, so that we have no
-/// config. In that case, we use the Path variant to hold the full path to the file on
-/// disk.
-pub enum PathOrConf {
-    Path(PathBuf),
-    Conf(&'static PageServerConf),
 }

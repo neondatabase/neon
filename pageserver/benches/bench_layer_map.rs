@@ -1,8 +1,7 @@
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::Layer;
-use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, LayerDescriptor};
+use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, Layer, LayerDescriptor};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;

@@ -13,6 +13,7 @@ use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
 use anyhow::{ensure, Result};
+use pageserver_api::models::InMemoryLayerInfo;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -80,6 +81,16 @@ impl InMemoryLayer {
     pub fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
+
+    pub fn info(&self) -> InMemoryLayerInfo {
+        let lsn_start = self.start_lsn;
+        let lsn_end = self.inner.read().unwrap().end_lsn;
+
+        match lsn_end {
+            Some(lsn_end) => InMemoryLayerInfo::Frozen { lsn_start, lsn_end },
+            None => InMemoryLayerInfo::Open { lsn_start },
+        }
+    }
 }
 
 impl Layer for InMemoryLayer {
@@ -109,7 +120,6 @@ impl Layer for InMemoryLayer {
         let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
         format!("inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
-
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();

@@ -7,6 +7,7 @@ use crate::repository::Key;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
+use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,9 +17,11 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
-use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
+use super::{
+    DeltaFileName, DeltaLayer, ImageFileName, LayerFileName, LayerIter, LayerKeyIter,
+    PersistentLayer,
+};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
@@ -135,6 +138,26 @@ impl PersistentLayer for RemoteLayer {
 
     fn file_size(&self) -> Option<u64> {
         self.layer_metadata.file_size()
+    }
+
+    fn info(&self) -> HistoricLayerInfo {
+        let layer_file_name = self.filename().file_name();
+        let lsn_range = self.get_lsn_range();
+
+        if self.is_delta {
+            HistoricLayerInfo::Delta {
+                layer_file_name,
+                lsn_start: lsn_range.start,
+                lsn_end: lsn_range.end,
+                remote: true,
+            }
+        } else {
+            HistoricLayerInfo::Image {
+                layer_file_name,
+                lsn_start: lsn_range.start,
+                remote: true,
+            }
+        }
     }
 }
 
