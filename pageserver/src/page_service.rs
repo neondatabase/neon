@@ -13,6 +13,7 @@ use anyhow::Context;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
@@ -424,7 +425,7 @@ impl PageServerHandler {
     ) -> Result<(), QueryError> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+        let timeline = get_active_tenant_timeline(tenant_id, timeline_id).await?;
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
             return Err(QueryError::Other(
@@ -622,7 +623,7 @@ impl PageServerHandler {
         full_backup: bool,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+        let timeline = get_active_tenant_timeline(tenant_id, timeline_id).await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
@@ -779,7 +780,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
-            let timeline = get_active_timeline_with_timeout(tenant_id, timeline_id).await?;
+            let timeline = get_active_tenant_timeline(tenant_id, timeline_id).await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
@@ -985,27 +986,64 @@ impl postgres_backend_async::Handler for PageServerHandler {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+enum GetActiveTenantError {
+    #[error(
+        "Timed out waiting {wait_time:?} for tenant active state. Latest state: {latest_state:?}"
+    )]
+    WaitForActiveTimeout {
+        latest_state: TenantState,
+        wait_time: Duration,
+    },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<GetActiveTenantError> for QueryError {
+    fn from(e: GetActiveTenantError) -> Self {
+        match e {
+            GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
+                ConnectionError::Socket(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
+            ),
+            GetActiveTenantError::Other(e) => QueryError::Other(e),
+        }
+    }
+}
+
 /// Get active tenant.
 ///
 /// If the tenant is Loading, waits for it to become Active, for up to 30 s. That
 /// ensures that queries don't fail immediately after pageserver startup, because
 /// all tenants are still loading.
-async fn get_active_tenant_with_timeout(tenant_id: TenantId) -> anyhow::Result<Arc<Tenant>> {
+async fn get_active_tenant_with_timeout(
+    tenant_id: TenantId,
+) -> Result<Arc<Tenant>, GetActiveTenantError> {
     let tenant = mgr::get_tenant(tenant_id, false).await?;
-    match tokio::time::timeout(Duration::from_secs(30), tenant.wait_to_become_active()).await {
-        Ok(wait_result) => wait_result
-            // no .context(), the error message is good enough and some tests depend on it
-            .map(move |()| tenant),
-        Err(_) => anyhow::bail!("Timeout waiting for tenant {tenant_id} to become Active"),
+    let wait_time = Duration::from_secs(30);
+    match tokio::time::timeout(wait_time, tenant.wait_to_become_active()).await {
+        Ok(Ok(())) => Ok(tenant),
+        // no .context(), the error message is good enough and some tests depend on it
+        Ok(Err(wait_error)) => Err(GetActiveTenantError::Other(wait_error)),
+        Err(_) => {
+            let latest_state = tenant.current_state();
+            if latest_state == TenantState::Active {
+                Ok(tenant)
+            } else {
+                Err(GetActiveTenantError::WaitForActiveTimeout {
+                    latest_state,
+                    wait_time,
+                })
+            }
+        }
     }
 }
 
 /// Shorthand for getting a reference to a Timeline of an Active tenant.
-async fn get_active_timeline_with_timeout(
+async fn get_active_tenant_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
-) -> anyhow::Result<Arc<Timeline>> {
-    get_active_tenant_with_timeout(tenant_id)
-        .await
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
+) -> Result<Arc<Timeline>, GetActiveTenantError> {
+    let tenant = get_active_tenant_with_timeout(tenant_id).await?;
+    let timeline = tenant.get_timeline(timeline_id, true)?;
+    Ok(timeline)
 }
