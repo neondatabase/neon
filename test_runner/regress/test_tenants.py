@@ -314,8 +314,16 @@ def test_pageserver_with_empty_tenants(
         ).value
     )
 
+    assert (
+        tenant_active_count == 1
+    ), f"Tenant {tenant_with_empty_timelines_dir} should have metric as active"
+
     tenant_broken_count = int(
         ps_metrics.query_one(
             "pageserver_tenant_states_count", filter=broken_tenants_metric_filter
         ).value
     )
+
+    assert (
+        tenant_broken_count == 1
+    ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"
